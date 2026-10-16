@@ -10,6 +10,8 @@ This document is derived from `docs/concept/project.yaml`, the eight episode scr
 functionality for the real implementation. Where the concept material is silent, the gap is marked
 **[open]** so the implementer can make a call rather than guess that the concept decided it.
 
+> **Status:** This document describes the target product functionality and concept. For the architecture and implementation as it exists on `main` today, see [docs/architecture.md](../architecture.md). Decisions made during implementation are recorded in [docs/decisions.md](../decisions.md).
+
 Running example used throughout the concept: repo `acme/support-agent`, PR `#418`, three evals
 `triage/runbook_lookup`, `triage/escalation_policy`, `triage/summary_quality`.
 
@@ -52,7 +54,7 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 ### 2.1 The entrypoint
 
 - Path: `.evals/list`, an executable at the repository root.
-- Executed inside a sandbox checked out at the exact commit under test (both PR head and base).
+- Executed inside a sandbox checked out at the exact commit under test (both PR head and base). *(Decided in implementation: `commit` must be an exact 7–64 character hex SHA, validated by pattern `^[0-9a-fA-F]{7,64}$` to guarantee immutability.)*
 - Prints a JSON manifest to stdout.
 
 ### 2.2 Manifest format (as shown in the concept)
@@ -156,6 +158,8 @@ standard environment contract into the sandbox, and tears it down afterwards.
 | `docker` | A Docker daemon for the sample | `DOCKER_HOST=unix:///run/eval/docker.sock` |
 | *(cloud project, shown as an env var)* | A leased cloud project from a pool, cleaned on release | `GOOGLE_CLOUD_PROJECT=eval-pool-0412` |
 | `[]` (empty) | Nothing: zero privilege. No tokens, no daemon. | nothing |
+
+*(Decided in implementation: empty `resources: []` is implemented as zero-privilege sandboxes: `automountServiceAccountToken: false`, non-root user UID 1000, drop ALL capabilities, RuntimeDefault seccomp, and Pod Security Admission restricted.)*
 
 **[open]** The exact resource type name for a leased cloud project is not given (only the env var
 is shown). Resource types should be an extensible set; the four above are the launch set.

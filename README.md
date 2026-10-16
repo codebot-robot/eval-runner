@@ -4,7 +4,7 @@ CI for evals: efficient statistical estimation of agentic goodness.
 
 `eval-runner` is a Kubernetes-native continuous integration system that discovers the evals in a repository, executes them in isolated sandboxes on every pull request, and uses statistical estimation to determine whether agent changes represent a measurable improvement or regression.
 
-> **Status: early development.** Today the controller performs eval discovery (runs `.evals/list` in an agent-sandbox); sample execution, statistical verdicts and PR integration are described in [docs/concept/functionality.md](docs/concept/functionality.md) and are not yet implemented.
+> **Status: early development.** Today the controller performs eval discovery (runs `.evals/list` in an agent-sandbox), documented in [docs/architecture.md](docs/architecture.md); sample execution, statistical verdicts and PR integration are described in [docs/concept/functionality.md](docs/concept/functionality.md) and are not yet implemented.
 
 ## Core Concepts
 
@@ -16,6 +16,8 @@ CI for evals: efficient statistical estimation of agentic goodness.
 
 ## Documentation
 
+- [System Architecture](docs/architecture.md): Overview of the system as implemented on `main` today, components, trust model, and implementation status.
+- [Architecture Decisions](docs/decisions.md): Architectural decision records (ADR log) documenting design choices and rationales.
 - [Development Guide](docs/development.md): Prerequisites, local development workflows, running unit and E2E tests, and running local Inspect evals.
 - [Functional Description](docs/concept/functionality.md): Detailed architecture, execution lifecycle, statistical gates, and UI mockups.
 - [Contributing](docs/contributing.md): Contribution guidelines and community standards.
