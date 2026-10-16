@@ -67,12 +67,14 @@ func main() {
 	var probeAddr string
 	var maxStdoutBytes int64
 	var maxStderrBytes int64
+	var maxDiscoveryAttempts int
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.Int64Var(&maxStdoutBytes, "max-stdout-bytes", discovery.MaxStdoutBytes, "Maximum stdout bytes buffered from discovery execution")
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
+	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of discovery retry attempts for transient errors")
 
 	opts := zap.Options{
 		Development: true,
@@ -153,13 +155,14 @@ func main() {
 	}
 
 	reconciler := &controller.RunReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		Executor:         executor,
-		SandboxNamespace: sandboxNamespace,
-		MaxStdoutBytes:   maxStdoutBytes,
-		MaxStderrBytes:   maxStderrBytes,
-		MaxMessageBytes:  discovery.MaxMessageBytes,
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		Executor:             executor,
+		SandboxNamespace:     sandboxNamespace,
+		MaxStdoutBytes:       maxStdoutBytes,
+		MaxStderrBytes:       maxStderrBytes,
+		MaxMessageBytes:      discovery.MaxMessageBytes,
+		MaxDiscoveryAttempts: maxDiscoveryAttempts,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {
