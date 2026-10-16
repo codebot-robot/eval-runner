@@ -67,7 +67,7 @@ func TestEvalDiscovery(t *testing.T) {
 
 	// In the sandbox, clone fixture repository and execute .evals/list
 	cloneURL := "git://git-server/support-agent.git"
-	cmd := "git clone -q " + cloneURL + " /tmp/repo && cd /tmp/repo && ./.evals/list"
+	cmd := "rm -rf /tmp/repo && git clone -q " + cloneURL + " /tmp/repo && cd /tmp/repo && ./.evals/list"
 	out := harness.ExecInPodWithRetry(ns, sandboxName, 60*time.Second, "sh", "-c", cmd)
 
 	t.Logf("Captured .evals/list output:\n%s", out)

@@ -64,21 +64,23 @@ This script:
 1. Downloads and installs pinned versions of `kind` and `kubectl` into `.build/bin/`.
 2. Prepends `.build/bin/` to `PATH`.
 3. Sets `RUN_E2E=1`.
-4. Runs `go test -v ./tests/e2e/...`.
+4. Runs `go test -v -count=1 ./tests/e2e/...`.
 
 ### Option 2: Running via `go test` directly
 
 If `kind` and `kubectl` are already installed on your system `PATH` (or after running `./dev/tasks/test-e2e` once to populate `.build/bin`):
 
 ```bash
-RUN_E2E=1 go test -v ./tests/e2e/...
+RUN_E2E=1 go test -v -count=1 ./tests/e2e/...
 ```
 
 To run a specific test:
 
 ```bash
-RUN_E2E=1 go test -v ./tests/e2e/... -run TestEvalDiscovery
+RUN_E2E=1 go test -v -count=1 ./tests/e2e/... -run TestEvalDiscovery
 ```
+
+> **Note on Kubeconfig Context:** When running tests against a cluster, the harness switches the active kubectl context using `kubectl config use-context kind-<clusterName>`, which updates the current context in your kubeconfig (`~/.kube/config`).
 
 ## Environment Variables
 
@@ -88,4 +90,4 @@ The E2E test harness recognizes several environment variables:
 |---|---|---|
 | `RUN_E2E` | _(unset)_ | When set to `1` (or any non-empty value), enables running the E2E test suite. When unset, E2E tests are skipped. |
 | `KIND_CLUSTER_NAME` | `kind` | Name of the kind cluster to create or use. If a cluster with this name already exists, the test reuses it without re-creating it or deleting it afterwards. |
-| `SKIP_CLEANUP` | _(unset)_ | When set to `1` (or any non-empty value), preserves the kind cluster created by the test instead of deleting it when the test completes. This is useful for manual debugging, e.g. inspecting pods and resources with `kubectl`. |
+| `SKIP_CLEANUP` | _(unset)_ | When set to `1` (or any non-empty value), preserves the kind cluster and test namespaces created by the test instead of deleting them when the test completes. This is useful for manual debugging, e.g. inspecting pods and resources with `kubectl`. |

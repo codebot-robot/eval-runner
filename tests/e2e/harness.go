@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,8 +27,9 @@ import (
 )
 
 const (
-	AgentSandboxVersion = "v1.0.7"
-	AgentSandboxURL     = "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/" + AgentSandboxVersion + "/sandbox.yaml"
+	AgentSandboxVersion      = "v1.0.7"
+	AgentSandboxURL          = "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/" + AgentSandboxVersion + "/sandbox.yaml"
+	AgentSandboxSandboxImage = "alpine/git:v2.47.2"
 )
 
 type Harness struct {
@@ -107,12 +109,20 @@ func (h *Harness) InstallAgentSandbox() {
 }
 
 func (h *Harness) CreateNamespace() string {
-	ns := fmt.Sprintf("test-eval-%d", time.Now().UnixNano()%1000000)
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		h.t.Fatalf("Failed to generate random namespace suffix: %v", err)
+	}
+	ns := fmt.Sprintf("test-eval-%x", b)
 	h.t.Logf("Creating test namespace %s", ns)
 	h.runCmd("kubectl", "create", "namespace", ns)
 	h.t.Cleanup(func() {
-		h.t.Logf("Cleaning up test namespace %s", ns)
-		h.runCmd("kubectl", "delete", "namespace", ns, "--ignore-not-found")
+		if os.Getenv("SKIP_CLEANUP") == "" {
+			h.t.Logf("Cleaning up test namespace %s", ns)
+			h.runCmd("kubectl", "delete", "namespace", ns, "--ignore-not-found")
+		} else {
+			h.t.Logf("Skipping cleanup of test namespace %s (SKIP_CLEANUP set)", ns)
+		}
 	})
 	return ns
 }
@@ -230,16 +240,16 @@ spec:
     spec:
       containers:
       - name: agent
-        image: alpine/git:latest
+        image: %s
         command: ["sh", "-c", "sleep 3600"]
       restartPolicy: Never
-`, name, namespace)
+`, name, namespace, AgentSandboxSandboxImage)
 
 	h.KubectlApplyContent(manifest)
-	// Wait for the backing pod to be Ready
-	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=Ready", "pod/"+name, "--timeout=120s")
-	// Also wait for the Sandbox condition to report Ready
-	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=Ready", "sandbox/"+name, "--timeout=30s")
+	// Wait for the Sandbox condition to report Ready first
+	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=Ready", "sandbox/"+name, "--timeout=120s")
+	// Also wait for the backing pod to be Ready
+	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=Ready", "pod/"+name, "--timeout=30s")
 }
 
 func (h *Harness) ExecInPodWithRetry(namespace, podName string, timeout time.Duration, args ...string) string {
