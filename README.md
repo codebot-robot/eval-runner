@@ -1,6 +1,7 @@
 # eval-runner
 
-CI for evals: efficient statistical estimation of agentic goodness.
+CI for evals: efficient statistical estimation of agentic goodness.  
+*CI stands for confidence interval.*
 
 `eval-runner` is a Kubernetes-native continuous integration system that discovers the evals in a repository, executes them in isolated sandboxes on every pull request, and uses statistical estimation to determine whether agent changes represent a measurable improvement or regression.
 

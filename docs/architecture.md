@@ -95,7 +95,7 @@ The system is deployed into two distinct namespaces:
 
 The controller relies on [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) (pinned release `v1.0.7`) as its sandbox abstraction.
 
-The controller creates a `Sandbox` CR (`agents.x-k8s.io/v1beta1`) in `eval-runner-sandbox`. The name is deterministically derived as `discovery-<run-name>` (or a truncated hash prefix if the name would exceed 63 characters). The `agent-sandbox` controller reconciles this CR and creates the underlying pod.
+The controller creates a `Sandbox` CR (`agents.x-k8s.io/v1beta1`) in `eval-runner-sandbox`. The name is deterministically derived as `discovery-<run-name>` (or a truncated name plus an 8-hex-character hash suffix if the name would exceed 63 characters). The `agent-sandbox` controller reconciles this CR and creates the underlying pod.
 
 ### Discovery Flow and State Machine
 
@@ -131,11 +131,11 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
      ```sh
      rm -rf /tmp/repo && git clone -q -- "$1" /tmp/repo && cd /tmp/repo && git checkout -q "$2" && ./.evals/list
      ```
-   - **Timeout**: The exec command is executed with a 5-minute context timeout (`5*time.Minute`).
+   - **Timeout**: The exec command is executed with a 5-minute context timeout (`5*time.Minute`). Note that this bound covers the exec step only; time spent waiting for the pod to schedule and become Ready is currently unbounded (an overall discovery deadline is tracked in [#12](https://github.com/gke-labs/eval-runner/issues/12) / PR [#19](https://github.com/gke-labs/eval-runner/pull/19)).
 4. **Output Capture and Limits**:
    - Exec streams are captured through `LimitWriter` instances (`pkg/discovery/limit_writer.go`).
-   - If stdout exceeds 1 MiB (`MaxStdoutBytes`), the command aborts and fails with a `LimitError`.
-   - If stderr exceeds 64 KiB (`MaxStderrBytes`), the command aborts and fails with a `LimitError`.
+   - If stdout exceeds 1 MiB (`MaxStdoutBytes`), output beyond the cap is discarded and the Run fails with a `LimitError` once the exec completes; cancelling the exec on trip is tracked in [#22](https://github.com/gke-labs/eval-runner/issues/22).
+   - If stderr exceeds 64 KiB (`MaxStderrBytes`), output beyond the cap is discarded and the Run fails with a `LimitError` once the exec completes; cancelling the exec on trip is tracked in [#22](https://github.com/gke-labs/eval-runner/issues/22).
 5. **Manifest Parsing and Validation**:
    - The stdout output is parsed as a JSON `Manifest` (`pkg/discovery/manifest.go`).
    - Validation enforces:
@@ -202,7 +202,7 @@ sequenceDiagram
     Pod->>Pod: Exec ./.evals/list
     Pod-->>Ctrl: SPDY stream stdout (JSON) and stderr (bounded)
     Ctrl->>Ctrl: Enforce stream limits (1 MiB stdout, 64 KiB stderr)
-    Ctrl->>Ctrl: Parse and validate manifest (unique IDs, <=1000 tasks)
+    Ctrl->>Ctrl: Parse and validate manifest (unique IDs, at most 1000 tasks)
     Ctrl->>API: Update Run status: phase=Discovered, status.manifest populated
     Ctrl->>API: Delete Sandbox CR in eval-runner-sandbox
     API-->>SB: Watch event: Sandbox deleted
@@ -240,9 +240,9 @@ The trust model establishes strict boundaries around untrusted repository code:
 
 ### Reachability and Containment
 
-- **The Sandbox cannot reach the Kubernetes API**: Because `automountServiceAccountToken: false` is set and no kubeconfig is injected, untrusted code running inside the sandbox has no cluster identity or credentials.
+- **The Sandbox has no credentials for the Kubernetes API**: Because `automountServiceAccountToken: false` is set and no kubeconfig is injected, untrusted code running inside the sandbox has no cluster identity or credentials (no SA token, no kubeconfig).
 - **The Sandbox cannot push data**: The sandbox does not push results or logs. The controller connects to the pod via Kubernetes SPDY `remotecommand` exec and **pulls** stdout and stderr out.
-- **Network reachability**: The sandbox pod has standard container network egress to clone the target repository from Git (e.g. over HTTP/HTTPS or Git protocol). It cannot access any internal controller ports or secrets.
+- **Network reachability and egress**: There is no NetworkPolicy in `k8s/` today, so sandbox pod network egress is unrestricted: it has ordinary cluster network reachability (it can reach the Kubernetes API server and controller probe port `:8081`, though it lacks credentials to authenticate). It also has standard container network egress to clone repositories from Git (e.g. over HTTP/HTTPS or Git protocol). Adding a default-deny egress NetworkPolicy for `eval-runner-sandbox` (allowing only DNS and Git traffic) is tracked in issue [#33](https://github.com/gke-labs/eval-runner/issues/33).
 - **Memory and API protection**: Even if `.evals/list` attempts a denial-of-service by printing gigabytes of output, the controller's `LimitWriter` cuts off consumption at 1 MiB for stdout and 64 KiB for stderr. This guarantees that status updates to the Kubernetes API server never exceed etcd's ~1.5 MiB request limit.
 
 ### Controller RBAC Permissions
@@ -321,9 +321,9 @@ The following table maps sections of the target product concept ([docs/concept/f
 | **§3.1, §3.4** | Sample execution in sandboxes | **In progress** | Issue [#26](https://github.com/gke-labs/eval-runner/issues/26) |
 | **§3.2** | Empty resources (`[]` = zero privilege) | **Done** | Implemented in `pkg/discovery/sandbox.go` |
 | **§3.2** | Declared resources (`docker`, `kind`, `kubernetes-namespace`, cloud projects) | **Not started** | — |
-| **§4.1–§4.6** | Statistics (paired sampling, Wilson CI, stopping rule, verdicts, P(improvement)) | **In progress** | Issue [#25](https://github.com/gke-labs/eval-runner/issues/25) |
+| **§4.1–§4.6** | Statistics (paired sampling, Wilson CI, stopping rule, verdicts, P(improvement)) | **In progress** | Issue [#25](https://github.com/gke-labs/eval-runner/issues/25), PR [#29](https://github.com/gke-labs/eval-runner/pull/29) |
 | **§5.1–§5.4** | GitHub integration (check runs, updating PR comment, bot PRs) | **Not started** | — |
-| **§6** | Trajectory storage (Inspect log format to user bucket) & viewer UI | **Not started** | Artifact sink interface started in [#26](https://github.com/gke-labs/eval-runner/issues/26) |
+| **§6** | Trajectory storage (Inspect log format to user bucket) & viewer UI | **Not started** | Artifact sink interface planned in [#26](https://github.com/gke-labs/eval-runner/issues/26) |
 | **§7** | Trajectory mining (automated skill fix generation) | **Not started** | — |
 | **§8** | Fine-tunes (OpenRL training loop, continuum measurement, activation PRs) | **Not started** | — |
 | **§9.1** | Evals from the wild (anonymised eval submission) | **Not started** | — |
@@ -340,3 +340,4 @@ Several targeted enhancements to discovery and sandbox management are tracked in
 - **Finalizer NoMatch tolerance**: Issue [#23](https://github.com/gke-labs/eval-runner/issues/23).
 - **Stderr tail on deadline expiry & injectable clock**: Issue [#24](https://github.com/gke-labs/eval-runner/issues/24).
 - **Docs eval drift guard & evidence checks**: Issue [#27](https://github.com/gke-labs/eval-runner/issues/27).
+- **Default-deny egress NetworkPolicy**: Issue [#33](https://github.com/gke-labs/eval-runner/issues/33).

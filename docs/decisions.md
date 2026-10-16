@@ -62,7 +62,7 @@ Future pull requests that introduce an architectural decision should append an e
 - **Date**: 2026-10-16
 - **Status**: Accepted
 - **Decision**: Impose strict size limits on sandbox exec streams (1 MiB stdout, 64 KiB stderr), manifest tasks (max 1,000), error message length (4,096 B), and stderr tail retention (10 lines / 3 KiB).
-- **Rationale**: Untrusted repository entrypoints could emit megabytes of data, causing controller memory exhaustion or status write rejections against etcd's ~1.5 MiB request limit. Enforcing limits at the stream level and recording only task aggregate summaries ensures cluster stability.
+- **Rationale**: Untrusted repository entrypoints could emit megabytes of data, causing controller memory exhaustion or status write rejections against etcd's ~1.5 MiB request limit. Today `status.manifest` holds the full discovered manifest (bounded by `MaxTasks = 1000`). Enforcing limits at the stream level ensures cluster stability, and per-sample execution data will stay out of status once sample runs are implemented (#26).
 
 ### ADR-008: Project automation, manifests, and CI via `ap` (autoproject)
 - **Date**: 2026-10-16
