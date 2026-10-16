@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM alpine:latest
+FROM alpine:3.21
 RUN apk add --no-cache git git-daemon
 WORKDIR /work
 COPY examples/support-agent/ ./
