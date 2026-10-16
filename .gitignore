@@ -1,0 +1,6 @@
+# Binaries and build artifacts
+.build/
+bin/
+
+# Logs
+*.log
