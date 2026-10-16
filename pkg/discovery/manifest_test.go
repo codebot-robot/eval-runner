@@ -131,6 +131,20 @@ func TestValidateManifest(t *testing.T) {
 			},
 			expectError: true,
 		},
+		{
+			name: "too many tasks",
+			manifest: func() *v1alpha1.Manifest {
+				tasks := make([]v1alpha1.ManifestTask, MaxTasks+1)
+				for i := range tasks {
+					tasks[i] = v1alpha1.ManifestTask{
+						ID:   string(rune('a'+(i%26))) + string(rune('0'+(i/26))),
+						Spec: "task.py@eval",
+					}
+				}
+				return &v1alpha1.Manifest{Tasks: tasks}
+			}(),
+			expectError: true,
+		},
 	}
 
 	for _, tc := range tests {
