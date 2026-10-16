@@ -39,6 +39,9 @@ const (
 // ConditionTypeDiscovered is the condition type reporting whether discovery succeeded.
 const ConditionTypeDiscovered = "Discovered"
 
+// FinalizerDiscoverySandbox is the finalizer placed on Runs to ensure discovery sandboxes are deleted.
+const FinalizerDiscoverySandbox = "evalrunner.gke-labs.dev/discovery-sandbox"
+
 // RepoSpec specifies the git repository and commit to evaluate.
 type RepoSpec struct {
 	// URL is the git clone URL for the repository under test.

@@ -28,8 +28,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -46,43 +48,67 @@ type RunReconciler struct {
 }
 
 // Reconcile handles the Run state machine:
-//  1. Pending -> create Sandbox in eval-runner-sandbox, set Discovering.
+//  1. Pending -> ensure finalizer, create Sandbox in eval-runner-sandbox, set Discovering.
 //  2. Wait for sandbox pod Ready, exec git clone && git checkout && ./.evals/list.
 //  3. Parse and validate manifest, write status.manifest, set Discovered.
 //     On failure, set Failed with message and tail of stderr.
 //  4. Delete sandbox when done, idempotent across restarts.
+//  5. On Run deletion, GC discovery sandbox and remove finalizer.
 func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-
-	var run v1alpha1.Run
-	if err := r.Get(ctx, req.NamespacedName, &run); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
 
 	sandboxNamespace := r.SandboxNamespace
 	if sandboxNamespace == "" {
 		sandboxNamespace = discovery.DefaultSandboxNamespace
 	}
 
-	sandboxName := discovery.SandboxNameForRun(run.Name)
+	sandboxName := discovery.SandboxNameForRun(req.Name)
 	sandboxKey := types.NamespacedName{Namespace: sandboxNamespace, Name: sandboxName}
 
-	// Terminal states: already finished, do nothing (clean up any leftover sandbox)
-	if run.Status.Phase == v1alpha1.RunPhaseDiscovered || run.Status.Phase == v1alpha1.RunPhaseFailed {
-		var leftoverSb sandboxv1beta1.Sandbox
-		err := r.Get(ctx, sandboxKey, &leftoverSb)
-		if err == nil {
-			if err := r.Delete(ctx, &leftoverSb); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to delete leftover sandbox for terminal run", "sandbox", sandboxName)
+	var run v1alpha1.Run
+	if err := r.Get(ctx, req.NamespacedName, &run); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Run was deleted. Clean up any leftover sandbox matching this Run.
+			if err := r.deleteSandboxIfMatching(ctx, sandboxKey, req.Namespace, req.Name); err != nil {
+				return ctrl.Result{}, err
 			}
-		} else if !apierrors.IsNotFound(err) {
-			logger.Error(err, "failed to check leftover sandbox for terminal run", "sandbox", sandboxName)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Deletion lifecycle: Run is marked for deletion. Clean up sandbox and remove finalizer.
+	if !run.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox) {
+			logger.Info("Run is being deleted; cleaning up discovery sandbox", "run", run.Name)
+			if err := r.deleteSandboxIfMatching(ctx, sandboxKey, run.Namespace, run.Name); err != nil {
+				return ctrl.Result{}, err
+			}
+			controllerutil.RemoveFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox)
+			if err := r.Update(ctx, &run); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{}, nil
 	}
 
-	var sandbox sandboxv1beta1.Sandbox
+	// Terminal states: already finished, do nothing (clean up any leftover sandbox).
+	if run.Status.Phase == v1alpha1.RunPhaseDiscovered || run.Status.Phase == v1alpha1.RunPhaseFailed {
+		if err := r.deleteSandboxIfMatching(ctx, sandboxKey, run.Namespace, run.Name); err != nil {
+			logger.Error(err, "failed to delete leftover sandbox for terminal run", "sandbox", sandboxName)
+		}
+		return ctrl.Result{}, nil
+	}
 
+	// Ensure finalizer is attached before creating or processing sandbox.
+	if !controllerutil.ContainsFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox) {
+		controllerutil.AddFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox)
+		if err := r.Update(ctx, &run); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	var sandbox sandboxv1beta1.Sandbox
 	err := r.Get(ctx, sandboxKey, &sandbox)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
@@ -100,16 +126,17 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 		}
 
-		run.Status.Phase = v1alpha1.RunPhaseDiscovering
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionTypeDiscovered,
-			Status:             metav1.ConditionFalse,
-			Reason:             "Discovering",
-			Message:            "Running discovery in sandbox",
-			ObservedGeneration: run.Generation,
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Phase = v1alpha1.RunPhaseDiscovering
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionTypeDiscovered,
+				Status:             metav1.ConditionFalse,
+				Reason:             "Discovering",
+				Message:            "Running discovery in sandbox",
+				ObservedGeneration: gen,
+			})
 		})
-
-		if err := r.Status().Update(ctx, &run); err != nil {
+		if err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -118,15 +145,17 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// Sandbox exists. Ensure phase reflects Discovering if it was Pending or empty
 	if run.Status.Phase != v1alpha1.RunPhaseDiscovering {
-		run.Status.Phase = v1alpha1.RunPhaseDiscovering
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionTypeDiscovered,
-			Status:             metav1.ConditionFalse,
-			Reason:             "Discovering",
-			Message:            "Running discovery in sandbox",
-			ObservedGeneration: run.Generation,
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Phase = v1alpha1.RunPhaseDiscovering
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionTypeDiscovered,
+				Status:             metav1.ConditionFalse,
+				Reason:             "Discovering",
+				Message:            "Running discovery in sandbox",
+				ObservedGeneration: gen,
+			})
 		})
-		if err := r.Status().Update(ctx, &run); err != nil {
+		if err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -181,50 +210,80 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Manifest validation failed: %v", err))
 	}
 
-	// Step 5: Success -> cleanup sandbox and update Run to Discovered
-	logger.Info("Discovery successful; cleaning up sandbox and recording manifest", "tasks", len(manifest.Tasks))
-	if err := r.Delete(ctx, &sandbox); err != nil && !apierrors.IsNotFound(err) {
-		logger.Error(err, "failed to delete sandbox", "sandbox", sandbox.Name)
+	// Step 5: Success -> update Run to Discovered, then cleanup sandbox
+	logger.Info("Discovery successful; recording manifest and cleaning up sandbox", "tasks", len(manifest.Tasks))
+	err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+		status.Phase = v1alpha1.RunPhaseDiscovered
+		status.Message = ""
+		status.Manifest = manifest
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionTypeDiscovered,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Discovered",
+			Message:            fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks)),
+			ObservedGeneration: gen,
+		})
+	})
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
-	run.Status.Phase = v1alpha1.RunPhaseDiscovered
-	run.Status.Message = ""
-	run.Status.Manifest = manifest
-	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionTypeDiscovered,
-		Status:             metav1.ConditionTrue,
-		Reason:             "Discovered",
-		Message:            fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks)),
-		ObservedGeneration: run.Generation,
-	})
-
-	if err := r.Status().Update(ctx, &run); err != nil {
-		return ctrl.Result{}, err
+	if err := r.Delete(ctx, &sandbox); err != nil && !apierrors.IsNotFound(err) {
+		logger.Error(err, "failed to delete sandbox", "sandbox", sandbox.Name)
 	}
 
 	return ctrl.Result{}, nil
 }
 
+func (r *RunReconciler) deleteSandboxIfMatching(ctx context.Context, sandboxKey types.NamespacedName, runNamespace, runName string) error {
+	logger := log.FromContext(ctx)
+	var sb sandboxv1beta1.Sandbox
+	if err := r.Get(ctx, sandboxKey, &sb); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if sb.Labels[discovery.LabelRunName] == runName && sb.Labels[discovery.LabelRunNamespace] == runNamespace {
+		if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "failed to delete sandbox", "sandbox", sandboxKey.Name)
+			return err
+		}
+		logger.Info("Deleted sandbox for run", "sandbox", sandboxKey.Name, "run", runName)
+	}
+	return nil
+}
+
+func (r *RunReconciler) updateRunStatus(ctx context.Context, key types.NamespacedName, mutate func(*v1alpha1.RunStatus, int64)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest v1alpha1.Run
+		if err := r.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+		mutate(&latest.Status, latest.Generation)
+		return r.Status().Update(ctx, &latest)
+	})
+}
+
 func (r *RunReconciler) failRun(ctx context.Context, run *v1alpha1.Run, sandbox *sandboxv1beta1.Sandbox, message string) (ctrl.Result, error) {
+	key := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}
+	err := r.updateRunStatus(ctx, key, func(status *v1alpha1.RunStatus, gen int64) {
+		status.Phase = v1alpha1.RunPhaseFailed
+		status.Message = message
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionTypeDiscovered,
+			Status:             metav1.ConditionFalse,
+			Reason:             "DiscoveryFailed",
+			Message:            message,
+			ObservedGeneration: gen,
+		})
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if sandbox != nil {
 		if err := r.Delete(ctx, sandbox); err != nil && !apierrors.IsNotFound(err) {
 			logger := log.FromContext(ctx)
 			logger.Error(err, "failed to delete sandbox on failure", "sandbox", sandbox.Name)
 		}
-	}
-
-	run.Status.Phase = v1alpha1.RunPhaseFailed
-	run.Status.Message = message
-	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionTypeDiscovered,
-		Status:             metav1.ConditionFalse,
-		Reason:             "DiscoveryFailed",
-		Message:            message,
-		ObservedGeneration: run.Generation,
-	})
-
-	if err := r.Status().Update(ctx, run); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
