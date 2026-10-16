@@ -1,0 +1,40 @@
+<!doctype html><html><head><style>{{ base_css }}
+.verdict { font-size: 26px; margin: 4px 0 18px; display: flex; align-items: center; gap: 14px; }
+.foot { color: var(--muted); font-size: 20px; margin-top: 16px; display: flex; gap: 28px; }
+</style></head><body><div class="canvas"><div class="window">
+<div class="bar"><i></i><i></i><i></i><span class="url">github.com/{{ repo | default('acme/support-agent') }}/pull/{{ pr | default(418) }}</span></div>
+<div class="body">
+  <h1 class="pr">{{ title | default('skills: tell the agent to check the runbook before escalating') }} <span class="num">#{{ pr | default(418) }}</span></h1>
+  <div class="bot">
+    <div class="avatar">er</div>
+    <div class="comment">
+      <div class="head"><b>eval-runner</b> <span class="tag">bot</span> &nbsp;·&nbsp; {{ when | default('commented 14 minutes ago') }}</div>
+      <div class="content">
+        <div class="verdict">{% set v = verdict | default('IMPROVED') %}
+          <span class="chip {{ {'IMPROVED':'good','REGRESSED':'bad','UNCHANGED':'neutral','INCONCLUSIVE':'warn','RUNNING':'pending'}[v] }}"><span class="dot"></span>{{ v }}</span>
+          <span>{{ headline | default('3f9c2e1 vs main · P(improvement) = 0.98') }}</span></div>
+        <table class="ci">
+          <tr><th>eval</th><th>base</th><th>this PR</th><th>Δ (95% CI)</th><th></th><th>runs</th></tr>
+          {% for r in rows | default([
+            {'name':'triage/runbook_lookup','base':'0.61','pr':'0.84','d':'+0.23','lo':0.11,'hi':0.35,'st':'good','label':'improved','n':'48'},
+            {'name':'triage/escalation_policy','base':'0.88','pr':'0.90','d':'+0.02','lo':-0.05,'hi':0.09,'st':'neutral','label':'unchanged','n':'32'},
+            {'name':'triage/summary_quality','base':'0.72','pr':'0.75','d':'+0.03','lo':-0.08,'hi':0.14,'st':'warn','label':'inconclusive','n':'16'},
+          ]) %}
+          <tr><td class="mono">{{ r.name }}</td><td class="num">{{ r.base }}</td><td class="num">{{ r.pr }}</td><td class="num">{{ r.d }}</td>
+            <td>{% set lo = r.lo %}{% set hi = r.hi %}{% set scale = 340/1.0 %}
+              <div class="cibar"><div class="axis"></div><div class="zero" style="left:{{ 170 }}px"></div>
+                <div class="range {{ r.st }}-c" style="left:{{ 170 + lo*scale }}px; width:{{ (hi-lo)*scale }}px"></div>
+                <div class="pt {{ r.st }}-c" style="left:{{ 170 + (lo+hi)/2*scale - 7 }}px"></div></div></td>
+            <td><span class="chip {{ r.st }}" style="font-size:18px"><span class="dot"></span>{{ r.label }}</span></td><td class="num">{{ r.n }}</td></tr>
+          {% endfor %}
+        </table>
+        <div class="foot"><span>{{ foot1 | default('96 of 3,200 possible samples run · $4.10') }}</span><span>{{ foot2 | default('paired against base commit a81d0c4') }}</span><span>{{ foot3 | default('trajectories ↗') }}</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="checks">
+    {% for st, name, desc in checks | default([['ok','unit tests','412 passed in 38s'],['ok','eval-runner / evals','IMPROVED · 1 up, 2 unchanged']]) %}
+    <div class="row"><span class="{{ st }}">{% if st=='ok' %}✔{% elif st=='fail' %}✖{% elif st=='pend' %}●{% else %}?{% endif %}</span><span class="name">{{ name }}</span><span class="desc">{{ desc }}</span></div>
+    {% endfor %}
+  </div>
+</div></div></div></body></html>

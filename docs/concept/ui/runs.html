@@ -1,0 +1,32 @@
+<!doctype html><html><head><style>{{ base_css }}
+.app { position: absolute; left: 120px; top: 70px; width: 1680px; height: 940px; background: #fff; border-radius: 18px; box-shadow: 0 30px 80px rgba(17,24,39,.14); overflow: hidden; display: flex; }
+.side { width: 300px; background: var(--canvas); border-right: 1px solid var(--line); padding: 30px 26px; }
+.side .logo { font-weight: 700; font-size: 26px; color: var(--indigo); margin-bottom: 36px; }
+.side .nav { font-size: 22px; color: var(--muted); margin: 14px 0; } .side .nav.on { color: var(--ink); font-weight: 600; }
+.main { flex: 1; padding: 34px 42px; }
+.main h2 { font-size: 32px; margin: 0 0 6px; font-weight: 600; } .main .meta { color: var(--muted); font-size: 21px; margin-bottom: 26px; }
+.task { display: grid; grid-template-columns: 420px 1fr 260px 150px; align-items: center; gap: 20px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; font-size: 22px; }
+.task .name { font-family: var(--mono); font-size: 21px; } .task .res { display: flex; gap: 8px; flex-wrap: wrap; }
+.res .r { font-size: 17px; padding: 3px 10px; border-radius: 6px; background: var(--indigo-soft); color: var(--indigo); font-family: var(--mono); }
+.pods { display: flex; gap: 6px; } .pods .pd { width: 20px; height: 20px; border-radius: 5px; background: #E5E7EB; }
+.pods .pd.run { background: var(--teal); } .pods .pd.done { background: var(--indigo); } .pods .pd.q { background: #E5E7EB; }
+.hx { position: absolute; right: 60px; bottom: 50px; display: grid; grid-template-columns: repeat(12, 28px); gap: 6px; }
+.hx i { width: 28px; height: 28px; display: block; background: #EEF0F3; clip-path: polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%); }
+.hx i.on { background: var(--teal); } .hx i.dn { background: var(--indigo); }
+.note { position: absolute; left: 342px; bottom: 44px; font-size: 20px; color: var(--muted); }
+</style></head><body><div class="canvas"><div class="app">
+<div class="side"><div class="logo">eval-runner</div><div class="nav">Pull requests</div><div class="nav on">Runs</div><div class="nav">Trajectories</div><div class="nav">Cohorts</div><div class="nav">Fine-tunes</div></div>
+<div class="main">
+  <h2>{{ heading | default('acme/support-agent #418 · 3f9c2e1') }}</h2>
+  <div class="meta">{{ meta | default('namespace eval-ci · isolation: gvisor · 8 of 96 samples complete') }}</div>
+  {% for t in tasks | default([
+    {'name':'triage/runbook_lookup','res':['kubernetes-namespace'],'pods':['done','done','run','run','run','q','q','q'],'st':'running'},
+    {'name':'triage/escalation_policy','res':['kind','docker'],'pods':['run','run','q','q','q','q','q','q'],'st':'provisioning kind'},
+    {'name':'triage/summary_quality','res':[],'pods':['q','q','q','q','q','q','q','q'],'st':'queued'},
+  ]) %}
+  <div class="task"><span class="name">{{ t.name }}</span><span class="res">{% for r in t.res %}<span class="r">{{ r }}</span>{% endfor %}{% if not t.res %}<span class="r" style="background:var(--neutral-soft);color:var(--muted)">no credentials</span>{% endif %}</span>
+    <span class="pods">{% for p in t.pods %}<span class="pd {{ p }}"></span>{% endfor %}</span><span class="{{ 'ok' if t.st=='done' else ('pend' if t.st!='queued' else 'skip') }}">{{ t.st }}</span></div>
+  {% endfor %}
+  <div class="hx">{% for c in cells | default(('on,dn,,,on,,,dn,,,,,on,,,,dn,,,on,,,,,,,on,,,,dn,,,,on,,,,,,dn,,,,on,,,,,,,,on,,,,,dn,,,,,,,on,,,,,,,,,,').split(',')) %}<i class="{{ c }}"></i>{% endfor %}</div>
+  <div class="note">{{ note | default('sandboxes: one pod per sample · artifacts pulled by the controller · no cluster credentials inside the sandbox') }}</div>
+</div></div></div></body></html>

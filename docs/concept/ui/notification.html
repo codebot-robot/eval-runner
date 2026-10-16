@@ -1,0 +1,25 @@
+<!doctype html><html><head><style>{{ base_css }}
+.card { position: absolute; left: 360px; top: 150px; width: 1200px; background: #fff; border-radius: 22px; box-shadow: 0 40px 100px rgba(17,24,39,.18); overflow: hidden; }
+.card .top { padding: 34px 44px 24px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 22px; }
+.bell { width: 64px; height: 64px; border-radius: 18px; background: linear-gradient(135deg, var(--indigo), var(--teal)); flex: none; }
+.top h2 { margin: 0; font-size: 36px; font-weight: 700; letter-spacing: -0.01em; } .top .m { color: var(--muted); font-size: 21px; margin-top: 4px; }
+.body { padding: 28px 44px 36px; }
+table.ci th:first-child, table.ci td:first-child { width: 360px; }
+.delta { color: var(--good); font-weight: 600; } .delta.bad { color: var(--bad); }
+.actions { display: flex; gap: 16px; margin-top: 30px; align-items: center; }
+.btn.primary { background: var(--indigo); color: #fff; } .btn.ghost { border: 1px solid var(--line); color: var(--ink-2); }
+.small { color: var(--muted); font-size: 19px; margin-left: auto; font-family: var(--mono); }
+</style></head><body><div class="canvas"><div class="card">
+<div class="top"><div class="bell"></div><div><h2>{{ heading | default('New fine-tune available: triage-v7') }}</h2><div class="m">{{ meta | default('trained overnight with OpenRL on 2,140 scored trajectories · base model gemini-2.5-pro · $38 compute') }}</div></div></div>
+<div class="body">
+  <table class="ci">
+    <tr><th>eval</th><th>current (prompt + skills)</th><th>triage-v7</th><th>Δ (95% CI)</th><th>cost / sample</th></tr>
+    {% for r in rows | default([
+      {'name':'triage/runbook_lookup','a':'0.84','b':'0.93','d':'+0.09 [+0.04, +0.14]','c':'$0.031 → $0.012'},
+      {'name':'triage/escalation_policy','a':'0.90','b':'0.95','d':'+0.05 [+0.01, +0.09]','c':'$0.028 → $0.011'},
+      {'name':'triage/summary_quality','a':'0.75','b':'0.74','d':'−0.01 [−0.07, +0.05]','c':'$0.030 → $0.012'},
+    ]) %}
+    <tr><td class="mono">{{ r.name }}</td><td class="num">{{ r.a }}</td><td class="num">{{ r.b }}</td><td class="num delta {{ 'bad' if r.d.startswith('−') }}">{{ r.d }}</td><td class="num">{{ r.c }}</td></tr>{% endfor %}
+  </table>
+  <div class="actions"><span class="btn primary">{{ cta | default('Open PR to activate triage-v7') }}</span><span class="btn ghost">Compare trajectories</span><span class="small">{{ small | default('evaluated on the same 96 paired samples as PR #418') }}</span></div>
+</div></div></div></body></html>

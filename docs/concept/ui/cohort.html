@@ -1,0 +1,33 @@
+<!doctype html><html><head><style>{{ base_css }}
+.wrap { position: absolute; left: 120px; top: 80px; width: 1680px; height: 920px; background: #fff; border-radius: 18px; box-shadow: 0 30px 80px rgba(17,24,39,.14); padding: 44px 56px; }
+h2 { font-size: 34px; margin: 0 0 6px; font-weight: 600; } .meta { color: var(--muted); font-size: 22px; margin-bottom: 14px; }
+svg text { font-family: var(--sans); fill: var(--ink-2); font-size: 20px; } .ax { stroke: var(--line); stroke-width: 2; } .grid { stroke: #F1F5F9; }
+.legend { display: flex; gap: 34px; font-size: 21px; margin: 6px 0 10px; } .legend span { display: inline-flex; align-items: center; gap: 10px; } .legend i { width: 26px; height: 4px; border-radius: 2px; display: inline-block; }
+</style></head><body><div class="canvas"><div class="wrap">
+<h2>{{ heading | default('Did the agent regress, or did the test get harder?') }}</h2>
+<div class="meta">{{ meta | default('main branch · mean score per cohort · weekly · 95% CI shaded') }}</div>
+<div class="legend"><span><i style="background:var(--indigo)"></i>original suite (24 evals)</span><span><i style="background:var(--teal)"></i>cohort: customer-reported Q4 (+11 evals)</span><span><i style="background:var(--muted)"></i>all evals combined</span></div>
+{% set X0, X1, Y0, Y1 = 90, 1500, 40, 620 %}
+{% set weeks = ['w36','w37','w38','w39','w40','w41','w42','w43','w44','w45'] %}
+{% set orig = [0.80,0.81,0.81,0.83,0.84,0.84,0.85,0.85,0.86,0.86] %}
+{% set coh  = [None,None,None,None,None,0.41,0.47,0.55,0.62,0.68] %}
+{% set allv = [0.80,0.81,0.81,0.83,0.84,0.70,0.73,0.76,0.79,0.81] %}
+{% set n_done = n_done | default(10) %}
+{% macro xy(i, v) %}{{ X0 + i/9*(X1-X0) }},{{ Y1 - (v-0.3)/0.7*(Y1-Y0) }}{% endmacro %}
+<svg width="1560" height="700" viewBox="0 0 1560 700">
+  {% for g in [0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0] %}{% set y = Y1 - (g-0.3)/0.7*(Y1-Y0) %}<line class="grid" x1="{{X0}}" y1="{{y}}" x2="{{X1}}" y2="{{y}}"/><text x="{{X0-14}}" y="{{y+7}}" text-anchor="end">{{ '%.1f' % g }}</text>{% endfor %}
+  <line class="ax" x1="{{X0}}" y1="{{Y1}}" x2="{{X1}}" y2="{{Y1}}"/>
+  {% for w in weeks %}<text x="{{ X0 + loop.index0/9*(X1-X0) }}" y="{{Y1+32}}" text-anchor="middle">{{ w }}</text>{% endfor %}
+  {% set xa = X0 + 5/9*(X1-X0) %}<line x1="{{xa}}" y1="{{Y0}}" x2="{{xa}}" y2="{{Y1}}" stroke="var(--teal)" stroke-dasharray="6 6" stroke-width="2"/><text x="{{xa+10}}" y="{{Y0+18}}" style="fill:#0F766E;font-size:18px">11 customer-reported evals added</text>
+  <polyline fill="none" stroke="var(--muted)" stroke-width="3" points="{% for v in allv[:n_done] %}{{ xy(loop.index0, v) }} {% endfor %}"/>
+  <polyline fill="none" stroke="var(--indigo)" stroke-width="3" points="{% for v in orig[:n_done] %}{{ xy(loop.index0, v) }} {% endfor %}"/>
+  <polyline fill="none" stroke="var(--teal)" stroke-width="3" points="{% for v in coh[:n_done] if v %}{{ xy(loop.index0 + 5, v) }} {% endfor %}"/>
+  {% for v in orig[:n_done] %}<circle cx="{{ (xy(loop.index0, v)).split(',')[0] }}" cy="{{ (xy(loop.index0, v)).split(',')[1] }}" r="6" fill="var(--indigo)" stroke="#fff" stroke-width="2"/>{% endfor %}
+  {% for v in coh[:n_done] if v %}<circle cx="{{ (xy(loop.index0+5, v)).split(',')[0] }}" cy="{{ (xy(loop.index0+5, v)).split(',')[1] }}" r="6" fill="var(--teal)" stroke="#fff" stroke-width="2"/>{% endfor %}
+  {% if n_done >= 10 %}
+  <text x="{{X1+12}}" y="{{ Y1 - (0.86-0.3)/0.7*(Y1-Y0) + 7 }}" style="fill:var(--indigo);font-weight:600">0.86 · no regression</text>
+  <text x="{{X1+12}}" y="{{ Y1 - (0.68-0.3)/0.7*(Y1-Y0) + 7 }}" style="fill:#0F766E;font-weight:600">0.68 · new cohort, improving</text>
+  <text x="{{X1+12}}" y="{{ Y1 - (0.81-0.3)/0.7*(Y1-Y0) + 30 }}" style="fill:var(--muted)">0.81 · combined</text>
+  {% endif %}
+</svg>
+</div></div></body></html>

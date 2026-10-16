@@ -1,0 +1,18 @@
+<!doctype html><html><head><style>{{ base_css }}
+body { background: #fff; }
+.title { position: absolute; left: 160px; top: 330px; width: 1600px; }
+.ep { font-family: var(--mono); font-size: 28px; color: var(--muted); margin-bottom: 26px; }
+.ep b { color: var(--indigo); font-weight: 600; }
+h1 { font-size: 84px; line-height: 1.08; margin: 0 0 30px; letter-spacing: -0.025em; font-weight: 700; max-width: 1400px; }
+.sub { font-size: 34px; color: var(--ink-2); max-width: 1300px; line-height: 1.35; }
+.rule { position: absolute; left: 160px; top: 290px; width: 96px; height: 8px; background: linear-gradient(90deg, var(--indigo), var(--teal)); border-radius: 4px; }
+.foot { position: absolute; left: 160px; bottom: 90px; font-size: 24px; color: var(--muted); font-family: var(--mono); }
+</style></head><body><div class="canvas">
+<div class="rule"></div>
+<div class="title">
+  <div class="ep"><b>{{ series.name }}</b> · episode {{ video.episode }} of {{ series.episodes }}</div>
+  <h1>{{ video.title }}</h1>
+  <div class="sub">{{ video.subtitle }}</div>
+</div>
+<div class="foot">{{ brand.repo }}</div>
+</div></body></html>

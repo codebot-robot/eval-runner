@@ -1,0 +1,38 @@
+<!doctype html><html><head><style>{{ base_css }}
+.wrap { position: absolute; left: 120px; top: 80px; width: 1680px; height: 920px; background: #fff; border-radius: 18px; box-shadow: 0 30px 80px rgba(17,24,39,.14); padding: 44px 56px; }
+h2 { font-size: 34px; margin: 0 0 6px; font-weight: 600; } .meta { color: var(--muted); font-size: 22px; margin-bottom: 20px; }
+.cols { display: flex; gap: 56px; }
+.tiles { width: 520px; }
+.tile { border: 1px solid var(--line); border-radius: 14px; padding: 22px 26px; margin-bottom: 18px; }
+.tile .lab { font-size: 20px; color: var(--muted); } .tile .val { font-size: 54px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin: 4px 0; } .tile .sub { font-size: 20px; color: var(--ink-2); }
+.tile.naive .val { color: var(--muted); } .tile.smart .val { color: var(--indigo); }
+svg text { font-family: var(--sans); fill: var(--ink-2); font-size: 20px; } svg .ax { stroke: var(--line); stroke-width: 2; } svg .grid { stroke: #F1F5F9; stroke-width: 1; }
+</style></head><body><div class="canvas"><div class="wrap">
+<h2>{{ heading | default('How many samples until we know?') }}</h2>
+<div class="meta">{{ meta | default('triage/runbook_lookup · paired base vs PR · stop when the 95% CI excludes zero or is narrower than the equivalence margin') }}</div>
+<div class="cols">
+  <div class="tiles">
+    <div class="tile naive"><div class="lab">naive: every eval × 1000 runs, every PR</div><div class="val">{{ naive_cost | default('$1,400') }}</div><div class="sub">{{ naive_sub | default('3,200 samples · 6 h 40 m') }}</div></div>
+    <div class="tile smart"><div class="lab">eval-runner: adaptive sampling</div><div class="val">{{ smart_cost | default('$4.10') }}</div><div class="sub">{{ smart_sub | default('96 samples · 14 min · same verdict') }}</div></div>
+  </div>
+  {# CI-width-vs-samples chart. Points: (n, lo, hi) for Δ; drawn up to n_done. One axis, thin marks, direct labels. #}
+  {% set pts = [[4,-0.42,0.78],[8,-0.21,0.60],[12,-0.12,0.52],[16,-0.06,0.48],[24,0.00,0.43],[32,0.04,0.40],[40,0.07,0.38],[48,0.11,0.35],[64,0.13,0.33],[80,0.14,0.32],[96,0.15,0.31]] %}
+  {% set n_done = n_done | default(96) %}{% set n_stop = n_stop | default(96) %}
+  {% set X0, X1, Y0, Y1 = 90, 1000, 60, 560 %}
+  <svg width="1040" height="640" viewBox="0 0 1040 640">
+    {% for g in [-0.5,-0.25,0,0.25,0.5,0.75] %}{% set y = Y1 - (g+0.5)/1.25*(Y1-Y0) %}
+    <line class="{{ 'ax' if g==0 else 'grid' }}" x1="{{X0}}" y1="{{y}}" x2="{{X1}}" y2="{{y}}"/><text x="{{X0-14}}" y="{{y+7}}" text-anchor="end">{{ '%+.2f' % g if g!=0 else '0' }}</text>{% endfor %}
+    <line class="ax" x1="{{X0}}" y1="{{Y1}}" x2="{{X1}}" y2="{{Y1}}"/>
+    {% for n in [0,16,32,48,64,80,96] %}<text x="{{ X0 + n/100*(X1-X0) }}" y="{{Y1+30}}" text-anchor="middle">{{ n }}</text>{% endfor %}
+    <text x="{{ (X0+X1)/2 }}" y="{{ Y1+62 }}" text-anchor="middle" style="fill:var(--muted)">samples run (paired)</text>
+    <text x="{{X0}}" y="{{Y0-24}}" style="fill:var(--muted)">Δ score, 95% confidence interval</text>
+    <rect x="{{X0}}" y="{{ Y1 - (0.05+0.5)/1.25*(Y1-Y0) }}" width="{{X1-X0}}" height="{{ (0.10)/1.25*(Y1-Y0) }}" fill="#F3F4F6"/>
+    <text x="{{X1-6}}" y="{{ Y1 - (0.0+0.5)/1.25*(Y1-Y0) - 10 }}" text-anchor="end" style="fill:var(--muted);font-size:17px">equivalence margin ±0.05</text>
+    {% for n, lo, hi in pts if n <= n_done %}{% set x = X0 + n/100*(X1-X0) %}{% set ylo = Y1 - (lo+0.5)/1.25*(Y1-Y0) %}{% set yhi = Y1 - (hi+0.5)/1.25*(Y1-Y0) %}
+    {% set col = 'var(--good)' if lo > 0 else 'var(--warn)' %}
+    <line x1="{{x}}" y1="{{ylo}}" x2="{{x}}" y2="{{yhi}}" stroke="{{col}}" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="{{x}}" cy="{{ (ylo+yhi)/2 }}" r="7" fill="{{col}}" stroke="#fff" stroke-width="2"/>
+    {% if loop.last %}<text x="{{x+16}}" y="{{ (ylo+yhi)/2 + 7 }}" style="font-weight:600;fill:{{col}}">n={{n}} · Δ {{ '%+.2f' % ((lo+hi)/2) }} [{{ '%+.2f' % lo }}, {{ '%+.2f' % hi }}]{% if n >= n_stop %} → CI clear of zero: IMPROVED, stop{% endif %}</text>{% endif %}
+    {% endfor %}
+  </svg>
+</div></div></div></body></html>
