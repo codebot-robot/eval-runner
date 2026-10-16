@@ -65,10 +65,14 @@ func main() {
 	var evalRunnerNamespace string
 	var sandboxNamespace string
 	var probeAddr string
+	var maxStdoutBytes int64
+	var maxStderrBytes int64
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.Int64Var(&maxStdoutBytes, "max-stdout-bytes", discovery.MaxStdoutBytes, "Maximum stdout bytes buffered from discovery execution")
+	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
 
 	opts := zap.Options{
 		Development: true,
@@ -142,8 +146,10 @@ func main() {
 	}
 
 	executor := &controller.SPDYPodExecutor{
-		Config:    cfg,
-		Clientset: clientset,
+		Config:      cfg,
+		Clientset:   clientset,
+		StdoutLimit: maxStdoutBytes,
+		StderrLimit: maxStderrBytes,
 	}
 
 	reconciler := &controller.RunReconciler{
@@ -151,6 +157,9 @@ func main() {
 		Scheme:           mgr.GetScheme(),
 		Executor:         executor,
 		SandboxNamespace: sandboxNamespace,
+		MaxStdoutBytes:   maxStdoutBytes,
+		MaxStderrBytes:   maxStderrBytes,
+		MaxMessageBytes:  discovery.MaxMessageBytes,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

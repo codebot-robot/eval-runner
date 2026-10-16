@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
@@ -45,6 +46,34 @@ type RunReconciler struct {
 	Scheme           *runtime.Scheme
 	Executor         PodExecutor
 	SandboxNamespace string
+	MaxStdoutBytes   int64
+	MaxStderrBytes   int64
+	MaxMessageBytes  int
+}
+
+func (r *RunReconciler) maxStdoutBytes() int64 {
+	if r.MaxStdoutBytes > 0 {
+		return r.MaxStdoutBytes
+	}
+	return discovery.MaxStdoutBytes
+}
+
+func (r *RunReconciler) maxStderrBytes() int64 {
+	if r.MaxStderrBytes > 0 {
+		return r.MaxStderrBytes
+	}
+	return discovery.MaxStderrBytes
+}
+
+func (r *RunReconciler) maxMessageBytes() int {
+	if r.MaxMessageBytes > 0 {
+		return r.MaxMessageBytes
+	}
+	return discovery.MaxMessageBytes
+}
+
+func (r *RunReconciler) maxStderrLines() int {
+	return discovery.MaxStderrLines
 }
 
 // Reconcile handles the Run state machine:
@@ -187,8 +216,30 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	defer cancel()
 	stdout, stderr, err := r.Executor.Exec(execCtx, sandboxNamespace, pod.Name, discovery.DiscoveryContainerName, cmd)
 	if err != nil {
-		tail := extractStderrTail(stderr, 10)
+		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
 		msg := fmt.Sprintf("Command execution failed: %v", err)
+		if tail != "" {
+			msg += "\n" + tail
+		}
+		return r.failRun(ctx, &run, &sandbox, msg)
+	}
+
+	stdoutLimit := r.maxStdoutBytes()
+	stderrLimit := r.maxStderrBytes()
+
+	// Defense-in-depth: validate stdout and stderr sizes even if executor did not report limit error
+	if int64(len(stdout)) > stdoutLimit {
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Command execution failed: %v", &discovery.LimitError{
+			Stream: "stdout",
+			Limit:  stdoutLimit,
+		}))
+	}
+	if int64(len(stderr)) > stderrLimit {
+		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		msg := fmt.Sprintf("Command execution failed: %v", &discovery.LimitError{
+			Stream: "stderr",
+			Limit:  stderrLimit,
+		})
 		if tail != "" {
 			msg += "\n" + tail
 		}
@@ -198,7 +249,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Step 4: Parse & validate manifest
 	manifest, err := discovery.ParseManifest([]byte(stdout))
 	if err != nil {
-		tail := extractStderrTail(stderr, 10)
+		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
 		msg := fmt.Sprintf("Failed to parse manifest: %v", err)
 		if tail != "" {
 			msg += "\n" + tail
@@ -263,15 +314,16 @@ func (r *RunReconciler) updateRunStatus(ctx context.Context, key types.Namespace
 }
 
 func (r *RunReconciler) failRun(ctx context.Context, run *v1alpha1.Run, sandbox *sandboxv1beta1.Sandbox, message string) (ctrl.Result, error) {
+	boundedMessage := truncateMessage(message, r.maxMessageBytes())
 	key := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}
 	err := r.updateRunStatus(ctx, key, func(status *v1alpha1.RunStatus, gen int64) {
 		status.Phase = v1alpha1.RunPhaseFailed
-		status.Message = message
+		status.Message = boundedMessage
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionTypeDiscovered,
 			Status:             metav1.ConditionFalse,
 			Reason:             "DiscoveryFailed",
-			Message:            message,
+			Message:            boundedMessage,
 			ObservedGeneration: gen,
 		})
 	})
@@ -301,7 +353,7 @@ func isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-func extractStderrTail(stderr string, maxLines int) string {
+func extractStderrTail(stderr string, maxLines int, maxBytes int) string {
 	trimmed := strings.TrimSpace(stderr)
 	if trimmed == "" {
 		return ""
@@ -310,7 +362,32 @@ func extractStderrTail(stderr string, maxLines int) string {
 	if len(lines) > maxLines {
 		lines = lines[len(lines)-maxLines:]
 	}
-	return strings.Join(lines, "\n")
+	res := strings.Join(lines, "\n")
+	if maxBytes > 0 && len(res) > maxBytes {
+		res = res[len(res)-maxBytes:]
+		if idx := strings.Index(res, "\n"); idx != -1 && idx < len(res)-1 {
+			res = res[idx+1:]
+		}
+		for len(res) > 0 && !utf8.RuneStart(res[0]) {
+			res = res[1:]
+		}
+	}
+	return strings.TrimSpace(res)
+}
+
+func truncateMessage(msg string, maxBytes int) string {
+	if maxBytes <= 0 || len(msg) <= maxBytes {
+		return msg
+	}
+	const suffix = "\n... [truncated]"
+	if maxBytes <= len(suffix) {
+		return msg[:maxBytes]
+	}
+	cutoff := maxBytes - len(suffix)
+	for cutoff > 0 && !utf8.RuneStart(msg[cutoff]) {
+		cutoff--
+	}
+	return msg[:cutoff] + suffix
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -15,10 +15,10 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 
+	"github.com/gke-labs/eval-runner/pkg/discovery"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -33,8 +33,10 @@ type PodExecutor interface {
 
 // SPDYPodExecutor implements PodExecutor using client-go's remotecommand SPDY executor.
 type SPDYPodExecutor struct {
-	Config    *restclient.Config
-	Clientset kubernetes.Interface
+	Config      *restclient.Config
+	Clientset   kubernetes.Interface
+	StdoutLimit int64
+	StderrLimit int64
 }
 
 func (e *SPDYPodExecutor) Exec(ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
@@ -57,11 +59,35 @@ func (e *SPDYPodExecutor) Exec(ctx context.Context, namespace, podName, containe
 		return "", "", fmt.Errorf("failed to create SPDY executor: %w", err)
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutLimit := e.StdoutLimit
+	if stdoutLimit <= 0 {
+		stdoutLimit = discovery.MaxStdoutBytes
+	}
+	stderrLimit := e.StderrLimit
+	if stderrLimit <= 0 {
+		stderrLimit = discovery.MaxStderrBytes
+	}
+
+	stdoutWriter := discovery.NewLimitWriter(stdoutLimit, "stdout")
+	stderrWriter := discovery.NewLimitWriter(stderrLimit, "stderr")
+
 	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdoutBuf,
-		Stderr: &stderrBuf,
+		Stdout: stdoutWriter,
+		Stderr: stderrWriter,
 	})
 
-	return stdoutBuf.String(), stderrBuf.String(), err
+	if stdoutWriter.LimitExceeded() {
+		return stdoutWriter.String(), stderrWriter.String(), &discovery.LimitError{
+			Stream: "stdout",
+			Limit:  stdoutLimit,
+		}
+	}
+	if stderrWriter.LimitExceeded() {
+		return stdoutWriter.String(), stderrWriter.String(), &discovery.LimitError{
+			Stream: "stderr",
+			Limit:  stderrLimit,
+		}
+	}
+
+	return stdoutWriter.String(), stderrWriter.String(), err
 }

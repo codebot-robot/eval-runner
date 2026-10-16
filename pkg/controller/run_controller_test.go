@@ -680,3 +680,256 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 		t.Errorf("Expected Exec to still be 1 after second reconcile, got %d", executor.callCount)
 	}
 }
+
+type discoveringRunFixture struct {
+	client      client.Client
+	reconciler  *RunReconciler
+	req         ctrl.Request
+	sandboxName string
+}
+
+func newDiscoveringRunFixture(t *testing.T, executor PodExecutor) *discoveringRunFixture {
+	scheme := setupScheme(t)
+	runName := "test-run"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Executor:         executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	return &discoveringRunFixture{
+		client:      cl,
+		reconciler:  reconciler,
+		req:         req,
+		sandboxName: sandboxName,
+	}
+}
+
+func TestReconcileStdoutOverLimitFails(t *testing.T) {
+	f := newDiscoveringRunFixture(t, &fakePodExecutor{
+		stdout: strings.Repeat("x", 1024),
+		err: &discovery.LimitError{
+			Stream: "stdout",
+			Limit:  discovery.MaxStdoutBytes,
+		},
+	})
+
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "stdout limit exceeded") {
+		t.Errorf("Expected failure message to mention stdout limit exceeded, got: %s", updatedRun.Status.Message)
+	}
+	if len(updatedRun.Status.Message) > discovery.MaxMessageBytes {
+		t.Errorf("Expected status.message <= %d bytes, got %d", discovery.MaxMessageBytes, len(updatedRun.Status.Message))
+	}
+
+	var checkSb sandboxv1beta1.Sandbox
+	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcileStderrOverLimitFails(t *testing.T) {
+	f := newDiscoveringRunFixture(t, &fakePodExecutor{
+		stderr: strings.Repeat("error line\n", 500),
+		err: &discovery.LimitError{
+			Stream: "stderr",
+			Limit:  discovery.MaxStderrBytes,
+		},
+	})
+
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "stderr limit exceeded") {
+		t.Errorf("Expected failure message to mention stderr limit exceeded, got: %s", updatedRun.Status.Message)
+	}
+	if len(updatedRun.Status.Message) > discovery.MaxMessageBytes {
+		t.Errorf("Expected status.message <= %d bytes, got %d", discovery.MaxMessageBytes, len(updatedRun.Status.Message))
+	}
+
+	var checkSb sandboxv1beta1.Sandbox
+	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcileOversizedManifestFails(t *testing.T) {
+	var tasksJSON []string
+	for i := 0; i <= discovery.MaxTasks; i++ {
+		tasksJSON = append(tasksJSON, `{"id":"task-`+strings.Repeat("a", 5)+string(rune('0'+i%10))+`-`+string(rune('a'+i%26))+`-`+string(rune('0'+(i/10)%10))+`","spec":"eval.py@run"}`)
+	}
+	oversizedJSON := `{"tasks":[` + strings.Join(tasksJSON, ",") + `]}`
+
+	f := newDiscoveringRunFixture(t, &fakePodExecutor{
+		stdout: oversizedJSON,
+	})
+
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "exceeding maximum allowed") {
+		t.Errorf("Expected failure message to mention exceeding maximum allowed tasks, got: %s", updatedRun.Status.Message)
+	}
+
+	var checkSb sandboxv1beta1.Sandbox
+	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcileStatusMessageBoundedOnFailure(t *testing.T) {
+	massiveStderr := strings.Repeat("extremely long failure line with lots of text 1234567890\n", 2000)
+
+	f := newDiscoveringRunFixture(t, &fakePodExecutor{
+		stderr: massiveStderr,
+		err:    errors.New("command crashed"),
+	})
+
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if len(updatedRun.Status.Message) > discovery.MaxMessageBytes {
+		t.Errorf("Expected status.message <= %d bytes, got %d", discovery.MaxMessageBytes, len(updatedRun.Status.Message))
+	}
+	if len(updatedRun.Status.Conditions) > 0 {
+		cond := updatedRun.Status.Conditions[0]
+		if len(cond.Message) > discovery.MaxMessageBytes {
+			t.Errorf("Expected condition message <= %d bytes, got %d", discovery.MaxMessageBytes, len(cond.Message))
+		}
+	}
+}
+
+func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
+	f := newDiscoveringRunFixture(t, &fakePodExecutor{
+		stdout: strings.Repeat("x", int(discovery.MaxStdoutBytes)+1),
+	})
+
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "stdout limit exceeded") {
+		t.Errorf("Expected failure message to mention stdout limit exceeded, got: %s", updatedRun.Status.Message)
+	}
+
+	var checkSb sandboxv1beta1.Sandbox
+	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcileStderrOverLimitWithoutExecutorError(t *testing.T) {
+	f := newDiscoveringRunFixture(t, &fakePodExecutor{
+		stderr: strings.Repeat("e", int(discovery.MaxStderrBytes)+1),
+	})
+
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "stderr limit exceeded") {
+		t.Errorf("Expected failure message to mention stderr limit exceeded, got: %s", updatedRun.Status.Message)
+	}
+
+	var checkSb sandboxv1beta1.Sandbox
+	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}

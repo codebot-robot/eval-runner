@@ -103,3 +103,17 @@ status:
 | `tasks[].spec` | `string` | Framework-specific entrypoint specification (e.g. `file.py@task_fn`). |
 | `tasks[].resources` | `[]ManifestResource` | Declarative resource requirements for the task. |
 | `tasks[].images` | `[]string` | Names of images required by this task. |
+
+## Resource and Output Limits
+
+Because `.evals/list` executes within an untrusted sandbox, the controller enforces strict size boundaries on exec streams, manifests, and status updates. This protects the controller against memory exhaustion and prevents rejected status writes to the Kubernetes API server (etcd enforces a ~1.5 MiB object limit).
+
+| Limit | Constant in `pkg/discovery` | CLI Flag / Default | Behavior when Exceeded |
+|---|---|---|---|
+| Discovery stdout | `MaxStdoutBytes` (1 MiB / 1,048,576 B) | `--max-stdout-bytes` (default: `1048576`) | Remaining output discarded; Run marked `Failed` with `stdout limit exceeded`. |
+| Discovery stderr | `MaxStderrBytes` (64 KiB / 65,536 B) | `--max-stderr-bytes` (default: `65536`) | Remaining output discarded; Run marked `Failed` with `stderr limit exceeded`. |
+| Manifest tasks | `MaxTasks` (1,000 tasks) | Enforced during validation | Validation fails, Run marked `Failed` with task count error. |
+| Failure message length | `MaxMessageBytes` (4,096 B) | Controller default: `4096` | Truncated safely with `\n... [truncated]`. |
+| Stderr tail lines | `MaxStderrLines` (10 lines) | Controller default: `10` | Only the most recent lines of stderr are retained. |
+| Stderr tail bytes | `MaxStderrTailBytes` (3,072 B) | Controller default: `3072` | Stderr tail is capped before inclusion in failure message. |
+

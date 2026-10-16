@@ -34,6 +34,7 @@ func ParseManifest(data []byte) (*v1alpha1.Manifest, error) {
 // ValidateManifest validates the discovered manifest:
 // - Manifest must not be nil
 // - tasks must not be empty
+// - tasks must not exceed MaxTasks
 // - Each task must have a non-empty, unique ID
 // - Each task must have a non-empty Spec
 func ValidateManifest(m *v1alpha1.Manifest) error {
@@ -43,6 +44,10 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 
 	if len(m.Tasks) == 0 {
 		return fmt.Errorf("manifest contains no tasks")
+	}
+
+	if len(m.Tasks) > MaxTasks {
+		return fmt.Errorf("manifest contains %d tasks, exceeding maximum allowed (%d)", len(m.Tasks), MaxTasks)
 	}
 
 	seenIDs := make(map[string]struct{}, len(m.Tasks))
