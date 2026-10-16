@@ -16,27 +16,117 @@ limitations under the License.
 
 # Development Guide
 
-This document describes how to set up your local development environment and run tests for `eval-runner`.
+This document describes how to set up your local development environment, deploy eval-runner, and run tests.
 
 ## Prerequisites
 
 - **Go**: 1.27 or newer
-- **Docker**: Docker daemon running (locally or via `DOCKER_HOST`)
+- **Docker**: Docker daemon running (locally or via `DOCKER_HOST`) with `buildx` plugin
 - **Git**
+- **Kubernetes cluster with agent-sandbox**: `agent-sandbox` is a prerequisite for running `eval-runner`. On any cluster where `eval-runner` is deployed, install the pinned `v1.0.7` release:
 
-Tools like `kind` and `kubectl` do not need to be installed beforehand; the test scripts can download and manage them automatically.
+  ```bash
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.7/sandbox.yaml
+  ```
+
+  The controller will verify that the `Sandbox` CRD (`agents.x-k8s.io/v1beta1`) is present upon startup and fail fast with an error message if it is missing.
+
+Tools like `kind` and `kubectl` do not need to be installed beforehand for testing; test scripts can download and manage them automatically under `.build/bin/`.
 
 ## Project Automation (`ap`)
 
-This repository uses [`ap` (autoproject)](https://github.com/gke-labs/gke-labs-infra/blob/main/ap/llms.txt) for project automation and CI generation.
+This repository uses [`ap` (autoproject)](https://github.com/gke-labs/gke-labs-infra/blob/main/ap/llms.txt) for project automation, manifests, and CI generation.
 
 Common commands:
 
-- `ap generate`: Formats code, stamps copyright headers, updates CI presubmit scripts (`dev/ci/presubmits/`), and regenerates `.github/workflows/ci-presubmits.yaml`.
+- `ap generate`: Formats code, stamps copyright headers, runs CRD generation tasks, updates CI presubmit scripts (`dev/ci/presubmits/`), and regenerates `.github/workflows/ci-presubmits.yaml`.
 - `ap lint`: Runs Go linters (`govet`, `gofmt`, etc.).
 - `ap test`: Runs unit tests (`go test`).
 - `ap build`: Builds container images defined under `images/`.
+- `ap deploy`: Builds and deploys images and Kubernetes manifests from `k8s/` into the active cluster.
 - `ap e2e`: Discovers and executes all end-to-end tests.
+
+## Generating CRDs and DeepCopy
+
+CRD manifests under `k8s/` and Go `runtime.Object` deepcopy methods are generated using `controller-gen`.
+
+Run:
+
+```bash
+./dev/tasks/generate-crds
+```
+
+This task is also invoked automatically whenever `ap generate` is executed.
+
+## Deploying to a Cluster (`ap deploy`)
+
+To deploy `eval-runner` into a target Kubernetes cluster (with `agent-sandbox` installed):
+
+```bash
+IMAGE_PREFIX=<registry> ap deploy
+```
+
+For example, on Google Kubernetes Engine (GKE):
+
+```bash
+IMAGE_PREFIX=gcr.io/my-gke-project ap deploy
+```
+
+`ap deploy` will:
+1. Build the `eval-runner` container image (for `linux/amd64`).
+2. Tag and push the image to `<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`.
+3. Apply the manifests in `k8s/` in order (`00-namespaces.yaml`, `evalrunner.gke-labs.dev_runs.yaml`, `rbac.yaml`, `runner-deployment.yaml`).
+4. Substitute the `eval-runner` image reference in the deployment with the full pushed image reference.
+5. Wait for the CRD to be established and the deployment to become available.
+
+## Creating a Run by Hand
+
+Once the controller is deployed, you can create a `Run` resource targeting any git repository:
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: test-run
+  namespace: eval-runner
+spec:
+  repo:
+    url: https://github.com/my-org/my-repo.git
+    commit: abc1234def5678...
+EOF
+```
+
+### Inspecting Runs
+
+View the status and phase of runs:
+
+```bash
+kubectl get runs -n eval-runner
+```
+
+View detailed status, conditions, and the discovered manifest:
+
+```bash
+kubectl get run test-run -n eval-runner -o yaml
+```
+
+### Inspecting Sandboxes in `eval-runner-sandbox`
+
+During discovery, the controller creates an isolated sandbox in the `eval-runner-sandbox` namespace:
+
+```bash
+# View active sandboxes
+kubectl get sandboxes -n eval-runner-sandbox
+
+# View backing discovery pods
+kubectl get pods -n eval-runner-sandbox
+
+# View logs from a discovery container
+kubectl logs -n eval-runner-sandbox discovery-test-run -c agent
+```
+
+Once discovery completes (or fails), the sandbox is automatically deleted.
 
 ## Running Unit Tests
 
@@ -50,7 +140,7 @@ E2E tests will automatically be skipped unless `RUN_E2E=1` is provided.
 
 ## Running End-to-End (E2E) Tests
 
-E2E tests live in `tests/e2e/`. They test eval-runner against a real Kubernetes cluster using `kind` and `kubernetes-sigs/agent-sandbox`.
+E2E tests live in `tests/e2e/`. They test eval-runner against a real Kubernetes cluster using `kind`, `kubernetes-sigs/agent-sandbox`, and in-cluster git server fixtures.
 
 ### Option 1: Automated via `ap e2e` (Recommended)
 
@@ -64,7 +154,7 @@ ap e2e
 
 This provides a one-command run with no pre-installed `kind` or `kubectl`:
 1. Executes `dev/tasks/test-e2e` to download and install pinned versions of `kind` and `kubectl` into `.build/bin/`.
-2. Automatically discovers and executes all Go E2E tests under `tests/e2e/` with `RUN_E2E=1`.
+2. Automatically discovers and executes all Go E2E tests under `tests/e2e/` with `RUN_E2E=1`, running `TestRunDiscovery`.
 
 ### Option 2: Running via `go test` directly
 
@@ -77,10 +167,8 @@ RUN_E2E=1 go test -v -count=1 ./tests/e2e/...
 To run a specific test:
 
 ```bash
-RUN_E2E=1 go test -v -count=1 ./tests/e2e/... -run TestEvalDiscovery
+RUN_E2E=1 go test -v -count=1 ./tests/e2e/... -run TestRunDiscovery
 ```
-
-> **Note on Kubeconfig Context:** When running tests against a cluster, the harness switches the active kubectl context using `kubectl config use-context kind-<clusterName>`, which updates the current context in your kubeconfig (`~/.kube/config`).
 
 ## Environment Variables
 
