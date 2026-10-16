@@ -128,6 +128,10 @@ type RunStatus struct {
 	// Manifest is the parsed output of .evals/list once discovery completes.
 	// +optional
 	Manifest *Manifest `json:"manifest,omitempty"`
+
+	// DiscoveryDeadline is the deadline by which discovery must complete.
+	// +optional
+	DiscoveryDeadline *metav1.Time `json:"discoveryDeadline,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -80,6 +80,7 @@ status:
 | `message` | `string` | Human-readable explanation or error details (including stderr tail on failure). |
 | `conditions` | `[]metav1.Condition` | Standard Kubernetes condition list. Includes condition `Discovered`. |
 | `manifest` | `*Manifest` | The parsed output of `.evals/list` upon successful discovery. |
+| `discoveryDeadline` | `*metav1.Time` | Overall deadline by which discovery must complete. |
 
 ### Phases
 
