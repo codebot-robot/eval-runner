@@ -199,12 +199,14 @@ uv sync
 
 ### Running Locally
 
-To run the comprehension eval with a real model, set your provider API key in the environment (e.g. `GEMINI_API_KEY` for Google Gemini models):
+To run the comprehension eval with a real model, set your provider API key in the environment (e.g. `GEMINI_API_KEY` for Google Gemini models). The default model across code and configuration is `google/gemini-3.5-flash-lite`:
 
 ```bash
 cd evals
 uv run inspect eval docs_comprehension.py@readme_comprehension --model google/gemini-3.5-flash-lite
 ```
+
+(Note: `--model` can also be omitted when `GEMINI_API_KEY` is set; the task falls back to `DEFAULT_MODEL = "google/gemini-3.5-flash-lite"`.)
 
 To run the blind control task (which omits the documents to check for pretraining leakage):
 
@@ -245,7 +247,8 @@ Questions live in `evals/datasets/readme_questions.jsonl`. Each line is a JSON r
     "The documents do not state this."
   ],
   "target": "A",
-  "source": "docs/development.md: Running Unit Tests"
+  "source": "docs/development.md: Running Unit Tests",
+  "evidence": "go test ./..."
 }
 ```
 
@@ -254,6 +257,7 @@ Guidelines for writing questions:
 - **`choices`**: Exactly 4 options (`A`, `B`, `C`, `D`).
 - **`target`**: The letter of the correct answer (`A`, `B`, `C`, or `D`).
 - **`source`**: The document and section where the answer is found (e.g., `README.md: Core Concepts`, `docs/development.md: Environment Variables`).
+- **`evidence`**: A short, non-empty substring from the injected documentation that must be present (verified by `test-evals` in CI as a drift guard).
 - **Guard against leakage**: Ask about repo-specific details (names of tools, commands, environment variables, verdicts) rather than general Kubernetes or software engineering facts.
 - **Negative controls ("Not stated")**: Include questions about plausible facts that are intentionally omitted from our documentation, with the correct target being "The documents do not state this." (or similar). This punishes models that guess confidently.
 
