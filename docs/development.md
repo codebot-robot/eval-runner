@@ -21,7 +21,7 @@ This document describes how to set up your local development environment, deploy
 ## Prerequisites
 
 - **Go**: 1.27 or newer
-- **Docker**: Docker daemon running (locally or via `DOCKER_HOST`) with `buildx` plugin
+- **Docker**: Docker daemon running (locally or via `DOCKER_HOST`). (The `buildx` plugin is only required if building multi-arch images with `ap`.)
 - **Git**
 - **Kubernetes cluster with agent-sandbox**: `agent-sandbox` is a prerequisite for running `eval-runner`. On any cluster where `eval-runner` is deployed, install the pinned `v1.0.7` release:
 

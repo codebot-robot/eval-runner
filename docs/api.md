@@ -70,7 +70,7 @@ status:
 |---|---|---|
 | `repo` | `RepoSpec` | Git repository and commit to evaluate. **Required.** |
 | `repo.url` | `string` | The clone URL for the repository under test. **Required.** |
-| `repo.commit` | `string` | The exact git commit SHA (or reference) to check out. **Required.** |
+| `repo.commit` | `string` | The exact git commit SHA (7 to 64 hex characters) to check out. **Required.** |
 
 ## Status (`status`)
 
