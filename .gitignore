@@ -4,3 +4,10 @@ bin/
 
 # Logs
 *.log
+*.eval
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+

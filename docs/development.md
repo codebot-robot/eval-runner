@@ -170,6 +170,8 @@ To run a specific test:
 RUN_E2E=1 go test -v -count=1 ./tests/e2e/... -run TestRunDiscovery
 ```
 
+> **Note on Kubeconfig Context:** When running tests against a cluster, the harness switches the active kubectl context using `kubectl config use-context kind-<clusterName>`, which updates the current context in your kubeconfig (`~/.kube/config`).
+
 ## Environment Variables
 
 The E2E test harness recognizes several environment variables:
@@ -179,3 +181,79 @@ The E2E test harness recognizes several environment variables:
 | `RUN_E2E` | _(unset)_ | When set to `1` (or any non-empty value), enables running the E2E test suite. When unset, E2E tests are skipped. |
 | `KIND_CLUSTER_NAME` | `kind` | Name of the kind cluster to create or use. If a cluster with this name already exists, the test reuses it without re-creating it or deleting it afterwards. |
 | `SKIP_CLEANUP` | _(unset)_ | When set to `1` (or any non-empty value), preserves the kind cluster and test namespaces created by the test instead of deleting them when the test completes. This is useful for manual debugging, e.g. inspecting pods and resources with `kubectl`. |
+
+## Evals
+
+We dogfood our own evals to measure whether our documentation is understandable to a reader. An Inspect task feeds the documentation (`README.md` and `docs/development.md`) to a model and asks multiple-choice comprehension questions whose answers can only be found in the docs.
+
+The eval is managed with [`uv`](https://docs.astral.sh/uv/) under the `evals/` directory.
+
+### Setup
+
+Install `uv` if not already installed, then install Python dependencies in `evals/`:
+
+```bash
+cd evals
+uv sync
+```
+
+### Running Locally
+
+To run the comprehension eval with a real model, set your provider API key in the environment (e.g. `GEMINI_API_KEY` for Google Gemini models):
+
+```bash
+cd evals
+uv run inspect eval docs_comprehension.py@readme_comprehension --model google/gemini-3.5-flash-lite
+```
+
+To run the blind control task (which omits the documents to check for pretraining leakage):
+
+```bash
+cd evals
+uv run inspect eval docs_comprehension.py@readme_comprehension_blind --model google/gemini-3.5-flash-lite
+```
+
+To run offline without requiring an API key (using Inspect's built-in `mockllm/model` provider):
+
+```bash
+cd evals
+uv run inspect eval docs_comprehension.py --model mockllm/model
+```
+
+### Viewing Results (`inspect view`)
+
+Inspect includes an interactive web UI for inspecting sample logs, evaluation scores, prompts, and model responses:
+
+```bash
+cd evals
+uv run inspect view
+```
+
+This launches a local web server (usually at `http://localhost:7575`) displaying evaluation runs stored in `evals/logs/`.
+
+### How to Add a Question
+
+Questions live in `evals/datasets/readme_questions.jsonl`. Each line is a JSON record with the following schema:
+
+```json
+{
+  "input": "Which command runs unit tests in the repository?",
+  "choices": [
+    "go test ./...",
+    "npm test",
+    "cargo test",
+    "The documents do not state this."
+  ],
+  "target": "A",
+  "source": "docs/development.md: Running Unit Tests"
+}
+```
+
+Guidelines for writing questions:
+- **`input`**: A clear question testing comprehension of facts stated in `README.md` or `docs/development.md`.
+- **`choices`**: Exactly 4 options (`A`, `B`, `C`, `D`).
+- **`target`**: The letter of the correct answer (`A`, `B`, `C`, or `D`).
+- **`source`**: The document and section where the answer is found (e.g., `README.md: Core Concepts`, `docs/development.md: Environment Variables`).
+- **Guard against leakage**: Ask about repo-specific details (names of tools, commands, environment variables, verdicts) rather than general Kubernetes or software engineering facts.
+- **Negative controls ("Not stated")**: Include questions about plausible facts that are intentionally omitted from our documentation, with the correct target being "The documents do not state this." (or similar). This punishes models that guess confidently.
+
