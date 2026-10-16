@@ -98,6 +98,15 @@ spec:
 		if strings.TrimSpace(out) != "" {
 			t.Errorf("Expected sandbox %s to be deleted, but found:\n%s", sandboxName, out)
 		}
+
+		// Delete Run and assert no sandbox remains
+		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+
+		out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
+		}
 	})
 
 	t.Run("BadCommitFails", func(t *testing.T) {
@@ -130,5 +139,44 @@ spec:
 		if strings.TrimSpace(out) != "" {
 			t.Errorf("Expected sandbox %s to be deleted on failure, but found:\n%s", sandboxName, out)
 		}
+
+		// Delete Run and assert no sandbox remains
+		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+
+		out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
+		}
+	})
+
+	t.Run("DeleteMidDiscovery", func(t *testing.T) {
+		runName := "support-agent-delete-mid-discovery"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    commit: %s
+`, runName, commit)
+
+		harness.KubectlApplyContent(manifest)
+
+		// Assert sandbox was created in eval-runner-sandbox
+		sandboxName := discovery.SandboxNameForRun(runName)
+		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+
+		// Delete the Run while it is mid-discovery
+		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+
+		// Assert Run is deleted (finalizer cleanup completes)
+		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+
+		// Assert sandbox was deleted from eval-runner-sandbox
+		harness.WaitForSandboxDeleted("eval-runner-sandbox", sandboxName, 30*time.Second)
 	})
 }

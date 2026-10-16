@@ -236,6 +236,40 @@ func (h *Harness) WaitForRunPhase(namespace, runName, expectedPhase string, time
 	}
 }
 
+func (h *Harness) WaitForRunDeleted(namespace, runName string, timeout time.Duration) {
+	h.t.Logf("Waiting for Run %s/%s to be deleted (timeout %v)", namespace, runName, timeout)
+	start := time.Now()
+	for {
+		cmd := exec.Command("kubectl", "get", "run", runName, "-n", namespace, "--ignore-not-found")
+		out, err := cmd.Output()
+		if err == nil && strings.TrimSpace(string(out)) == "" {
+			return
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Run %s/%s to be deleted; current: %s", namespace, runName, strings.TrimSpace(string(out)))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func (h *Harness) WaitForSandboxDeleted(namespace, sandboxName string, timeout time.Duration) {
+	h.t.Logf("Waiting for Sandbox %s/%s to be deleted (timeout %v)", namespace, sandboxName, timeout)
+	start := time.Now()
+	for {
+		cmd := exec.Command("kubectl", "get", "sandbox", sandboxName, "-n", namespace, "--ignore-not-found")
+		out, err := cmd.Output()
+		if err == nil && strings.TrimSpace(string(out)) == "" {
+			return
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Sandbox %s/%s to be deleted; current: %s", namespace, sandboxName, strings.TrimSpace(string(out)))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func (h *Harness) CreateNamespace() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
