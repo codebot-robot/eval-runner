@@ -83,6 +83,7 @@ func BuildDiscoveryCommand(repoURL, commit string) []string {
 // - automountServiceAccountToken: false
 // - non-root user (UID 1000)
 // - no extra capabilities (drop ALL)
+// - RuntimeDefault seccomp profile
 // - pinned image
 // - resource requests and limits
 func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sandbox {
@@ -95,6 +96,9 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sa
 	runAsUser := int64(1000)
 	runAsGroup := int64(1000)
 	allowPrivilegeEscalation := false
+	seccompProfile := corev1.SeccompProfile{
+		Type: corev1.SeccompProfileTypeRuntimeDefault,
+	}
 
 	labels := map[string]string{
 		LabelRunName:      run.Name,
@@ -121,10 +125,11 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sa
 					Spec: corev1.PodSpec{
 						AutomountServiceAccountToken: &automountToken,
 						SecurityContext: &corev1.PodSecurityContext{
-							RunAsNonRoot: &runAsNonRoot,
-							RunAsUser:    &runAsUser,
-							RunAsGroup:   &runAsGroup,
-							FSGroup:      &runAsGroup,
+							RunAsNonRoot:   &runAsNonRoot,
+							RunAsUser:      &runAsUser,
+							RunAsGroup:     &runAsGroup,
+							FSGroup:        &runAsGroup,
+							SeccompProfile: &seccompProfile,
 						},
 						RestartPolicy: corev1.RestartPolicyNever,
 						Containers: []corev1.Container{
@@ -143,6 +148,7 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sa
 									Capabilities: &corev1.Capabilities{
 										Drop: []corev1.Capability{"ALL"},
 									},
+									SeccompProfile: &seccompProfile,
 								},
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{

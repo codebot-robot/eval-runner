@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -132,6 +133,9 @@ func TestBuildSandbox(t *testing.T) {
 	if podSpec.SecurityContext.RunAsUser == nil || *podSpec.SecurityContext.RunAsUser == 0 {
 		t.Errorf("RunAsUser must be non-zero (non-root)")
 	}
+	if podSpec.SecurityContext.SeccompProfile == nil || podSpec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Pod SeccompProfile must be RuntimeDefault, got: %v", podSpec.SecurityContext.SeccompProfile)
+	}
 
 	if len(podSpec.Containers) != 1 {
 		t.Fatalf("Expected 1 container, got %d", len(podSpec.Containers))
@@ -147,8 +151,14 @@ func TestBuildSandbox(t *testing.T) {
 	if c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
 		t.Errorf("AllowPrivilegeEscalation must be false")
 	}
+	if c.SecurityContext.RunAsNonRoot == nil || !*c.SecurityContext.RunAsNonRoot {
+		t.Errorf("Container RunAsNonRoot must be true")
+	}
 	if c.SecurityContext.Capabilities == nil || len(c.SecurityContext.Capabilities.Drop) != 1 || c.SecurityContext.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("Expected Drop ALL capabilities, got: %v", c.SecurityContext.Capabilities)
+	}
+	if c.SecurityContext.SeccompProfile == nil || c.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Container SeccompProfile must be RuntimeDefault, got: %v", c.SecurityContext.SeccompProfile)
 	}
 
 	// Resources checks
