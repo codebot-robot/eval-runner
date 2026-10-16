@@ -2,6 +2,24 @@
 
 CI for evals: efficient statistical estimation of agentic goodness.
 
+`eval-runner` is a Kubernetes-native continuous integration system that discovers the evals in a repository, executes them in isolated sandboxes on every pull request, and uses statistical estimation to determine whether agent changes represent a measurable improvement or regression.
+
+> **Status: early development.** Today the controller performs eval discovery (runs `.evals/list` in an agent-sandbox); sample execution, statistical verdicts and PR integration are described in [docs/concept/functionality.md](docs/concept/functionality.md) and are not yet implemented.
+
+## Core Concepts
+
+- **An agent is a distribution, not a function:** The same agent input yields variable outputs across runs. The unit of measurement is therefore a success rate with a confidence interval, rather than a binary pass/fail.
+- **Eval discovery via code:** Evals are discovered by executing an entrypoint (`.evals/list`) at the repository root. This executable outputs a JSON manifest detailing tasks, working directories, and declarative resource requirements.
+- **Isolated sandboxes:** Each sample runs in an isolated pod (e.g. using `kubernetes-sigs/agent-sandbox`) with only the declared resources (such as Docker or Kind).
+- **Statistical verdicts:** By running paired samples between the PR head commit and the base commit, `eval-runner` produces a run-level verdict: `IMPROVED`, `REGRESSED`, `UNCHANGED`, or `INCONCLUSIVE`.
+- **Framework compatibility:** Built-in native support for UK AISI Inspect (`inspect_ai`), with format-agnostic extensibility for any evaluation framework.
+
+## Documentation
+
+- [Development Guide](docs/development.md): Prerequisites, local development workflows, running unit and E2E tests, and running local Inspect evals.
+- [Functional Description](docs/concept/functionality.md): Detailed architecture, execution lifecycle, statistical gates, and UI mockups.
+- [Contributing](docs/contributing.md): Contribution guidelines and community standards.
+
 ## Contributing
 
 This project is licensed under the [Apache 2.0 License](LICENSE).

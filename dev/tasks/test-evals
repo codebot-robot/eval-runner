@@ -1,0 +1,83 @@
+#!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+export PATH="${REPO_ROOT}/.build/bin:${PATH}"
+
+# Ensure uv is installed
+if ! command -v uv >/dev/null 2>&1; then
+    echo "Installing uv 0.13.1 into .build/bin..."
+    mkdir -p "${REPO_ROOT}/.build/bin"
+    curl -LsSf https://astral.sh/uv/0.13.1/install.sh | env UV_INSTALL_DIR="${REPO_ROOT}/.build/bin" sh
+fi
+
+echo "=== 1. Validating .evals/list manifest ==="
+if [[ ! -x "${REPO_ROOT}/.evals/list" ]]; then
+    echo "ERROR: .evals/list is not executable" >&2
+    exit 1
+fi
+
+# Validate JSON format and referenced task files via python reading from stdin
+"${REPO_ROOT}/.evals/list" | python3 -c "
+import json, sys
+from pathlib import Path
+
+repo_root = Path('${REPO_ROOT}')
+data = json.load(sys.stdin)
+print(json.dumps(data, indent=2))
+
+tasks = data.get('tasks', [])
+if not tasks:
+    print('ERROR: No tasks found in manifest', file=sys.stderr)
+    sys.exit(1)
+
+task_ids = set()
+for t in tasks:
+    task_id = t.get('id')
+    workdir = t.get('workdir')
+    spec = t.get('spec')
+    if not task_id or not workdir or not spec:
+        print(f'ERROR: Incomplete task entry: {t}', file=sys.stderr)
+        sys.exit(1)
+    task_ids.add(task_id)
+    spec_file = spec.split('@')[0]
+    task_path = repo_root / workdir / spec_file
+    if not task_path.is_file():
+        print(f'ERROR: Task spec file does not exist: {task_path}', file=sys.stderr)
+        sys.exit(1)
+
+required_ids = {'docs/readme_comprehension', 'docs/readme_comprehension_blind'}
+missing = required_ids - task_ids
+if missing:
+    print(f'ERROR: Missing required task ids in manifest: {missing}', file=sys.stderr)
+    sys.exit(1)
+
+print('Manifest validated successfully.')
+"
+
+echo "=== 2. Running offline Inspect eval (mockllm) ==="
+cd "${REPO_ROOT}/evals"
+MOCK_LOG_DIR="$(mktemp -d)"
+trap 'rm -rf "${MOCK_LOG_DIR}"' EXIT
+
+uv run --locked inspect eval docs_comprehension.py --model mockllm/model --limit 2 --log-dir "${MOCK_LOG_DIR}"
+
+echo "=== test-evals passed successfully ==="
