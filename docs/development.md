@@ -52,19 +52,19 @@ E2E tests will automatically be skipped unless `RUN_E2E=1` is provided.
 
 E2E tests live in `tests/e2e/`. They test eval-runner against a real Kubernetes cluster using `kind` and `kubernetes-sigs/agent-sandbox`.
 
-### Option 1: Automated Script (Recommended)
+### Option 1: Automated via `ap e2e` (Recommended)
 
 Run:
 
 ```bash
-./dev/tasks/test-e2e
+ap e2e
 ```
 
-This script:
-1. Downloads and installs pinned versions of `kind` and `kubectl` into `.build/bin/`.
-2. Prepends `.build/bin/` to `PATH`.
-3. Sets `RUN_E2E=1`.
-4. Runs `go test -v -count=1 ./tests/e2e/...`.
+(or `go run github.com/gke-labs/gke-labs-infra/ap@latest e2e .` or `./dev/ci/presubmits/ap-e2e`)
+
+This provides a one-command run with no pre-installed `kind` or `kubectl`:
+1. Executes `dev/tasks/test-e2e` to download and install pinned versions of `kind` and `kubectl` into `.build/bin/`.
+2. Automatically discovers and executes all Go E2E tests under `tests/e2e/` with `RUN_E2E=1`.
 
 ### Option 2: Running via `go test` directly
 
