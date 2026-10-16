@@ -30,12 +30,38 @@ spec:
         app: eval-runner-controller
     spec:
       serviceAccountName: eval-runner-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: controller
         image: eval-runner
         args:
         - --namespace=eval-runner
         - --sandbox-namespace=eval-runner-sandbox
+        - --health-probe-bind-address=:8081
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
         resources:
           requests:
             cpu: 100m
