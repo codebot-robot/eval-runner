@@ -17,6 +17,7 @@ package e2e
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,12 +25,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 )
 
 const (
-	AgentSandboxVersion      = "v1.0.7"
-	AgentSandboxURL          = "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/" + AgentSandboxVersion + "/sandbox.yaml"
-	AgentSandboxSandboxImage = "alpine/git:v2.47.2"
+	AgentSandboxVersion = "v1.0.7"
+	AgentSandboxURL     = "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/" + AgentSandboxVersion + "/sandbox.yaml"
 )
 
 type Harness struct {
@@ -47,16 +49,11 @@ func NewHarness(t *testing.T, clusterName string) *Harness {
 func (h *Harness) Setup() {
 	h.t.Logf("Setting up harness for cluster %s", h.clusterName)
 
-	// Ensure .build/bin is checked if tools are missing from PATH
 	gitRoot := h.GetGitRoot()
 	buildBin := filepath.Join(gitRoot, ".build", "bin")
 	currentPath := os.Getenv("PATH")
 	if !strings.Contains(currentPath, buildBin) {
-		if info, err := os.Stat(buildBin); err != nil {
-			if !os.IsNotExist(err) {
-				h.t.Logf("Checking %s: %v", buildBin, err)
-			}
-		} else if info.IsDir() {
+		if info, err := os.Stat(buildBin); err == nil && info.IsDir() {
 			if err := os.Setenv("PATH", buildBin+string(os.PathListSeparator)+currentPath); err != nil {
 				h.t.Fatalf("Failed to update PATH: %v", err)
 			}
@@ -70,7 +67,6 @@ func (h *Harness) Setup() {
 		h.t.Fatalf("kubectl not found on PATH: %v (run ./dev/tasks/test-e2e to install)", err)
 	}
 
-	// Create kind cluster if it doesn't exist
 	clusters := h.runCmd("kind", "get", "clusters")
 	exists := false
 	for _, cluster := range strings.Split(clusters, "\n") {
@@ -95,7 +91,6 @@ func (h *Harness) Setup() {
 		h.t.Logf("Reusing existing kind cluster %s", h.clusterName)
 	}
 
-	// Switch context to the target cluster
 	contextName := "kind-" + h.clusterName
 	h.runCmd("kubectl", "config", "use-context", contextName)
 
@@ -106,6 +101,139 @@ func (h *Harness) InstallAgentSandbox() {
 	h.t.Logf("Installing agent-sandbox %s", AgentSandboxVersion)
 	h.KubectlApplyFileWithRetry(AgentSandboxURL, 60*time.Second)
 	h.runCmd("kubectl", "wait", "--namespace", "agent-sandbox-system", "--for=condition=available", "deployment/agent-sandbox-controller", "--timeout=120s")
+}
+
+func (h *Harness) DeployEvalRunner() {
+	h.t.Log("Building and deploying eval-runner controller from k8s manifests")
+	gitRoot := h.GetGitRoot()
+
+	// Build and load controller image
+	h.DockerBuild("eval-runner:e2e", filepath.Join(gitRoot, "images/eval-runner/Dockerfile"), gitRoot)
+	h.KindLoad("eval-runner:e2e")
+
+	// Apply namespaces
+	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/00-namespaces.yaml"))
+
+	// Apply Run CRD and wait for it to be established
+	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/evalrunner.gke-labs.dev_runs.yaml"))
+	h.runCmd("kubectl", "wait", "--for=condition=established", "--timeout=60s", "crd/runs.evalrunner.gke-labs.dev")
+
+	// Apply RBAC
+	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/rbac.yaml"))
+
+	// Apply Deployment with image rewritten for kind local image
+	deployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/runner-deployment.yaml"))
+	if err != nil {
+		h.t.Fatalf("Failed to read runner-deployment.yaml: %v", err)
+	}
+	modifiedDeploy := strings.Replace(
+		string(deployContent),
+		"image: eval-runner",
+		"image: eval-runner:e2e\n        imagePullPolicy: Never",
+		1,
+	)
+	h.KubectlApplyContent(modifiedDeploy)
+
+	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")
+}
+
+func (h *Harness) DeployGitServer(namespace string) {
+	h.t.Logf("Building and deploying git server in namespace %s", namespace)
+	gitRoot := h.GetGitRoot()
+	h.DockerBuild("git-server:e2e", filepath.Join(gitRoot, "images/git-server/Dockerfile"), gitRoot)
+	h.KindLoad("git-server:e2e")
+
+	manifest := fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-server
+  namespace: %s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: git-server
+  template:
+    metadata:
+      labels:
+        app: git-server
+    spec:
+      containers:
+      - name: git-server
+        image: git-server:e2e
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 9418
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-server
+  namespace: %s
+spec:
+  selector:
+    app: git-server
+  ports:
+  - port: 9418
+    targetPort: 9418
+`, namespace, namespace)
+
+	h.KubectlApplyContent(manifest)
+	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=available", "deployment/git-server", "--timeout=90s")
+}
+
+func (h *Harness) GetGitServerCommit(namespace, repoName string) string {
+	gitDir := fmt.Sprintf("/git/%s", repoName)
+	out := h.runCmd("kubectl", "exec", "-n", namespace, "deployment/git-server", "--", "git", "--git-dir="+gitDir, "rev-parse", "HEAD")
+	return strings.TrimSpace(out)
+}
+
+func (h *Harness) WaitForSandboxExists(namespace, sandboxName string, timeout time.Duration) {
+	h.t.Logf("Waiting for Sandbox %s/%s to be created (timeout %v)", namespace, sandboxName, timeout)
+	start := time.Now()
+	for {
+		cmd := exec.Command("kubectl", "get", "sandbox", sandboxName, "-n", namespace, "--ignore-not-found")
+		out, err := cmd.Output()
+		if err == nil && strings.TrimSpace(string(out)) != "" {
+			return
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Sandbox %s/%s to be created in namespace %s", namespace, sandboxName, namespace)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func (h *Harness) WaitForRunPhase(namespace, runName, expectedPhase string, timeout time.Duration) *v1alpha1.Run {
+	h.t.Logf("Waiting for Run %s/%s to reach phase %s (timeout %v)", namespace, runName, expectedPhase, timeout)
+	start := time.Now()
+	var lastRun v1alpha1.Run
+	var lastErr error
+	for {
+		cmd := exec.Command("kubectl", "get", "run", runName, "-n", namespace, "-o", "json")
+		out, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+		} else {
+			var r v1alpha1.Run
+			if err := json.Unmarshal(out, &r); err != nil {
+				lastErr = err
+			} else {
+				lastRun = r
+				if string(r.Status.Phase) == expectedPhase {
+					return &r
+				}
+			}
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Run %s/%s to reach %s; last phase: %s, message: %s, lastErr: %v",
+				namespace, runName, expectedPhase, lastRun.Status.Phase, lastRun.Status.Message, lastErr)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func (h *Harness) CreateNamespace() string {
@@ -157,6 +285,11 @@ func (h *Harness) KubectlApplyContent(content string) {
 	}
 }
 
+func (h *Harness) KubectlApplyFile(path string) {
+	h.t.Logf("Applying kubectl file: %s", path)
+	h.runCmd("kubectl", "apply", "-f", path)
+}
+
 func (h *Harness) KubectlApplyFileWithRetry(path string, timeout time.Duration) {
 	h.t.Logf("Applying kubectl file (with retry): %s", path)
 	start := time.Now()
@@ -175,107 +308,6 @@ func (h *Harness) KubectlApplyFileWithRetry(path string, timeout time.Duration) 
 
 		if time.Since(start) > timeout {
 			h.t.Fatalf("Timeout waiting for kubectl apply %s to succeed: %v\nStderr: %s", path, lastErr, lastStderr)
-		}
-		time.Sleep(2 * time.Second)
-	}
-}
-
-func (h *Harness) DeployGitServer(namespace string) {
-	h.t.Log("Building and deploying git server")
-	gitRoot := h.GetGitRoot()
-	h.DockerBuild("git-server:e2e", filepath.Join(gitRoot, "images/git-server/Dockerfile"), gitRoot)
-	h.KindLoad("git-server:e2e")
-
-	manifest := fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: git-server
-  namespace: %s
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: git-server
-  template:
-    metadata:
-      labels:
-        app: git-server
-    spec:
-      containers:
-      - name: git-server
-        image: git-server:e2e
-        imagePullPolicy: Never
-        ports:
-        - containerPort: 9418
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: git-server
-  namespace: %s
-spec:
-  selector:
-    app: git-server
-  ports:
-  - port: 9418
-    targetPort: 9418
-`, namespace, namespace)
-
-	h.KubectlApplyContent(manifest)
-	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=available", "deployment/git-server", "--timeout=90s")
-}
-
-func (h *Harness) DeploySandbox(namespace, name string) {
-	h.t.Logf("Deploying sandbox %s in namespace %s", name, namespace)
-
-	manifest := fmt.Sprintf(`
-apiVersion: agents.x-k8s.io/v1beta1
-kind: Sandbox
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  podTemplate:
-    spec:
-      containers:
-      - name: agent
-        image: %s
-        command: ["sh", "-c", "sleep 3600"]
-      restartPolicy: Never
-`, name, namespace, AgentSandboxSandboxImage)
-
-	h.KubectlApplyContent(manifest)
-	// Wait for the Sandbox condition to report Ready first
-	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=Ready", "sandbox/"+name, "--timeout=120s")
-	// Also wait for the backing pod to be Ready
-	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=Ready", "pod/"+name, "--timeout=30s")
-}
-
-func (h *Harness) ExecInPodWithRetry(namespace, podName string, timeout time.Duration, args ...string) string {
-	h.t.Logf("Executing command in pod %s/%s (with retry up to %v): %v", namespace, podName, timeout, args)
-	start := time.Now()
-	var lastErr error
-	var lastStderr string
-	var lastStdout string
-
-	cmdArgs := append([]string{"exec", "--namespace", namespace, podName, "--"}, args...)
-
-	for {
-		cmd := exec.Command("kubectl", cmdArgs...)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		if err == nil {
-			return stdout.String()
-		}
-		lastErr = err
-		lastStdout = stdout.String()
-		lastStderr = stderr.String()
-
-		if time.Since(start) > timeout {
-			h.t.Fatalf("Timeout waiting for exec command in %s/%s to succeed: %v\nStdout: %s\nStderr: %s", namespace, podName, lastErr, lastStdout, lastStderr)
 		}
 		time.Sleep(2 * time.Second)
 	}

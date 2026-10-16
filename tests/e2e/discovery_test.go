@@ -15,35 +15,16 @@
 package e2e
 
 import (
-	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gke-labs/eval-runner/pkg/discovery"
 )
 
-type Manifest struct {
-	Images []ManifestImage `json:"images,omitempty"`
-	Tasks  []ManifestTask  `json:"tasks"`
-}
-
-type ManifestImage struct {
-	Name    string `json:"name"`
-	Context string `json:"context"`
-}
-
-type ManifestTask struct {
-	ID        string             `json:"id"`
-	Workdir   string             `json:"workdir"`
-	Spec      string             `json:"spec"`
-	Resources []ManifestResource `json:"resources,omitempty"`
-	Images    []string           `json:"images,omitempty"`
-}
-
-type ManifestResource struct {
-	Type string `json:"type"`
-}
-
-func TestEvalDiscovery(t *testing.T) {
+func TestRunDiscovery(t *testing.T) {
 	if os.Getenv("RUN_E2E") == "" {
 		t.Skip("skipping e2e test: RUN_E2E is not set")
 	}
@@ -56,48 +37,98 @@ func TestEvalDiscovery(t *testing.T) {
 	harness := NewHarness(t, clusterName)
 	harness.Setup()
 
-	ns := harness.CreateNamespace()
+	// Deploy eval-runner controller from k8s manifests
+	harness.DeployEvalRunner()
 
-	// Deploy git server serving examples/support-agent fixture
-	harness.DeployGitServer(ns)
+	// Deploy git server in eval-runner-sandbox namespace
+	harness.DeployGitServer("eval-runner-sandbox")
 
-	// Deploy agent-sandbox Sandbox
-	sandboxName := "eval-discovery-sandbox"
-	harness.DeploySandbox(ns, sandboxName)
+	commit := harness.GetGitServerCommit("eval-runner-sandbox", "support-agent.git")
+	t.Logf("Fixture repository commit: %s", commit)
 
-	// In the sandbox, clone fixture repository and execute .evals/list
-	cloneURL := "git://git-server/support-agent.git"
-	cmd := "rm -rf /tmp/repo && git clone -q " + cloneURL + " /tmp/repo && cd /tmp/repo && ./.evals/list"
-	out := harness.ExecInPodWithRetry(ns, sandboxName, 60*time.Second, "sh", "-c", cmd)
+	t.Run("DiscoveredSuccess", func(t *testing.T) {
+		runName := "support-agent-success"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    commit: %s
+`, runName, commit)
 
-	t.Logf("Captured .evals/list output:\n%s", out)
+		harness.KubectlApplyContent(manifest)
 
-	var manifest Manifest
-	if err := json.Unmarshal([]byte(out), &manifest); err != nil {
-		t.Fatalf("Failed to parse .evals/list output as JSON manifest: %v\nOutput: %s", err, out)
-	}
+		// Assert sandbox was created in eval-runner-sandbox
+		sandboxName := discovery.SandboxNameForRun(runName)
+		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
-	if len(manifest.Tasks) != 3 {
-		t.Fatalf("Expected 3 tasks in manifest, got %d", len(manifest.Tasks))
-	}
+		run := harness.WaitForRunPhase("eval-runner", runName, "Discovered", 90*time.Second)
 
-	expectedTaskIDs := map[string]bool{
-		"triage/runbook_lookup":    false,
-		"triage/escalation_policy": false,
-		"triage/summary_quality":   false,
-	}
-
-	for _, task := range manifest.Tasks {
-		if _, ok := expectedTaskIDs[task.ID]; !ok {
-			t.Errorf("Unexpected task id in manifest: %s", task.ID)
-		} else {
-			expectedTaskIDs[task.ID] = true
+		if run.Status.Manifest == nil {
+			t.Fatalf("Expected status.manifest to be populated")
 		}
-	}
-
-	for taskID, found := range expectedTaskIDs {
-		if !found {
-			t.Errorf("Expected task id %q was not found in manifest", taskID)
+		if len(run.Status.Manifest.Tasks) != 3 {
+			t.Fatalf("Expected 3 tasks in manifest, got %d", len(run.Status.Manifest.Tasks))
 		}
-	}
+
+		expectedTasks := map[string]bool{
+			"triage/runbook_lookup":    false,
+			"triage/escalation_policy": false,
+			"triage/summary_quality":   false,
+		}
+		for _, task := range run.Status.Manifest.Tasks {
+			if _, ok := expectedTasks[task.ID]; !ok {
+				t.Errorf("Unexpected task id: %s", task.ID)
+			} else {
+				expectedTasks[task.ID] = true
+			}
+		}
+		for taskID, found := range expectedTasks {
+			if !found {
+				t.Errorf("Expected task %q was not discovered", taskID)
+			}
+		}
+
+		// Assert sandbox was deleted from eval-runner-sandbox
+		out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("Expected sandbox %s to be deleted, but found:\n%s", sandboxName, out)
+		}
+	})
+
+	t.Run("BadCommitFails", func(t *testing.T) {
+		runName := "support-agent-bad-commit"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    commit: "0000000000000000000000000000000000000000"
+`, runName)
+
+		harness.KubectlApplyContent(manifest)
+
+		// Assert sandbox was created in eval-runner-sandbox
+		sandboxName := discovery.SandboxNameForRun(runName)
+		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+
+		run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 60*time.Second)
+		if strings.TrimSpace(run.Status.Message) == "" {
+			t.Errorf("Expected non-empty failure message for bad commit")
+		}
+
+		// Assert sandbox was deleted from eval-runner-sandbox
+		out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("Expected sandbox %s to be deleted on failure, but found:\n%s", sandboxName, out)
+		}
+	})
 }
