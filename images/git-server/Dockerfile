@@ -23,6 +23,9 @@ RUN git config --global user.email "test@example.com" && \
     git commit -m "initial commit" && \
     git clone --bare /work /git/support-agent.git && \
     touch /git/support-agent.git/git-daemon-export-ok && \
+    chown -R 65534:65534 /git && \
+    git config --system --add safe.directory '*' && \
     rm -rf /work
+USER 65534:65534
 EXPOSE 9418
 CMD ["git", "daemon", "--reuseaddr", "--base-path=/git", "--export-all", "--verbose", "/git"]
