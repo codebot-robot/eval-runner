@@ -39,12 +39,48 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
+const (
+	// DefaultDiscoveryDeadline is the default overall deadline for discovery to complete.
+	DefaultDiscoveryDeadline = 10 * time.Minute
+)
+
 // RunReconciler reconciles a Run object
 type RunReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	Executor         PodExecutor
-	SandboxNamespace string
+	Scheme            *runtime.Scheme
+	Executor          PodExecutor
+	SandboxNamespace  string
+	DiscoveryDeadline time.Duration
+	Now               func() time.Time
+}
+
+func (r *RunReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+func (r *RunReconciler) discoveryDeadline() time.Duration {
+	if r.DiscoveryDeadline > 0 {
+		return r.DiscoveryDeadline
+	}
+	return DefaultDiscoveryDeadline
+}
+
+func (r *RunReconciler) requeueDelay(deadline *metav1.Time) time.Duration {
+	defaultDelay := 2 * time.Second
+	if deadline == nil {
+		return defaultDelay
+	}
+	remaining := deadline.Sub(r.now())
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining < defaultDelay {
+		return remaining
+	}
+	return defaultDelay
 }
 
 // Reconcile handles the Run state machine:
@@ -128,6 +164,10 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseDiscovering
+			if status.DiscoveryDeadline == nil {
+				deadline := metav1.NewTime(r.now().Add(r.discoveryDeadline()))
+				status.DiscoveryDeadline = &deadline
+			}
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeDiscovered,
 				Status:             metav1.ConditionFalse,
@@ -140,13 +180,17 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 	}
 
-	// Sandbox exists. Ensure phase reflects Discovering if it was Pending or empty
-	if run.Status.Phase != v1alpha1.RunPhaseDiscovering {
+	// Sandbox exists. Ensure phase reflects Discovering and deadline is recorded
+	if run.Status.Phase != v1alpha1.RunPhaseDiscovering || run.Status.DiscoveryDeadline == nil {
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseDiscovering
+			if status.DiscoveryDeadline == nil {
+				deadline := metav1.NewTime(r.now().Add(r.discoveryDeadline()))
+				status.DiscoveryDeadline = &deadline
+			}
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeDiscovered,
 				Status:             metav1.ConditionFalse,
@@ -160,33 +204,101 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 	}
 
-	// Step 2: Check if backing pod is Ready
+	// Step 2: Check backing pod and conditions
+	podName := sandbox.Name
+	if name, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
+		podName = name
+	}
+
 	var pod corev1.Pod
-	podKey := types.NamespacedName{Namespace: sandboxNamespace, Name: sandboxName}
-	if err := r.Get(ctx, podKey, &pod); err != nil {
-		if apierrors.IsNotFound(err) {
-			logger.Info("Backing pod not yet created", "pod", podKey)
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	podKey := types.NamespacedName{Namespace: sandboxNamespace, Name: podName}
+	podErr := r.Get(ctx, podKey, &pod)
+	if podErr != nil && !apierrors.IsNotFound(podErr) {
+		return ctrl.Result{}, podErr
+	}
+	podExists := (podErr == nil)
+
+	// Check if overall discovery deadline has been exceeded
+	if run.Status.DiscoveryDeadline != nil && r.now().After(run.Status.DiscoveryDeadline.Time) {
+		var podPtr *corev1.Pod
+		if podExists {
+			podPtr = &pod
 		}
-		return ctrl.Result{}, err
+		msg := formatPodDeadlineMessage(podPtr)
+		logger.Info("Discovery deadline exceeded; failing Run", "run", run.Name, "message", msg)
+		return r.failRun(ctx, &run, &sandbox, msg)
+	}
+
+	if !podExists {
+		logger.Info("Backing pod not yet created", "pod", podKey)
+		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 	}
 
 	if pod.Status.Phase == corev1.PodFailed {
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Sandbox pod failed: %s", pod.Status.Message))
+		msg := "Sandbox pod failed"
+		if pod.Status.Message != "" {
+			msg = fmt.Sprintf("%s: %s", msg, pod.Status.Message)
+		}
+		return r.failRun(ctx, &run, &sandbox, msg)
 	}
 
-	if !isPodReady(&pod) {
+	if pod.Status.Phase == corev1.PodSucceeded {
+		msg := "Sandbox pod succeeded unexpectedly before discovery completed"
+		if pod.Status.Message != "" {
+			msg = fmt.Sprintf("%s: %s", msg, pod.Status.Message)
+		}
+		return r.failRun(ctx, &run, &sandbox, msg)
+	}
+
+	finishedCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	if finishedCond != nil && finishedCond.Status == metav1.ConditionTrue {
+		if finishedCond.Reason == sandboxv1beta1.SandboxReasonPodFailed {
+			msg := "Sandbox pod failed"
+			if finishedCond.Message != "" {
+				msg = fmt.Sprintf("%s: %s", msg, finishedCond.Message)
+			}
+			return r.failRun(ctx, &run, &sandbox, msg)
+		}
+		if finishedCond.Reason == sandboxv1beta1.SandboxReasonPodSucceeded {
+			msg := "Sandbox pod succeeded unexpectedly before discovery completed"
+			if finishedCond.Message != "" {
+				msg = fmt.Sprintf("%s: %s", msg, finishedCond.Message)
+			}
+			return r.failRun(ctx, &run, &sandbox, msg)
+		}
+	}
+
+	sandboxReady := meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if !sandboxReady && !isPodReady(&pod) {
 		logger.Info("Backing pod not yet ready", "pod", podKey, "phase", pod.Status.Phase)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 	}
 
 	// Step 3: Pod is Ready -> execute discovery command
 	logger.Info("Sandbox pod is ready; executing discovery", "pod", podKey)
 	cmd := discovery.BuildDiscoveryCommand(run.Spec.Repo.URL, run.Spec.Repo.Commit)
-	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	execTimeout := 5 * time.Minute
+	if run.Status.DiscoveryDeadline != nil {
+		remaining := run.Status.DiscoveryDeadline.Sub(r.now())
+		if remaining <= 0 {
+			return r.failRun(ctx, &run, &sandbox, formatPodDeadlineMessage(&pod))
+		}
+		if remaining < execTimeout {
+			execTimeout = remaining
+		}
+	}
+	execCtx, cancel := context.WithTimeout(ctx, execTimeout)
 	defer cancel()
 	stdout, stderr, err := r.Executor.Exec(execCtx, sandboxNamespace, pod.Name, discovery.DiscoveryContainerName, cmd)
 	if err != nil {
+		if run.Status.DiscoveryDeadline != nil && r.now().After(run.Status.DiscoveryDeadline.Time) {
+			msg := formatPodDeadlineMessage(&pod)
+			tail := extractStderrTail(stderr, 10)
+			if tail != "" {
+				msg += "\n" + tail
+			}
+			return r.failRun(ctx, &run, &sandbox, msg)
+		}
 		tail := extractStderrTail(stderr, 10)
 		msg := fmt.Sprintf("Command execution failed: %v", err)
 		if tail != "" {
@@ -301,6 +413,42 @@ func isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+func formatPodDeadlineMessage(pod *corev1.Pod) string {
+	if pod == nil {
+		return "Discovery deadline exceeded: sandbox pod not found"
+	}
+
+	var details []string
+	allStatuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, cs := range allStatuses {
+		if cs.State.Waiting != nil {
+			reason := cs.State.Waiting.Reason
+			msg := cs.State.Waiting.Message
+			if reason != "" && msg != "" {
+				details = append(details, fmt.Sprintf("container %s waiting: %s: %s", cs.Name, reason, msg))
+			} else if reason != "" {
+				details = append(details, fmt.Sprintf("container %s waiting: %s", cs.Name, reason))
+			} else if msg != "" {
+				details = append(details, fmt.Sprintf("container %s waiting: %s", cs.Name, msg))
+			}
+		}
+	}
+
+	if len(details) == 0 {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Status == corev1.ConditionFalse && cond.Message != "" {
+				details = append(details, fmt.Sprintf("%s=%s: %s", cond.Type, cond.Reason, cond.Message))
+			}
+		}
+	}
+
+	msg := fmt.Sprintf("Discovery deadline exceeded (pod phase: %s)", pod.Status.Phase)
+	if len(details) > 0 {
+		msg = fmt.Sprintf("%s: %s", msg, strings.Join(details, "; "))
+	}
+	return msg
+}
+
 func extractStderrTail(stderr string, maxLines int) string {
 	trimmed := strings.TrimSpace(stderr)
 	if trimmed == "" {
@@ -319,6 +467,19 @@ func (r *RunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1alpha1.Run{}).
 		Watches(
 			&sandboxv1beta1.Sandbox{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				runName := obj.GetLabels()[discovery.LabelRunName]
+				runNS := obj.GetLabels()[discovery.LabelRunNamespace]
+				if runName != "" && runNS != "" {
+					return []reconcile.Request{
+						{NamespacedName: types.NamespacedName{Namespace: runNS, Name: runName}},
+					}
+				}
+				return nil
+			}),
+		).
+		Watches(
+			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				runName := obj.GetLabels()[discovery.LabelRunName]
 				runNS := obj.GetLabels()[discovery.LabelRunNamespace]

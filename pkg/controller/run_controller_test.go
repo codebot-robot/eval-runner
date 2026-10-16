@@ -19,6 +19,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
@@ -41,9 +42,13 @@ type fakePodExecutor struct {
 	stdout string
 	stderr string
 	err    error
+	onExec func()
 }
 
 func (f *fakePodExecutor) Exec(ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
+	if f.onExec != nil {
+		f.onExec()
+	}
 	return f.stdout, f.stderr, f.err
 }
 
@@ -119,6 +124,9 @@ func TestReconcilePendingToDiscovering(t *testing.T) {
 	}
 	if !controllerutil.ContainsFinalizer(&updatedRun, v1alpha1.FinalizerDiscoverySandbox) {
 		t.Errorf("Expected finalizer %s on run, got: %v", v1alpha1.FinalizerDiscoverySandbox, updatedRun.Finalizers)
+	}
+	if updatedRun.Status.DiscoveryDeadline == nil {
+		t.Errorf("Expected DiscoveryDeadline to be set in status")
 	}
 }
 
@@ -678,5 +686,480 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 	}
 	if executor.callCount != 1 {
 		t.Errorf("Expected Exec to still be 1 after second reconcile, got %d", executor.callCount)
+	}
+}
+
+func TestReconcilePodNeverReadyPastDeadline(t *testing.T) {
+	scheme := setupScheme(t)
+
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	pastDeadline := metav1.NewTime(now.Add(-5 * time.Minute))
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:             v1alpha1.RunPhaseDiscovering,
+			DiscoveryDeadline: &pastDeadline,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Executor:         &fakePodExecutor{},
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              func() time.Time { return now },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Discovery deadline exceeded") {
+		t.Errorf("Expected message to contain 'Discovery deadline exceeded', got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Pending") {
+		t.Errorf("Expected message to contain pod phase 'Pending', got: %s", updatedRun.Status.Message)
+	}
+
+	// Assert Sandbox was cleaned up
+	var checkSb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcilePodSucceededFailsAndCleansUp(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodSucceeded,
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Executor:         &fakePodExecutor{},
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "succeeded unexpectedly") {
+		t.Errorf("Expected message to mention pod succeeded unexpectedly, got: %s", updatedRun.Status.Message)
+	}
+
+	// Assert Sandbox was cleaned up
+	var checkSb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcilePodImagePullBackOffSurfacesWaitingReason(t *testing.T) {
+	scheme := setupScheme(t)
+
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	pastDeadline := metav1.NewTime(now.Add(-1 * time.Minute))
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:             v1alpha1.RunPhaseDiscovering,
+			DiscoveryDeadline: &pastDeadline,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "agent",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason:  "ImagePullBackOff",
+							Message: `Back-off pulling image "invalid-registry.example.com/bad-image:latest"`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Executor:         &fakePodExecutor{},
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              func() time.Time { return now },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "ImagePullBackOff") {
+		t.Errorf("Expected message to contain 'ImagePullBackOff', got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Back-off pulling image") {
+		t.Errorf("Expected message to contain container waiting message, got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Discovery deadline exceeded") {
+		t.Errorf("Expected message to contain 'Discovery deadline exceeded', got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Pending") {
+		t.Errorf("Expected message to contain pod phase 'Pending', got: %s", updatedRun.Status.Message)
+	}
+
+	// Assert Sandbox was cleaned up
+	var checkSb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcileCustomDiscoveryDeadlineConfigured(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	customDeadline := 25 * time.Minute
+	fixedNow := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	reconciler := &RunReconciler{
+		Client:            client,
+		Scheme:            scheme,
+		Executor:          &fakePodExecutor{},
+		SandboxNamespace:  "eval-runner-sandbox",
+		DiscoveryDeadline: customDeadline,
+		Now:               func() time.Time { return fixedNow },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.DiscoveryDeadline == nil {
+		t.Fatalf("Expected DiscoveryDeadline to be set")
+	}
+
+	expectedDeadline := fixedNow.Add(customDeadline)
+	if !updatedRun.Status.DiscoveryDeadline.Time.Equal(expectedDeadline) {
+		t.Errorf("DiscoveryDeadline %v does not equal expected %v", updatedRun.Status.DiscoveryDeadline.Time, expectedDeadline)
+	}
+}
+
+func TestReconcileSandboxReadyConditionUsed(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb.Status.Conditions = []metav1.Condition{
+		{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionTrue,
+			Reason: sandboxv1beta1.SandboxReasonDependenciesReady,
+		},
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
+	executor := &fakePodExecutor{stdout: validManifestJSON}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Executor:         executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Did not expect RequeueAfter on success")
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
+	}
+}
+
+func TestReconcileExecFailsPastDeadlineIncludesStderrTail(t *testing.T) {
+	scheme := setupScheme(t)
+
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	deadline := metav1.NewTime(now.Add(1 * time.Minute))
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:             v1alpha1.RunPhaseDiscovering,
+			DiscoveryDeadline: &deadline,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	executed := false
+	executor := &fakePodExecutor{
+		err:    errors.New("command timed out"),
+		stderr: "Cloning into '/tmp/repo'...\nfatal: early EOF",
+		onExec: func() {
+			executed = true
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Executor:         executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		Now: func() time.Time {
+			if executed {
+				return now.Add(2 * time.Minute)
+			}
+			return now
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Discovery deadline exceeded") {
+		t.Errorf("Expected message to contain 'Discovery deadline exceeded', got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "fatal: early EOF") {
+		t.Errorf("Expected message to contain stderr tail, got: %s", updatedRun.Status.Message)
 	}
 }

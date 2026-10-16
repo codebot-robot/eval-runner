@@ -68,6 +68,10 @@ spec:
 
 		run := harness.WaitForRunPhase("eval-runner", runName, "Discovered", 90*time.Second)
 
+		if run.Status.DiscoveryDeadline == nil {
+			t.Errorf("Expected status.discoveryDeadline to be populated")
+		}
+
 		if run.Status.Manifest == nil {
 			t.Fatalf("Expected status.manifest to be populated")
 		}
@@ -130,6 +134,9 @@ spec:
 		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
 		run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 60*time.Second)
+		if run.Status.DiscoveryDeadline == nil {
+			t.Errorf("Expected status.discoveryDeadline to be populated")
+		}
 		if strings.TrimSpace(run.Status.Message) == "" {
 			t.Errorf("Expected non-empty failure message for bad commit")
 		}

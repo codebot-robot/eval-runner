@@ -41,6 +41,7 @@ spec:
         - --namespace=eval-runner
         - --sandbox-namespace=eval-runner-sandbox
         - --health-probe-bind-address=:8081
+        - --discovery-deadline=10m
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

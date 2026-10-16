@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/controller"
@@ -65,10 +66,12 @@ func main() {
 	var evalRunnerNamespace string
 	var sandboxNamespace string
 	var probeAddr string
+	var discoveryDeadline time.Duration
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.DurationVar(&discoveryDeadline, "discovery-deadline", controller.DefaultDiscoveryDeadline, "Overall deadline for discovery to complete")
 
 	opts := zap.Options{
 		Development: true,
@@ -147,10 +150,11 @@ func main() {
 	}
 
 	reconciler := &controller.RunReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		Executor:         executor,
-		SandboxNamespace: sandboxNamespace,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Executor:          executor,
+		SandboxNamespace:  sandboxNamespace,
+		DiscoveryDeadline: discoveryDeadline,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {
