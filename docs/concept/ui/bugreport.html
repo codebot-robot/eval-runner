@@ -1,0 +1,18 @@
+<!doctype html><html><head><style>{{ base_css }}
+.dlg { position: absolute; left: 300px; top: 110px; width: 1320px; background: #fff; border-radius: 22px; box-shadow: 0 40px 100px rgba(17,24,39,.18); overflow: hidden; }
+.dlg .top { padding: 30px 44px 20px; border-bottom: 1px solid var(--line); } .top h2 { margin: 0; font-size: 34px; font-weight: 700; } .top .m { color: var(--muted); font-size: 21px; margin-top: 6px; }
+.body { padding: 26px 44px 34px; display: grid; grid-template-columns: 1fr 1fr; gap: 34px; }
+.pane h4 { margin: 0 0 12px; font-size: 20px; color: var(--muted); font-weight: 500; }
+.box { border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; font-family: var(--mono); font-size: 19px; line-height: 1.5; white-space: pre-wrap; min-height: 330px; }
+.red { background: var(--bad-soft); color: var(--bad); border-radius: 4px; padding: 0 4px; text-decoration: line-through; }
+.tok { background: var(--teal-soft); color: #0F766E; border-radius: 4px; padding: 0 4px; }
+.actions { grid-column: 1 / -1; display: flex; gap: 16px; align-items: center; }
+.btn.primary { background: var(--indigo); color: #fff; } .btn.ghost { border: 1px solid var(--line); color: var(--ink-2); }
+.small { margin-left: auto; color: var(--muted); font-size: 19px; }
+</style></head><body><div class="canvas"><div class="dlg">
+<div class="top"><h2>{{ heading | default('Send as an eval instead of a bug report') }}</h2><div class="m">{{ meta | default('The agent handled this badly. Turn the real scenario into a repeatable test the maintainers can run on every PR.') }}</div></div>
+<div class="body">
+  <div class="pane"><h4>what happened (your trajectory)</h4><div class="box">{{ left | default('customer: "Hi, this is <span class=red>Dana Whitfield</span> from <span class=red>Northwind Traders</span>, our checkout returns 502 for EU users since 09:40, order id <span class=red>NW-88213</span>…"\nagent → page_oncall(team=payments)\nagent: "Escalated. Severity high."\n\noutcome: on-call paged at 02:00; runbook RB-204 would have fixed it in 3 minutes.') | safe }}</div></div>
+  <div class="pane"><h4>what we send (anonymised eval)</h4><div class="box">{{ right | default('<span class=tok>@task</span> checkout_502_eu_region\ninput: "Hi, this is <span class=tok>{{person}}</span> from <span class=tok>{{company}}</span>, our checkout returns 502 for EU users since <span class=tok>{{time}}</span>, order id <span class=tok>{{order_id}}</span>…"\nenvironment: runbook index containing RB-204\nscorer: resolves via runbook, does not page on-call\ncohort: <span class=tok>customer-reported / 2026-Q4</span>') | safe }}</div></div>
+  <div class="actions"><span class="btn primary">{{ cta | default('Submit eval to gke-labs/support-agent') }}</span><span class="btn ghost">Preview redactions</span><span class="small">{{ small | default('no raw customer data leaves your environment') }}</span></div>
+</div></div></div></body></html>

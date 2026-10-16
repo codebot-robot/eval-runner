@@ -1,0 +1,37 @@
+<!doctype html><html><head><style>{{ base_css }}
+.app { position: absolute; left: 120px; top: 70px; width: 1680px; height: 940px; background: #fff; border-radius: 18px; box-shadow: 0 30px 80px rgba(17,24,39,.14); overflow: hidden; display: flex; }
+.list { width: 440px; border-right: 1px solid var(--line); background: var(--canvas); padding: 26px 0; }
+.list h3 { margin: 0 26px 14px; font-size: 20px; color: var(--muted); font-weight: 500; }
+.row { display: flex; align-items: center; gap: 12px; padding: 12px 26px; font-size: 20px; font-family: var(--mono); }
+.row.sel { background: #fff; border-left: 4px solid var(--indigo); padding-left: 22px; }
+.row .st { width: 12px; height: 12px; border-radius: 50%; } .row .st.p { background: var(--good); } .row .st.f { background: var(--bad); }
+.row .id { flex: 1; } .row .n { color: var(--muted); font-size: 18px; }
+.view { flex: 1; padding: 30px 40px; }
+.view h2 { margin: 0 0 4px; font-size: 28px; font-weight: 600; } .view .meta { color: var(--muted); font-size: 20px; margin-bottom: 22px; font-family: var(--mono); }
+.ev { display: flex; gap: 18px; padding: 12px 16px; border-radius: 10px; margin-bottom: 8px; font-size: 21px; align-items: flex-start; }
+.ev .k { width: 150px; flex: none; font-family: var(--mono); font-size: 18px; color: var(--muted); padding-top: 3px; }
+.ev .b { font-family: var(--mono); font-size: 20px; white-space: pre-wrap; line-height: 1.4; }
+.ev.tool { background: var(--indigo-soft); } .ev.tool .k { color: var(--indigo); }
+.ev.bad { background: var(--bad-soft); border: 1px solid #FECACA; } .ev.bad .k { color: var(--bad); }
+.ev.note { background: var(--teal-soft); } .ev.note .k { color: #0F766E; }
+.foot { position: absolute; right: 40px; bottom: 30px; font-size: 19px; color: var(--muted); font-family: var(--mono); }
+</style></head><body><div class="canvas"><div class="app">
+<div class="list"><h3>{{ list_title | default('triage/runbook_lookup · base a81d0c4 · 48 samples') }}</h3>
+  {% for r in samples | default([
+    {'id':'sample-017','st':'f','n':'11 turns'},{'id':'sample-018','st':'p','n':'4 turns'},{'id':'sample-019','st':'f','n':'13 turns','sel':1},
+    {'id':'sample-020','st':'p','n':'5 turns'},{'id':'sample-021','st':'f','n':'12 turns'},{'id':'sample-022','st':'p','n':'3 turns'},{'id':'sample-023','st':'f','n':'14 turns'},{'id':'sample-024','st':'p','n':'4 turns'}]) %}
+  <div class="row {{ 'sel' if r.sel }}"><span class="st {{ r.st }}"></span><span class="id">{{ r.id }}</span><span class="n">{{ r.n }}</span></div>{% endfor %}
+</div>
+<div class="view">
+  <h2>{{ heading | default('sample-019 · FAIL · 13 turns · 41,200 tokens') }}</h2>
+  <div class="meta">{{ meta | default('gs://acme-evals/runs/a81d0c4/triage/runbook_lookup/sample-019.json · inspect log format') }}</div>
+  {% for e in events | default([
+    {'cls':'', 'k':'user', 'b':'Customer reports checkout returns HTTP 502 for EU users since 09:40 UTC.'},
+    {'cls':'tool','k':'tool_call','b':'classify_severity(message=…) → "high"'},
+    {'cls':'tool','k':'tool_call','b':'page_oncall(team="payments", reason="high severity")'},
+    {'cls':'bad','k':'assistant','b':'Escalated to on-call. Severity high. No further action.'},
+    {'cls':'note','k':'miner','b':'Pattern seen in 14 / 21 failing samples: never calls runbook_search before page_oncall.\nRunbook RB-204 ("EU 502 after deploy") would have resolved this without escalation.'},
+  ]) %}
+  <div class="ev {{ e.cls }}"><span class="k">{{ e.k }}</span><span class="b">{{ e.b }}</span></div>{% endfor %}
+  <div class="foot">{{ foot | default('open format · any agent can read it') }}</div>
+</div></div></div></body></html>

@@ -1,0 +1,20 @@
+<!doctype html><html><head><style>{{ base_css }}
+body { background: #fff; }
+.box { position: absolute; left: 160px; top: 300px; width: 1600px; }
+.kicker { margin-bottom: 26px; }
+h1 { font-size: 72px; line-height: 1.1; margin: 0 0 26px; letter-spacing: -0.02em; font-weight: 700; max-width: 1400px; }
+.line { font-size: 32px; color: var(--ink-2); line-height: 1.4; max-width: 1350px; }
+.repo { position: absolute; left: 160px; bottom: 150px; font-family: var(--mono); font-size: 34px; color: var(--indigo); font-weight: 600; }
+.next { position: absolute; left: 160px; bottom: 90px; font-size: 24px; color: var(--muted); }
+.mark { position: absolute; right: 160px; top: 300px; width: 200px; height: 200px; border-radius: 40px; background: linear-gradient(135deg, var(--indigo), var(--teal)); }
+.mark:after { content: ""; position: absolute; inset: 60px; border-radius: 22px; background: #fff; opacity: .92; }
+</style></head><body><div class="canvas">
+<div class="mark"></div>
+<div class="box">
+  <div class="kicker">{{ series.name }} · {{ brand.tagline }}</div>
+  <h1>{{ video.takeaway }}</h1>
+  <div class="line">{{ video.outro | default('') }}</div>
+</div>
+<div class="repo">{{ brand.repo }}</div>
+{% if video.next %}<div class="next">Next: {{ video.next }}</div>{% endif %}
+</div></body></html>

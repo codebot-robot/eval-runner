@@ -1,0 +1,33 @@
+<!doctype html><html><head><style>{{ base_css }}
+.diff { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-family: var(--mono); font-size: 22px; margin-top: 10px; }
+.diff .fname { background: var(--canvas); padding: 12px 20px; border-bottom: 1px solid var(--line); color: var(--ink-2); display: flex; justify-content: space-between; }
+.diff .l { display: flex; padding: 5px 20px; white-space: pre; }
+.diff .l .n { width: 70px; color: #9CA3AF; } .diff .del { background: #FEF2F2; } .diff .add { background: #F0FDF4; }
+.diff .del .n:before { content: "−"; color: var(--bad); margin-right: 12px; } .diff .add .n:before { content: "+"; color: var(--good); margin-right: 12px; }
+.diff .ctx .n:before { content: " "; margin-right: 12px; }
+.mergebox { margin-top: 26px; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; }
+.mergebox .q { font-size: 26px; color: var(--ink-2); }
+</style></head><body><div class="canvas"><div class="window">
+<div class="bar"><i></i><i></i><i></i><span class="url">github.com/{{ repo | default('acme/support-agent') }}/pull/{{ pr | default(418) }}</span></div>
+<div class="body">
+  <h1 class="pr">{{ title | default('skills: tell the agent to check the runbook before escalating') }} <span class="num">#{{ pr | default(418) }}</span></h1>
+  <div class="sub"><span class="chip good"><span class="dot"></span>Open</span> &nbsp; wants to merge 1 commit into <span class="branch">main</span> from <span class="branch">{{ branch | default('runbook-first') }}</span></div>
+  <div class="diff">
+    <div class="fname"><span>{{ file | default('skills/triage/SKILL.md') }}</span><span>{{ stat | default('+3 −1') }}</span></div>
+    {% for kind, n, text in lines | default([
+      ['ctx', 14, '## Procedure'],
+      ['ctx', 15, '1. Read the customer message and classify severity.'],
+      ['del', 16, '2. If severity is high, escalate to an on-call human.'],
+      ['add', 16, '2. Check the runbook index for a matching incident first.'],
+      ['add', 17, '3. Only escalate if no runbook matches or the runbook fails.'],
+      ['add', 18, '4. Always include the runbook id in your summary.'],
+      ['ctx', 19, ''],
+    ]) %}<div class="l {{ kind }}"><span class="n">{{ n }}</span>{{ text }}</div>{% endfor %}
+  </div>
+  <div class="checks">
+    {% for st, name, desc in checks | default([['ok','unit tests','412 passed in 38s'],['ok','lint','clean'],['skip','agent behaviour','— no check —']]) %}
+    <div class="row"><span class="{{ st }}">{% if st=='ok' %}✔{% elif st=='fail' %}✖{% elif st=='pend' %}●{% else %}?{% endif %}</span><span class="name">{{ name }}</span><span class="desc">{{ desc }}</span></div>
+    {% endfor %}
+  </div>
+  <div class="mergebox"><span class="q">{{ question | default('Did the agent get better, or worse?') }}</span><span class="btn {{ 'merge' if merge_enabled else 'disabled' }}">Merge pull request</span></div>
+</div></div></div></body></html>
