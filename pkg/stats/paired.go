@@ -29,6 +29,9 @@ const (
 
 	// DefaultBayesianBootstrapDraws is the number of Dirichlet weight draws for P(improvement).
 	DefaultBayesianBootstrapDraws = 5000
+
+	// tieEpsilon is the numerical tolerance used for identifying tied differences and mean equivalence.
+	tieEpsilon = 1e-9
 )
 
 // ComparePaired performs a paired comparison between candidate (PR) scores and baseline scores
@@ -75,25 +78,37 @@ func ComparePairedWithSeed(candidate, baseline []SampleScore, confidence float64
 	numPairs := len(diffs)
 	if numPairs == 0 {
 		return PairedEstimate{
-			MeanDelta:        0.0,
-			CI:               Interval{Lower: 0.0, Upper: 0.0},
-			BootstrapCI:      Interval{Lower: 0.0, Upper: 0.0},
-			NormalCI:         Interval{Lower: 0.0, Upper: 0.0},
-			PImprovement:     0.5,
-			BaseMean:         0.0,
-			CandidateMean:    0.0,
-			Confidence:       confidence,
-			NumPairs:         0,
-			DroppedCandidate: droppedCandidate,
-			DroppedBaseline:  droppedBaseline,
+			MeanDelta:          0.0,
+			CI:                 Interval{Lower: 0.0, Upper: 0.0},
+			BootstrapCI:        Interval{Lower: 0.0, Upper: 0.0},
+			NormalCI:           Interval{Lower: 0.0, Upper: 0.0},
+			PImprovement:       0.5,
+			NormalPImprovement: 0.5,
+			BaseMean:           0.0,
+			CandidateMean:      0.0,
+			Confidence:         confidence,
+			NumPairs:           0,
+			Wins:               0,
+			Losses:             0,
+			Ties:               0,
+			DroppedCandidate:   droppedCandidate,
+			DroppedBaseline:    droppedBaseline,
 		}
 	}
 
 	var sumCand, sumBase, sumDiff float64
+	var wins, losses, ties int
 	for i := 0; i < numPairs; i++ {
 		sumCand += candScores[i]
 		sumBase += baseScores[i]
 		sumDiff += diffs[i]
+		if diffs[i] > tieEpsilon {
+			wins++
+		} else if diffs[i] < -tieEpsilon {
+			losses++
+		} else {
+			ties++
+		}
 	}
 	candMean := sumCand / float64(numPairs)
 	baseMean := sumBase / float64(numPairs)
@@ -102,19 +117,24 @@ func ComparePairedWithSeed(candidate, baseline []SampleScore, confidence float64
 	bootCI := BootstrapPercentileCI(diffs, confidence, DefaultBootstrapReplicates, seed)
 	normCI := NormalApproximationCI(diffs, confidence)
 	pImp := BayesianBootstrapPImprovement(diffs, DefaultBayesianBootstrapDraws, seed+1)
+	normPImp := NormalApproximationPImprovement(diffs)
 
 	return PairedEstimate{
-		MeanDelta:        meanDelta,
-		CI:               bootCI, // Bootstrap percentile is the default
-		BootstrapCI:      bootCI,
-		NormalCI:         normCI,
-		PImprovement:     pImp,
-		BaseMean:         baseMean,
-		CandidateMean:    candMean,
-		Confidence:       confidence,
-		NumPairs:         numPairs,
-		DroppedCandidate: droppedCandidate,
-		DroppedBaseline:  droppedBaseline,
+		MeanDelta:          meanDelta,
+		CI:                 bootCI, // Bootstrap percentile is the default
+		BootstrapCI:        bootCI,
+		NormalCI:           normCI,
+		PImprovement:       pImp,
+		NormalPImprovement: normPImp,
+		BaseMean:           baseMean,
+		CandidateMean:      candMean,
+		Confidence:         confidence,
+		NumPairs:           numPairs,
+		Wins:               wins,
+		Losses:             losses,
+		Ties:               ties,
+		DroppedCandidate:   droppedCandidate,
+		DroppedBaseline:    droppedBaseline,
 	}
 }
 
@@ -127,34 +147,51 @@ func CompareDifferences(diffs []float64, confidence float64, seed int64) PairedE
 	numPairs := len(diffs)
 	if numPairs == 0 {
 		return PairedEstimate{
-			MeanDelta:    0.0,
-			CI:           Interval{Lower: 0.0, Upper: 0.0},
-			BootstrapCI:  Interval{Lower: 0.0, Upper: 0.0},
-			NormalCI:     Interval{Lower: 0.0, Upper: 0.0},
-			PImprovement: 0.5,
-			Confidence:   confidence,
-			NumPairs:     0,
+			MeanDelta:          0.0,
+			CI:                 Interval{Lower: 0.0, Upper: 0.0},
+			BootstrapCI:        Interval{Lower: 0.0, Upper: 0.0},
+			NormalCI:           Interval{Lower: 0.0, Upper: 0.0},
+			PImprovement:       0.5,
+			NormalPImprovement: 0.5,
+			Confidence:         confidence,
+			NumPairs:           0,
+			Wins:               0,
+			Losses:             0,
+			Ties:               0,
 		}
 	}
 
 	var sumDiff float64
+	var wins, losses, ties int
 	for _, d := range diffs {
 		sumDiff += d
+		if d > tieEpsilon {
+			wins++
+		} else if d < -tieEpsilon {
+			losses++
+		} else {
+			ties++
+		}
 	}
 	meanDelta := sumDiff / float64(numPairs)
 
 	bootCI := BootstrapPercentileCI(diffs, confidence, DefaultBootstrapReplicates, seed)
 	normCI := NormalApproximationCI(diffs, confidence)
 	pImp := BayesianBootstrapPImprovement(diffs, DefaultBayesianBootstrapDraws, seed+1)
+	normPImp := NormalApproximationPImprovement(diffs)
 
 	return PairedEstimate{
-		MeanDelta:    meanDelta,
-		CI:           bootCI,
-		BootstrapCI:  bootCI,
-		NormalCI:     normCI,
-		PImprovement: pImp,
-		Confidence:   confidence,
-		NumPairs:     numPairs,
+		MeanDelta:          meanDelta,
+		CI:                 bootCI,
+		BootstrapCI:        bootCI,
+		NormalCI:           normCI,
+		PImprovement:       pImp,
+		NormalPImprovement: normPImp,
+		Confidence:         confidence,
+		NumPairs:           numPairs,
+		Wins:               wins,
+		Losses:             losses,
+		Ties:               ties,
 	}
 }
 
@@ -275,8 +312,66 @@ func NormalApproximationCI(diffs []float64, confidence float64) Interval {
 	}
 }
 
-// BayesianBootstrapPImprovement estimates the posterior probability that the true delta > 0
-// using Rubin's Bayesian Bootstrap (Dirichlet(1, ..., 1) resampling weights).
+// NormalApproximationPImprovement computes the probability of improvement under the
+// classical normal approximation: P(Δ > 0) + 0.5 · P(Δ = 0), splitting ties evenly.
+func NormalApproximationPImprovement(diffs []float64) float64 {
+	n := len(diffs)
+	if n == 0 {
+		return 0.5
+	}
+
+	allZero := true
+	for _, d := range diffs {
+		if math.Abs(d) > tieEpsilon {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return 0.5
+	}
+
+	var sum float64
+	for _, d := range diffs {
+		sum += d
+	}
+	mean := sum / float64(n)
+
+	var sumSq float64
+	for _, d := range diffs {
+		diff := d - mean
+		sumSq += diff * diff
+	}
+	variance := sumSq / float64(n-1)
+	se := math.Sqrt(variance / float64(n))
+
+	if se == 0 {
+		if mean > tieEpsilon {
+			return 1.0
+		} else if mean < -tieEpsilon {
+			return 0.0
+		}
+		return 0.5
+	}
+
+	// For a continuous normal distribution N(mean, se^2), P(Δ = 0) = 0,
+	// and P(Δ > 0) = 1 - Φ(-mean/se) = Φ(mean / se).
+	z := mean / se
+	return NormalCDF(z)
+}
+
+// BayesianBootstrapPImprovement estimates the posterior probability of improvement
+// as P(Δ > 0) + 0.5 · P(Δ = 0) (ties split evenly) using Rubin's Bayesian Bootstrap
+// (Dirichlet(1, ..., 1) resampling weights).
+//
+// To prevent zero posterior probability when no wins or no losses have been observed
+// among ties (e.g. 0W/1L/19T where non-parametric bootstrap mass sits entirely on non-positive
+// outcomes), the posterior is regularised with a uniform prior consisting of two symmetric
+// pseudo-observations at +1.0 and -1.0. For binary differences, this corresponds analytically
+// to P(Beta(W+1, L+1) > 0.5):
+//   - 0 wins, 1 loss, 19 ties -> P(Beta(1, 2) > 0.5) = 0.25
+//   - 1 win, 0 losses, 19 ties -> P(Beta(2, 1) > 0.5) = 0.75
+//   - 3 wins, 2 losses, 15 ties -> P(Beta(4, 3) > 0.5) = 0.65625
 //
 // Why Bayesian Bootstrap over Beta-Binomial:
 // The Bayesian Bootstrap operates directly on continuous differences, seamlessly supporting
@@ -289,42 +384,36 @@ func BayesianBootstrapPImprovement(diffs []float64, draws int, seed int64) float
 	}
 
 	allZero := true
-	allPositive := true
-	allNegative := true
 	for _, d := range diffs {
-		if d != 0 {
+		if math.Abs(d) > tieEpsilon {
 			allZero = false
-		}
-		if d <= 0 {
-			allPositive = false
-		}
-		if d >= 0 {
-			allNegative = false
+			break
 		}
 	}
 
 	if allZero {
 		return 0.5
 	}
-	if allPositive {
-		return 1.0
-	}
-	if allNegative {
-		return 0.0
-	}
 
 	if draws <= 0 {
 		draws = DefaultBayesianBootstrapDraws
 	}
 
+	// Regularise posterior with symmetric uniform prior (+1.0, -1.0)
+	augmented := make([]float64, n+2)
+	copy(augmented, diffs)
+	augmented[n] = 1.0
+	augmented[n+1] = -1.0
+	m := n + 2
+
 	rng := rand.New(rand.NewSource(seed))
 	var wins float64
 
-	expWeights := make([]float64, n)
+	expWeights := make([]float64, m)
 
 	for b := 0; b < draws; b++ {
 		var sumExp float64
-		for i := 0; i < n; i++ {
+		for i := 0; i < m; i++ {
 			// Generate standard exponential variable: -ln(U)
 			u := rng.Float64()
 			if u < 1e-15 {
@@ -336,13 +425,13 @@ func BayesianBootstrapPImprovement(diffs []float64, draws int, seed int64) float
 		}
 
 		var weightedMean float64
-		for i := 0; i < n; i++ {
-			weightedMean += (expWeights[i] / sumExp) * diffs[i]
+		for i := 0; i < m; i++ {
+			weightedMean += (expWeights[i] / sumExp) * augmented[i]
 		}
 
-		if weightedMean > 0 {
+		if weightedMean > tieEpsilon {
 			wins++
-		} else if weightedMean == 0 {
+		} else if math.Abs(weightedMean) <= tieEpsilon {
 			wins += 0.5
 		}
 	}

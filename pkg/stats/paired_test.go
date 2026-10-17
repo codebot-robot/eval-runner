@@ -43,6 +43,12 @@ func TestPairedIdenticalArrays(t *testing.T) {
 	if est.PImprovement != 0.5 {
 		t.Errorf("PImprovement for identical samples = %v, want 0.5", est.PImprovement)
 	}
+	if est.NormalPImprovement != 0.5 {
+		t.Errorf("NormalPImprovement for identical samples = %v, want 0.5", est.NormalPImprovement)
+	}
+	if est.Wins != 0 || est.Losses != 0 || est.Ties != n {
+		t.Errorf("Expected wins/losses/ties = 0/0/%d, got %d/%d/%d", n, est.Wins, est.Losses, est.Ties)
+	}
 	if est.DroppedCandidate != 0 || est.DroppedBaseline != 0 {
 		t.Errorf("Expected 0 dropped samples, got cand=%d base=%d", est.DroppedCandidate, est.DroppedBaseline)
 	}
@@ -223,5 +229,114 @@ func TestNormalAndBootstrapComparison(t *testing.T) {
 	diffUpper := math.Abs(est.BootstrapCI.Upper - est.NormalCI.Upper)
 	if diffLower > 0.15 || diffUpper > 0.15 {
 		t.Errorf("Bootstrap and Normal CI diverged too much: boot=%v, norm=%v", est.BootstrapCI, est.NormalCI)
+	}
+}
+
+func TestTieSplittingAndNormalFallback(t *testing.T) {
+	// Acceptance criterion: all-tied -> P = 0.5 (both bootstrap and normal fallback)
+	allZeros := []float64{0.0, 0.0, 0.0, 0.0}
+	pBootZero := BayesianBootstrapPImprovement(allZeros, 1000, 42)
+	if pBootZero != 0.5 {
+		t.Errorf("BayesianBootstrapPImprovement for all-zero diffs = %v, want 0.5", pBootZero)
+	}
+
+	pNormZero := NormalApproximationPImprovement(allZeros)
+	if pNormZero != 0.5 {
+		t.Errorf("NormalApproximationPImprovement for all-zero diffs = %v, want 0.5", pNormZero)
+	}
+
+	estZero := CompareDifferences(allZeros, 0.95, 42)
+	if estZero.PImprovement != 0.5 {
+		t.Errorf("CompareDifferences.PImprovement for all-zero = %v, want 0.5", estZero.PImprovement)
+	}
+	if estZero.NormalPImprovement != 0.5 {
+		t.Errorf("CompareDifferences.NormalPImprovement for all-zero = %v, want 0.5", estZero.NormalPImprovement)
+	}
+	if estZero.Wins != 0 || estZero.Losses != 0 || estZero.Ties != 4 {
+		t.Errorf("CompareDifferences wins/losses/ties = %d/%d/%d, want 0/0/4",
+			estZero.Wins, estZero.Losses, estZero.Ties)
+	}
+
+	// Acceptance criterion: mixed with ties -> P matches the split formula on a hand-computed example
+	// Hand-computed Example 1: Symmetric differences with ties: {+1.0, 0.0, 0.0, -1.0}
+	// Wins=1, Losses=1, Ties=2.
+	// Empirical split formula: (Wins + 0.5 * Ties) / N = (1 + 0.5 * 2) / 4 = 0.50.
+	// Normal approximation: mean = 0, se > 0 => z = 0 => NormalCDF(0) = 0.50.
+	symDiffs := []float64{1.0, 0.0, 0.0, -1.0}
+	pNormSym := NormalApproximationPImprovement(symDiffs)
+	if pNormSym != 0.50 {
+		t.Errorf("NormalApproximationPImprovement(symmetric) = %v, want 0.50", pNormSym)
+	}
+
+	estSym := CompareDifferences(symDiffs, 0.95, 42)
+	if estSym.Wins != 1 || estSym.Losses != 1 || estSym.Ties != 2 {
+		t.Errorf("CompareDifferences wins/losses/ties = %d/%d/%d, want 1/1/2",
+			estSym.Wins, estSym.Losses, estSym.Ties)
+	}
+	if math.Abs(estSym.PImprovement-0.50) > 0.02 {
+		t.Errorf("BayesianBootstrapPImprovement(symmetric) = %v, want ~0.50", estSym.PImprovement)
+	}
+
+	// Hand-computed Example 2: Asymmetric differences with ties: {+1.0, 0.0, 0.0, +1.0}
+	// Wins=2, Losses=0, Ties=2.
+	// Empirical split formula: (Wins + 0.5 * Ties) / N = (2 + 0.5 * 2) / 4 = 0.75.
+	// Normal approximation analytical computation:
+	//   mean = (1 + 0 + 0 + 1) / 4 = 0.5
+	//   variance = sum((x - 0.5)^2) / 3 = (0.25 * 4) / 3 = 1/3
+	//   se = sqrt((1/3) / 4) = 1 / sqrt(12)
+	//   z = 0.5 / (1 / sqrt(12)) = 0.5 * sqrt(12) = sqrt(3) ≈ 1.7320508075688772
+	//   expected P = NormalCDF(sqrt(3)) ≈ 0.95836764
+	asymDiffs := []float64{1.0, 0.0, 0.0, 1.0}
+	expectedZ := math.Sqrt(3.0)
+	expectedPNorm := NormalCDF(expectedZ)
+
+	pNormAsym := NormalApproximationPImprovement(asymDiffs)
+	if math.Abs(pNormAsym-expectedPNorm) > 1e-6 {
+		t.Errorf("NormalApproximationPImprovement({1,0,0,1}) = %v, want NormalCDF(sqrt(3)) = %v",
+			pNormAsym, expectedPNorm)
+	}
+
+	estAsym := CompareDifferences(asymDiffs, 0.95, 42)
+	if estAsym.Wins != 2 || estAsym.Losses != 0 || estAsym.Ties != 2 {
+		t.Errorf("CompareDifferences wins/losses/ties = %d/%d/%d, want 2/0/2",
+			estAsym.Wins, estAsym.Losses, estAsym.Ties)
+	}
+	if math.Abs(estAsym.NormalPImprovement-expectedPNorm) > 1e-6 {
+		t.Errorf("estAsym.NormalPImprovement = %v, want %v", estAsym.NormalPImprovement, expectedPNorm)
+	}
+
+	// Hand-computed Example 3: Uniform prior regularisation on 0W/1L/19T
+	// In the real GKE comparison docs/readme_comprehension_blind (20 pairs: 0 wins, 1 loss, 19 ties):
+	// Analytically, Beta(W+1, L+1) = Beta(1, 2), P(Beta(1, 2) > 0.5) = 0.25.
+	diffs0W1L := make([]float64, 20)
+	diffs0W1L[0] = -1.0
+	pBoot0W1L := BayesianBootstrapPImprovement(diffs0W1L, DefaultBayesianBootstrapDraws, 42)
+	if math.Abs(pBoot0W1L-0.25) > 0.02 {
+		t.Errorf("BayesianBootstrapPImprovement(0W/1L/19T) = %v, want ~0.25 (Beta(1, 2))", pBoot0W1L)
+	}
+	est0W1L := CompareDifferences(diffs0W1L, 0.95, 42)
+	if est0W1L.Wins != 0 || est0W1L.Losses != 1 || est0W1L.Ties != 19 {
+		t.Errorf("CompareDifferences wins/losses/ties = %d/%d/%d, want 0/1/19",
+			est0W1L.Wins, est0W1L.Losses, est0W1L.Ties)
+	}
+	if math.Abs(est0W1L.PImprovement-0.25) > 0.02 {
+		t.Errorf("est0W1L.PImprovement = %v, want ~0.25", est0W1L.PImprovement)
+	}
+
+	// Hand-computed Example 4: Uniform prior regularisation on 1W/0L/19T
+	// Analytically, Beta(W+1, L+1) = Beta(2, 1), P(Beta(2, 1) > 0.5) = 0.75.
+	diffs1W0L := make([]float64, 20)
+	diffs1W0L[0] = 1.0
+	pBoot1W0L := BayesianBootstrapPImprovement(diffs1W0L, DefaultBayesianBootstrapDraws, 42)
+	if math.Abs(pBoot1W0L-0.75) > 0.02 {
+		t.Errorf("BayesianBootstrapPImprovement(1W/0L/19T) = %v, want ~0.75 (Beta(2, 1))", pBoot1W0L)
+	}
+
+	// Hand-computed Example 5: Uniform prior regularisation on 3W/2L/15T
+	// Analytically, Beta(W+1, L+1) = Beta(4, 3), P(Beta(4, 3) > 0.5) = 21/32 = 0.65625.
+	diffs3W2L := []float64{1.0, 1.0, 1.0, -1.0, -1.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	pBoot3W2L := BayesianBootstrapPImprovement(diffs3W2L, DefaultBayesianBootstrapDraws, 42)
+	if math.Abs(pBoot3W2L-0.65625) > 0.02 {
+		t.Errorf("BayesianBootstrapPImprovement(3W/2L/15T) = %v, want ~0.656 (Beta(4, 3))", pBoot3W2L)
 	}
 }

@@ -49,8 +49,13 @@ type PairedEstimate struct {
 	// NormalCI is the classical normal approximation confidence interval.
 	NormalCI Interval `json:"normal_ci"`
 
-	// PImprovement is the posterior probability that the true delta > 0.
+	// PImprovement is the posterior probability that the candidate improves over baseline:
+	// P(Δ > 0) + 0.5 · P(Δ = 0), splitting ties evenly.
 	PImprovement float64 `json:"p_improvement"`
+
+	// NormalPImprovement is the probability of improvement under the classical normal approximation:
+	// P(Δ > 0) + 0.5 · P(Δ = 0), splitting ties evenly.
+	NormalPImprovement float64 `json:"normal_p_improvement,omitempty"`
 
 	// BaseMean is the mean score of baseline samples.
 	BaseMean float64 `json:"base_mean"`
@@ -63,6 +68,15 @@ type PairedEstimate struct {
 
 	// NumPairs is the count of matched (paired) samples.
 	NumPairs int `json:"num_pairs"`
+
+	// Wins is the count of pairs where candidate scored higher than baseline (delta > 0).
+	Wins int `json:"wins"`
+
+	// Losses is the count of pairs where candidate scored lower than baseline (delta < 0).
+	Losses int `json:"losses"`
+
+	// Ties is the count of pairs where candidate and baseline scored equally (delta == 0).
+	Ties int `json:"ties"`
 
 	// DroppedCandidate is the number of candidate samples dropped due to lack of a matching baseline.
 	DroppedCandidate int `json:"dropped_candidate"`
