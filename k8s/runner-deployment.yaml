@@ -40,6 +40,7 @@ spec:
         args:
         - --namespace=eval-runner
         - --sandbox-namespace=eval-runner-sandbox
+        - --sample-runner-image=sample-runner:latest
         - --health-probe-bind-address=:8081
         - --discovery-deadline=10m
         securityContext:

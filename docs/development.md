@@ -165,6 +165,67 @@ kubectl logs -n eval-runner-sandbox discovery-test-run -c agent
 
 Once discovery completes (or fails), the sandbox is automatically deleted.
 
+### Running Sample Evaluations with a Real Model (e.g. Gemini on GKE)
+
+To execute real evals against a repository, provide `spec.model` on the `Run`. For cloud models (such as Gemini), inject provider credentials using a Kubernetes Secret in the sandbox namespace:
+
+1. **Ensure the Model Secret exists in `eval-runner-sandbox`:**
+
+   Our GKE dev cluster uses `eval-runner-sandbox/model-credentials` containing key `GEMINI_API_KEY`. If creating it from scratch:
+
+   ```bash
+   kubectl -n eval-runner-sandbox create secret generic model-credentials \
+     --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY}"
+   ```
+
+2. **Configure the Controller:**
+
+   Configure the eval-runner controller deployment with `--model-secret=model-credentials` using a JSON patch on the container args:
+
+   ```bash
+   kubectl -n eval-runner patch deployment eval-runner-controller --type=json \
+     -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--model-secret=model-credentials"}]'
+   ```
+
+   Alternatively, add `- --model-secret=model-credentials` under `args` in `k8s/runner-deployment.yaml` and deploy via `ap deploy`.
+
+   *(Note: This is an interim credential injection mechanism; future architecture targets zero-credential sandboxes via a model gateway.)*
+
+3. **Create the Run:**
+
+   ```bash
+   kubectl apply -f - <<EOF
+   apiVersion: evalrunner.gke-labs.dev/v1alpha1
+   kind: Run
+   metadata:
+     name: docs-comprehension-gemini
+     namespace: eval-runner
+   spec:
+     repo:
+       url: https://github.com/gke-labs/eval-runner.git
+       commit: $(git rev-parse HEAD)
+     model: google/gemini-3.5-flash-lite
+     tasks:
+       - docs/readme_comprehension
+       - docs/readme_comprehension_blind
+     limit: 10
+   EOF
+   ```
+
+4. **Watch and View Results:**
+
+   Watch the run progress from `Pending` -> `Discovering` -> `Running` -> `Completed`:
+
+   ```bash
+   kubectl get run docs-comprehension-gemini -n eval-runner -w
+   ```
+
+   View per-task scores and aggregates once completed:
+
+   ```bash
+   kubectl get run docs-comprehension-gemini -n eval-runner -o yaml
+   ```
+
 ## Running Unit Tests
 
 Run all unit tests with:

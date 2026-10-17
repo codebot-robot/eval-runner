@@ -29,7 +29,7 @@ go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 \
 echo "Generating CRD manifests..."
 mkdir -p "${REPO_ROOT}/k8s"
 go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 \
-    crd paths="./api/..." output:crd:dir=./k8s
+    crd:allowDangerousTypes=true paths="./api/..." output:crd:dir=./k8s
 
 for f in "${REPO_ROOT}/k8s"/*.yaml; do
   if [[ -f "$f" ]] && ! grep -q "Copyright 2026 Google LLC" "$f"; then

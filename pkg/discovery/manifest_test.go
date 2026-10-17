@@ -132,6 +132,42 @@ func TestValidateManifest(t *testing.T) {
 			expectError: true,
 		},
 		{
+			name: "spec starting with dash",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "--flag"},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "workdir with ..",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Workdir: "../evals"},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "workdir absolute",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Workdir: "/evals"},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "valid workdir",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Workdir: "evals/sub"},
+				},
+			},
+			expectError: false,
+		},
+		{
 			name: "too many tasks",
 			manifest: func() *v1alpha1.Manifest {
 				tasks := make([]v1alpha1.ManifestTask, MaxTasks+1)

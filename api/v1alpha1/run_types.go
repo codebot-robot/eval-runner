@@ -18,8 +18,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// RunPhase defines the phase of an eval Run.
-// +kubebuilder:validation:Enum=Pending;Discovering;Discovered;Failed
+// RunPhase represents the lifecycle phase of a Run.
+// +kubebuilder:validation:Enum=Pending;Discovering;Discovered;Running;Completed;Failed
 type RunPhase string
 
 const (
@@ -32,14 +32,69 @@ const (
 	// RunPhaseDiscovered means discovery completed successfully and the manifest is populated.
 	RunPhaseDiscovered RunPhase = "Discovered"
 
+	// RunPhaseRunning means sample tasks are actively executing in sandboxes.
+	RunPhaseRunning RunPhase = "Running"
+
+	// RunPhaseCompleted means all sample tasks have finished executing.
+	RunPhaseCompleted RunPhase = "Completed"
+
 	// RunPhaseFailed means discovery or execution encountered an error.
 	RunPhaseFailed RunPhase = "Failed"
 )
 
+// TaskPhase defines the lifecycle phase of an individual eval task.
+// +kubebuilder:validation:Enum=Pending;Running;Completed;Failed
+type TaskPhase string
+
+const (
+	// TaskPhasePending means the task is waiting to run in a sandbox.
+	TaskPhasePending TaskPhase = "Pending"
+
+	// TaskPhaseRunning means the task is currently executing in a sandbox.
+	TaskPhaseRunning TaskPhase = "Running"
+
+	// TaskPhaseCompleted means the task completed execution and scores were recorded.
+	TaskPhaseCompleted TaskPhase = "Completed"
+
+	// TaskPhaseFailed means the task encountered an error or failed to run.
+	TaskPhaseFailed TaskPhase = "Failed"
+)
+
+// TaskStatus records the execution status and scores for a single eval task.
+type TaskStatus struct {
+	// ID is the unique identifier of the task (e.g. docs/readme_comprehension).
+	// +kubebuilder:validation:Required
+	ID string `json:"id"`
+
+	// Phase is the current execution phase of this task.
+	// +optional
+	Phase TaskPhase `json:"phase,omitempty"`
+
+	// Samples is the number of samples scored.
+	// +optional
+	Samples int `json:"samples"`
+
+	// Successes is the number of samples with score == 1 (for binary scorers).
+	// +optional
+	Successes int `json:"successes"`
+
+	// MeanScore is the mean of per-sample scores in [0, 1].
+	// +optional
+	MeanScore *float64 `json:"meanScore,omitempty"`
+
+	// Message contains failure detail or bounded error information.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// LogPath is the path or URI where the Inspect log was stored by the artifact sink.
+	// +optional
+	LogPath string `json:"logPath,omitempty"`
+}
+
 // ConditionTypeDiscovered is the condition type reporting whether discovery succeeded.
 const ConditionTypeDiscovered = "Discovered"
 
-// FinalizerDiscoverySandbox is the finalizer placed on Runs to ensure discovery sandboxes are deleted.
+// FinalizerDiscoverySandbox is the finalizer placed on Runs to ensure discovery and task sandboxes are deleted.
 const FinalizerDiscoverySandbox = "evalrunner.gke-labs.dev/discovery-sandbox"
 
 // RepoSpec specifies the git repository and commit to evaluate.
@@ -59,6 +114,20 @@ type RunSpec struct {
 	// Repo specifies the repository and commit to run.
 	// +kubebuilder:validation:Required
 	Repo RepoSpec `json:"repo"`
+
+	// Model is the Inspect model identifier (e.g. mockllm/model, google/gemini-3.5-flash-lite).
+	// If empty, the Run stops after discovery.
+	// +optional
+	Model string `json:"model,omitempty"`
+
+	// Tasks is an optional allow-list of task IDs to run.
+	// If empty, all tasks with empty resources are eligible.
+	// +optional
+	Tasks []string `json:"tasks,omitempty"`
+
+	// Limit is an optional per-task cap on samples (passed to Inspect as --limit).
+	// +optional
+	Limit *int `json:"limit,omitempty"`
 }
 
 // ManifestResource describes a resource needed by an eval task.
@@ -132,6 +201,14 @@ type RunStatus struct {
 	// DiscoveryDeadline is the deadline by which discovery must complete.
 	// +optional
 	DiscoveryDeadline *metav1.Time `json:"discoveryDeadline,omitempty"`
+
+	// ExecutionDeadline is the deadline by which sample execution must complete.
+	// +optional
+	ExecutionDeadline *metav1.Time `json:"executionDeadline,omitempty"`
+
+	// Tasks records the status and results for each executed eval task.
+	// +optional
+	Tasks []TaskStatus `json:"tasks,omitempty"`
 }
 
 // +kubebuilder:object:root=true
