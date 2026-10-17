@@ -2724,8 +2724,9 @@ func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 	if tFail.Phase != v1alpha1.TaskPhaseFailed {
 		t.Errorf("Expected task-fail to be Failed, got %s", tFail.Phase)
 	}
-	if !strings.Contains(tFail.Message, "syntax error in task-fail") {
-		t.Errorf("Expected failure message to contain stderr tail, got %q", tFail.Message)
+	expectedFailMsg := "step inspect eval failed with exit code 1: syntax error in task-fail"
+	if tFail.Message != expectedFailMsg {
+		t.Errorf("Expected failure message %q, got %q", expectedFailMsg, tFail.Message)
 	}
 
 	tOk := taskMap["task-ok"]
@@ -2734,6 +2735,151 @@ func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 	}
 	if tOk.Samples != 1 || tOk.Successes != 1 {
 		t.Errorf("Expected task-ok to have 1 sample, 1 success, got %+v", tOk)
+	}
+}
+
+func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-1", Spec: "eval.py@task1"},
+					{ID: "task-2", Spec: "eval.py@task2"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+				{ID: "task-2", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "inspect" {
+				if strings.Contains(cfg.Command[2], "task1") {
+					return &sandboxclient.ExecuteResult{
+						ExitCode: 1,
+						Stderr:   "ERROR: Google API requires optional dependencies. Install with:\npip install google-genai",
+					}, nil
+				}
+				if strings.Contains(cfg.Command[2], "task2") {
+					return &sandboxclient.ExecuteResult{
+						ExitCode: 2,
+						Stderr:   "SyntaxError: invalid syntax",
+					}, nil
+				}
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+
+	// Turn 1: Create sandboxes
+	_, _ = reconciler.Reconcile(t.Context(), req)
+
+	// Create pods for all sandboxes
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	if len(sbList.Items) != 2 {
+		t.Fatalf("Expected 2 sandboxes created, got %d", len(sbList.Items))
+	}
+	for _, sb := range sbList.Items {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sb.Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.10",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+	}
+
+	// Turn 2: Run both tasks (both will fail)
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	// Turn 3: Finish Run
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected Run phase Failed when all tasks fail, got %s", updatedRun.Status.Phase)
+	}
+	expectedRunMsg := "all 2 tasks failed"
+	if updatedRun.Status.Message != expectedRunMsg {
+		t.Errorf("Expected Run message %q, got %q", expectedRunMsg, updatedRun.Status.Message)
+	}
+
+	taskMap := make(map[string]v1alpha1.TaskStatus)
+	for _, t := range updatedRun.Status.Tasks {
+		taskMap[t.ID] = t
+	}
+
+	t1 := taskMap["task-1"]
+	if t1.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task-1 to be Failed, got %s", t1.Phase)
+	}
+	expectedT1Msg := "step inspect eval failed with exit code 1: ERROR: Google API requires optional dependencies. Install with:\npip install google-genai"
+	if t1.Message != expectedT1Msg {
+		t.Errorf("Expected task-1 message %q, got %q", expectedT1Msg, t1.Message)
+	}
+
+	t2 := taskMap["task-2"]
+	if t2.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task-2 to be Failed, got %s", t2.Phase)
+	}
+	expectedT2Msg := "step inspect eval failed with exit code 2: SyntaxError: invalid syntax"
+	if t2.Message != expectedT2Msg {
+		t.Errorf("Expected task-2 message %q, got %q", expectedT2Msg, t2.Message)
+	}
+
+	// Assert all task sandboxes are deleted
+	var postSBList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &postSBList, client.InNamespace("eval-runner-sandbox"))
+	if len(postSBList.Items) != 0 {
+		t.Errorf("Expected all task sandboxes to be deleted, found %d", len(postSBList.Items))
 	}
 }
 

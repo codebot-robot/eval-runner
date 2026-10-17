@@ -226,6 +226,15 @@ To execute real evals against a repository, provide `spec.model` on the `Run`. F
    kubectl get run docs-comprehension-gemini -n eval-runner -o yaml
    ```
 
+#### Provider Dependencies and Custom Images
+
+The default sample runner sandbox image (`images/sample-runner`) includes Inspect AI alongside pinned provider dependencies for common model providers out of the box:
+- `google-genai` (for Gemini models, our default)
+- `openai`
+- `anthropic`
+
+For evaluations requiring other model providers or custom environments, a repository can declare custom images in `.evals/list` using the manifest's top-level `images[]` declarations and `tasks[].images[]` references (see concept §2.2 in `docs/concept/functionality.md`).
+
 ## Running Unit Tests
 
 Run all unit tests with:
