@@ -230,7 +230,7 @@ For evaluations requiring other model providers or custom environments, a reposi
 
 ## Results in GCS
 
-By default, the controller runs with an in-memory no-op artifact sink. When `--artifact-bucket=gs://<bucket>` is configured, the controller persists raw Inspect evaluation JSON logs alongside a per-task aggregate `summary.json` directly to Google Cloud Storage under `runs/<commit>/<task-id>/`.
+By default, the controller runs with an in-memory no-op artifact sink. When `artifactBucket` is configured (via the `eval-runner-config` ConfigMap or the `--artifact-bucket` flag), the controller persists raw Inspect evaluation JSON logs alongside a per-task aggregate `summary.json` directly to Google Cloud Storage under `runs/<commit>/<task-id>/`.
 
 Writes happen exclusively from the controller pod using Application Default Credentials (ADC). Sandboxes never hold bucket credentials or cloud service account tokens (zero-trust architecture).
 
@@ -277,21 +277,45 @@ To grant the controller permissions to write artifacts to a GCS bucket using GKE
 
    *(Note: Manifests remain project-agnostic and do not include the GCP project annotation so that repeated `ap deploy` runs do not overwrite cluster annotations. `kubectl apply` leaves existing annotations in place.)*
 
-### Configuring the Controller Flag
+### Configuring the Cluster ConfigMap
 
-Configure the controller deployment with `--artifact-bucket=gs://<bucket>`:
+Per-cluster settings (such as the artifact bucket) live in a ConfigMap named `eval-runner-config` in the `eval-runner` namespace, created once by the operator. Because deployment manifests in `k8s/` are project-agnostic, deploys require no argument patching with `kubectl patch`.
 
-```bash
-kubectl -n eval-runner patch deployment eval-runner-controller --type=json \
-  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--artifact-bucket=gs://<bucket>"}]'
-```
-
-For our GKE dev cluster (`gs://justinbs-knotai-dev-eval-runner`):
+Create the ConfigMap once:
 
 ```bash
-kubectl -n eval-runner patch deployment eval-runner-controller --type=json \
-  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--artifact-bucket=gs://justinbs-knotai-dev-eval-runner"}]'
+kubectl -n eval-runner create configmap eval-runner-config \
+  --from-literal=artifactBucket=gs://<bucket>
 ```
+
+For our GKE dev cluster (bucket `gs://justinbs-knotai-dev-eval-runner`):
+
+```bash
+kubectl -n eval-runner create configmap eval-runner-config \
+  --from-literal=artifactBucket=gs://justinbs-knotai-dev-eval-runner
+```
+
+Or apply as a manifest:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eval-runner-config
+  namespace: eval-runner
+data:
+  artifactBucket: gs://justinbs-knotai-dev-eval-runner
+```
+
+Supported ConfigMap keys include:
+- `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
+- `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).
+- `executionDeadline`: Overall deadline for sample execution to complete (default `30m`).
+- `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
+- `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
+- `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
+
+Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the ConfigMap is absent, all built-in defaults are used.
 
 ### Browsing and Inspecting Results
 

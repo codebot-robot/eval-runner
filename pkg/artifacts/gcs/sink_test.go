@@ -363,3 +363,31 @@ func TestGCSSink_ErrorPropagation(t *testing.T) {
 		t.Errorf("Expected quota exceeded error, got %v", err)
 	}
 }
+
+func TestValidateBucket(t *testing.T) {
+	valid := []string{
+		"gs://my-bucket",
+		"gs://my-bucket/",
+		"my-bucket",
+		"  gs://my-bucket/  ",
+	}
+	for _, b := range valid {
+		if err := ValidateBucket(b); err != nil {
+			t.Errorf("ValidateBucket(%q) returned unexpected error: %v", b, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"   ",
+		"gs://bucket/with/path",
+		"bucket..name",
+		"bucket\\name",
+		"bucket name",
+	}
+	for _, b := range invalid {
+		if err := ValidateBucket(b); err == nil {
+			t.Errorf("ValidateBucket(%q) expected error, got nil", b)
+		}
+	}
+}

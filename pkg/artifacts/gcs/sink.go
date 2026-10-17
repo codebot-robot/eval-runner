@@ -194,6 +194,12 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 	return fmt.Sprintf("gs://%s/%s", s.bucket, logObject), nil
 }
 
+// ValidateBucket checks whether raw is a well-formed GCS bucket name or gs:// URI.
+func ValidateBucket(raw string) error {
+	_, err := normalizeAndValidateBucket(raw)
+	return err
+}
+
 func normalizeAndValidateBucket(raw string) (string, error) {
 	b := strings.TrimSpace(raw)
 	b = strings.TrimPrefix(b, "gs://")
@@ -202,7 +208,7 @@ func normalizeAndValidateBucket(raw string) (string, error) {
 	if b == "" {
 		return "", fmt.Errorf("bucket name must not be empty")
 	}
-	if strings.Contains(b, "/") || strings.Contains(b, "\\") || strings.Contains(b, "..") || strings.ContainsRune(b, 0) {
+	if strings.ContainsAny(b, " \t\r\n") || strings.Contains(b, "/") || strings.Contains(b, "\\") || strings.Contains(b, "..") || strings.ContainsRune(b, 0) {
 		return "", fmt.Errorf("bucket name %q contains invalid characters", raw)
 	}
 	return b, nil
