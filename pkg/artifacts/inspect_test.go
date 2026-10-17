@@ -240,3 +240,90 @@ func TestParseInspectLog_MultipleScorersDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestParseInspectSampleScores(t *testing.T) {
+	t.Run("Binary20_17", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join("testdata", "binary_20_17.json"))
+		if err != nil {
+			t.Fatalf("Failed to read testdata: %v", err)
+		}
+
+		scores, err := ParseInspectSampleScores(data)
+		if err != nil {
+			t.Fatalf("ParseInspectSampleScores failed: %v", err)
+		}
+
+		if len(scores) != 20 {
+			t.Fatalf("Expected 20 sample scores, got %d", len(scores))
+		}
+
+		if scores[0].ID != "1" || scores[0].Score != 1.0 {
+			t.Errorf("Expected sample 0 to be ID '1' with score 1.0, got %+v", scores[0])
+		}
+		if scores[17].ID != "18" || scores[17].Score != 0.0 {
+			t.Errorf("Expected sample 17 to be ID '18' with score 0.0, got %+v", scores[17])
+		}
+	})
+
+	t.Run("MockLLM2", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join("testdata", "mockllm_2.json"))
+		if err != nil {
+			t.Fatalf("Failed to read testdata: %v", err)
+		}
+
+		scores, err := ParseInspectSampleScores(data)
+		if err != nil {
+			t.Fatalf("ParseInspectSampleScores failed: %v", err)
+		}
+
+		if len(scores) != 2 {
+			t.Fatalf("Expected 2 sample scores, got %d", len(scores))
+		}
+
+		if scores[0].ID != "1" || scores[0].Score != 0.0 {
+			t.Errorf("Expected sample 0 ID '1' score 0.0, got %+v", scores[0])
+		}
+		if scores[1].ID != "2" || scores[1].Score != 0.0 {
+			t.Errorf("Expected sample 1 ID '2' score 0.0, got %+v", scores[1])
+		}
+	})
+
+	t.Run("EmptyAndInvalid", func(t *testing.T) {
+		if _, err := ParseInspectSampleScores([]byte("")); err == nil {
+			t.Errorf("Expected error for empty input")
+		}
+		if _, err := ParseInspectSampleScores([]byte("{invalid")); err == nil {
+			t.Errorf("Expected error for invalid JSON")
+		}
+		emptySamples, err := ParseInspectSampleScores([]byte(`{"version": 2, "samples": []}`))
+		if err != nil {
+			t.Errorf("Unexpected error for empty samples: %v", err)
+		}
+		if len(emptySamples) != 0 {
+			t.Errorf("Expected 0 sample scores, got %d", len(emptySamples))
+		}
+	})
+
+	t.Run("EpochAndLargeID", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"samples": [
+				{"id": 120000000, "epoch": 1, "scores": {"accuracy": {"value": 1.0}}},
+				{"id": 120000000, "epoch": 2, "scores": {"accuracy": {"value": 0.5}}}
+			]
+		}`
+		scores, err := ParseInspectSampleScores([]byte(raw))
+		if err != nil {
+			t.Fatalf("ParseInspectSampleScores failed: %v", err)
+		}
+		if len(scores) != 2 {
+			t.Fatalf("Expected 2 scores, got %d", len(scores))
+		}
+		if scores[0].ID != "120000000" || scores[0].Score != 1.0 {
+			t.Errorf("Expected score 0 to be ID '120000000' and score 1.0, got %+v", scores[0])
+		}
+		if scores[1].ID != "120000000#2" || scores[1].Score != 0.5 {
+			t.Errorf("Expected score 1 to be ID '120000000#2' and score 0.5, got %+v", scores[1])
+		}
+	})
+}

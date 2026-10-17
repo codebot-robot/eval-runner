@@ -54,6 +54,12 @@ type ArtifactSink interface {
 	// StoreArtifact persists the raw log bytes for a task and returns the storage path or URI.
 	StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error)
 
+	// StoreComparison persists comparison summary data as comparisons/<comparisonName>.json and returns the storage path or URI.
+	StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error)
+
+	// Load retrieves raw artifact bytes from the given storage path or URI, bounded by the maximum allowed artifact size.
+	Load(ctx context.Context, path string) ([]byte, error)
+
 	// ArtifactPrefix returns the run-level storage prefix/URI for a given commit, or empty string if not applicable.
 	ArtifactPrefix(commit string) string
 }

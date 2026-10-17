@@ -391,3 +391,70 @@ func TestValidateBucket(t *testing.T) {
 		}
 	}
 }
+
+func TestGCSSink_StoreComparisonAndLoad(t *testing.T) {
+	fakeClient := NewFakeStorageClient()
+	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient), WithMaxUploadBytes(100))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	payload := []byte(`{"comparison": "comp-1", "verdict": "UNCHANGED"}`)
+	uri, err := sink.StoreComparison(t.Context(), "comp-1", payload)
+	if err != nil {
+		t.Fatalf("StoreComparison failed: %v", err)
+	}
+
+	expectedURI := "gs://eval-bucket/comparisons/comp-1.json"
+	if uri != expectedURI {
+		t.Errorf("Expected URI %q, got %q", expectedURI, uri)
+	}
+
+	// Verify object exists in fake client
+	obj, exists := fakeClient.GetObject("eval-bucket", "comparisons/comp-1.json")
+	if !exists {
+		t.Fatalf("Object was not written to storage client")
+	}
+	if string(obj.Data) != string(payload) {
+		t.Errorf("Payload mismatch: got %s, want %s", obj.Data, payload)
+	}
+
+	// Store and verify run artifact for loading
+	runPayload := []byte(`{"version": 2, "samples": []}`)
+	fakeClient.Objects["eval-bucket/runs/commit1/task1/log.json"] = FakeObject{Data: runPayload}
+
+	// Load via gs:// URI
+	loaded, err := sink.Load(t.Context(), "gs://eval-bucket/runs/commit1/task1/log.json")
+	if err != nil {
+		t.Fatalf("Load via URI failed: %v", err)
+	}
+	if string(loaded) != string(runPayload) {
+		t.Errorf("Loaded mismatch: got %s, want %s", loaded, runPayload)
+	}
+
+	// Load via object path
+	loadedPath, err := sink.Load(t.Context(), "runs/commit1/task1/log.json")
+	if err != nil {
+		t.Fatalf("Load via object path failed: %v", err)
+	}
+	if string(loadedPath) != string(runPayload) {
+		t.Errorf("Loaded mismatch: got %s, want %s", loadedPath, runPayload)
+	}
+
+	// Missing runs/ prefix rejected
+	if _, err := sink.Load(t.Context(), "comparisons/comp-1.json"); err == nil {
+		t.Errorf("Expected error for missing runs/ prefix, got nil")
+	}
+
+	// Bucket mismatch
+	if _, err := sink.Load(t.Context(), "gs://other-bucket/runs/commit1/task1/log.json"); err == nil {
+		t.Errorf("Expected error for bucket mismatch, got nil")
+	}
+
+	// Exceeds max bytes
+	oversized := make([]byte, 200)
+	fakeClient.Objects["eval-bucket/runs/oversized.json"] = FakeObject{Data: oversized}
+	if _, err := sink.Load(t.Context(), "gs://eval-bucket/runs/oversized.json"); err == nil {
+		t.Errorf("Expected error for oversized artifact load, got nil")
+	}
+}

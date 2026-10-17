@@ -21,6 +21,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gke-labs/eval-runner/pkg/stats"
 )
 
 // InspectLog represents the top-level structure of an Inspect JSON log file.
@@ -68,6 +70,7 @@ type InspectMetric struct {
 // InspectSample represents an individual evaluated sample.
 type InspectSample struct {
 	ID     any                           `json:"id"`
+	Epoch  int                           `json:"epoch,omitempty"`
 	Scores map[string]InspectSampleScore `json:"scores,omitempty"`
 }
 
@@ -242,4 +245,91 @@ func ParseInspectLog(data []byte) (*TaskAggregates, error) {
 	}
 
 	return agg, nil
+}
+
+// ParseInspectSampleScores extracts per-sample scores from Inspect JSON log bytes,
+// matching the primary scorer selection used in ParseInspectLog.
+// Each sample score preserves the sample ID as a string.
+func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, fmt.Errorf("empty log data")
+	}
+
+	var log InspectLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal inspect log: %w", err)
+	}
+
+	if len(log.Samples) == 0 {
+		return nil, nil
+	}
+
+	primaryScorer := ""
+	if len(log.Eval.Scorers) > 0 {
+		primaryScorer = log.Eval.Scorers[0].Name
+	} else if log.Results != nil && len(log.Results.Scores) > 0 {
+		primaryScorer = log.Results.Scores[0].Name
+	}
+
+	var sampleScores []stats.SampleScore
+	for _, s := range log.Samples {
+		if len(s.Scores) == 0 {
+			continue
+		}
+
+		var targetScore InspectSampleScore
+		var found bool
+		if primaryScorer != "" {
+			targetScore, found = s.Scores[primaryScorer]
+		}
+		if !found {
+			keys := make([]string, 0, len(s.Scores))
+			for k := range s.Scores {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			if len(keys) > 0 {
+				targetScore = s.Scores[keys[0]]
+				found = true
+			}
+		}
+
+		scoreVal, valid := ScoreToFloat(targetScore.Value)
+		if !valid {
+			continue
+		}
+
+		var idStr string
+		switch v := s.ID.(type) {
+		case float64:
+			if v == math.Trunc(v) {
+				idStr = strconv.FormatInt(int64(v), 10)
+			} else {
+				idStr = fmt.Sprint(v)
+			}
+		case int:
+			idStr = strconv.Itoa(v)
+		case int64:
+			idStr = strconv.FormatInt(v, 10)
+		case string:
+			idStr = v
+		default:
+			idStr = fmt.Sprint(s.ID)
+		}
+
+		if s.ID == nil || idStr == "" || idStr == "<nil>" {
+			continue
+		}
+
+		if s.Epoch > 1 {
+			idStr = fmt.Sprintf("%s#%d", idStr, s.Epoch)
+		}
+
+		sampleScores = append(sampleScores, stats.SampleScore{
+			ID:    idStr,
+			Score: scoreVal,
+		})
+	}
+
+	return sampleScores, nil
 }

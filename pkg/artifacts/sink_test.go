@@ -59,7 +59,7 @@ func TestLocalDirSink(t *testing.T) {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
 
-	expectedPath := filepath.Join(tempDir, "test-ns", "run-123", "docs%2Freadme_comprehension", "result.json")
+	expectedPath := filepath.Join(tempDir, "runs", "abc1234", "docs%2Freadme_comprehension", "result.json")
 	if savedPath != expectedPath {
 		t.Errorf("Expected path %q, got %q", expectedPath, savedPath)
 	}
@@ -138,5 +138,81 @@ func TestLocalDirSink_DirectoryTraversalRejected(t *testing.T) {
 				t.Errorf("Expected error for %s, got nil", tt.name)
 			}
 		})
+	}
+}
+
+func TestNoopSink_StoreComparisonAndLoad(t *testing.T) {
+	sink := &NoopSink{}
+	path, err := sink.StoreComparison(t.Context(), "my-comp", []byte("{}"))
+	if err != nil {
+		t.Fatalf("StoreComparison returned error: %v", err)
+	}
+	if path != "" {
+		t.Errorf("Expected empty path, got %q", path)
+	}
+
+	if _, err := sink.Load(t.Context(), "any-path"); err == nil {
+		t.Errorf("Expected error from NoopSink.Load, got nil")
+	}
+}
+
+func TestLocalDirSink_StoreComparisonAndLoad(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "artifacts-comp-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	sink := &LocalDirSink{BaseDir: tempDir}
+	payload := []byte(`{"comparison": "comp-1"}`)
+
+	savedPath, err := sink.StoreComparison(t.Context(), "comp-1", payload)
+	if err != nil {
+		t.Fatalf("StoreComparison failed: %v", err)
+	}
+
+	expectedPath := filepath.Join(tempDir, "comparisons", "comp-1.json")
+	if savedPath != expectedPath {
+		t.Errorf("Expected path %q, got %q", expectedPath, savedPath)
+	}
+
+	// Create and load a valid run artifact under runs/
+	runDir := filepath.Join(tempDir, "runs", "commit-1", "task-1")
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatalf("Failed to create runDir: %v", err)
+	}
+	runPath := filepath.Join(runDir, "log.json")
+	runPayload := []byte(`{"version": 2, "samples": []}`)
+	if err := os.WriteFile(runPath, runPayload, 0644); err != nil {
+		t.Fatalf("Failed to write runPath: %v", err)
+	}
+
+	loaded, err := sink.Load(t.Context(), runPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if string(loaded) != string(runPayload) {
+		t.Errorf("Expected content %s, got %s", runPayload, loaded)
+	}
+
+	// Reject loading artifacts outside runs/
+	if _, err := sink.Load(t.Context(), savedPath); err == nil {
+		t.Errorf("Expected error loading path outside runs/, got nil")
+	}
+
+	// Test empty BaseDir in Load
+	emptySink := &LocalDirSink{BaseDir: ""}
+	if _, err := emptySink.Load(t.Context(), runPath); err == nil {
+		t.Errorf("Expected error on empty BaseDir in Load")
+	}
+
+	// Test traversal in StoreComparison
+	if _, err := sink.StoreComparison(t.Context(), "../escape", payload); err == nil {
+		t.Errorf("Expected error on directory traversal in comparison name")
+	}
+
+	// Test traversal in Load
+	if _, err := sink.Load(t.Context(), filepath.Join(tempDir, "../../../etc/passwd")); err == nil {
+		t.Errorf("Expected error on escaping base directory in Load")
 	}
 }

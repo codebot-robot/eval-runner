@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"cloud.google.com/go/storage"
@@ -33,6 +34,7 @@ const (
 // StorageClient defines the interface for interacting with GCS.
 type StorageClient interface {
 	WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error
+	ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error)
 	Close() error
 }
 
@@ -49,6 +51,29 @@ func (c *realStorageClient) WriteObject(ctx context.Context, bucket, object, con
 		return errors.Join(err, w.Close())
 	}
 	return w.Close()
+}
+
+func (c *realStorageClient) ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error) {
+	rc, err := c.client.Bucket(bucket).Object(object).NewReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	limit := maxBytes
+	if limit <= 0 {
+		limit = DefaultMaxUploadBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	closeErr := rc.Close()
+	if err != nil {
+		return nil, errors.Join(err, closeErr)
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("object gs://%s/%s exceeds maximum size of %d bytes", bucket, object, limit)
+	}
+	return data, nil
 }
 
 func (c *realStorageClient) Close() error {
@@ -131,6 +156,79 @@ func (s *GCSSink) ArtifactPrefix(commit string) string {
 		return ""
 	}
 	return fmt.Sprintf("gs://%s/runs/%s/", s.bucket, commit)
+}
+
+// StoreComparison persists comparison summary data as comparisons/<comparisonName>.json and returns the gs:// URI.
+func (s *GCSSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
+	if err := validateSafeComponent("comparisonName", comparisonName); err != nil {
+		return "", err
+	}
+	if s.bucket == "" {
+		return "", fmt.Errorf("bucket name is empty")
+	}
+
+	capLimit := s.maxUploadBytes
+	if capLimit <= 0 {
+		capLimit = DefaultMaxUploadBytes
+	}
+
+	uploadData := data
+	if int64(len(data)) > capLimit {
+		uploadData = data[:capLimit]
+	}
+
+	compObject := fmt.Sprintf("comparisons/%s.json", comparisonName)
+	if err := s.client.WriteObject(ctx, s.bucket, compObject, "application/json", uploadData); err != nil {
+		return "", fmt.Errorf("failed to upload comparison to gs://%s/%s: %w", s.bucket, compObject, err)
+	}
+
+	return fmt.Sprintf("gs://%s/%s", s.bucket, compObject), nil
+}
+
+// Load retrieves raw artifact bytes from the given storage path or URI, bounded by the maximum allowed artifact size.
+func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return nil, fmt.Errorf("artifact path must not be empty")
+	}
+
+	bucket := s.bucket
+	object := cleanPath
+
+	if strings.HasPrefix(cleanPath, "gs://") {
+		trimmed := strings.TrimPrefix(cleanPath, "gs://")
+		parts := strings.SplitN(trimmed, "/", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+			return nil, fmt.Errorf("invalid gs:// URI %q", path)
+		}
+		if s.bucket != "" && parts[0] != s.bucket {
+			return nil, fmt.Errorf("bucket mismatch: requested %q but sink configured for %q", parts[0], s.bucket)
+		}
+		bucket = parts[0]
+		object = parts[1]
+	} else {
+		object = strings.TrimPrefix(object, "/")
+	}
+
+	if bucket == "" {
+		return nil, fmt.Errorf("bucket name is empty")
+	}
+
+	if !strings.HasPrefix(object, "runs/") {
+		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' prefix", path)
+	}
+
+	capLimit := s.maxUploadBytes
+	if capLimit <= 0 {
+		capLimit = DefaultMaxUploadBytes
+	}
+
+	data, err := s.client.ReadObject(ctx, bucket, object, capLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read artifact from gs://%s/%s: %w", bucket, object, err)
+	}
+
+	return data, nil
 }
 
 // StoreArtifact writes the inspect log and summary.json to GCS and returns the gs:// URI.
