@@ -24,9 +24,11 @@ DATASET_PATH = Path(__file__).resolve().parent / "datasets" / "readme_questions.
 
 
 def validate_dataset(samples: list[dict], docs: str) -> None:
-    """Validates that every sample contains an evidence string found in the injected docs.
+    """Validates that every sample contains an evidence string found in the injected docs,
+    and that any optional 'absent' strings do not appear in the injected docs.
 
-    Raises ValueError if a sample is missing evidence or the evidence is not in docs.
+    Raises ValueError if a sample is missing evidence, evidence is not in docs,
+    or any 'absent' string appears in docs.
     """
     for i, sample in enumerate(samples):
         evidence = sample.get("evidence")
@@ -39,6 +41,22 @@ def validate_dataset(samples: list[dict], docs: str) -> None:
                 f"Sample #{i + 1} ({sample.get('input', 'unknown')}) evidence string not found in documentation:\n"
                 f"  Missing evidence: {evidence!r}"
             )
+        absent = sample.get("absent")
+        if absent is not None:
+            if not isinstance(absent, list):
+                raise ValueError(
+                    f"Sample #{i + 1} ({sample.get('input', 'unknown')}) 'absent' field must be a list of strings."
+                )
+            for absent_str in absent:
+                if not isinstance(absent_str, str) or not absent_str.strip():
+                    raise ValueError(
+                        f"Sample #{i + 1} ({sample.get('input', 'unknown')}) has an invalid absent string: {absent_str!r}."
+                    )
+                if absent_str in docs:
+                    raise ValueError(
+                        f"Sample #{i + 1} ({sample.get('input', 'unknown')}) absent string was found in documentation:\n"
+                        f"  Forbidden string: {absent_str!r}"
+                    )
 
 
 class TestDocsDrift(unittest.TestCase):
@@ -54,6 +72,14 @@ class TestDocsDrift(unittest.TestCase):
         """Positive test: Every sample in the dataset must have an evidence string present in docs."""
         self.assertGreaterEqual(len(self.samples), 20, "Expected at least 20 questions in dataset")
         validate_dataset(self.samples, self.docs)
+
+        # Ensure all negative controls have a non-empty absent list
+        negative_controls = [s for s in self.samples if "Not stated" in s.get("source", "")]
+        self.assertEqual(len(negative_controls), 5, "Expected 5 negative control questions")
+        for sample in negative_controls:
+            self.assertIn("absent", sample, f"Negative control missing 'absent' field: {sample.get('input')}")
+            self.assertIsInstance(sample["absent"], list)
+            self.assertGreater(len(sample["absent"]), 0, f"Negative control has empty 'absent' list: {sample.get('input')}")
 
     def test_missing_evidence_field_fails(self):
         """Negative unit check: Samples missing the evidence field must fail validation."""
@@ -98,6 +124,52 @@ class TestDocsDrift(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             validate_dataset(bad_sample, self.docs)
         self.assertIn("not found in documentation", str(ctx.exception))
+
+    def test_absent_string_in_docs_fails(self):
+        """Negative unit check: Samples with an absent string appearing in documentation must fail validation."""
+        bad_sample = [
+            {
+                "input": "Sample with forbidden string found in docs",
+                "choices": ["A", "B", "C", "D"],
+                "target": "A",
+                "source": "README.md",
+                "evidence": "CI for evals",
+                "absent": ["eval-runner"],
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            validate_dataset(bad_sample, self.docs)
+        self.assertIn("absent string was found in documentation", str(ctx.exception))
+
+    def test_invalid_absent_type_fails(self):
+        """Negative unit check: Samples with an invalid absent field type or empty item must fail validation."""
+        bad_sample_non_list = [
+            {
+                "input": "Sample with non-list absent",
+                "choices": ["A", "B", "C", "D"],
+                "target": "A",
+                "source": "README.md",
+                "evidence": "CI for evals",
+                "absent": "not_a_list",
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            validate_dataset(bad_sample_non_list, self.docs)
+        self.assertIn("'absent' field must be a list of strings", str(ctx.exception))
+
+        bad_sample_empty_str = [
+            {
+                "input": "Sample with empty absent item",
+                "choices": ["A", "B", "C", "D"],
+                "target": "A",
+                "source": "README.md",
+                "evidence": "CI for evals",
+                "absent": ["   "],
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            validate_dataset(bad_sample_empty_str, self.docs)
+        self.assertIn("has an invalid absent string", str(ctx.exception))
 
 
 if __name__ == "__main__":
