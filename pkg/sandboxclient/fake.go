@@ -21,14 +21,28 @@ import (
 
 // FakeClient is a test fake implementing Client and Factory.
 type FakeClient struct {
-	mu              sync.Mutex
-	ExecuteHandler  func(ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error)
-	ReadFileHandler func(ctx context.Context, path string) ([]byte, error)
-	CloseHandler    func() error
+	mu         sync.Mutex
+	CallCount  int
+	Calls      []ProcessConfig
+	ExecFn     func(call int, ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error)
+	CloseFn    func() error
+	CloseCalls int
 
-	Calls         []ProcessConfig
+	// Step-based convenience defaults
+	ListStdout string
+	ListStderr string
+	ListErr    error
+
+	CloneErr    error
+	CloneExit   int
+	CloneStderr string
+
+	CheckoutErr    error
+	CheckoutExit   int
+	CheckoutStderr string
+
 	ReadFileCalls []string
-	CloseCalls    int
+	ReadFileFn    func(ctx context.Context, path string) ([]byte, error)
 }
 
 // NewFakeClient returns a new FakeClient.
@@ -41,48 +55,74 @@ func (f *FakeClient) NewClient(podIP string) (Client, error) {
 	return f, nil
 }
 
-// Execute logs the call and delegates to ExecuteHandler if set.
-func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error) {
-	f.mu.Lock()
-	f.Calls = append(f.Calls, cfg)
-	handler := f.ExecuteHandler
-	f.mu.Unlock()
-
-	if handler != nil {
-		return handler(ctx, cfg)
-	}
-	return &ExecuteResult{ExitCode: 0}, nil
-}
-
-// ReadFile logs the call and delegates to ReadFileHandler if set.
+// ReadFile logs the call and delegates to ReadFileFn if set.
 func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	f.mu.Lock()
 	f.ReadFileCalls = append(f.ReadFileCalls, path)
-	handler := f.ReadFileHandler
+	fn := f.ReadFileFn
 	f.mu.Unlock()
 
-	if handler != nil {
-		return handler(ctx, path)
+	if fn != nil {
+		return fn(ctx, path)
 	}
 	return nil, nil
 }
 
-// Close increments CloseCalls and delegates to CloseHandler if set.
+// Close increments CloseCalls and delegates to CloseFn if set.
 func (f *FakeClient) Close() error {
 	f.mu.Lock()
 	f.CloseCalls++
-	handler := f.CloseHandler
+	fn := f.CloseFn
 	f.mu.Unlock()
 
-	if handler != nil {
-		return handler()
+	if fn != nil {
+		return fn()
 	}
 	return nil
 }
 
-// CallCount returns the number of Execute invocations.
-func (f *FakeClient) CallCount() int {
+// Execute logs the call and delegates to ExecFn or evaluates step-based defaults.
+func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.Calls)
+	f.CallCount++
+	f.Calls = append(f.Calls, cfg)
+	call := f.CallCount
+	execFn := f.ExecFn
+	f.mu.Unlock()
+
+	if execFn != nil {
+		return execFn(call, ctx, cfg)
+	}
+
+	if len(cfg.Command) == 0 {
+		return &ExecuteResult{ExitCode: 0}, nil
+	}
+
+	cmd0 := cfg.Command[0]
+	if cmd0 == "rm" {
+		return &ExecuteResult{ExitCode: 0}, nil
+	}
+
+	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+		if f.CloneErr != nil {
+			return nil, f.CloneErr
+		}
+		return &ExecuteResult{ExitCode: f.CloneExit, Stderr: f.CloneStderr}, nil
+	}
+
+	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "checkout" {
+		if f.CheckoutErr != nil {
+			return nil, f.CheckoutErr
+		}
+		return &ExecuteResult{ExitCode: f.CheckoutExit, Stderr: f.CheckoutStderr}, nil
+	}
+
+	if cmd0 == "./.evals/list" {
+		if f.ListErr != nil {
+			return nil, f.ListErr
+		}
+		return &ExecuteResult{ExitCode: 0, Stdout: f.ListStdout, Stderr: f.ListStderr}, nil
+	}
+
+	return &ExecuteResult{ExitCode: 0}, nil
 }

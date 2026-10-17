@@ -184,6 +184,22 @@ func TestSandboxClient_ReadFile(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Errorf("expected 500 error, got: %v", err)
 	}
+
+	// Test read file limit
+	clientWithFileLimit, err := New("127.0.0.1", WithRESTPort(httpPort), WithHTTPClient(httpServer.Client()), WithReadFileLimit(5))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer clientWithFileLimit.Close()
+
+	_, err = clientWithFileLimit.ReadFile(t.Context(), "repo/output.json")
+	if err == nil {
+		t.Fatalf("expected LimitError for file read over limit, got nil")
+	}
+	var limitErr *discovery.LimitError
+	if !errors.As(err, &limitErr) || limitErr.Stream != "file" {
+		t.Errorf("expected LimitError for file stream, got: %v", err)
+	}
 }
 
 func TestSandboxClient_Validation(t *testing.T) {

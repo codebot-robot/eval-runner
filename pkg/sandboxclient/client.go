@@ -38,6 +38,9 @@ const (
 
 	// DefaultHTTPTimeout is the default timeout for REST HTTP operations.
 	DefaultHTTPTimeout = 30 * time.Second
+
+	// DefaultReadFileLimit is the default maximum size for files read via REST (10 MiB).
+	DefaultReadFileLimit = 10 * 1024 * 1024
 )
 
 // ProcessConfig configures a process execution in the sandbox.
@@ -81,11 +84,12 @@ func (f FactoryFunc) NewClient(podIP string) (Client, error) {
 
 // ClientOptions configures a Client instance.
 type ClientOptions struct {
-	GRPCPort    int
-	RESTPort    int
-	StdoutLimit int64
-	StderrLimit int64
-	HTTPClient  *http.Client
+	GRPCPort      int
+	RESTPort      int
+	StdoutLimit   int64
+	StderrLimit   int64
+	ReadFileLimit int64
+	HTTPClient    *http.Client
 }
 
 // Option configures ClientOptions.
@@ -119,6 +123,13 @@ func WithStderrLimit(limit int64) Option {
 	}
 }
 
+// WithReadFileLimit overrides the file read limit.
+func WithReadFileLimit(limit int64) Option {
+	return func(o *ClientOptions) {
+		o.ReadFileLimit = limit
+	}
+}
+
 // WithHTTPClient overrides the HTTP client.
 func WithHTTPClient(client *http.Client) Option {
 	return func(o *ClientOptions) {
@@ -133,6 +144,7 @@ type sandboxdClient struct {
 	restBaseURL   string
 	stdoutLimit   int64
 	stderrLimit   int64
+	readFileLimit int64
 }
 
 // DefaultFactory returns a Factory that constructs sandboxd clients with the provided default options.
@@ -149,10 +161,11 @@ func New(podIP string, opts ...Option) (Client, error) {
 	}
 
 	options := ClientOptions{
-		GRPCPort:    DefaultGRPCPort,
-		RESTPort:    DefaultRESTPort,
-		StdoutLimit: discovery.MaxStdoutBytes,
-		StderrLimit: discovery.MaxStderrBytes,
+		GRPCPort:      DefaultGRPCPort,
+		RESTPort:      DefaultRESTPort,
+		StdoutLimit:   discovery.MaxStdoutBytes,
+		StderrLimit:   discovery.MaxStderrBytes,
+		ReadFileLimit: DefaultReadFileLimit,
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -183,6 +196,7 @@ func New(podIP string, opts ...Option) (Client, error) {
 		restBaseURL:   restBaseURL,
 		stdoutLimit:   options.StdoutLimit,
 		stderrLimit:   options.StderrLimit,
+		readFileLimit: options.ReadFileLimit,
 	}, nil
 }
 
@@ -256,9 +270,22 @@ func (c *sandboxdClient) ReadFile(ctx context.Context, path string) ([]byte, err
 		return nil, fmt.Errorf("file %q not found (HTTP 404)", path)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	limit := c.readFileLimit
+	if limit <= 0 {
+		limit = DefaultReadFileLimit
+	}
+
+	limitedReader := io.LimitReader(resp.Body, limit+1)
+	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body for %s: %w", path, err)
+	}
+
+	if int64(len(body)) > limit {
+		return nil, &discovery.LimitError{
+			Stream: "file",
+			Limit:  limit,
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {

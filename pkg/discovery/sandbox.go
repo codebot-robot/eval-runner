@@ -34,7 +34,7 @@ const (
 	DefaultControllerNamespace = "eval-runner"
 
 	// SandboxdImage is the pinned image containing the sandboxd binary.
-	SandboxdImage = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:v20261015-v1.0.7"
+	SandboxdImage = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:v20261015-v1.0.7@sha256:1cce7c94565de950903595864098bd32bd87dbd10865cab3f94fd0c58668cd42"
 
 	// DiscoveryImage is the pinned image used for discovery sandboxes.
 	DiscoveryImage = "alpine/git:v2.47.2"
