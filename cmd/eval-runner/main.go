@@ -102,11 +102,16 @@ func main() {
 	}
 
 	// Least-privilege namespaced caching per object:
-	// Runs are only cached in evalRunnerNamespace.
+	// Runs and Secrets are only cached in evalRunnerNamespace.
 	// Sandboxes and Pods are only cached in sandboxNamespace.
 	cacheOptions := cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
 			&v1alpha1.Run{}: {
+				Namespaces: map[string]cache.Config{
+					evalRunnerNamespace: {},
+				},
+			},
+			&corev1.Secret{}: {
 				Namespaces: map[string]cache.Config{
 					evalRunnerNamespace: {},
 				},
@@ -151,6 +156,7 @@ func main() {
 
 	reconciler := &controller.RunReconciler{
 		Client:               mgr.GetClient(),
+		APIReader:            mgr.GetAPIReader(),
 		Scheme:               mgr.GetScheme(),
 		ClientFactory:        clientFactory,
 		SandboxNamespace:     sandboxNamespace,

@@ -20,7 +20,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      evalrunner.gke-labs.dev/role: discovery
+      evalrunner.gke-labs.dev/sandbox: "true"
   policyTypes:
   - Ingress
   ingress:

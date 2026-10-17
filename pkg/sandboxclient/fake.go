@@ -43,6 +43,9 @@ type FakeClient struct {
 
 	ReadFileCalls []string
 	ReadFileFn    func(ctx context.Context, path string) ([]byte, error)
+
+	LastPodIP     string
+	LastAuthToken string
 }
 
 // NewFakeClient returns a new FakeClient.
@@ -51,7 +54,15 @@ func NewFakeClient() *FakeClient {
 }
 
 // NewClient implements Factory by returning this FakeClient.
-func (f *FakeClient) NewClient(podIP string) (Client, error) {
+func (f *FakeClient) NewClient(podIP string, opts ...Option) (Client, error) {
+	var o ClientOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	f.mu.Lock()
+	f.LastPodIP = podIP
+	f.LastAuthToken = o.AuthToken
+	f.mu.Unlock()
 	return f, nil
 }
 

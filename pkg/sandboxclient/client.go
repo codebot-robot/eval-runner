@@ -26,6 +26,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
@@ -71,15 +72,15 @@ type Client interface {
 
 // Factory creates Client instances for sandbox pod IPs.
 type Factory interface {
-	NewClient(podIP string) (Client, error)
+	NewClient(podIP string, opts ...Option) (Client, error)
 }
 
 // FactoryFunc adapts a function into a Factory.
-type FactoryFunc func(podIP string) (Client, error)
+type FactoryFunc func(podIP string, opts ...Option) (Client, error)
 
 // NewClient implements Factory.
-func (f FactoryFunc) NewClient(podIP string) (Client, error) {
-	return f(podIP)
+func (f FactoryFunc) NewClient(podIP string, opts ...Option) (Client, error) {
+	return f(podIP, opts...)
 }
 
 // ClientOptions configures a Client instance.
@@ -89,6 +90,7 @@ type ClientOptions struct {
 	StdoutLimit   int64
 	StderrLimit   int64
 	ReadFileLimit int64
+	AuthToken     string
 	HTTPClient    *http.Client
 }
 
@@ -130,6 +132,13 @@ func WithReadFileLimit(limit int64) Option {
 	}
 }
 
+// WithAuthToken sets the bearer token for authenticating with sandboxd.
+func WithAuthToken(token string) Option {
+	return func(o *ClientOptions) {
+		o.AuthToken = token
+	}
+}
+
 // WithHTTPClient overrides the HTTP client.
 func WithHTTPClient(client *http.Client) Option {
 	return func(o *ClientOptions) {
@@ -145,12 +154,16 @@ type sandboxdClient struct {
 	stdoutLimit   int64
 	stderrLimit   int64
 	readFileLimit int64
+	authToken     string
 }
 
 // DefaultFactory returns a Factory that constructs sandboxd clients with the provided default options.
-func DefaultFactory(opts ...Option) Factory {
-	return FactoryFunc(func(podIP string) (Client, error) {
-		return New(podIP, opts...)
+func DefaultFactory(defaultOpts ...Option) Factory {
+	return FactoryFunc(func(podIP string, opts ...Option) (Client, error) {
+		combined := make([]Option, 0, len(defaultOpts)+len(opts))
+		combined = append(combined, defaultOpts...)
+		combined = append(combined, opts...)
+		return New(podIP, combined...)
 	})
 }
 
@@ -171,10 +184,26 @@ func New(podIP string, opts ...Option) (Client, error) {
 		opt(&options)
 	}
 
+	var dialOpts []grpc.DialOption
+	dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if options.AuthToken != "" {
+		token := options.AuthToken
+		dialOpts = append(dialOpts,
+			grpc.WithUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, callOpts ...grpc.CallOption) error {
+				ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+				return invoker(ctx, method, req, reply, cc, callOpts...)
+			}),
+			grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, callOpts ...grpc.CallOption) (grpc.ClientStream, error) {
+				ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+				return streamer(ctx, desc, cc, method, callOpts...)
+			}),
+		)
+	}
+
 	grpcTarget := net.JoinHostPort(podIP, fmt.Sprintf("%d", options.GRPCPort))
 	conn, err := grpc.NewClient(
 		grpcTarget,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		dialOpts...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC client for %s: %w", grpcTarget, err)
@@ -197,6 +226,7 @@ func New(podIP string, opts ...Option) (Client, error) {
 		stdoutLimit:   options.StdoutLimit,
 		stderrLimit:   options.StderrLimit,
 		readFileLimit: options.ReadFileLimit,
+		authToken:     options.AuthToken,
 	}, nil
 }
 
@@ -254,6 +284,9 @@ func (c *sandboxdClient) ReadFile(ctx context.Context, path string) ([]byte, err
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 
 	resp, err := c.httpClient.Do(httpReq)

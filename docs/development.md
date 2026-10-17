@@ -31,6 +31,16 @@ This document describes how to set up your local development environment, deploy
 
   The controller will verify that the `Sandbox` CRD (`agents.x-k8s.io/v1beta1`) is present upon startup and fail fast with an error message if it is missing.
 
+### Upgrading the `sandboxd` Image
+
+`eval-runner` injects `sandboxd` into discovery sandboxes via an initContainer using the image reference pinned by digest in `pkg/discovery/sandbox.go` (`SandboxdImage` constant).
+
+To upgrade or repin the `sandboxd` image:
+1. Locate the target release or staging image from [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox).
+2. Inspect the multi-architecture manifest list using `docker buildx imagetools inspect <image-ref>` to verify available platforms and obtain its exact `@sha256:` digest.
+3. Update `SandboxdImage` in `pkg/discovery/sandbox.go` with the pinned digest reference.
+4. Run `ap test` and `ap e2e` to verify.
+
 Tools like `kind` and `kubectl` do not need to be installed beforehand for testing; test scripts can download and manage them automatically under `.build/bin/`.
 
 ## Project Automation (`ap`)

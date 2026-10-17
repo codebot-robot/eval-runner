@@ -56,7 +56,31 @@ const (
 
 	// LabelRole indicates the role of the sandbox.
 	LabelRole = "evalrunner.gke-labs.dev/role"
+
+	// LabelSandbox indicates whether the pod is a sandbox managed by eval-runner.
+	LabelSandbox = "evalrunner.gke-labs.dev/sandbox"
 )
+
+// AuthTokenDigest calculates the hex SHA-256 digest of the given bearer token.
+func AuthTokenDigest(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+// AuthSecretNameForRun deterministically generates a valid Kubernetes resource name
+// for a Run's auth Secret (DNS-1123 label, max 63 characters).
+func AuthSecretNameForRun(runName string) string {
+	prefix := "discovery-auth-"
+	fullName := prefix + runName
+	if len(fullName) <= 63 {
+		return fullName
+	}
+
+	h := sha256.Sum256([]byte(runName))
+	hashSuffix := "-" + hex.EncodeToString(h[:4]) // 9 chars: -12345678
+	maxPrefixLen := 63 - len(hashSuffix)
+	return fullName[:maxPrefixLen] + hashSuffix
+}
 
 // SandboxNameForRun deterministically generates a valid Kubernetes resource name
 // for a Run's discovery sandbox (DNS-1123 label, max 63 characters).
@@ -84,7 +108,7 @@ func SandboxNameForRun(runName string) string {
 // - resource requests and limits
 // - sandboxd gRPC (9090) and REST (8080) ports exposed
 // - readiness probe targeting sandboxd /v1/health
-func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sandbox {
+func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string, authTokenDigest ...string) *sandboxv1beta1.Sandbox {
 	if sandboxNamespace == "" {
 		sandboxNamespace = DefaultSandboxNamespace
 	}
@@ -102,9 +126,20 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sa
 		LabelRunName:      run.Name,
 		LabelRunNamespace: run.Namespace,
 		LabelRole:         "discovery",
+		LabelSandbox:      "true",
 	}
 	if run.UID != "" {
 		labels[LabelRunUID] = string(run.UID)
+	}
+
+	cmd := []string{
+		"/sandboxd-bin/sandboxd",
+		"--root-dir=/workspace",
+		"--rest-port=8080",
+		"--grpc-port=9090",
+	}
+	if len(authTokenDigest) > 0 && authTokenDigest[0] != "" {
+		cmd = append(cmd, "--auth-token-sha256="+authTokenDigest[0])
 	}
 
 	return &sandboxv1beta1.Sandbox{
@@ -172,14 +207,9 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sa
 						},
 						Containers: []corev1.Container{
 							{
-								Name:  DiscoveryContainerName,
-								Image: DiscoveryImage,
-								Command: []string{
-									"/sandboxd-bin/sandboxd",
-									"--root-dir=/workspace",
-									"--rest-port=8080",
-									"--grpc-port=9090",
-								},
+								Name:    DiscoveryContainerName,
+								Image:   DiscoveryImage,
+								Command: cmd,
 								Ports: []corev1.ContainerPort{
 									{
 										Name:          "rest",

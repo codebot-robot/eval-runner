@@ -104,4 +104,11 @@ Future pull requests that introduce an architectural decision should append an e
   Controller RBAC drops `pods/exec`. An ingress `NetworkPolicy` in `eval-runner-sandbox` restricts ports `:9090` and `:8080` to controller pods in `eval-runner`.
 - **Rationale**: Driving execution via structured RPCs supersedes heuristic regex parsing of mixed stderr streams. Step-based discovery guarantees transient clone failures are retried without any risk of retrying permanent errors like missing `.evals/list` or non-existent commit SHAs. Direct in-cluster RPC avoids routing through the Kubernetes API server via `pods/exec`, adhering to least-privilege RBAC. Because sandboxd has no authentication, ingress NetworkPolicy ensures sandbox pods are only accessible by the authorized controller.
 
+### ADR-014: Enable sandboxd bearer auth (--auth-token-sha256) and generalise NetworkPolicy podSelector
+- **Date**: 2026-10-17
+- **Status**: Accepted
+- **Decision**: Configure `sandboxd` with `--auth-token-sha256=<hex>` in sandbox pod specs. The controller generates a random 256-bit bearer token per sandbox, persists it in a label-free Secret in `eval-runner` (and caches in controller memory), and injects only the hex SHA-256 digest into the sandbox pod command line. The controller presents the bearer token on all gRPC and REST RPCs. `/v1/health` remains unauthenticated for kubelet readiness probes. Generalise the ingress NetworkPolicy podSelector from `evalrunner.gke-labs.dev/role: discovery` to `evalrunner.gke-labs.dev/sandbox: "true"`, covering both discovery and future sample sandboxes by default.
+- **Rationale**: Defense in depth against cluster environments where NetworkPolicy enforcement is disabled or incomplete. Minting tokens in the controller and only exposing SHA-256 digests in pod specs ensures sandbox processes cannot read the credentials required to reach sandboxd from outside. Label-free Secrets in `eval-runner` prevent leakage into the sandbox namespace while guaranteeing controller restart resilience. Generalising the podSelector to `evalrunner.gke-labs.dev/sandbox: "true"` prevents new sandbox roles from being accidentally exposed without ingress policies.
+
+
 
