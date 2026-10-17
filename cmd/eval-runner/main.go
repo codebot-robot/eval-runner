@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/controller"
@@ -65,6 +66,7 @@ func main() {
 	var evalRunnerNamespace string
 	var sandboxNamespace string
 	var probeAddr string
+	var discoveryDeadline time.Duration
 	var maxStdoutBytes int64
 	var maxStderrBytes int64
 	var maxDiscoveryAttempts int
@@ -72,6 +74,7 @@ func main() {
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.DurationVar(&discoveryDeadline, "discovery-deadline", controller.DefaultDiscoveryDeadline, "Overall deadline for discovery to complete")
 	flag.Int64Var(&maxStdoutBytes, "max-stdout-bytes", discovery.MaxStdoutBytes, "Maximum stdout bytes buffered from discovery execution")
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of discovery retry attempts for transient errors")
@@ -159,6 +162,7 @@ func main() {
 		Scheme:               mgr.GetScheme(),
 		Executor:             executor,
 		SandboxNamespace:     sandboxNamespace,
+		DiscoveryDeadline:    discoveryDeadline,
 		MaxStdoutBytes:       maxStdoutBytes,
 		MaxStderrBytes:       maxStderrBytes,
 		MaxMessageBytes:      discovery.MaxMessageBytes,
