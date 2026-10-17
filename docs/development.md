@@ -62,7 +62,7 @@ This task is also invoked automatically whenever `ap generate` is executed.
 
 To deploy `eval-runner` into a target Kubernetes cluster (with `agent-sandbox` installed), deploys must use a unique image tag rather than `latest`. Deploying with `latest` leaves the Deployment manifest byte-identical when updating an existing installation, causing `kubectl apply` to report `unchanged` and leaving the cluster silently running the previous digest.
 
-The recommended way to deploy is using the `./dev/tasks/deploy` wrapper, which automatically sets `IMAGE_TAG` from git (short SHA, plus a `-dirty` suffix when the working tree is dirty) and calls `ap deploy`:
+The recommended way to deploy is using the `./dev/tasks/deploy` wrapper, which automatically sets `IMAGE_TAG` from git (short SHA, plus a `-dirty` suffix when the working tree is dirty), invokes `ap` at the repository-pinned version via `go run` (never from `PATH`), verifies that the pushed multi-platform index contains `linux/amd64`, and applies the manifests:
 
 ```bash
 IMAGE_PREFIX=<registry> ./dev/tasks/deploy
@@ -82,12 +82,13 @@ IMAGE_TAG=$(git rev-parse --short HEAD) IMAGE_PREFIX=<registry> ap deploy
 
 (`ap` honours `IMAGE_TAG`.)
 
-`ap deploy` will:
-1. Build the `eval-runner` container image (for `linux/amd64`).
-2. Tag and push the image to `<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`.
-3. Apply the manifests in `k8s/` in order (`00-namespaces.yaml`, `evalrunner.gke-labs.dev_runs.yaml`, `rbac.yaml`, `runner-deployment.yaml`).
-4. Substitute the `eval-runner` image reference in the deployment with the full pushed image reference (`<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`).
-5. Wait for the CRD to be established and the deployment to become available.
+`./dev/tasks/deploy` will:
+1. Build the `eval-runner` container image (for `linux/amd64` and `linux/arm64`, pinned in `.ap/images.yaml`).
+2. Tag and push the multi-platform image index to `<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`.
+3. Inspect the pushed index with `docker buildx imagetools inspect` and verify it contains `linux/amd64`, failing immediately before applying manifests if absent.
+4. Apply the manifests in `k8s/` in order (`00-namespaces.yaml`, `evalrunner.gke-labs.dev_runs.yaml`, `rbac.yaml`, `runner-deployment.yaml`).
+5. Substitute the `eval-runner` image reference in the deployment with the full pushed image reference (`<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`).
+6. Wait for the CRD to be established and the deployment to become available.
 
 ### Verifying the Running Digest
 
