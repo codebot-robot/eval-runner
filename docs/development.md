@@ -60,24 +60,50 @@ This task is also invoked automatically whenever `ap generate` is executed.
 
 ## Deploying to a Cluster (`ap deploy`)
 
-To deploy `eval-runner` into a target Kubernetes cluster (with `agent-sandbox` installed):
+To deploy `eval-runner` into a target Kubernetes cluster (with `agent-sandbox` installed), deploys must use a unique image tag rather than `latest`. Deploying with `latest` leaves the Deployment manifest byte-identical when updating an existing installation, causing `kubectl apply` to report `unchanged` and leaving the cluster silently running the previous digest.
+
+The recommended way to deploy is using the `./dev/tasks/deploy` wrapper, which automatically sets `IMAGE_TAG` from git (short SHA, plus a `-dirty` suffix when the working tree is dirty) and calls `ap deploy`:
 
 ```bash
-IMAGE_PREFIX=<registry> ap deploy
+IMAGE_PREFIX=<registry> ./dev/tasks/deploy
 ```
 
 For example, on Google Kubernetes Engine (GKE):
 
 ```bash
-IMAGE_PREFIX=gcr.io/my-gke-project ap deploy
+IMAGE_PREFIX=gcr.io/my-gke-project ./dev/tasks/deploy
 ```
+
+Alternatively, invoke `ap deploy` directly by setting a unique tag:
+
+```bash
+IMAGE_TAG=$(git rev-parse --short HEAD) IMAGE_PREFIX=<registry> ap deploy
+```
+
+(`ap` honours `IMAGE_TAG`.)
 
 `ap deploy` will:
 1. Build the `eval-runner` container image (for `linux/amd64`).
 2. Tag and push the image to `<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`.
 3. Apply the manifests in `k8s/` in order (`00-namespaces.yaml`, `evalrunner.gke-labs.dev_runs.yaml`, `rbac.yaml`, `runner-deployment.yaml`).
-4. Substitute the `eval-runner` image reference in the deployment with the full pushed image reference.
+4. Substitute the `eval-runner` image reference in the deployment with the full pushed image reference (`<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`).
 5. Wait for the CRD to be established and the deployment to become available.
+
+### Verifying the Running Digest
+
+To verify which image digest is actively running in the cluster:
+
+```bash
+kubectl -n eval-runner get pods -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
+```
+
+### Recovery: Manual Rollout Restart
+
+If a cluster was previously deployed with `latest` (or an unchanged tag) and did not roll automatically, restart the deployment to force Kubernetes to pull and start updated pods:
+
+```bash
+kubectl -n eval-runner rollout restart deployment/eval-runner-controller
+```
 
 ## Creating a Run by Hand
 
