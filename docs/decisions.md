@@ -116,6 +116,13 @@ Future pull requests that introduce an architectural decision should append an e
 - **Decision**: Sibling images are derived from the controller image until ap supports sibling placeholders (gke-labs-infra#464). Remove the deploy-time manifest rewrite in `dev/tasks/deploy` and derive the `sample-runner` image reference at runtime from the controller's own Pod spec via the Downward API (`POD_NAME` and `POD_NAMESPACE`). The controller queries its own Pod in `eval-runner` (granted via scoped RBAC `get` on `pods`), finds the `eval-runner` container image, and replaces the final path segment `eval-runner` with `sample-runner`, preserving repository prefix and tag. Image references with digest references (`@sha256:`) or mismatched naming fail fast at startup asking for the flag. `--sample-runner-image` is retained as an explicit override.
 - **Rationale**: Eliminates deploy-time mutations of tracked deployment manifests that caused dirty git working trees (`-dirty` image tags) and relied on platform-specific sed semantics. ap guarantees one `IMAGE_PREFIX` and one `IMAGE_TAG` per deploy, making derivation consistent. Once `gke-labs-infra#464` ships declarative placeholder substitution for sibling images, this runtime derivation can be replaced cleanly.
 
+### ADR-016: Per-task success rate with 95% Wilson/Student-t CI on Run status and printer columns
+- **Date**: 2026-10-17
+- **Status**: Accepted
+- **Decision**: Record `status.tasks[].successRate` and `status.tasks[].successRateCI: {lower, upper, confidence: 0.95, method: "wilson"|"t"}` on each completed task on a `Run`. Binary scorers compute the Wilson score interval via `stats.Proportion`; continuous non-binary scorers compute Student's t-intervals via `stats.Mean` on in-memory per-sample scores. Add `status.summary` recording completed/failed counts, total samples, and simple mean success rate with its range. Declare CRD printer columns for `kubectl get runs` (`PHASE`, `TASKS` [completed/total], `SAMPLES`, `AGE`) and `kubectl get runs -o wide` (`RATES` compact `id=rate [lo,hi]` string capped at 120 chars). Provide CLI inspection via `evalstats -from-run <name>`.
+- **Rationale**: Concrete first step of "CI stands for confidence interval". In accordance with the status discipline in ADR-007 and #53's principle, durable per-sample trajectories belong in the artifact sink (#44), while the `Run` resource carries bounded summary progress and intervals. This provides immediate statistical visibility in `kubectl` and the terminal before baseline pairing and web UI land.
+
+
 
 
 

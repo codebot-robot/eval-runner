@@ -35,6 +35,12 @@ func TestParseInspectLog_Binary20_17(t *testing.T) {
 	if agg.Samples != 20 {
 		t.Errorf("Expected 20 samples, got %d", agg.Samples)
 	}
+	if len(agg.Scores) != 20 {
+		t.Errorf("Expected 20 per-sample scores, got %d", len(agg.Scores))
+	}
+	if !agg.IsBinary() {
+		t.Errorf("Expected binary_20_17 to be binary")
+	}
 	if agg.Successes != 17 {
 		t.Errorf("Expected 17 successes, got %d", agg.Successes)
 	}
@@ -93,6 +99,12 @@ func TestParseInspectLog_MixedScores(t *testing.T) {
 	// Scores: 1.0 + 0.5 + 0.5 + 1.0 + 0.0 + 0.75 = 3.75 over 6 samples
 	if agg.Samples != 6 {
 		t.Errorf("Expected 6 samples, got %d", agg.Samples)
+	}
+	if len(agg.Scores) != 6 {
+		t.Errorf("Expected 6 per-sample scores, got %d", len(agg.Scores))
+	}
+	if agg.IsBinary() {
+		t.Errorf("Expected MixedScores to be non-binary")
 	}
 	// Successes (score >= 1.0): samples 1 and 4 -> 2
 	if agg.Successes != 2 {

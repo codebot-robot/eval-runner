@@ -86,6 +86,21 @@ type TaskAggregates struct {
 	Samples   int
 	Successes int
 	MeanScore *float64
+	Scores    []float64
+}
+
+// IsBinary reports whether all parsed sample scores are binary (0.0 or 1.0),
+// or if no individual sample scores were recorded (e.g. results fallback).
+func (a *TaskAggregates) IsBinary() bool {
+	if len(a.Scores) == 0 {
+		return true
+	}
+	for _, s := range a.Scores {
+		if s != 0.0 && s != 1.0 {
+			return false
+		}
+	}
+	return true
 }
 
 // ScoreToFloat converts a scalar score value (number, bool, or sentinel string)
@@ -194,6 +209,7 @@ func ParseInspectLog(data []byte) (*TaskAggregates, error) {
 
 			agg.Samples++
 			totalScore += scoreVal
+			agg.Scores = append(agg.Scores, scoreVal)
 			if scoreVal >= 1.0 {
 				agg.Successes++
 			}

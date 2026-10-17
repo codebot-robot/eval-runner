@@ -34,6 +34,16 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.summary.tasks
+      name: Tasks
+      type: string
+    - jsonPath: .status.summary.totalSamples
+      name: Samples
+      type: integer
+    - jsonPath: .status.summary.rates
+      name: Rates
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -256,6 +266,56 @@ spec:
                 - Completed
                 - Failed
                 type: string
+              summary:
+                description: Summary provides aggregate statistics across tasks in
+                  the Run.
+                properties:
+                  meanSuccessRate:
+                    description: MeanSuccessRate is the simple mean of task success
+                      rates across completed tasks.
+                    type: number
+                  rates:
+                    description: Rates is a compact string of per-task rates and confidence
+                      intervals for wide printer column display.
+                    type: string
+                  successRateRange:
+                    description: SuccessRateRange is the min and max of task success
+                      rates across completed tasks.
+                    properties:
+                      max:
+                        description: Max is the maximum value in the range.
+                        type: number
+                      min:
+                        description: Min is the minimum value in the range.
+                        type: number
+                    required:
+                    - max
+                    - min
+                    type: object
+                  tasks:
+                    description: Tasks is a compact string representing completed
+                      vs total tasks (e.g. "2/2").
+                    type: string
+                  tasksCompleted:
+                    description: TasksCompleted is the number of tasks that completed
+                      successfully.
+                    type: integer
+                  tasksFailed:
+                    description: TasksFailed is the number of tasks that failed.
+                    type: integer
+                  tasksTotal:
+                    description: TasksTotal is the total number of tasks.
+                    type: integer
+                  totalSamples:
+                    description: TotalSamples is the total number of samples evaluated
+                      across all tasks.
+                    type: integer
+                required:
+                - tasksCompleted
+                - tasksFailed
+                - tasksTotal
+                - totalSamples
+                type: object
               tasks:
                 description: Tasks records the status and results for each executed
                   eval task.
@@ -294,6 +354,42 @@ spec:
                         to Running.
                       format: date-time
                       type: string
+                    successRate:
+                      description: SuccessRate is the point estimate of the success
+                        rate in [0, 1].
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    successRateCI:
+                      description: SuccessRateCI is the confidence interval for the
+                        success rate.
+                      properties:
+                        confidence:
+                          description: Confidence is the confidence level (e.g. 0.95
+                            for 95% confidence).
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                        lower:
+                          description: Lower is the lower confidence bound.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                        method:
+                          description: Method is the estimation method used (e.g.
+                            "wilson", "t").
+                          type: string
+                        upper:
+                          description: Upper is the upper confidence bound.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                      required:
+                      - confidence
+                      - lower
+                      - method
+                      - upper
+                      type: object
                     successes:
                       description: Successes is the number of samples with score ==
                         1 (for binary scorers).
