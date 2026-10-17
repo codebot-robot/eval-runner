@@ -71,6 +71,7 @@ func main() {
 	var probeAddr string
 	var discoveryDeadline time.Duration
 	var executionDeadline time.Duration
+	var taskGracePeriod time.Duration
 	var maxStdoutBytes int64
 	var maxStderrBytes int64
 	var maxDiscoveryAttempts int
@@ -83,6 +84,7 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.DurationVar(&discoveryDeadline, "discovery-deadline", controller.DefaultDiscoveryDeadline, "Overall deadline for discovery to complete")
 	flag.DurationVar(&executionDeadline, "execution-deadline", controller.DefaultExecutionDeadline, "Overall deadline for sample execution to complete")
+	flag.DurationVar(&taskGracePeriod, "task-grace-period", controller.DefaultTaskGracePeriod, "Grace period before failing a Running task whose sandbox is missing")
 	flag.Int64Var(&maxStdoutBytes, "max-stdout-bytes", discovery.MaxStdoutBytes, "Maximum stdout bytes buffered from discovery execution")
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
@@ -209,6 +211,7 @@ func main() {
 		SandboxNamespace:     sandboxNamespace,
 		DiscoveryDeadline:    discoveryDeadline,
 		ExecutionDeadline:    executionDeadline,
+		TaskGracePeriod:      taskGracePeriod,
 		MaxStdoutBytes:       maxStdoutBytes,
 		MaxStderrBytes:       maxStderrBytes,
 		MaxMessageBytes:      discovery.MaxMessageBytes,

@@ -3047,3 +3047,520 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 		t.Errorf("Expected failure message to mention sandbox missing, got: %s", tMissing.Message)
 	}
 }
+
+func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
+	scheme := setupScheme(t)
+
+	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	currentTime := startTime
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-cache-lag",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-lag", Spec: "eval.py@lag"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-lag", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	hideSandboxesFromCache := false
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if hideSandboxesFromCache {
+					if _, ok := list.(*sandboxv1beta1.SandboxList); ok {
+						return nil
+					}
+				}
+				return c.List(ctx, list, opts...)
+			},
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if hideSandboxesFromCache {
+					if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+						return apierrors.NewNotFound(sandboxv1beta1.GroupVersion.WithResource("sandboxes").GroupResource(), key.Name)
+					}
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              func() time.Time { return currentTime },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-cache-lag"}}
+
+	// Turn 1: Starts pending task, creates sandbox in API server, records StartedAt in status
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run after Turn 1: %v", err)
+	}
+	if len(updatedRun.Status.Tasks) != 1 || updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
+		t.Fatalf("Expected task to be Running, got %+v", updatedRun.Status.Tasks)
+	}
+	if updatedRun.Status.Tasks[0].StartedAt == nil {
+		t.Fatalf("Expected StartedAt to be set on Running task")
+	}
+
+	// Turn 2: Simulate cache lag. Cache does not see sandbox.
+	// Current time is 5 seconds after start (within 30s grace period).
+	hideSandboxesFromCache = true
+	currentTime = startTime.Add(5 * time.Second)
+
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 reconcile error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter > 0 during grace period, got %v", res.RequeueAfter)
+	}
+
+	// Verify task is STILL Running and not failed spuriously
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run after Turn 2: %v", err)
+	}
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
+		t.Errorf("Expected task to remain Running during grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+
+	// Turn 3: Grace period has now elapsed (35 seconds after start > 30s default grace period).
+	// Sandbox is still absent from cache.
+	currentTime = startTime.Add(35 * time.Second)
+
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 3 reconcile error: %v", err)
+	}
+
+	// Verify task now fails terminal
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run after Turn 3: %v", err)
+	}
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task to fail after grace period elapsed, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Tasks[0].Message, "task sandbox missing") {
+		t.Errorf("Expected failure message to mention sandbox missing, got: %s", updatedRun.Status.Tasks[0].Message)
+	}
+}
+
+func TestReconcileRunningTaskSandboxCacheLagRecoversBeforeGracePeriod(t *testing.T) {
+	scheme := setupScheme(t)
+
+	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	currentTime := startTime
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-cache-lag-recover",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-recover", Spec: "eval.py@recover"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-recover", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	hideSandboxesFromCache := false
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if hideSandboxesFromCache {
+					if _, ok := list.(*sandboxv1beta1.SandboxList); ok {
+						return nil
+					}
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+
+	inspectLog := `{"version":2,"status":"success","eval":{"task":"task-recover"},"samples":[{"id":1,"scores":{"choice":{"value":1.0}}}]}`
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              func() time.Time { return currentTime },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-cache-lag-recover"}}
+
+	// Turn 1: Create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	// Turn 2: Cache lags (5s in). Task stays Running.
+	hideSandboxesFromCache = true
+	currentTime = startTime.Add(5 * time.Second)
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter > 0 during grace period")
+	}
+
+	// Turn 3: Cache catches up (10s in), backing Pod is ready
+	hideSandboxesFromCache = false
+	currentTime = startTime.Add(10 * time.Second)
+
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	if len(sbList.Items) != 1 {
+		t.Fatalf("Expected 1 sandbox in client, got %d", len(sbList.Items))
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbList.Items[0].Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.15",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Reconcile Turn 3: Executes task
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 3 error: %v", err)
+	}
+
+	// Turn 4: Completes Run
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 4 error: %v", err)
+	}
+
+	var finalRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &finalRun)
+	if finalRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("Expected Run to be Completed, got %s", finalRun.Status.Phase)
+	}
+	if finalRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseCompleted {
+		t.Errorf("Expected task to be Completed, got %s", finalRun.Status.Tasks[0].Phase)
+	}
+}
+
+func TestReconcileRunningTaskSandboxCacheLagDirectAPIReader(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-api-reader",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-direct", Spec: "eval.py@direct"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-direct", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	hideFromCacheList := false
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if hideFromCacheList {
+					if _, ok := list.(*sandboxv1beta1.SandboxList); ok {
+						return nil
+					}
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+
+	// APIReader points to uncached client which can read the sandbox directly
+	apiReader := cl
+
+	inspectLog := `{"version":2,"status":"success","eval":{"task":"task-direct"},"samples":[{"id":1,"scores":{"choice":{"value":1.0}}}]}`
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-api-reader"}}
+
+	// Turn 1: Create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	// Simulate cache lag on List, but create ready Pod
+	hideFromCacheList = true
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun(run.Name, "task-direct"),
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.18",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Turn 2: Cache List returns 0 sandboxes, but APIReader finds it and executes
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue after executing task via APIReader")
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseCompleted {
+		t.Errorf("Expected task to complete via APIReader uncached read, got %s (msg: %s)", updatedRun.Status.Tasks[0].Phase, updatedRun.Status.Tasks[0].Message)
+	}
+}
+
+func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T) {
+	scheme := setupScheme(t)
+
+	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	currentTime := startTime
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-genuine-delete",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-del", Spec: "eval.py@del"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-del", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              func() time.Time { return currentTime },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-genuine-delete"}}
+
+	// Turn 1: Create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	// Genuinely delete the sandbox from the API server
+	sbName := discovery.TaskSandboxNameForRun(run.Name, "task-del")
+	var sb sandboxv1beta1.Sandbox
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sbName}, &sb); err != nil {
+		t.Fatalf("Failed to get created sandbox: %v", err)
+	}
+	if err := cl.Delete(t.Context(), &sb); err != nil {
+		t.Fatalf("Failed to delete sandbox: %v", err)
+	}
+
+	// Turn 2: Reconcile at t = 5s (within grace period). Task must stay Running and requeue.
+	currentTime = startTime.Add(5 * time.Second)
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter > 0 during grace period")
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
+		t.Errorf("Expected task to remain Running within grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+
+	// Turn 3: Reconcile at t = 35s (past grace period). Task must now fail.
+	currentTime = startTime.Add(35 * time.Second)
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 3 error: %v", err)
+	}
+
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected genuinely deleted sandbox to fail task after grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Tasks[0].Message, "task sandbox missing") {
+		t.Errorf("Expected failure message to mention sandbox missing, got: %s", updatedRun.Status.Tasks[0].Message)
+	}
+}
+
+func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T) {
+	scheme := setupScheme(t)
+
+	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	currentTime := startTime
+
+	// Task has StartedAt == nil, but token Secret exists with CreationTimestamp
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-secret-time",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-secret-time", Spec: "eval.py@test"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-secret-time", Phase: v1alpha1.TaskPhaseRunning}, // StartedAt is nil
+			},
+		},
+	}
+
+	secretName := discovery.TaskAuthSecretNameForRun(run.Name, "task-secret-time")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              secretName,
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(startTime),
+		},
+		Data: map[string][]byte{"token": []byte("dummy-token")},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, secret).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              func() time.Time { return currentTime },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-secret-time"}}
+
+	// At t = 5s (within grace period of 30s): stays Running
+	currentTime = startTime.Add(5 * time.Second)
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error at 5s: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter > 0 during grace period")
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
+		t.Errorf("Expected task to remain Running within grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+
+	// At t = 35s (past grace period): fails
+	currentTime = startTime.Add(35 * time.Second)
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error at 35s: %v", err)
+	}
+
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task to fail after grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+}

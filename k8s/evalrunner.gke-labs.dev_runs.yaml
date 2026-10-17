@@ -285,6 +285,11 @@ spec:
                     samples:
                       description: Samples is the number of samples scored.
                       type: integer
+                    startedAt:
+                      description: StartedAt is the time when the task transitioned
+                        to Running.
+                      format: date-time
+                      type: string
                     successes:
                       description: Successes is the number of samples with score ==
                         1 (for binary scorers).

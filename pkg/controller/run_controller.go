@@ -65,6 +65,9 @@ const (
 
 	// DefaultMaxParallelTasks is the default maximum number of concurrent task sandboxes.
 	DefaultMaxParallelTasks = 4
+
+	// DefaultTaskGracePeriod is the default grace period before treating absence of a running task's sandbox as a failure.
+	DefaultTaskGracePeriod = 30 * time.Second
 )
 
 // DefaultDiscoveryRetryBackoff defines the default backoff intervals between clone retry attempts.
@@ -133,6 +136,10 @@ type RunReconciler struct {
 	// ExecutionDeadline is the overall deadline duration for sample execution.
 	// Defaults to DefaultExecutionDeadline (30m) if <= 0.
 	ExecutionDeadline time.Duration
+
+	// TaskGracePeriod is the grace period before treating absence of a running task's sandbox as a failure.
+	// Defaults to DefaultTaskGracePeriod (30s) if <= 0.
+	TaskGracePeriod time.Duration
 
 	// MaxParallelTasks is the maximum number of task sandboxes to run concurrently.
 	// Defaults to DefaultMaxParallelTasks (4) if <= 0.
@@ -387,6 +394,13 @@ func (r *RunReconciler) executionDeadline() time.Duration {
 		return r.ExecutionDeadline
 	}
 	return DefaultExecutionDeadline
+}
+
+func (r *RunReconciler) taskGracePeriod() time.Duration {
+	if r.TaskGracePeriod > 0 {
+		return r.TaskGracePeriod
+	}
+	return DefaultTaskGracePeriod
 }
 
 func (r *RunReconciler) maxParallelTasks() int {
@@ -1269,6 +1283,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			}
 
 			if len(started) > 0 || len(failedTasks) > 0 {
+				now := metav1.NewTime(r.now())
 				err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 					for i := range status.Tasks {
 						tid := status.Tasks[i].ID
@@ -1279,6 +1294,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 							for _, s := range started {
 								if s == tid {
 									status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
+									status.Tasks[i].StartedAt = &now
 									break
 								}
 							}
@@ -1297,6 +1313,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 						for _, s := range started {
 							if s == tid {
 								run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
+								run.Status.Tasks[i].StartedAt = &now
 								break
 							}
 						}
@@ -1314,6 +1331,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 	var readyTasks []readyTaskItem
 	terminalFailures := make(map[string]string)
+	waitingInGracePeriod := false
+	var minGraceRemaining time.Duration
 
 	for _, t := range run.Status.Tasks {
 		if t.Phase != v1alpha1.TaskPhaseRunning {
@@ -1322,6 +1341,62 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 		sb, hasSB := sandboxesByTask[t.ID]
 		if !hasSB {
+			// Prefer reading back the created object with the API reader (uncached)
+			sbName := discovery.TaskSandboxNameForRun(run.Name, t.ID)
+			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
+			reader := client.Reader(r.Client)
+			if r.APIReader != nil {
+				reader = r.APIReader
+			}
+			var directSB sandboxv1beta1.Sandbox
+			if err := reader.Get(ctx, sbKey, &directSB); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+			} else {
+				sb = directSB
+				hasSB = true
+				sandboxesByTask[t.ID] = directSB
+			}
+		}
+
+		if !hasSB {
+			var startedAt time.Time
+			if t.StartedAt != nil {
+				startedAt = t.StartedAt.Time
+			} else {
+				secretName := discovery.TaskAuthSecretNameForRun(run.Name, t.ID)
+				secretNamespace := run.Namespace
+				if secretNamespace == "" {
+					secretNamespace = discovery.DefaultControllerNamespace
+				}
+				reader := client.Reader(r.Client)
+				if r.APIReader != nil {
+					reader = r.APIReader
+				}
+				var secret corev1.Secret
+				if err := reader.Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: secretName}, &secret); err != nil {
+					if !apierrors.IsNotFound(err) {
+						return ctrl.Result{}, err
+					}
+				} else if !secret.CreationTimestamp.IsZero() {
+					startedAt = secret.CreationTimestamp.Time
+				}
+			}
+
+			if !startedAt.IsZero() {
+				elapsed := r.now().Sub(startedAt)
+				if elapsed < r.taskGracePeriod() {
+					logger.V(1).Info("Task sandbox not yet visible in cache; waiting within grace period", "task", t.ID)
+					waitingInGracePeriod = true
+					remaining := r.taskGracePeriod() - elapsed
+					if minGraceRemaining == 0 || remaining < minGraceRemaining {
+						minGraceRemaining = remaining
+					}
+					continue
+				}
+			}
+
 			terminalFailures[t.ID] = "task sandbox missing while in Running phase"
 			continue
 		}
@@ -1378,18 +1453,23 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 
 		for tid := range terminalFailures {
+			sbName := discovery.TaskSandboxNameForRun(run.Name, tid)
+			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
 			if sb, ok := sandboxesByTask[tid]; ok {
-				sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
 				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
 					logger.Error(err, "failed to delete task sandbox on terminal failure", "task", tid)
 				}
-				r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
 			}
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
 		}
 	}
 
 	if len(readyTasks) == 0 {
-		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+		requeueAfter := 1 * time.Second
+		if waitingInGracePeriod && minGraceRemaining > 0 && minGraceRemaining < requeueAfter {
+			requeueAfter = minGraceRemaining
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	resultsChan := make(chan taskExecutionResult, len(readyTasks))

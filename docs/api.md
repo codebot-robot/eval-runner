@@ -120,6 +120,7 @@ status:
 |---|---|---|
 | `id` | `string` | Unique task identifier matching the manifest. |
 | `phase` | `string` | Execution phase of the task (`Pending`, `Running`, `Completed`, `Failed`). |
+| `startedAt` | `*metav1.Time` | Timestamp when the task transitioned to `Running`. |
 | `samples` | `int` | Number of samples scored. |
 | `successes` | `int` | Number of samples with score >= 1.0 (for binary scorers). |
 | `meanScore` | `*float64` | Mean of per-sample scores. Numeric values are taken as-is (unclamped), 'C'/'CORRECT'/'YES'/'TRUE' map to 1.0, 'P'/'PARTIAL' map to 0.5, and 'I'/'INCORRECT'/'N'/'NOANSWER' map to 0.0. |

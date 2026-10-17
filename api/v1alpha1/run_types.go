@@ -70,6 +70,10 @@ type TaskStatus struct {
 	// +optional
 	Phase TaskPhase `json:"phase,omitempty"`
 
+	// StartedAt is the time when the task transitioned to Running.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
 	// Samples is the number of samples scored.
 	// +optional
 	Samples int `json:"samples"`
