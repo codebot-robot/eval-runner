@@ -32,6 +32,7 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	"google.golang.org/grpc/codes"
@@ -43,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
@@ -169,8 +171,35 @@ type RunReconciler struct {
 	// Sleep pauses execution between retries. In tests, this can be overridden to return immediately.
 	Sleep func(ctx context.Context, d time.Duration) error
 
+	// ControllerNamespace is the namespace where the controller runs (defaults to eval-runner).
+	ControllerNamespace string
+
+	// PKIManager coordinates controller CA and per-sandbox server cert Secrets.
+	PKIManager *pki.Manager
+
+	// SandboxdImage is the container image used for the sandboxd initContainer.
+	SandboxdImage string
+
+	pkiMu sync.Mutex
+
 	mu     sync.RWMutex
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
+}
+
+func (r *RunReconciler) controllerNamespace() string {
+	if r.ControllerNamespace != "" {
+		return r.ControllerNamespace
+	}
+	return discovery.DefaultControllerNamespace
+}
+
+func (r *RunReconciler) pki() *pki.Manager {
+	r.pkiMu.Lock()
+	defer r.pkiMu.Unlock()
+	if r.PKIManager == nil {
+		r.PKIManager = pki.NewManager(r.Client, r.controllerNamespace(), r.sandboxNamespace())
+	}
+	return r.PKIManager
 }
 
 func (r *RunReconciler) getAuthToken(key string) (string, bool) {
@@ -277,6 +306,10 @@ func (r *RunReconciler) ensureAuthToken(ctx context.Context, run *v1alpha1.Run, 
 
 func (r *RunReconciler) cleanupAuthToken(ctx context.Context, runNamespace, runName string, sandboxKey types.NamespacedName) {
 	r.deleteAuthToken(sandboxKey.String())
+	if err := r.pki().DeleteServerCertSecret(ctx, sandboxKey.Name); err != nil {
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("Failed to delete server cert secret", "sandbox", sandboxKey.Name, "error", err)
+	}
 	if runNamespace == "" {
 		runNamespace = discovery.DefaultControllerNamespace
 	}
@@ -361,6 +394,10 @@ func (r *RunReconciler) ensureTaskAuthToken(ctx context.Context, run *v1alpha1.R
 
 func (r *RunReconciler) cleanupTaskAuthToken(ctx context.Context, runNamespace, runName, taskID string, sandboxKey types.NamespacedName) {
 	r.deleteAuthToken(sandboxKey.String())
+	if err := r.pki().DeleteServerCertSecret(ctx, sandboxKey.Name); err != nil {
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("Failed to delete task server cert secret", "sandbox", sandboxKey.Name, "error", err)
+	}
 	if runNamespace == "" {
 		runNamespace = discovery.DefaultControllerNamespace
 	}
@@ -580,11 +617,34 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		tokenDigest := discovery.AuthTokenDigest(authToken)
 
+		// Create server cert Secret before Sandbox so it exists when pod starts
+		if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.discoveryDeadline()+time.Hour, nil); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to ensure server cert secret: %w", err)
+		}
+
 		logger.Info("Creating discovery sandbox", "sandbox", sandboxName, "namespace", sandboxNamespace)
-		desiredSandbox := discovery.BuildSandbox(&run, sandboxNamespace, tokenDigest)
+		desiredSandbox := discovery.BuildSandbox(&run, sandboxNamespace, tokenDigest, discovery.SandboxOptions{
+			ServerCertSecret: pki.ServerSecretName(sandboxName),
+			CAConfigMap:      pki.DefaultCAConfigMapName,
+			SandboxdImage:    r.SandboxdImage,
+		})
 		if err := r.Create(ctx, desiredSandbox); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
 				return ctrl.Result{}, fmt.Errorf("failed to create sandbox: %w", err)
+			}
+		}
+
+		if desiredSandbox.UID != "" {
+			ownerRef := &metav1.OwnerReference{
+				APIVersion:         sandboxv1beta1.GroupVersion.String(),
+				Kind:               "Sandbox",
+				Name:               desiredSandbox.Name,
+				UID:                desiredSandbox.UID,
+				Controller:         ptr.To(true),
+				BlockOwnerDeletion: ptr.To(false),
+			}
+			if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.discoveryDeadline()+time.Hour, ownerRef); err != nil {
+				logger.V(1).Info("Could not attach ownerRef to server cert secret", "error", err)
 			}
 		}
 
@@ -609,6 +669,21 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		run.Status.DiscoveryDeadline = &deadline
 
 		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
+	}
+
+	var ownerRef *metav1.OwnerReference
+	if sandbox.UID != "" {
+		ownerRef = &metav1.OwnerReference{
+			APIVersion:         sandboxv1beta1.GroupVersion.String(),
+			Kind:               "Sandbox",
+			Name:               sandbox.Name,
+			UID:                sandbox.UID,
+			Controller:         ptr.To(true),
+			BlockOwnerDeletion: ptr.To(false),
+		}
+	}
+	if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.discoveryDeadline()+time.Hour, ownerRef); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to ensure server cert secret: %w", err)
 	}
 
 	// Sandbox exists. Ensure phase reflects Discovering and deadline is recorded (back-filled for in-flight Runs)
@@ -729,6 +804,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		var opts []sandboxclient.Option
 		if authToken != "" {
 			opts = append(opts, sandboxclient.WithAuthToken(authToken))
+		}
+		if tlsConfig := r.pki().ClientTLSConfig(sandbox.Name, sandbox.Namespace); tlsConfig != nil {
+			opts = append(opts, sandboxclient.WithTLSConfig(tlsConfig))
 		}
 		var clientErr error
 		sbClient, clientErr = factory.NewClient(pod.Status.PodIP, opts...)
@@ -1302,16 +1380,40 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					failedTasks[taskID] = fmt.Sprintf("failed to ensure task auth token: %v", tokenErr)
 					continue
 				}
+
+				// Create server cert Secret before Sandbox so it exists when pod starts
+				if _, err := r.pki().EnsureServerCertSecret(ctx, sbName, r.executionDeadline()+time.Hour, nil); err != nil {
+					logger.Error(err, "Failed to ensure task server cert secret", "task", taskID)
+					failedTasks[taskID] = fmt.Sprintf("failed to ensure server cert secret: %v", err)
+					continue
+				}
+
 				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
 					Namespace:         r.sandboxNamespace(),
 					SampleRunnerImage: r.sampleRunnerImage(),
 					ModelSecret:       effectiveModelSecret,
 					AuthTokenDigest:   discovery.AuthTokenDigest(token),
+					ServerCertSecret:  pki.ServerSecretName(sbName),
+					CAConfigMap:       pki.DefaultCAConfigMapName,
+					SandboxdImage:     r.SandboxdImage,
 				})
 				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
 					logger.Error(err, "Failed to create task sandbox", "task", taskID)
 					failedTasks[taskID] = fmt.Sprintf("failed to create sandbox: %v", err)
 				} else {
+					if desiredSandbox.UID != "" {
+						ownerRef := &metav1.OwnerReference{
+							APIVersion:         sandboxv1beta1.GroupVersion.String(),
+							Kind:               "Sandbox",
+							Name:               desiredSandbox.Name,
+							UID:                desiredSandbox.UID,
+							Controller:         ptr.To(true),
+							BlockOwnerDeletion: ptr.To(false),
+						}
+						if _, err := r.pki().EnsureServerCertSecret(ctx, sbName, r.executionDeadline()+time.Hour, ownerRef); err != nil {
+							logger.V(1).Info("Could not attach ownerRef to task server cert secret", "task", taskID, "error", err)
+						}
+					}
 					started = append(started, taskID)
 					sandboxesByTask[taskID] = *desiredSandbox
 				}
@@ -1438,6 +1540,21 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 			terminalFailures[t.ID] = "task sandbox missing while in Running phase"
 			continue
+		}
+
+		var taskOwnerRef *metav1.OwnerReference
+		if sb.UID != "" {
+			taskOwnerRef = &metav1.OwnerReference{
+				APIVersion:         sandboxv1beta1.GroupVersion.String(),
+				Kind:               "Sandbox",
+				Name:               sb.Name,
+				UID:                sb.UID,
+				Controller:         ptr.To(true),
+				BlockOwnerDeletion: ptr.To(false),
+			}
+		}
+		if _, err := r.pki().EnsureServerCertSecret(ctx, sb.Name, r.executionDeadline()+time.Hour, taskOwnerRef); err != nil {
+			logger.V(1).Info("Could not ensure server cert secret for task", "task", t.ID, "error", err)
 		}
 
 		podName := sb.Name
@@ -1624,6 +1741,9 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		var opts []sandboxclient.Option
 		if authToken != "" {
 			opts = append(opts, sandboxclient.WithAuthToken(authToken))
+		}
+		if tlsConfig := r.pki().ClientTLSConfig(sb.Name, sb.Namespace); tlsConfig != nil {
+			opts = append(opts, sandboxclient.WithTLSConfig(tlsConfig))
 		}
 		factory := r.ClientFactory
 		if factory == nil {
