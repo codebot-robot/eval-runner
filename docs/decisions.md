@@ -102,7 +102,7 @@ Future pull requests that introduce an architectural decision should append an e
   2. `git checkout <commit>`: permanent failure on non-zero exit (no retry);
   3. `./.evals/list`: executed in the repo directory, categorizing missing, non-executable, non-zero exit, and invalid JSON as distinct, typed failures without retries.
   Controller RBAC drops `pods/exec`. An ingress `NetworkPolicy` in `eval-runner-sandbox` restricts ports `:9090` and `:8080` to controller pods in `eval-runner`.
-- **Rationale**: Driving execution via structured RPCs supersedes heuristic regex parsing of mixed stderr streams. Step-based discovery guarantees transient clone failures are retried without any risk of retrying permanent errors like missing `.evals/list` or non-existent commit SHAs. Direct in-cluster RPC avoids routing through the Kubernetes API server via `pods/exec`, adhering to least-privilege RBAC. Because sandboxd has no authentication, ingress NetworkPolicy ensures sandbox pods are only accessible by the authorized controller.
+- **Rationale**: Driving execution via structured RPCs supersedes heuristic regex parsing of mixed stderr streams. Step-based discovery guarantees transient clone failures are retried without any risk of retrying permanent errors like missing `.evals/list` or non-existent commit SHAs. Direct in-cluster RPC avoids routing through the Kubernetes API server via `pods/exec`, adhering to least-privilege RBAC. Because sandboxd originally had no authentication (superseded by per-sandbox bearer authentication in ADR-014), ingress NetworkPolicy ensures sandbox pods are only accessible by the authorized controller.
 
 ### ADR-014: Enable sandboxd bearer auth (--auth-token-sha256) and generalise NetworkPolicy podSelector
 - **Date**: 2026-10-17

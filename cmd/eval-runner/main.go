@@ -102,16 +102,11 @@ func main() {
 	}
 
 	// Least-privilege namespaced caching per object:
-	// Runs and Secrets are only cached in evalRunnerNamespace.
+	// Runs are only cached in evalRunnerNamespace.
 	// Sandboxes and Pods are only cached in sandboxNamespace.
 	cacheOptions := cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
 			&v1alpha1.Run{}: {
-				Namespaces: map[string]cache.Config{
-					evalRunnerNamespace: {},
-				},
-			},
-			&corev1.Secret{}: {
 				Namespaces: map[string]cache.Config{
 					evalRunnerNamespace: {},
 				},

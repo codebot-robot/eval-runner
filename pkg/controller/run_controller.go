@@ -227,9 +227,11 @@ func (r *RunReconciler) ensureAuthToken(ctx context.Context, run *v1alpha1.Run, 
 		if getErr := reader.Get(ctx, secretKey, &secret); getErr != nil {
 			return "", fmt.Errorf("failed to get existing auth secret: %w", getErr)
 		}
-		if tokenBytes, ok := secret.Data["token"]; ok && len(tokenBytes) > 0 {
-			token = string(tokenBytes)
+		tokenBytes, ok := secret.Data["token"]
+		if !ok || len(tokenBytes) == 0 {
+			return "", fmt.Errorf("existing auth secret %s lacks a token", secretKey)
 		}
+		token = string(tokenBytes)
 	}
 
 	r.setAuthToken(sandboxKey.String(), token)
@@ -536,11 +538,12 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				sandboxclient.WithStderrLimit(r.maxStderrBytes()),
 			)
 		}
-		var opts []sandboxclient.Option
 		authToken, tokenErr := r.ensureAuthToken(ctx, &run, sandboxKey)
 		if tokenErr != nil {
-			logger.V(1).Info("Could not retrieve auth token for sandbox", "error", tokenErr)
-		} else if authToken != "" {
+			return ctrl.Result{}, fmt.Errorf("failed to retrieve auth token for sandbox: %w", tokenErr)
+		}
+		var opts []sandboxclient.Option
+		if authToken != "" {
 			opts = append(opts, sandboxclient.WithAuthToken(authToken))
 		}
 		var clientErr error
@@ -605,6 +608,10 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		})
 
 		if cloneErr == nil && cloneRes != nil && cloneRes.ExitCode == 0 {
+			break
+		}
+
+		if status.Code(cloneErr) == codes.Unauthenticated {
 			break
 		}
 
@@ -675,7 +682,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 
 		var msg string
-		if tail != "" {
+		if status.Code(cloneErr) == codes.Unauthenticated {
+			msg = fmt.Sprintf("step git clone failed: unauthenticated: %v", cloneErr)
+		} else if tail != "" {
 			msg = fmt.Sprintf("step git clone failed after %s: exit code %d: %s", formatAttemptCount(cloneAttempts), exitCode, tail)
 		} else if cloneErr != nil {
 			msg = fmt.Sprintf("step git clone failed after %s: %v", formatAttemptCount(cloneAttempts), cloneErr)
@@ -694,6 +703,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		Cwd:     "repo",
 	})
 	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
+		if status.Code(checkoutErr) == codes.Unauthenticated {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr))
+		}
 		var checkoutStderr string
 		var exitCode int
 		if checkoutRes != nil {
@@ -745,6 +757,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			return r.failRun(ctx, &run, &sandbox, msg)
 		}
 
+		if status.Code(listErr) == codes.Unauthenticated {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: unauthenticated: %v", listErr))
+		}
 		if isNotFoundError(listErr) {
 			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: missing .evals/list: %v", listErr))
 		}
@@ -844,12 +859,18 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 func (r *RunReconciler) deleteSandboxIfMatching(ctx context.Context, sandboxKey types.NamespacedName, runNamespace, runName string) error {
 	logger := log.FromContext(ctx)
-	r.cleanupAuthToken(ctx, runNamespace, runName, sandboxKey)
 	var sb sandboxv1beta1.Sandbox
 	if err := r.Get(ctx, sandboxKey, &sb); err != nil {
+		if apierrors.IsNotFound(err) {
+			if _, ok := r.getAuthToken(sandboxKey.String()); ok {
+				r.cleanupAuthToken(ctx, runNamespace, runName, sandboxKey)
+			}
+			return nil
+		}
 		return client.IgnoreNotFound(err)
 	}
 	if sb.Labels[discovery.LabelRunName] == runName && sb.Labels[discovery.LabelRunNamespace] == runNamespace {
+		r.cleanupAuthToken(ctx, runNamespace, runName, sandboxKey)
 		if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "failed to delete sandbox", "sandbox", sandboxKey.Name)
 			return err

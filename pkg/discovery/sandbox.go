@@ -108,7 +108,10 @@ func SandboxNameForRun(runName string) string {
 // - resource requests and limits
 // - sandboxd gRPC (9090) and REST (8080) ports exposed
 // - readiness probe targeting sandboxd /v1/health
-func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string, authTokenDigest ...string) *sandboxv1beta1.Sandbox {
+func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string, authTokenDigest string) *sandboxv1beta1.Sandbox {
+	if authTokenDigest == "" {
+		panic("authTokenDigest is required")
+	}
 	if sandboxNamespace == "" {
 		sandboxNamespace = DefaultSandboxNamespace
 	}
@@ -137,9 +140,7 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string, authTokenDigest ..
 		"--root-dir=/workspace",
 		"--rest-port=8080",
 		"--grpc-port=9090",
-	}
-	if len(authTokenDigest) > 0 && authTokenDigest[0] != "" {
-		cmd = append(cmd, "--auth-token-sha256="+authTokenDigest[0])
+		"--auth-token-sha256=" + authTokenDigest,
 	}
 
 	return &sandboxv1beta1.Sandbox{

@@ -75,7 +75,7 @@ func TestBuildSandbox(t *testing.T) {
 		},
 	}
 
-	sb := BuildSandbox(run, "eval-runner-sandbox")
+	sb := BuildSandbox(run, "eval-runner-sandbox", AuthTokenDigest("test"))
 
 	if sb.Name != "discovery-test-run-123" {
 		t.Errorf("Unexpected sandbox name: %s", sb.Name)
@@ -260,4 +260,19 @@ func TestAuthSecretNameForRun(t *testing.T) {
 	if !strings.HasPrefix(gotLong, "discovery-auth-") {
 		t.Errorf("Secret name missing prefix: %s", gotLong)
 	}
+}
+
+func TestBuildSandbox_EmptyAuthTokenPanics(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-empty-token",
+			Namespace: "eval-runner",
+		},
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("Expected BuildSandbox to panic on empty authTokenDigest")
+		}
+	}()
+	BuildSandbox(run, "eval-runner-sandbox", "")
 }
