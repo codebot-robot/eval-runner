@@ -1,0 +1,52 @@
+{
+  "version": 2,
+  "status": "success",
+  "eval": {
+    "task": "docs/readme_comprehension",
+    "model": "google/gemini-3.5-flash-lite",
+    "scorers": [
+      {
+        "name": "choice"
+      }
+    ]
+  },
+  "results": {
+    "total_samples": 20,
+    "completed_samples": 20,
+    "scores": [
+      {
+        "name": "choice",
+        "scorer": "choice",
+        "scored_samples": 20,
+        "metrics": {
+          "accuracy": {
+            "name": "accuracy",
+            "value": 0.85
+          }
+        }
+      }
+    ]
+  },
+  "samples": [
+    {"id": 1, "scores": {"choice": {"value": "C"}}},
+    {"id": 2, "scores": {"choice": {"value": "C"}}},
+    {"id": 3, "scores": {"choice": {"value": "C"}}},
+    {"id": 4, "scores": {"choice": {"value": "C"}}},
+    {"id": 5, "scores": {"choice": {"value": "C"}}},
+    {"id": 6, "scores": {"choice": {"value": "C"}}},
+    {"id": 7, "scores": {"choice": {"value": "C"}}},
+    {"id": 8, "scores": {"choice": {"value": "C"}}},
+    {"id": 9, "scores": {"choice": {"value": "C"}}},
+    {"id": 10, "scores": {"choice": {"value": "C"}}},
+    {"id": 11, "scores": {"choice": {"value": "C"}}},
+    {"id": 12, "scores": {"choice": {"value": "C"}}},
+    {"id": 13, "scores": {"choice": {"value": "C"}}},
+    {"id": 14, "scores": {"choice": {"value": "C"}}},
+    {"id": 15, "scores": {"choice": {"value": "C"}}},
+    {"id": 16, "scores": {"choice": {"value": "C"}}},
+    {"id": 17, "scores": {"choice": {"value": "C"}}},
+    {"id": 18, "scores": {"choice": {"value": "I"}}},
+    {"id": 19, "scores": {"choice": {"value": "I"}}},
+    {"id": 20, "scores": {"choice": {"value": "I"}}}
+  ]
+}
