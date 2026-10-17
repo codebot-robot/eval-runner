@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -41,82 +40,6 @@ import (
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
-
-type fakeSandboxClient struct {
-	mu        sync.Mutex
-	callCount int
-	calls     []sandboxclient.ProcessConfig
-	execFn    func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error)
-
-	listStdout string
-	listStderr string
-	listErr    error
-
-	cloneErr    error
-	cloneExit   int
-	cloneStderr string
-
-	checkoutErr    error
-	checkoutExit   int
-	checkoutStderr string
-}
-
-func (f *fakeSandboxClient) NewClient(podIP string) (sandboxclient.Client, error) {
-	return f, nil
-}
-
-func (f *fakeSandboxClient) ReadFile(ctx context.Context, path string) ([]byte, error) {
-	return nil, nil
-}
-
-func (f *fakeSandboxClient) Close() error {
-	return nil
-}
-
-func (f *fakeSandboxClient) Execute(ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-	f.mu.Lock()
-	f.callCount++
-	f.calls = append(f.calls, cfg)
-	call := f.callCount
-	execFn := f.execFn
-	f.mu.Unlock()
-
-	if execFn != nil {
-		return execFn(call, ctx, cfg)
-	}
-
-	if len(cfg.Command) == 0 {
-		return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-	}
-
-	cmd0 := cfg.Command[0]
-	if cmd0 == "rm" {
-		return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-	}
-
-	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
-		if f.cloneErr != nil {
-			return nil, f.cloneErr
-		}
-		return &sandboxclient.ExecuteResult{ExitCode: f.cloneExit, Stderr: f.cloneStderr}, nil
-	}
-
-	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "checkout" {
-		if f.checkoutErr != nil {
-			return nil, f.checkoutErr
-		}
-		return &sandboxclient.ExecuteResult{ExitCode: f.checkoutExit, Stderr: f.checkoutStderr}, nil
-	}
-
-	if cmd0 == "./.evals/list" {
-		if f.listErr != nil {
-			return nil, f.listErr
-		}
-		return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: f.listStdout, Stderr: f.listStderr}, nil
-	}
-
-	return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-}
 
 func setupScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -157,7 +80,7 @@ func TestReconcilePendingToDiscovering(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -242,8 +165,8 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 		]
 	}`
 
-	executor := &fakeSandboxClient{
-		listStdout: validManifestJSON,
+	executor := &sandboxclient.FakeClient{
+		ListStdout: validManifestJSON,
 	}
 
 	client := fake.NewClientBuilder().
@@ -327,9 +250,9 @@ func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 		},
 	}
 
-	executor := &fakeSandboxClient{
-		checkoutStderr: "fatal: reference is not a tree: deadbeef00000000000000000000000000000000",
-		checkoutExit:   128,
+	executor := &sandboxclient.FakeClient{
+		CheckoutStderr: "fatal: reference is not a tree: deadbeef00000000000000000000000000000000",
+		CheckoutExit:   128,
 	}
 
 	client := fake.NewClientBuilder().
@@ -418,7 +341,7 @@ func TestReconcileControllerRestartMidReconcile(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -468,7 +391,7 @@ func TestReconcileTerminalRunIsNoop(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -523,7 +446,7 @@ func TestReconcileDeleteRunMidDiscoveryRemovesSandbox(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -571,7 +494,7 @@ func TestReconcileDeletedRunNotFoundCleansUpSandbox(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -623,7 +546,7 @@ func TestReconcileTerminalRunWithLeftoverSandboxRemovesSandbox(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -685,8 +608,8 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 	}
 
 	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
-	executor := &fakeSandboxClient{
-		listStdout: validManifestJSON,
+	executor := &sandboxclient.FakeClient{
+		ListStdout: validManifestJSON,
 	}
 
 	firstStatusUpdate := true
@@ -800,8 +723,8 @@ func newDiscoveringRunFixture(t *testing.T, clientInstance sandboxclient.Client)
 }
 
 func TestReconcileStdoutOverLimitFails(t *testing.T) {
-	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
-		listErr: &discovery.LimitError{
+	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
+		ListErr: &discovery.LimitError{
 			Stream: "stdout",
 			Limit:  discovery.MaxStdoutBytes,
 		},
@@ -825,8 +748,8 @@ func TestReconcileStdoutOverLimitFails(t *testing.T) {
 }
 
 func TestReconcileStderrOverLimitFails(t *testing.T) {
-	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
-		listErr: &discovery.LimitError{
+	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
+		ListErr: &discovery.LimitError{
 			Stream: "stderr",
 			Limit:  discovery.MaxStderrBytes,
 		},
@@ -856,8 +779,8 @@ func TestReconcileOversizedManifestFails(t *testing.T) {
 	}
 	oversizedJSON := fmt.Sprintf(`{"tasks": [%s]}`, strings.Join(tasks, ","))
 
-	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
-		listStdout: oversizedJSON,
+	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
+		ListStdout: oversizedJSON,
 	})
 
 	_, err := f.reconciler.Reconcile(t.Context(), f.req)
@@ -879,9 +802,9 @@ func TestReconcileOversizedManifestFails(t *testing.T) {
 
 func TestReconcileStatusMessageBoundedOnFailure(t *testing.T) {
 	hugeStderr := strings.Repeat("error line for testing\n", 500)
-	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
-		listStderr: hugeStderr,
-		listErr:    errors.New("exit code 1"),
+	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
+		ListStderr: hugeStderr,
+		ListErr:    errors.New("exit code 1"),
 	})
 
 	_, err := f.reconciler.Reconcile(t.Context(), f.req)
@@ -903,8 +826,8 @@ func TestReconcileStatusMessageBoundedOnFailure(t *testing.T) {
 
 func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
 	hugeStdout := strings.Repeat("x", int(discovery.MaxStdoutBytes)+10)
-	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
-		listStdout: hugeStdout,
+	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
+		ListStdout: hugeStdout,
 	})
 
 	_, err := f.reconciler.Reconcile(t.Context(), f.req)
@@ -926,9 +849,9 @@ func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
 
 func TestReconcileStderrOverLimitWithoutExecutorError(t *testing.T) {
 	hugeStderr := strings.Repeat("x", int(discovery.MaxStderrBytes)+10)
-	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
-		listStderr: hugeStderr,
-		listStdout: `{"tasks":[{"id":"t1","spec":"s1"}]}`,
+	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
+		ListStderr: hugeStderr,
+		ListStdout: `{"tasks":[{"id":"t1","spec":"s1"}]}`,
 	})
 	f.reconciler.MaxStderrBytes = discovery.MaxStderrBytes
 
@@ -996,8 +919,8 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 	}`
 
 	cloneAttempts := 0
-	executor := &fakeSandboxClient{
-		execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
 			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
 				cloneAttempts++
 				if cloneAttempts <= 2 {
@@ -1107,8 +1030,8 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 	}
 
 	cloneAttempts := 0
-	executor := &fakeSandboxClient{
-		execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
 			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
 				cloneAttempts++
 				return &sandboxclient.ExecuteResult{
@@ -1131,7 +1054,7 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
-		MaxCloneAttempts: 5,
+		MaxDiscoveryAttempts: 5,
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			return nil
 		},
@@ -1172,36 +1095,36 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 func TestStepBasedFailures(t *testing.T) {
 	tests := []struct {
 		name              string
-		client            *fakeSandboxClient
+		client            *sandboxclient.FakeClient
 		expectedMsgSubstr []string
 	}{
 		{
 			name: "checkout failure fails immediately without retry",
-			client: &fakeSandboxClient{
-				checkoutExit:   1,
-				checkoutStderr: "error: pathspec 'bad-branch' did not match any file(s) known to git",
+			client: &sandboxclient.FakeClient{
+				CheckoutExit:   1,
+				CheckoutStderr: "error: pathspec 'bad-branch' did not match any file(s) known to git",
 			},
 			expectedMsgSubstr: []string{"step git checkout failed", "pathspec"},
 		},
 		{
 			name: ".evals/list missing fails immediately without retry",
-			client: &fakeSandboxClient{
-				listErr: status.Errorf(codes.NotFound, "command or path not found: ./.evals/list"),
+			client: &sandboxclient.FakeClient{
+				ListErr: status.Errorf(codes.NotFound, "command or path not found: ./.evals/list"),
 			},
 			expectedMsgSubstr: []string{"step ./.evals/list failed", "missing .evals/list"},
 		},
 		{
 			name: ".evals/list non-executable fails immediately without retry",
-			client: &fakeSandboxClient{
-				listErr: status.Errorf(codes.PermissionDenied, "permission denied: ./.evals/list"),
+			client: &sandboxclient.FakeClient{
+				ListErr: status.Errorf(codes.PermissionDenied, "permission denied: ./.evals/list"),
 			},
 			expectedMsgSubstr: []string{"step ./.evals/list failed", "not executable"},
 		},
 		{
 			name: ".evals/list non-zero exit fails immediately without retry",
-			client: &fakeSandboxClient{
-				listErr: nil,
-				execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			client: &sandboxclient.FakeClient{
+				ListErr: nil,
+				ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
 					if len(cfg.Command) > 0 && cfg.Command[0] == "./.evals/list" {
 						return &sandboxclient.ExecuteResult{
 							ExitCode: 2,
@@ -1215,9 +1138,9 @@ func TestStepBasedFailures(t *testing.T) {
 		},
 		{
 			name: ".evals/list invalid JSON fails immediately without retry",
-			client: &fakeSandboxClient{
-				listStdout: "{invalid json content",
-				listStderr: "warning: parsing config",
+			client: &sandboxclient.FakeClient{
+				ListStdout: "{invalid json content",
+				ListStderr: "warning: parsing config",
 			},
 			expectedMsgSubstr: []string{"step ./.evals/list failed", "invalid JSON"},
 		},
@@ -1295,7 +1218,7 @@ func TestReconcilePodNeverReadyPastDeadline(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return now },
 	}
@@ -1364,7 +1287,7 @@ func TestReconcilePodSucceededFailsAndCleansUp(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -1448,7 +1371,7 @@ func TestReconcilePodImagePullBackOffSurfacesWaitingReason(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return now },
 	}
@@ -1527,7 +1450,7 @@ func TestReconcilePodUnschedulableSurfacesPodScheduledFalse(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		SandboxClient:    &fakeSandboxClient{},
+		SandboxClient:    &sandboxclient.FakeClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return now },
 	}
@@ -1599,7 +1522,7 @@ func TestReconcileDeadlineSurvivesControllerRestart(t *testing.T) {
 	reconcilerRestarted := &RunReconciler{
 		Client:            client,
 		Scheme:            scheme,
-		SandboxClient:     &fakeSandboxClient{},
+		SandboxClient:     &sandboxclient.FakeClient{},
 		SandboxNamespace:  "eval-runner-sandbox",
 		DiscoveryDeadline: 20 * time.Minute,
 		Now:               func() time.Time { return now.Add(2 * time.Minute) },
@@ -1622,7 +1545,7 @@ func TestReconcileDeadlineSurvivesControllerRestart(t *testing.T) {
 	reconcilerPastDeadline := &RunReconciler{
 		Client:            client,
 		Scheme:            scheme,
-		SandboxClient:     &fakeSandboxClient{},
+		SandboxClient:     &sandboxclient.FakeClient{},
 		SandboxNamespace:  "eval-runner-sandbox",
 		DiscoveryDeadline: 20 * time.Minute,
 		Now:               func() time.Time { return now.Add(11 * time.Minute) },
@@ -1690,8 +1613,8 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 	}
 
 	cloneAttempts := 0
-	executor := &fakeSandboxClient{
-		execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
 			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
 				cloneAttempts++
 				return &sandboxclient.ExecuteResult{
@@ -1714,7 +1637,7 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
-		MaxCloneAttempts: 5,
+		MaxDiscoveryAttempts: 5,
 		DiscoveryRetryBackoff: []time.Duration{
 			10 * time.Second,
 			10 * time.Second,
@@ -1791,7 +1714,7 @@ func TestReconcileCustomDiscoveryDeadlineConfigured(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:            client,
 		Scheme:            scheme,
-		SandboxClient:     &fakeSandboxClient{},
+		SandboxClient:     &sandboxclient.FakeClient{},
 		SandboxNamespace:  "eval-runner-sandbox",
 		DiscoveryDeadline: customDeadline,
 		Now:               func() time.Time { return fixedNow },
@@ -1859,7 +1782,7 @@ func TestReconcileSandboxReadyConditionUsed(t *testing.T) {
 	}
 
 	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
-	executor := &fakeSandboxClient{listStdout: validManifestJSON}
+	executor := &sandboxclient.FakeClient{ListStdout: validManifestJSON}
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1938,7 +1861,7 @@ func TestReconcilePodAdoptedFromAnnotation(t *testing.T) {
 	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
 	factory := sandboxclient.FactoryFunc(func(podIP string) (sandboxclient.Client, error) {
 		dialedPodIP = podIP
-		return &fakeSandboxClient{listStdout: validManifestJSON}, nil
+		return &sandboxclient.FakeClient{ListStdout: validManifestJSON}, nil
 	})
 
 	client := fake.NewClientBuilder().

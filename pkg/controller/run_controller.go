@@ -18,9 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -85,25 +82,11 @@ func formatAttemptCount(n int) string {
 }
 
 func isNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if status.Code(err) == codes.NotFound || errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "no such file")
+	return status.Code(err) == codes.NotFound
 }
 
 func isPermissionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if status.Code(err) == codes.PermissionDenied || errors.Is(err, fs.ErrPermission) || errors.Is(err, os.ErrPermission) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "permission denied")
+	return status.Code(err) == codes.PermissionDenied
 }
 
 func defaultSleep(ctx context.Context, d time.Duration) error {
@@ -134,11 +117,8 @@ type RunReconciler struct {
 	// Now returns the current time. In tests, this can be overridden.
 	Now func() time.Time
 
-	// MaxCloneAttempts is the maximum number of attempts for the git clone step.
+	// MaxDiscoveryAttempts is the maximum number of attempts for the git clone step.
 	// Defaults to DefaultMaxDiscoveryAttempts (5) if <= 0.
-	MaxCloneAttempts int
-
-	// MaxDiscoveryAttempts is maintained for flag/backward compatibility.
 	MaxDiscoveryAttempts int
 
 	// DiscoveryRetryBackoff defines the backoff schedule between clone retry attempts.
@@ -163,10 +143,7 @@ func (r *RunReconciler) discoveryDeadline() time.Duration {
 	return DefaultDiscoveryDeadline
 }
 
-func (r *RunReconciler) maxCloneAttempts() int {
-	if r.MaxCloneAttempts > 0 {
-		return r.MaxCloneAttempts
-	}
+func (r *RunReconciler) maxDiscoveryAttempts() int {
 	if r.MaxDiscoveryAttempts > 0 {
 		return r.MaxDiscoveryAttempts
 	}
@@ -455,7 +432,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	execCtx, cancel := context.WithTimeout(ctx, execTimeout)
 	defer cancel()
 
-	maxAttempts := r.maxCloneAttempts()
+	maxAttempts := r.maxDiscoveryAttempts()
 	backoffs := r.DiscoveryRetryBackoff
 	if len(backoffs) == 0 {
 		backoffs = DefaultDiscoveryRetryBackoff
@@ -520,8 +497,8 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			"backoff", backoffDuration,
 		)
 
-		attemptMsg := fmt.Sprintf("Running discovery in sandbox (attempt %d of %d failed; retrying)", cloneAttempts, maxAttempts)
-		retryMsg := fmt.Sprintf("Discovery attempt %d failed; retrying", cloneAttempts)
+		attemptMsg := fmt.Sprintf("Running discovery in sandbox (step git clone attempt %d of %d failed; retrying)", cloneAttempts, maxAttempts)
+		retryMsg := fmt.Sprintf("step git clone attempt %d of %d failed; retrying", cloneAttempts, maxAttempts)
 		if updateErr := r.updateRunStatus(execCtx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeDiscovered,
