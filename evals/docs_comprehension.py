@@ -28,6 +28,19 @@ REPO_ROOT = CURRENT_DIR.parent
 DATASET_PATH = CURRENT_DIR / "datasets" / "readme_questions.jsonl"
 
 
+def _resolve_model():
+    """Returns the active model from CLI or environment if specified, else DEFAULT_MODEL."""
+    try:
+        from inspect_ai.model._model import active_model
+
+        m = active_model()
+        if m is not None and str(m) != "none/none":
+            return m
+    except Exception:
+        pass
+    return DEFAULT_MODEL
+
+
 def _read_documentation() -> str:
     """Reads the repository documentation files at run time.
 
@@ -57,7 +70,7 @@ def _load_dataset():
             input="input",
             choices="choices",
             target="target",
-            metadata=["source"],
+            metadata=["source", "evidence"],
         ),
     )
 
@@ -73,6 +86,7 @@ Answer only from the provided documents. If an answer cannot be determined from 
 
     return Task(
         name="docs/readme_comprehension",
+        model=_resolve_model(),
         dataset=_load_dataset(),
         solver=[
             system_message(sys_prompt),
@@ -89,6 +103,7 @@ def readme_comprehension_blind() -> Task:
 
     return Task(
         name="docs/readme_comprehension_blind",
+        model=_resolve_model(),
         dataset=_load_dataset(),
         solver=[
             system_message(sys_prompt),

@@ -73,7 +73,11 @@ if missing:
 print('Manifest validated successfully.')
 "
 
-echo "=== 2. Running offline Inspect eval (mockllm) ==="
+echo "=== 2. Validating evidence guard against docs drift ==="
+cd "${REPO_ROOT}/evals"
+uv run --locked python -m unittest test_drift.py
+
+echo "=== 3. Running offline Inspect eval (mockllm) ==="
 cd "${REPO_ROOT}/evals"
 MOCK_LOG_DIR="$(mktemp -d)"
 trap 'rm -rf "${MOCK_LOG_DIR}"' EXIT
