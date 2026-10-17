@@ -1,0 +1,85 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package gcs
+
+import (
+	"context"
+	"sync"
+)
+
+// FakeStorageClient is an in-memory test double for StorageClient.
+type FakeStorageClient struct {
+	mu      sync.Mutex
+	Objects map[string]FakeObject // key: "bucket/object"
+	Errors  map[string]error      // key: "bucket/object" -> injected error
+	Closed  bool
+}
+
+// FakeObject represents a stored object in FakeStorageClient.
+type FakeObject struct {
+	Bucket      string
+	Object      string
+	ContentType string
+	Data        []byte
+}
+
+// NewFakeStorageClient creates a new FakeStorageClient.
+func NewFakeStorageClient() *FakeStorageClient {
+	return &FakeStorageClient{
+		Objects: make(map[string]FakeObject),
+		Errors:  make(map[string]error),
+	}
+}
+
+// WriteObject records the object write in memory.
+func (f *FakeStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := bucket + "/" + object
+	if err, ok := f.Errors[key]; ok {
+		return err
+	}
+	// Check wildcard error for bucket
+	if err, ok := f.Errors[bucket+"/*"]; ok {
+		return err
+	}
+
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	f.Objects[key] = FakeObject{
+		Bucket:      bucket,
+		Object:      object,
+		ContentType: contentType,
+		Data:        dataCopy,
+	}
+	return nil
+}
+
+// Close marks the client as closed.
+func (f *FakeStorageClient) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Closed = true
+	return nil
+}
+
+// GetObject retrieves a stored object by bucket and object name.
+func (f *FakeStorageClient) GetObject(bucket, object string) (FakeObject, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	obj, ok := f.Objects[bucket+"/"+object]
+	return obj, ok
+}
