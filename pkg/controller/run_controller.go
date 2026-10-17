@@ -1267,9 +1267,28 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 
 		if len(tasksToStart) > 0 {
+			reader := client.Reader(r.Client)
+			if r.APIReader != nil {
+				reader = r.APIReader
+			}
+			secretExists, err := CheckModelSecretExists(ctx, reader, r.sandboxNamespace(), r.ModelSecret)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to check model secret %s/%s: %w", r.sandboxNamespace(), r.ModelSecret, err)
+			}
+
 			var started []string
 			failedTasks := make(map[string]string)
 			for _, taskID := range tasksToStart {
+				effectiveModelSecret := ""
+				if secretExists {
+					effectiveModelSecret = r.ModelSecret
+				} else if !IsMockModel(run.Spec.Model) {
+					msg := ModelCredentialsMissingMessage(r.sandboxNamespace(), r.ModelSecret)
+					logger.Info("Rejecting task launch due to missing model credentials", "task", taskID, "model", run.Spec.Model, "message", msg)
+					failedTasks[taskID] = msg
+					continue
+				}
+
 				sbName := discovery.TaskSandboxNameForRun(run.Name, taskID)
 				sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
 				token, tokenErr := r.ensureTaskAuthToken(ctx, run, taskID, sbKey)
@@ -1281,7 +1300,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
 					Namespace:         r.sandboxNamespace(),
 					SampleRunnerImage: r.sampleRunnerImage(),
-					ModelSecret:       r.ModelSecret,
+					ModelSecret:       effectiveModelSecret,
 					AuthTokenDigest:   discovery.AuthTokenDigest(token),
 				})
 				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -1329,6 +1348,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 							}
 						}
 					}
+				}
+				if len(started) == 0 && len(failedTasks) > 0 {
+					return ctrl.Result{Requeue: true}, nil
 				}
 			}
 		}

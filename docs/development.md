@@ -167,9 +167,11 @@ Once discovery completes (or fails), the sandbox is automatically deleted.
 
 ### Running Sample Evaluations with a Real Model (e.g. Gemini on GKE)
 
-To execute real evals against a repository, provide `spec.model` on the `Run`. For cloud models (such as Gemini), inject provider credentials using a Kubernetes Secret in the sandbox namespace:
+To execute real evals against a repository, provide `spec.model` on the `Run`. For cloud models (such as Gemini), provider credentials are provided via a Kubernetes Secret in the sandbox namespace:
 
 1. **Ensure the Model Secret exists in `eval-runner-sandbox`:**
+
+   The controller defaults `--model-secret` to `model-credentials` and treats it as optional-by-presence: at startup and on each task launch, the controller checks whether the Secret exists in `eval-runner-sandbox`. If present, sample sandboxes receive it automatically via `envFrom`. If absent, sample sandboxes run without credentials, and tasks requesting a non-mock model record a clear message explaining how to configure credentials.
 
    Our GKE dev cluster uses `eval-runner-sandbox/model-credentials` containing key `GEMINI_API_KEY`. If creating it from scratch:
 
@@ -178,20 +180,11 @@ To execute real evals against a repository, provide `spec.model` on the `Run`. F
      --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY}"
    ```
 
-2. **Configure the Controller:**
+   *(Note: This is an interim credential injection mechanism that the model gateway will replace. To use a different secret name, pass `--model-secret=<name>`; to explicitly disable credential injection, pass `--model-secret=""`.)*
 
-   Configure the eval-runner controller deployment with `--model-secret=model-credentials` using a JSON patch on the container args:
+2. **Create the Run:**
 
-   ```bash
-   kubectl -n eval-runner patch deployment eval-runner-controller --type=json \
-     -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--model-secret=model-credentials"}]'
-   ```
-
-   Alternatively, add `- --model-secret=model-credentials` under `args` in `k8s/runner-deployment.yaml` and deploy via `ap deploy`.
-
-   *(Note: This is an interim credential injection mechanism; future architecture targets zero-credential sandboxes via a model gateway.)*
-
-3. **Create the Run:**
+   Because the controller defaults `--model-secret` to `model-credentials` and checks for its presence automatically, no manual deployment arg patch is required after deploying. Create the Run directly:
 
    ```bash
    kubectl apply -f - <<EOF
@@ -212,7 +205,7 @@ To execute real evals against a repository, provide `spec.model` on the `Run`. F
    EOF
    ```
 
-4. **Watch and View Results:**
+3. **Watch and View Results:**
 
    Watch the run progress from `Pending` -> `Discovering` -> `Running` -> `Completed`:
 
