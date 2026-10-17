@@ -122,6 +122,9 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string) *sandboxv1beta1.Sa
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: sandboxv1beta1.PodTemplate{
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: labels,
+					},
 					Spec: corev1.PodSpec{
 						AutomountServiceAccountToken: &automountToken,
 						SecurityContext: &corev1.PodSecurityContext{

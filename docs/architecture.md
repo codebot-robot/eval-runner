@@ -77,6 +77,7 @@ The `Run` custom resource represents an evaluation request against a specific co
   - `message`: Human-readable status or bounded error description.
   - `conditions`: Kubernetes conditions, including condition `Discovered` (`True` or `False`).
   - `manifest`: Parsed manifest (`*Manifest`) populated when discovery succeeds, listing declared container images and eval tasks (`id`, `workdir`, `spec`, `resources`, `images`).
+  - `discoveryDeadline`: Overall deadline (`metav1.Time`) by which discovery must complete, set at `Pending` -> `Discovering` and back-filled for in-flight Runs.
 - **Finalizer**: `evalrunner.gke-labs.dev/discovery-sandbox` ensures discovery sandboxes in `eval-runner-sandbox` are cleaned up if a Run is deleted.
 
 ### Two Namespaces
@@ -121,17 +122,19 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
 1. **Pending -> Discovering**:
    - The controller ensures the finalizer `evalrunner.gke-labs.dev/discovery-sandbox` is added to the `Run`.
    - The controller builds and creates the `Sandbox` CR in `eval-runner-sandbox`.
-   - The Run status phase is updated to `Discovering` with condition `Discovered=False` (reason `Discovering`).
+   - The Run status phase is updated to `Discovering` with condition `Discovered=False` (reason `Discovering`) and `status.discoveryDeadline` is recorded (default 10 minutes, configurable via `--discovery-deadline`).
 2. **Waiting for Pod Ready**:
-   - The controller watches the backing pod in `eval-runner-sandbox`.
-   - If the pod is not yet ready, the controller requeues after 2 seconds.
-   - If the pod enters `PodFailed`, the Run transitions to `Failed`.
+   - The controller watches both Sandbox and Pod resources in `eval-runner-sandbox`. The backing pod name is resolved via the `agents.x-k8s.io/pod-name` annotation with fallback to the sandbox name.
+   - The overall discovery deadline check runs before checking whether the pod exists; if expired, the Run is failed immediately and the sandbox is cleaned up.
+   - If the pod is not yet ready, the controller requeues after `min(2s, remaining deadline)`.
+   - If the pod enters `PodFailed` or `PodSucceeded` unexpectedly, or if the Sandbox condition `Finished=True`, the Run transitions to `Failed`.
+   - Readiness is satisfied via the Sandbox `Ready` condition OR backing pod readiness.
 3. **Execution**:
    - Once the pod is ready, the controller executes the discovery command inside the `agent` container:
      ```sh
      rm -rf /tmp/repo && git clone -q -- "$1" /tmp/repo && cd /tmp/repo && git checkout -q "$2" && ./.evals/list
      ```
-   - **Timeout**: The exec command is executed with a 5-minute context timeout (`5*time.Minute`). Note that this bound covers the exec step only; time spent waiting for the pod to schedule and become Ready is currently unbounded (an overall discovery deadline is tracked in [#12](https://github.com/gke-labs/eval-runner/issues/12) / PR [#19](https://github.com/gke-labs/eval-runner/pull/19)).
+   - **Timeout**: The exec command context timeout is derived from the remaining discovery deadline budget (capped at `5*time.Minute`). Transient retry attempts and backoff sleep also respect this deadline.
 4. **Output Capture and Limits**:
    - Exec streams are captured through `LimitWriter` instances (`pkg/discovery/limit_writer.go`).
    - If stdout exceeds 1 MiB (`MaxStdoutBytes`), output beyond the cap is discarded and the Run fails with a `LimitError` once the exec completes; cancelling the exec on trip is tracked in [#22](https://github.com/gke-labs/eval-runner/issues/22).
@@ -146,7 +149,7 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
      - Each task must have a non-empty `spec`.
 6. **Completion**:
    - **On Success**: `status.phase` is set to `Discovered`, condition `Discovered=True` is recorded, `status.manifest` is populated, and the sandbox CR is deleted.
-   - **On Failure**: `status.phase` is set to `Failed`, condition `Discovered=False` (reason `DiscoveryFailed`) is recorded, `status.message` is populated with the error and a bounded stderr tail (up to 10 lines / 3 KiB; total message bounded to 4 KiB), and the sandbox CR is deleted.
+   - **On Failure**: `status.phase` is set to `Failed`, condition `Discovered=False` (reason `DiscoveryFailed`) is recorded, `status.message` is populated with the error description, pod phase, container waiting reasons/messages (e.g. `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`), and `PodScheduled=False` reason for unschedulable pods, appended to any bounded stderr tail (up to 10 lines / 3 KiB; total message bounded to 4 KiB), and the sandbox CR is deleted.
 
 ### Finalizer-Based Cleanup
 
@@ -334,7 +337,7 @@ The following table maps sections of the target product concept ([docs/concept/f
 ### Controller Enhancements in Flight
 
 Several targeted enhancements to discovery and sandbox management are tracked in active issues:
-- **Discovery deadline & pod waiting reasons**: Issue [#12](https://github.com/gke-labs/eval-runner/issues/12) / PR [#19](https://github.com/gke-labs/eval-runner/pull/19).
+- **Discovery deadline & pod waiting reasons**: Issue [#12](https://github.com/gke-labs/eval-runner/issues/12) / Issue [#41](https://github.com/gke-labs/eval-runner/issues/41) - Done.
 - **Clone failure retry with backoff**: Issue [#20](https://github.com/gke-labs/eval-runner/issues/20) / PR [#21](https://github.com/gke-labs/eval-runner/pull/21).
 - **Output limit exec cancellation**: Issue [#22](https://github.com/gke-labs/eval-runner/issues/22).
 - **Finalizer NoMatch tolerance**: Issue [#23](https://github.com/gke-labs/eval-runner/issues/23).
