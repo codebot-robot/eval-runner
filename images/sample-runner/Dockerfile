@@ -18,7 +18,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir inspect-ai==0.3.281
+RUN pip install --no-cache-dir \
+    inspect-ai==0.3.281 \
+    google-genai==2.31.0 \
+    openai==3.33.0 \
+    anthropic==1.15.0
 
 RUN groupadd -g 1000 sandbox && \
     useradd -u 1000 -g 1000 -m -s /bin/bash sandbox
