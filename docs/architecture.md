@@ -265,8 +265,7 @@ The trust model establishes strict boundaries around untrusted repository code:
 The controller uses strictly namespaced RBAC with **no ClusterRole**:
 
 1. **In namespace `eval-runner` (Role `eval-runner-controller`)**:
-   - `evalrunner.gke-labs.dev/runs` and `runs/status`: `get`, `list`, `watch`, `create`, `update`, `patch`, `delete`.
-   - Core `events`: `create`, `patch`.
+   - `evalrunner.gke-labs.dev/runs` and `runs/status`: `get`, `list`, `watch`, `update`, `patch`.
 2. **In namespace `eval-runner-sandbox` (Role `eval-runner-controller-sandbox`)**:
    - `agents.x-k8s.io/sandboxes`: `create`, `get`, `list`, `watch`, `delete`.
    - Core `pods`: `get`, `list`, `watch` (used to look up sandbox pod IP addresses; `pods/exec` is dropped).
