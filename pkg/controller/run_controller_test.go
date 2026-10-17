@@ -1050,10 +1050,10 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 		Build()
 
 	reconciler := &RunReconciler{
-		Client:           client,
-		Scheme:           scheme,
-		SandboxClient:    executor,
-		SandboxNamespace: "eval-runner-sandbox",
+		Client:               client,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
 		MaxDiscoveryAttempts: 5,
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			return nil
@@ -1633,10 +1633,10 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 		Build()
 
 	reconciler := &RunReconciler{
-		Client:           client,
-		Scheme:           scheme,
-		SandboxClient:    executor,
-		SandboxNamespace: "eval-runner-sandbox",
+		Client:               client,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
 		MaxDiscoveryAttempts: 5,
 		DiscoveryRetryBackoff: []time.Duration{
 			10 * time.Second,
