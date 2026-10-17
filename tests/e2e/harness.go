@@ -110,6 +110,8 @@ func (h *Harness) DeployEvalRunner() {
 	// Build and load controller image
 	h.DockerBuild("eval-runner:e2e", filepath.Join(gitRoot, "images/eval-runner/Dockerfile"), gitRoot)
 	h.KindLoad("eval-runner:e2e")
+	h.DockerBuild("sample-runner:e2e", filepath.Join(gitRoot, "images/sample-runner/Dockerfile"), gitRoot)
+	h.KindLoad("sample-runner:e2e")
 
 	// Apply namespaces
 	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/00-namespaces.yaml"))
@@ -133,6 +135,12 @@ func (h *Harness) DeployEvalRunner() {
 		string(deployContent),
 		"image: eval-runner",
 		"image: eval-runner:e2e\n        imagePullPolicy: Never",
+		1,
+	)
+	modifiedDeploy = strings.Replace(
+		modifiedDeploy,
+		"sample-runner:latest",
+		"sample-runner:e2e",
 		1,
 	)
 	h.KubectlApplyContent(modifiedDeploy)
@@ -281,6 +289,23 @@ func (h *Harness) WaitForSandboxDeleted(namespace, sandboxName string, timeout t
 
 		if time.Since(start) > timeout {
 			h.t.Fatalf("Timeout waiting for Sandbox %s/%s to be deleted; current: %s", namespace, sandboxName, strings.TrimSpace(string(out)))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func (h *Harness) WaitForAllSandboxesDeletedForRun(namespace, runName string, timeout time.Duration) {
+	h.t.Logf("Waiting for all sandboxes for Run %s in namespace %s to be deleted (timeout %v)", runName, namespace, timeout)
+	start := time.Now()
+	for {
+		cmd := exec.Command("kubectl", "get", "sandboxes", "-n", namespace, "-l", fmt.Sprintf("evalrunner.gke-labs.dev/run-name=%s", runName), "--no-headers")
+		out, err := cmd.Output()
+		if err == nil && strings.TrimSpace(string(out)) == "" {
+			return
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for sandboxes for run %s to be deleted; current: %s", runName, strings.TrimSpace(string(out)))
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
