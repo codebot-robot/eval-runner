@@ -14,7 +14,10 @@
 
 package artifacts
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // RunMetadata provides metadata about the Run and Task for artifact storage.
 type RunMetadata struct {
@@ -23,10 +26,34 @@ type RunMetadata struct {
 	TaskID       string
 	Model        string
 	Commit       string
+
+	// Task execution aggregates and timestamps for summary.json
+	Samples    int
+	Successes  int
+	MeanScore  *float64
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+}
+
+// TaskSummary records per-task aggregates and execution metadata written alongside the Inspect log.
+type TaskSummary struct {
+	TaskID     string     `json:"taskId"`
+	Model      string     `json:"model"`
+	Commit     string     `json:"commit"`
+	Samples    int        `json:"samples"`
+	Successes  int        `json:"successes"`
+	MeanScore  *float64   `json:"meanScore"`
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Capped     bool       `json:"capped"`
+	CapBytes   int64      `json:"capBytes,omitempty"`
 }
 
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.
 type ArtifactSink interface {
 	// StoreArtifact persists the raw log bytes for a task and returns the storage path or URI.
 	StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error)
+
+	// ArtifactPrefix returns the run-level storage prefix/URI for a given commit, or empty string if not applicable.
+	ArtifactPrefix(commit string) string
 }

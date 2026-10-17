@@ -33,12 +33,25 @@ func (s *NoopSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename
 	return "", nil
 }
 
+// ArtifactPrefix implements ArtifactSink for NoopSink.
+func (s *NoopSink) ArtifactPrefix(commit string) string {
+	return ""
+}
+
 // LocalDirSink is an ArtifactSink that writes artifacts to a local directory hierarchy.
 type LocalDirSink struct {
 	BaseDir string
 }
 
 var _ ArtifactSink = (*LocalDirSink)(nil)
+
+// ArtifactPrefix implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) ArtifactPrefix(commit string) string {
+	if s.BaseDir == "" {
+		return ""
+	}
+	return filepath.Join(s.BaseDir, "runs", commit) + "/"
+}
 
 func validateSafeComponent(name, val string) error {
 	if strings.TrimSpace(val) == "" {

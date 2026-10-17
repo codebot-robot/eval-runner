@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
@@ -78,6 +80,7 @@ func main() {
 	var maxParallelTasks int
 	var modelSecret string
 	var sampleRunnerImage string
+	var artifactBucket string
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -91,6 +94,7 @@ func main() {
 	flag.IntVar(&maxParallelTasks, "max-parallel-tasks", controller.DefaultMaxParallelTasks, "Maximum number of task sandboxes to run concurrently")
 	flag.StringVar(&modelSecret, "model-secret", "", "Name of Secret in sandbox namespace containing model credentials")
 	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
+	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
 
 	opts := zap.Options{
 		Development: true,
@@ -203,6 +207,16 @@ func main() {
 		sandboxclient.WithStderrLimit(maxStderrBytes),
 	)
 
+	var sink artifacts.ArtifactSink = &artifacts.NoopSink{}
+	if artifactBucket != "" {
+		gcsSink, err := gcs.New(context.Background(), artifactBucket)
+		if err != nil {
+			setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", artifactBucket)
+			os.Exit(1)
+		}
+		sink = gcsSink
+	}
+
 	reconciler := &controller.RunReconciler{
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
@@ -219,6 +233,7 @@ func main() {
 		MaxParallelTasks:     maxParallelTasks,
 		ModelSecret:          modelSecret,
 		SampleRunnerImage:    sampleRunnerImage,
+		ArtifactSink:         sink,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

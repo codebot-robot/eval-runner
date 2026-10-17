@@ -235,6 +235,108 @@ The default sample runner sandbox image (`images/sample-runner`) includes Inspec
 
 For evaluations requiring other model providers or custom environments, a repository can declare custom images in `.evals/list` using the manifest's top-level `images[]` declarations and `tasks[].images[]` references (see concept §2.2 in `docs/concept/functionality.md`).
 
+## Results in GCS
+
+By default, the controller runs with an in-memory no-op artifact sink. When `--artifact-bucket=gs://<bucket>` is configured, the controller persists raw Inspect evaluation JSON logs alongside a per-task aggregate `summary.json` directly to Google Cloud Storage under `runs/<commit>/<task-id>/`.
+
+Writes happen exclusively from the controller pod using Application Default Credentials (ADC). Sandboxes never hold bucket credentials or cloud service account tokens (zero-trust architecture).
+
+### One-Time Cloud Setup
+
+To grant the controller permissions to write artifacts to a GCS bucket using GKE Workload Identity:
+
+1. **Create the Google Service Account (GSA):**
+
+   ```bash
+   gcloud iam service-accounts create eval-runner-controller \
+     --project=<project> \
+     --description="Service account for eval-runner controller artifact uploads"
+   ```
+
+2. **Grant `roles/storage.objectAdmin` on the target bucket:**
+
+   ```bash
+   gcloud storage buckets add-iam-policy-binding gs://<bucket> \
+     --member="serviceAccount:eval-runner-controller@<project>.iam.gserviceaccount.com" \
+     --role="roles/storage.objectAdmin"
+   ```
+
+3. **Bind the Kubernetes ServiceAccount (KSA) via Workload Identity:**
+
+   Allow the `eval-runner/eval-runner-controller` Kubernetes ServiceAccount to impersonate the Google Service Account:
+
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding eval-runner-controller@<project>.iam.gserviceaccount.com \
+     --project=<project> \
+     --role="roles/iam.workloadIdentityUser" \
+     --member="serviceAccount:<project>.svc.id.goog[eval-runner/eval-runner-controller]"
+   ```
+
+4. **Annotate the Kubernetes ServiceAccount:**
+
+   Annotate `eval-runner-controller` in the `eval-runner` namespace with the GSA email:
+
+   ```bash
+   kubectl -n eval-runner annotate serviceaccount eval-runner-controller \
+     iam.gke.io/gcp-service-account=eval-runner-controller@<project>.iam.gserviceaccount.com \
+     --overwrite
+   ```
+
+   *(Note: Manifests remain project-agnostic and do not include the GCP project annotation so that repeated `ap deploy` runs do not overwrite cluster annotations. `kubectl apply` leaves existing annotations in place.)*
+
+### Configuring the Controller Flag
+
+Configure the controller deployment with `--artifact-bucket=gs://<bucket>`:
+
+```bash
+kubectl -n eval-runner patch deployment eval-runner-controller --type=json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--artifact-bucket=gs://<bucket>"}]'
+```
+
+For our GKE dev cluster (`gs://justinbs-knotai-dev-eval-runner`):
+
+```bash
+kubectl -n eval-runner patch deployment eval-runner-controller --type=json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--artifact-bucket=gs://justinbs-knotai-dev-eval-runner"}]'
+```
+
+### Browsing and Inspecting Results
+
+Artifacts follow a deterministic layout:
+- Raw Inspect log: `gs://<bucket>/runs/<commit>/<task-id>/<log-filename>.json`
+- Task summary: `gs://<bucket>/runs/<commit>/<task-id>/summary.json`
+
+List all artifacts for a specific commit:
+
+```bash
+gcloud storage ls --recursive gs://<bucket>/runs/<commit>/
+```
+
+View the JSON summary for a specific task:
+
+```bash
+gcloud storage cat gs://<bucket>/runs/<commit>/<task-id>/summary.json
+```
+
+The `summary.json` contains:
+```json
+{
+  "taskId": "docs/readme_comprehension",
+  "model": "google/gemini-3.5-flash-lite",
+  "commit": "abcdef123456",
+  "samples": 10,
+  "successes": 8,
+  "meanScore": 0.8,
+  "startedAt": "2026-10-17T14:52:45Z",
+  "finishedAt": "2026-10-17T14:52:47Z",
+  "capped": false
+}
+```
+
+Upload sizes are bounded to 10 MiB; if a log exceeds this limit, the log is uploaded in full up to the cap, and `"capped": true` along with `"capBytes"` are recorded in `summary.json`.
+
+On the `Run` custom resource, `status.artifacts` records the run-level prefix (e.g. `gs://<bucket>/runs/<commit>/`), and `status.tasks[].logPath` points directly to the `gs://` URI of each task's log.
+
 ## Running Unit Tests
 
 Run all unit tests with:

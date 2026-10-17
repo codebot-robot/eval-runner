@@ -102,6 +102,7 @@ status:
 | `discoveryDeadline` | `*metav1.Time` | Overall deadline by which discovery must complete. |
 | `executionDeadline` | `*metav1.Time` | Overall deadline by which sample execution must complete. |
 | `tasks` | `[]TaskStatus` | Per-task execution results and score aggregates. See [Tasks](#taskstatus). |
+| `artifacts` | `string` | Storage base URI or prefix where artifacts for this Run are persisted (e.g. `gs://<bucket>/runs/<commit>/`). |
 
 ### Phases
 
@@ -158,4 +159,6 @@ Because `.evals/list` and `inspect eval` execute within untrusted sandboxes, the
 | Max parallel tasks | `--max-parallel-tasks` | `4` | Caps concurrent task sandboxes executing at one time. |
 | Model credentials | `--model-secret` | `""` (none) | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes. |
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
+| Artifact bucket | `--artifact-bucket` | `""` (no-op sink) | GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored. |
+| Artifact upload size | `DefaultMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded Inspect log; uploads are capped to this size and recorded in `summary.json`. |
 

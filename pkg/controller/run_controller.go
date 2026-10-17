@@ -552,6 +552,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			status.Phase = v1alpha1.RunPhaseRunning
 			status.Tasks = initialTasks
 			status.ExecutionDeadline = &dl
+			if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
+				status.Artifacts = prefix
+			}
 		})
 		if err != nil {
 			return ctrl.Result{}, err
@@ -1046,6 +1049,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		status.Manifest = manifest
 		status.Tasks = initialTasks
 		status.ExecutionDeadline = &dl
+		if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
+			status.Artifacts = prefix
+		}
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionTypeDiscovered,
 			Status:             metav1.ConditionTrue,
@@ -1185,6 +1191,11 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			logger.Info("Tasks finished with at least one completed; marking Run as Completed", "run", run.Name, "completed", completedCount)
 			err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 				status.Phase = v1alpha1.RunPhaseCompleted
+				if status.Artifacts == "" {
+					if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
+						status.Artifacts = prefix
+					}
+				}
 			})
 			return ctrl.Result{}, err
 		}
@@ -1534,6 +1545,7 @@ type taskExecutionResult struct {
 }
 
 func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) taskExecutionResult {
+	startTime := r.now()
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 
 	var targetTask *v1alpha1.ManifestTask
@@ -1823,16 +1835,30 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 
 	// Step 6: Store artifact
+	finishTime := r.now()
 	meta := artifacts.RunMetadata{
 		RunName:      run.Name,
 		RunNamespace: run.Namespace,
 		TaskID:       taskID,
 		Model:        run.Spec.Model,
 		Commit:       run.Spec.Repo.Commit,
+		Samples:      agg.Samples,
+		Successes:    agg.Successes,
+		MeanScore:    agg.MeanScore,
+		StartedAt:    &startTime,
+		FinishedAt:   &finishTime,
 	}
 	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
 	if storeErr != nil {
 		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
+		return taskExecutionResult{
+			taskID:    taskID,
+			phase:     v1alpha1.TaskPhaseFailed,
+			samples:   agg.Samples,
+			successes: agg.Successes,
+			meanScore: agg.MeanScore,
+			message:   fmt.Sprintf("failed to store artifact: %v", storeErr),
+		}
 	}
 
 	return taskExecutionResult{
