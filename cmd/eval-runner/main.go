@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -25,9 +26,11 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	discoveryk8s "k8s.io/client-go/discovery"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -75,11 +78,6 @@ func main() {
 	var modelSecret string
 	var sampleRunnerImage string
 
-	defaultSampleRunnerImage := os.Getenv("SAMPLE_RUNNER_IMAGE")
-	if defaultSampleRunnerImage == "" {
-		defaultSampleRunnerImage = discovery.DefaultSampleRunnerImage
-	}
-
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -90,7 +88,7 @@ func main() {
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
 	flag.IntVar(&maxParallelTasks, "max-parallel-tasks", controller.DefaultMaxParallelTasks, "Maximum number of task sandboxes to run concurrently")
 	flag.StringVar(&modelSecret, "model-secret", "", "Name of Secret in sandbox namespace containing model credentials")
-	flag.StringVar(&sampleRunnerImage, "sample-runner-image", defaultSampleRunnerImage, "Container image used for sample execution sandboxes")
+	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
 
 	opts := zap.Options{
 		Development: true,
@@ -101,6 +99,47 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	cfg := ctrl.GetConfigOrDie()
+
+	if sampleRunnerImage == "" {
+		podName := os.Getenv("POD_NAME")
+		podNamespace := os.Getenv("POD_NAMESPACE")
+		if podName == "" || podNamespace == "" {
+			setupLog.Error(fmt.Errorf("POD_NAME and POD_NAMESPACE environment variables are required when --sample-runner-image is unset"), "cannot derive sample-runner image from controller pod")
+			os.Exit(1)
+		}
+
+		kubeClient, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			setupLog.Error(err, "unable to create kubernetes client to derive sample-runner image")
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pod, err := kubeClient.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			setupLog.Error(err, "unable to get controller pod to derive sample-runner image", "pod", podName, "namespace", podNamespace)
+			os.Exit(1)
+		}
+
+		controllerImage, err := controller.FindEvalRunnerImage(pod)
+		if err != nil {
+			setupLog.Error(err, "unable to find eval-runner container in controller pod", "pod", podName, "namespace", podNamespace)
+			os.Exit(1)
+		}
+
+		derivedImage, err := controller.DeriveSampleRunnerImage(controllerImage)
+		if err != nil {
+			setupLog.Error(err, "failed to derive sample-runner image from controller image", "controllerImage", controllerImage)
+			os.Exit(1)
+		}
+
+		sampleRunnerImage = derivedImage
+		setupLog.Info("derived sample-runner image from controller image", "image", sampleRunnerImage, "controllerImage", controllerImage)
+	} else {
+		setupLog.Info("using configured sample-runner image override", "image", sampleRunnerImage)
+	}
 
 	// Pre-requisite check: Fail fast if agent-sandbox CRD is missing
 	discoveryClient, err := discoveryk8s.NewDiscoveryClientForConfig(cfg)
