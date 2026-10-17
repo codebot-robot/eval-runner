@@ -1,0 +1,336 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ui
+
+import (
+	"fmt"
+	"html/template"
+	"math"
+	"time"
+
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// NavTab represents the current active tab in the UI header.
+type NavTab string
+
+const (
+	NavTabRuns        NavTab = "runs"
+	NavTabComparisons NavTab = "comparisons"
+)
+
+// RunListItem represents a single run row in the /runs list view.
+type RunListItem struct {
+	Name      string
+	Namespace string
+	Phase     v1alpha1.RunPhase
+	PhaseChip string // good, bad, warn, neutral, pending
+	Tasks     string // e.g. "2/2"
+	Samples   int
+	Rates     string
+	Commit    string // short commit
+	Age       string // e.g. "14m"
+	Link      string // "/runs/<ns>/<name>"
+}
+
+// RunsListView is the view model for the /runs list page.
+type RunsListView struct {
+	ActiveTab NavTab
+	Namespace string
+	Runs      []RunListItem
+}
+
+// RunTaskRow represents a single eval task in the /runs/<ns>/<name> detail view.
+type RunTaskRow struct {
+	ID        string
+	Phase     v1alpha1.TaskPhase
+	PhaseChip string // good, bad, warn, neutral, pending
+	RateStr   string // e.g. "0.84"
+	HasCI     bool
+	CILeftPx  float64
+	CIWidthPx float64
+	CIDotPx   float64
+	CILabel   string // e.g. "[0.72, 0.95]"
+	Samples   int
+	Successes int
+	Method    string // e.g. "wilson", "t"
+	LogPath   string // text path or URI
+	Message   string
+}
+
+// RunDetailView is the view model for the /runs/<ns>/<name> detail page.
+type RunDetailView struct {
+	ActiveTab       NavTab
+	Name            string
+	Namespace       string
+	Phase           v1alpha1.RunPhase
+	PhaseChip       string
+	RepoURL         string
+	Commit          string
+	CommitShort     string
+	Model           string
+	Age             string
+	ArtifactsPrefix string
+	Message         string
+
+	// Summary
+	TasksSummary     string
+	TasksCompleted   int
+	TasksFailed      int
+	TasksTotal       int
+	TotalSamples     int
+	MeanSuccessRate  string
+	SuccessRateRange string
+	CompactRates     string
+
+	Tasks []RunTaskRow
+}
+
+// ComparisonListItem represents a single comparison row in the /comparisons list view.
+type ComparisonListItem struct {
+	Name         string
+	Namespace    string
+	Verdict      v1alpha1.ComparisonVerdict
+	VerdictChip  string
+	PImprovement string
+	Tasks        string
+	BaselineRun  string
+	CandidateRun string
+	Age          string
+	Link         string
+}
+
+// ComparisonsListView is the view model for the /comparisons list page.
+type ComparisonsListView struct {
+	ActiveTab   NavTab
+	Namespace   string
+	Comparisons []ComparisonListItem
+}
+
+// ComparisonTaskRow represents a single task row in the PR-comment table.
+type ComparisonTaskRow struct {
+	ID          string
+	BaseRate    string        // e.g. "0.61"
+	CandRate    string        // e.g. "0.84"
+	Delta       template.HTML // e.g. "+0.23"
+	HasCI       bool
+	CILeftPx    float64
+	CIWidthPx   float64
+	CIDotPx     float64
+	CILabel     template.HTML // e.g. "[+0.11, +0.35]"
+	StatusClass string        // good, bad, warn, neutral, pending
+	Label       string        // improved, regressed, unchanged, inconclusive, running
+	Pairs       int
+	DroppedCand int
+	DroppedBase int
+}
+
+// ComparisonDetailView is the view model for the /comparisons/<ns>/<name> detail page.
+type ComparisonDetailView struct {
+	ActiveTab    NavTab
+	Name         string
+	Namespace    string
+	Verdict      v1alpha1.ComparisonVerdict
+	VerdictChip  string
+	Headline     string // e.g. "3f9c2e1 vs a81d0c4 · P(improvement) = 0.98"
+	PImprovement string // e.g. "0.98"
+	SummaryPath  string
+	Message      string
+
+	Tasks []ComparisonTaskRow
+
+	// Footer data
+	BaseRun          string
+	BaseCommit       string
+	BaseCommitShort  string
+	CandRun          string
+	CandCommit       string
+	CandCommitShort  string
+	TotalSamples     int
+	TotalPairs       int
+	TotalDroppedCand int
+	TotalDroppedBase int
+}
+
+// Helpers for CSS status classes
+
+func phaseChipClass(phase v1alpha1.RunPhase) string {
+	switch phase {
+	case v1alpha1.RunPhaseCompleted:
+		return "good"
+	case v1alpha1.RunPhaseRunning:
+		return "pending"
+	case v1alpha1.RunPhasePending, v1alpha1.RunPhaseDiscovering, v1alpha1.RunPhaseDiscovered:
+		return "warn"
+	case v1alpha1.RunPhaseFailed:
+		return "bad"
+	default:
+		return "neutral"
+	}
+}
+
+func taskPhaseChipClass(phase v1alpha1.TaskPhase) string {
+	switch phase {
+	case v1alpha1.TaskPhaseCompleted:
+		return "good"
+	case v1alpha1.TaskPhaseRunning:
+		return "pending"
+	case v1alpha1.TaskPhasePending:
+		return "neutral"
+	case v1alpha1.TaskPhaseFailed:
+		return "bad"
+	default:
+		return "neutral"
+	}
+}
+
+func verdictChipClass(verdict v1alpha1.ComparisonVerdict) string {
+	switch verdict {
+	case v1alpha1.ComparisonVerdictImproved:
+		return "good"
+	case v1alpha1.ComparisonVerdictRegressed:
+		return "bad"
+	case v1alpha1.ComparisonVerdictUnchanged:
+		return "neutral"
+	case v1alpha1.ComparisonVerdictInconclusive:
+		return "warn"
+	case v1alpha1.ComparisonVerdictRunning:
+		return "pending"
+	default:
+		return "neutral"
+	}
+}
+
+func labelStatusClass(label v1alpha1.ComparisonTaskLabel) string {
+	switch label {
+	case v1alpha1.ComparisonTaskLabelImproved:
+		return "good"
+	case v1alpha1.ComparisonTaskLabelRegressed:
+		return "bad"
+	case v1alpha1.ComparisonTaskLabelUnchanged:
+		return "neutral"
+	case v1alpha1.ComparisonTaskLabelInconclusive:
+		return "warn"
+	case v1alpha1.ComparisonTaskLabelRunning:
+		return "pending"
+	default:
+		return "neutral"
+	}
+}
+
+func clamp(v, min, max float64) float64 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+// CalculateComparisonBarGeometry calculates the geometry for the comparison CI bar.
+// Bar width is 340px, with the zero mark at the center (170px).
+// Scale is 340px / 1.0 = 340px per unit difference (range [-0.5, +0.5] spans the 340px bar).
+func CalculateComparisonBarGeometry(delta *float64, ci *v1alpha1.DeltaConfidenceInterval, barWidth float64) (leftPx, widthPx, dotPx float64, hasCI bool) {
+	if ci == nil {
+		return 0, 0, 0, false
+	}
+
+	zeroPx := barWidth / 2.0
+	scale := barWidth / 1.0 // 340 px per unit delta
+
+	lo := ci.Lower
+	hi := ci.Upper
+	d := 0.0
+	if delta != nil {
+		d = *delta
+	} else {
+		d = (lo + hi) / 2.0
+	}
+
+	rawLeft := zeroPx + lo*scale
+	rawRight := zeroPx + hi*scale
+
+	leftPx = clamp(rawLeft, 0, barWidth)
+	rightPx := clamp(rawRight, 0, barWidth)
+	if rightPx < leftPx {
+		rightPx = leftPx
+	}
+	widthPx = math.Max(rightPx-leftPx, 2.0) // at least 2px to be visible
+
+	// Point estimate dot is 14px wide, centered on zeroPx + d*scale
+	rawDot := zeroPx + d*scale - 7.0
+	dotPx = clamp(rawDot, 0, barWidth-14.0)
+
+	return leftPx, widthPx, dotPx, true
+}
+
+// CalculateRunBarGeometry calculates the geometry for a Run's single-task CI bar against a 0-1 axis.
+// Axis width is barWidth (default 240px). Axis goes from 0.0 (left=0) to 1.0 (right=barWidth).
+func CalculateRunBarGeometry(rate *float64, meanScore *float64, ci *v1alpha1.ConfidenceInterval, barWidth float64) (leftPx, widthPx, dotPx float64, hasCI bool) {
+	if ci == nil {
+		return 0, 0, 0, false
+	}
+
+	lo := clamp(ci.Lower, 0.0, 1.0)
+	hi := clamp(ci.Upper, 0.0, 1.0)
+	if hi < lo {
+		hi = lo
+	}
+
+	pt := 0.0
+	if rate != nil {
+		pt = clamp(*rate, 0.0, 1.0)
+	} else if meanScore != nil {
+		pt = clamp(*meanScore, 0.0, 1.0)
+	} else {
+		pt = (lo + hi) / 2.0
+	}
+
+	leftPx = lo * barWidth
+	rightPx := hi * barWidth
+	widthPx = math.Max(rightPx-leftPx, 2.0)
+
+	// Point estimate dot is 14px wide, centered on pt * barWidth
+	rawDot := pt*barWidth - 7.0
+	dotPx = clamp(rawDot, 0, barWidth-14.0)
+
+	return leftPx, widthPx, dotPx, true
+}
+
+func FormatAge(t metav1.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	d := time.Since(t.Time)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+func ShortCommit(c string) string {
+	if len(c) > 7 {
+		return c[:7]
+	}
+	return c
+}
