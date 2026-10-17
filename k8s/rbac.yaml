@@ -32,6 +32,8 @@ rules:
   resources:
   - runs
   - runs/status
+  - comparisons
+  - comparisons/status
   verbs:
   - get
   - list
