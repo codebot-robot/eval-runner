@@ -62,6 +62,15 @@ spec:
           spec:
             description: RunSpec defines the desired state of Run.
             properties:
+              limit:
+                description: Limit is an optional per-task cap on samples (passed
+                  to Inspect as --limit).
+                type: integer
+              model:
+                description: |-
+                  Model is the Inspect model identifier (e.g. mockllm/model, google/gemini-3.5-flash-lite).
+                  If empty, the Run stops after discovery.
+                type: string
               repo:
                 description: Repo specifies the repository and commit to run.
                 properties:
@@ -77,6 +86,13 @@ spec:
                 - commit
                 - url
                 type: object
+              tasks:
+                description: |-
+                  Tasks is an optional allow-list of task IDs to run.
+                  If empty, all tasks with empty resources are eligible.
+                items:
+                  type: string
+                type: array
             required:
             - repo
             type: object
@@ -146,6 +162,11 @@ spec:
                 x-kubernetes-list-type: map
               discoveryDeadline:
                 description: DiscoveryDeadline is the deadline by which discovery
+                  must complete.
+                format: date-time
+                type: string
+              executionDeadline:
+                description: ExecutionDeadline is the deadline by which sample execution
                   must complete.
                 format: date-time
                 type: string
@@ -227,8 +248,51 @@ spec:
                 - Pending
                 - Discovering
                 - Discovered
+                - Running
+                - Completed
                 - Failed
                 type: string
+              tasks:
+                description: Tasks records the status and results for each executed
+                  eval task.
+                items:
+                  description: TaskStatus records the execution status and scores
+                    for a single eval task.
+                  properties:
+                    id:
+                      description: ID is the unique identifier of the task (e.g. docs/readme_comprehension).
+                      type: string
+                    logPath:
+                      description: LogPath is the path or URI where the Inspect log
+                        was stored by the artifact sink.
+                      type: string
+                    meanScore:
+                      description: MeanScore is the mean of per-sample scores in [0,
+                        1].
+                      type: number
+                    message:
+                      description: Message contains failure detail or bounded error
+                        information.
+                      type: string
+                    phase:
+                      description: Phase is the current execution phase of this task.
+                      enum:
+                      - Pending
+                      - Running
+                      - Completed
+                      - Failed
+                      type: string
+                    samples:
+                      description: Samples is the number of samples scored.
+                      type: integer
+                    successes:
+                      description: Successes is the number of samples with score ==
+                        1 (for binary scorers).
+                      type: integer
+                  required:
+                  - id
+                  type: object
+                type: array
             type: object
         type: object
     served: true
