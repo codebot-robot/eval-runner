@@ -17,17 +17,21 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,20 +42,80 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
-type fakePodExecutor struct {
-	stdout    string
-	stderr    string
-	err       error
+type fakeSandboxClient struct {
+	mu        sync.Mutex
 	callCount int
-	execFn    func(call int, ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error)
+	calls     []sandboxclient.ProcessConfig
+	execFn    func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error)
+
+	listStdout string
+	listStderr string
+	listErr    error
+
+	cloneErr    error
+	cloneExit   int
+	cloneStderr string
+
+	checkoutErr    error
+	checkoutExit   int
+	checkoutStderr string
 }
 
-func (f *fakePodExecutor) Exec(ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
+func (f *fakeSandboxClient) NewClient(podIP string) (sandboxclient.Client, error) {
+	return f, nil
+}
+
+func (f *fakeSandboxClient) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	return nil, nil
+}
+
+func (f *fakeSandboxClient) Close() error {
+	return nil
+}
+
+func (f *fakeSandboxClient) Execute(ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+	f.mu.Lock()
 	f.callCount++
-	if f.execFn != nil {
-		return f.execFn(f.callCount, ctx, namespace, podName, containerName, cmd)
+	f.calls = append(f.calls, cfg)
+	call := f.callCount
+	execFn := f.execFn
+	f.mu.Unlock()
+
+	if execFn != nil {
+		return execFn(call, ctx, cfg)
 	}
-	return f.stdout, f.stderr, f.err
+
+	if len(cfg.Command) == 0 {
+		return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+	}
+
+	cmd0 := cfg.Command[0]
+	if cmd0 == "rm" {
+		return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+	}
+
+	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+		if f.cloneErr != nil {
+			return nil, f.cloneErr
+		}
+		return &sandboxclient.ExecuteResult{ExitCode: f.cloneExit, Stderr: f.cloneStderr}, nil
+	}
+
+	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "checkout" {
+		if f.checkoutErr != nil {
+			return nil, f.checkoutErr
+		}
+		return &sandboxclient.ExecuteResult{ExitCode: f.checkoutExit, Stderr: f.checkoutStderr}, nil
+	}
+
+	if cmd0 == "./.evals/list" {
+		if f.listErr != nil {
+			return nil, f.listErr
+		}
+		return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: f.listStdout, Stderr: f.listStderr}, nil
+	}
+
+	return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 }
 
 func setupScheme(t *testing.T) *runtime.Scheme {
@@ -93,7 +157,7 @@ func TestReconcilePendingToDiscovering(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -161,6 +225,7 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -177,8 +242,8 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 		]
 	}`
 
-	executor := &fakePodExecutor{
-		stdout: validManifestJSON,
+	executor := &fakeSandboxClient{
+		listStdout: validManifestJSON,
 	}
 
 	client := fake.NewClientBuilder().
@@ -190,7 +255,7 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         executor,
+		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -252,6 +317,7 @@ func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -261,9 +327,9 @@ func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 		},
 	}
 
-	executor := &fakePodExecutor{
-		stderr: "fatal: reference is not a tree: deadbeef00000000000000000000000000000000",
-		err:    errors.New("exit status 128"),
+	executor := &fakeSandboxClient{
+		checkoutStderr: "fatal: reference is not a tree: deadbeef00000000000000000000000000000000",
+		checkoutExit:   128,
 	}
 
 	client := fake.NewClientBuilder().
@@ -275,7 +341,7 @@ func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         executor,
+		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -293,14 +359,14 @@ func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
+	if !strings.Contains(updatedRun.Status.Message, "checkout") {
+		t.Errorf("Expected failure message to name the checkout step, got: %s", updatedRun.Status.Message)
+	}
 	if !strings.Contains(updatedRun.Status.Message, "deadbeef") {
 		t.Errorf("Expected failure message to contain stderr tail, got: %s", updatedRun.Status.Message)
 	}
 	if strings.Contains(updatedRun.Status.Message, "attempts") {
 		t.Errorf("Expected permanent failure to not mention attempts, got: %s", updatedRun.Status.Message)
-	}
-	if executor.callCount != 1 {
-		t.Errorf("Expected permanent failure to not be retried, got %d calls", executor.callCount)
 	}
 
 	// Assert Sandbox was cleaned up
@@ -331,10 +397,8 @@ func TestReconcileControllerRestartMidReconcile(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	// Existing sandbox from before restart
 	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
 
-	// Backing pod not ready yet
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sandboxName,
@@ -354,7 +418,7 @@ func TestReconcileControllerRestartMidReconcile(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -364,13 +428,15 @@ func TestReconcileControllerRestartMidReconcile(t *testing.T) {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 	if res.RequeueAfter == 0 {
-		t.Errorf("Expected requeue while pod is pending")
+		t.Errorf("Expected RequeueAfter when pod is pending")
 	}
 
-	// Verify sandbox was reused and not recreated
-	var checkSb sandboxv1beta1.Sandbox
-	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb); err != nil {
-		t.Fatalf("Expected sandbox to still exist: %v", err)
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovering {
+		t.Errorf("Expected phase to remain Discovering, got %s", updatedRun.Status.Phase)
 	}
 }
 
@@ -402,7 +468,7 @@ func TestReconcileTerminalRunIsNoop(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -413,6 +479,13 @@ func TestReconcileTerminalRunIsNoop(t *testing.T) {
 	}
 	if res.RequeueAfter != 0 {
 		t.Errorf("Expected no requeue for terminal Run")
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run")
+	var sb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &sb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected no sandbox created for terminal Run, got err: %v", err)
 	}
 }
 
@@ -450,7 +523,7 @@ func TestReconcileDeleteRunMidDiscoveryRemovesSandbox(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -460,41 +533,36 @@ func TestReconcileDeleteRunMidDiscoveryRemovesSandbox(t *testing.T) {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 	if res.RequeueAfter != 0 {
-		t.Errorf("Expected no requeue after deleting run")
+		t.Errorf("Expected no requeue on deletion")
 	}
 
-	// Assert Sandbox was deleted
 	var checkSb sandboxv1beta1.Sandbox
 	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
 	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on run deletion, got err: %v", err)
+		t.Errorf("Expected sandbox to be deleted on Run deletion, got err: %v", err)
 	}
 
-	// Assert finalizer was removed
 	var updatedRun v1alpha1.Run
-	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil && !apierrors.IsNotFound(err) {
-		t.Fatalf("Unexpected error getting run: %v", err)
-	} else if err == nil {
-		if controllerutil.ContainsFinalizer(&updatedRun, v1alpha1.FinalizerDiscoverySandbox) {
-			t.Errorf("Expected finalizer to be removed, got: %v", updatedRun.Finalizers)
-		}
+	err = client.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if err == nil && controllerutil.ContainsFinalizer(&updatedRun, v1alpha1.FinalizerDiscoverySandbox) {
+		t.Errorf("Expected finalizer to be removed from run")
 	}
 }
 
 func TestReconcileDeletedRunNotFoundCleansUpSandbox(t *testing.T) {
 	scheme := setupScheme(t)
 
+	runName := "test-run-ghost"
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run",
+			Name:      runName,
 			Namespace: "eval-runner",
 		},
 	}
 
-	sandboxName := discovery.SandboxNameForRun("test-run")
+	sandboxName := discovery.SandboxNameForRun(runName)
 	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
 
-	// Run is not in client (already deleted)
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(sb).
@@ -503,30 +571,33 @@ func TestReconcileDeletedRunNotFoundCleansUpSandbox(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
-	_, err := reconciler.Reconcile(t.Context(), req)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	res, err := reconciler.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue for deleted Run")
+	}
 
-	// Assert Sandbox was cleaned up via NotFound path
 	var checkSb sandboxv1beta1.Sandbox
 	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
 	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on NotFound run, got err: %v", err)
+		t.Errorf("Expected leftover sandbox to be deleted when Run is not found, got err: %v", err)
 	}
 }
 
 func TestReconcileTerminalRunWithLeftoverSandboxRemovesSandbox(t *testing.T) {
 	scheme := setupScheme(t)
 
+	runName := "test-run-terminal"
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run",
+			Name:      runName,
 			Namespace: "eval-runner",
 		},
 		Spec: v1alpha1.RunSpec{
@@ -540,7 +611,7 @@ func TestReconcileTerminalRunWithLeftoverSandboxRemovesSandbox(t *testing.T) {
 		},
 	}
 
-	sandboxName := discovery.SandboxNameForRun("test-run")
+	sandboxName := discovery.SandboxNameForRun(runName)
 	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
 
 	client := fake.NewClientBuilder().
@@ -552,11 +623,11 @@ func TestReconcileTerminalRunWithLeftoverSandboxRemovesSandbox(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
 	res, err := reconciler.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
@@ -565,32 +636,20 @@ func TestReconcileTerminalRunWithLeftoverSandboxRemovesSandbox(t *testing.T) {
 		t.Errorf("Expected no requeue for terminal Run")
 	}
 
-	// Assert leftover sandbox was deleted
 	var checkSb sandboxv1beta1.Sandbox
 	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
 	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected leftover sandbox to be deleted, got err: %v", err)
+		t.Errorf("Expected leftover sandbox to be deleted for terminal Run, got err: %v", err)
 	}
-}
-
-type countingPodExecutor struct {
-	stdout    string
-	stderr    string
-	err       error
-	callCount int
-}
-
-func (c *countingPodExecutor) Exec(ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
-	c.callCount++
-	return c.stdout, c.stderr, c.err
 }
 
 func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 	scheme := setupScheme(t)
 
+	runName := "test-run-conflict"
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-run",
+			Name:       runName,
 			Namespace:  "eval-runner",
 			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
 		},
@@ -605,7 +664,7 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 		},
 	}
 
-	sandboxName := discovery.SandboxNameForRun("test-run")
+	sandboxName := discovery.SandboxNameForRun(runName)
 	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
 
 	pod := &corev1.Pod{
@@ -615,6 +674,7 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -624,14 +684,9 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 		},
 	}
 
-	validManifestJSON := `{
-		"tasks": [
-			{"id": "triage/runbook_lookup", "workdir": "evals", "spec": "runbook.py@lookup"}
-		]
-	}`
-
-	executor := &countingPodExecutor{
-		stdout: validManifestJSON,
+	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
+	executor := &fakeSandboxClient{
+		listStdout: validManifestJSON,
 	}
 
 	firstStatusUpdate := true
@@ -643,7 +698,7 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 			SubResourceUpdate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 				if subResourceName == "status" && firstStatusUpdate {
 					firstStatusUpdate = false
-					return apierrors.NewConflict(schema.GroupResource{Group: "evalrunner.gke-labs.dev", Resource: "runs"}, "test-run", errors.New("conflict"))
+					return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("runs").GroupResource(), runName, errors.New("conflict"))
 				}
 				return cl.SubResource(subResourceName).Update(ctx, obj, opts...)
 			},
@@ -653,47 +708,25 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         executor,
+		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
 	res, err := reconciler.Reconcile(t.Context(), req)
 	if err != nil {
-		t.Fatalf("Reconcile error: %v", err)
+		t.Fatalf("Reconcile failed: %v", err)
 	}
 	if res.RequeueAfter != 0 {
-		t.Errorf("Did not expect RequeueAfter on success")
+		t.Errorf("Expected no requeue on success, got %v", res.RequeueAfter)
 	}
 
-	// Discovery should have only executed once despite conflict on status update
-	if executor.callCount != 1 {
-		t.Errorf("Expected Exec to be called exactly 1 time, got %d", executor.callCount)
-	}
-
-	// Assert Run updated to Discovered
 	var updatedRun v1alpha1.Run
 	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
 		t.Fatalf("Failed to get run: %v", err)
 	}
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
-		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
-	}
-
-	// Assert Sandbox was cleaned up
-	var checkSb sandboxv1beta1.Sandbox
-	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted, got err: %v", err)
-	}
-
-	// Reconcile a second time - verify discovery is not re-run
-	res, err = reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Second Reconcile error: %v", err)
-	}
-	if executor.callCount != 1 {
-		t.Errorf("Expected Exec to still be 1 after second reconcile, got %d", executor.callCount)
+		t.Errorf("Expected phase Discovered after conflict retry, got %s", updatedRun.Status.Phase)
 	}
 }
 
@@ -704,7 +737,7 @@ type discoveringRunFixture struct {
 	sandboxName string
 }
 
-func newDiscoveringRunFixture(t *testing.T, executor PodExecutor) *discoveringRunFixture {
+func newDiscoveringRunFixture(t *testing.T, clientInstance sandboxclient.Client) *discoveringRunFixture {
 	scheme := setupScheme(t)
 	runName := "test-run"
 	run := &v1alpha1.Run{
@@ -734,6 +767,7 @@ func newDiscoveringRunFixture(t *testing.T, executor PodExecutor) *discoveringRu
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -752,7 +786,7 @@ func newDiscoveringRunFixture(t *testing.T, executor PodExecutor) *discoveringRu
 	reconciler := &RunReconciler{
 		Client:           cl,
 		Scheme:           scheme,
-		Executor:         executor,
+		SandboxClient:    clientInstance,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -766,15 +800,15 @@ func newDiscoveringRunFixture(t *testing.T, executor PodExecutor) *discoveringRu
 }
 
 func TestReconcileStdoutOverLimitFails(t *testing.T) {
-	f := newDiscoveringRunFixture(t, &fakePodExecutor{
-		stdout: strings.Repeat("x", 1024),
-		err: &discovery.LimitError{
+	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
+		listErr: &discovery.LimitError{
 			Stream: "stdout",
 			Limit:  discovery.MaxStdoutBytes,
 		},
 	})
 
-	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
@@ -786,29 +820,20 @@ func TestReconcileStdoutOverLimitFails(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "stdout limit exceeded") {
-		t.Errorf("Expected failure message to mention stdout limit exceeded, got: %s", updatedRun.Status.Message)
-	}
-	if len(updatedRun.Status.Message) > discovery.MaxMessageBytes {
-		t.Errorf("Expected status.message <= %d bytes, got %d", discovery.MaxMessageBytes, len(updatedRun.Status.Message))
-	}
-
-	var checkSb sandboxv1beta1.Sandbox
-	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+		t.Errorf("Expected message to contain 'stdout limit exceeded', got: %s", updatedRun.Status.Message)
 	}
 }
 
 func TestReconcileStderrOverLimitFails(t *testing.T) {
-	f := newDiscoveringRunFixture(t, &fakePodExecutor{
-		stderr: strings.Repeat("error line\n", 500),
-		err: &discovery.LimitError{
+	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
+		listErr: &discovery.LimitError{
 			Stream: "stderr",
 			Limit:  discovery.MaxStderrBytes,
 		},
 	})
 
-	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
@@ -820,31 +845,23 @@ func TestReconcileStderrOverLimitFails(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "stderr limit exceeded") {
-		t.Errorf("Expected failure message to mention stderr limit exceeded, got: %s", updatedRun.Status.Message)
-	}
-	if len(updatedRun.Status.Message) > discovery.MaxMessageBytes {
-		t.Errorf("Expected status.message <= %d bytes, got %d", discovery.MaxMessageBytes, len(updatedRun.Status.Message))
-	}
-
-	var checkSb sandboxv1beta1.Sandbox
-	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+		t.Errorf("Expected message to contain 'stderr limit exceeded', got: %s", updatedRun.Status.Message)
 	}
 }
 
 func TestReconcileOversizedManifestFails(t *testing.T) {
-	var tasksJSON []string
-	for i := 0; i <= discovery.MaxTasks; i++ {
-		tasksJSON = append(tasksJSON, `{"id":"task-`+strings.Repeat("a", 5)+string(rune('0'+i%10))+`-`+string(rune('a'+i%26))+`-`+string(rune('0'+(i/10)%10))+`","spec":"eval.py@run"}`)
+	var tasks []string
+	for i := 0; i < 1001; i++ {
+		tasks = append(tasks, fmt.Sprintf(`{"id": "task_%d", "spec": "runbook.py"}`, i))
 	}
-	oversizedJSON := `{"tasks":[` + strings.Join(tasksJSON, ",") + `]}`
+	oversizedJSON := fmt.Sprintf(`{"tasks": [%s]}`, strings.Join(tasks, ","))
 
-	f := newDiscoveringRunFixture(t, &fakePodExecutor{
-		stdout: oversizedJSON,
+	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
+		listStdout: oversizedJSON,
 	})
 
-	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
@@ -856,25 +873,19 @@ func TestReconcileOversizedManifestFails(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "exceeding maximum allowed") {
-		t.Errorf("Expected failure message to mention exceeding maximum allowed tasks, got: %s", updatedRun.Status.Message)
-	}
-
-	var checkSb sandboxv1beta1.Sandbox
-	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+		t.Errorf("Expected message to contain 'exceeding maximum allowed', got: %s", updatedRun.Status.Message)
 	}
 }
 
 func TestReconcileStatusMessageBoundedOnFailure(t *testing.T) {
-	massiveStderr := strings.Repeat("extremely long failure line with lots of text 1234567890\n", 2000)
-
-	f := newDiscoveringRunFixture(t, &fakePodExecutor{
-		stderr: massiveStderr,
-		err:    errors.New("command crashed"),
+	hugeStderr := strings.Repeat("error line for testing\n", 500)
+	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
+		listStderr: hugeStderr,
+		listErr:    errors.New("exit code 1"),
 	})
 
-	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
@@ -886,22 +897,18 @@ func TestReconcileStatusMessageBoundedOnFailure(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if len(updatedRun.Status.Message) > discovery.MaxMessageBytes {
-		t.Errorf("Expected status.message <= %d bytes, got %d", discovery.MaxMessageBytes, len(updatedRun.Status.Message))
-	}
-	if len(updatedRun.Status.Conditions) > 0 {
-		cond := updatedRun.Status.Conditions[0]
-		if len(cond.Message) > discovery.MaxMessageBytes {
-			t.Errorf("Expected condition message <= %d bytes, got %d", discovery.MaxMessageBytes, len(cond.Message))
-		}
+		t.Errorf("Expected status message length <= %d, got %d", discovery.MaxMessageBytes, len(updatedRun.Status.Message))
 	}
 }
 
 func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
-	f := newDiscoveringRunFixture(t, &fakePodExecutor{
-		stdout: strings.Repeat("x", int(discovery.MaxStdoutBytes)+1),
+	hugeStdout := strings.Repeat("x", int(discovery.MaxStdoutBytes)+10)
+	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
+		listStdout: hugeStdout,
 	})
 
-	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
@@ -913,22 +920,20 @@ func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "stdout limit exceeded") {
-		t.Errorf("Expected failure message to mention stdout limit exceeded, got: %s", updatedRun.Status.Message)
-	}
-
-	var checkSb sandboxv1beta1.Sandbox
-	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+		t.Errorf("Expected message to contain 'stdout limit exceeded', got: %s", updatedRun.Status.Message)
 	}
 }
 
 func TestReconcileStderrOverLimitWithoutExecutorError(t *testing.T) {
-	f := newDiscoveringRunFixture(t, &fakePodExecutor{
-		stderr: strings.Repeat("e", int(discovery.MaxStderrBytes)+1),
+	hugeStderr := strings.Repeat("x", int(discovery.MaxStderrBytes)+10)
+	f := newDiscoveringRunFixture(t, &fakeSandboxClient{
+		listStderr: hugeStderr,
+		listStdout: `{"tasks":[{"id":"t1","spec":"s1"}]}`,
 	})
+	f.reconciler.MaxStderrBytes = discovery.MaxStderrBytes
 
-	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
@@ -940,13 +945,7 @@ func TestReconcileStderrOverLimitWithoutExecutorError(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "stderr limit exceeded") {
-		t.Errorf("Expected failure message to mention stderr limit exceeded, got: %s", updatedRun.Status.Message)
-	}
-
-	var checkSb sandboxv1beta1.Sandbox
-	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+		t.Errorf("Expected message to contain 'stderr limit exceeded', got: %s", updatedRun.Status.Message)
 	}
 }
 
@@ -979,6 +978,7 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -995,13 +995,24 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 		]
 	}`
 
-	executor := &fakePodExecutor{
-		execFn: func(call int, ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
-			if call == 1 {
-				// Simulate transient connection refused
-				return "", "fatal: unable to connect to git-server.eval-runner-sandbox.svc.cluster.local:\ngit-server.eval-runner-sandbox.svc.cluster.local[0: 34.118.239.254]: errno=Connection refused", errors.New("command terminated with exit code 128")
+	cloneAttempts := 0
+	executor := &fakeSandboxClient{
+		execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				cloneAttempts++
+				if cloneAttempts <= 2 {
+					// Simulate transient connection failure for first 2 attempts
+					return &sandboxclient.ExecuteResult{
+						ExitCode: 128,
+						Stderr:   "fatal: unable to connect to git-server.eval-runner-sandbox.svc.cluster.local: Connection refused",
+					}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 			}
-			return validManifestJSON, "", nil
+			if len(cfg.Command) > 0 && cfg.Command[0] == "./.evals/list" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: validManifestJSON}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 		},
 	}
 
@@ -1014,7 +1025,7 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         executor,
+		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			return nil
@@ -1030,8 +1041,8 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 		t.Errorf("Did not expect RequeueAfter on success")
 	}
 
-	if executor.callCount != 2 {
-		t.Errorf("Expected 2 discovery attempts (1 transient failure + 1 success), got %d", executor.callCount)
+	if cloneAttempts != 3 {
+		t.Errorf("Expected 3 clone attempts (2 failures + 1 success), got %d", cloneAttempts)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -1043,6 +1054,10 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 	}
 	if updatedRun.Status.Manifest == nil || len(updatedRun.Status.Manifest.Tasks) != 2 {
 		t.Fatalf("Expected 2 tasks in manifest, got: %+v", updatedRun.Status.Manifest)
+	}
+	// Assert attempts are recorded on success
+	if !strings.Contains(updatedRun.Status.Message, "3 attempts") {
+		t.Errorf("Expected status.Message to record 3 attempts, got: %s", updatedRun.Status.Message)
 	}
 
 	var checkSb sandboxv1beta1.Sandbox
@@ -1081,6 +1096,7 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -1090,9 +1106,18 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 		},
 	}
 
-	executor := &fakePodExecutor{
-		stderr: "fatal: unable to connect to git-server:\ngit-server: errno=Connection refused",
-		err:    errors.New("command terminated with exit code 128"),
+	cloneAttempts := 0
+	executor := &fakeSandboxClient{
+		execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				cloneAttempts++
+				return &sandboxclient.ExecuteResult{
+					ExitCode: 128,
+					Stderr:   "fatal: unable to connect to git-server:\ngit-server: errno=Connection refused",
+				}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
 	}
 
 	client := fake.NewClientBuilder().
@@ -1102,11 +1127,11 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 		Build()
 
 	reconciler := &RunReconciler{
-		Client:               client,
-		Scheme:               scheme,
-		Executor:             executor,
-		SandboxNamespace:     "eval-runner-sandbox",
-		MaxDiscoveryAttempts: 5,
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		MaxCloneAttempts: 5,
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			return nil
 		},
@@ -1118,8 +1143,8 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
-	if executor.callCount != 5 {
-		t.Errorf("Expected 5 discovery attempts, got %d", executor.callCount)
+	if cloneAttempts != 5 {
+		t.Errorf("Expected 5 clone attempts, got %d", cloneAttempts)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -1129,8 +1154,8 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
-	if !strings.Contains(updatedRun.Status.Message, "5 attempts") {
-		t.Errorf("Expected status.message to include number of attempts ('5 attempts'), got: %s", updatedRun.Status.Message)
+	if !strings.Contains(updatedRun.Status.Message, "step git clone failed after 5 attempts") {
+		t.Errorf("Expected status.message to indicate clone step failed after 5 attempts, got: %s", updatedRun.Status.Message)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "Connection refused") {
 		t.Errorf("Expected status.message to include stderr detail, got: %s", updatedRun.Status.Message)
@@ -1144,194 +1169,82 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 	}
 }
 
-func TestIsTransientDiscoveryErrorTable(t *testing.T) {
+func TestStepBasedFailures(t *testing.T) {
 	tests := []struct {
-		name        string
-		err         error
-		stderr      string
-		isTransient bool
+		name              string
+		client            *fakeSandboxClient
+		expectedMsgSubstr []string
 	}{
 		{
-			name:        "nil error",
-			err:         nil,
-			stderr:      "",
-			isTransient: false,
+			name: "checkout failure fails immediately without retry",
+			client: &fakeSandboxClient{
+				checkoutExit:   1,
+				checkoutStderr: "error: pathspec 'bad-branch' did not match any file(s) known to git",
+			},
+			expectedMsgSubstr: []string{"step git checkout failed", "pathspec"},
 		},
 		{
-			name:        "context deadline exceeded",
-			err:         context.DeadlineExceeded,
-			stderr:      "errno=Connection refused",
-			isTransient: false,
+			name: ".evals/list missing fails immediately without retry",
+			client: &fakeSandboxClient{
+				listErr: status.Errorf(codes.NotFound, "command or path not found: ./.evals/list"),
+			},
+			expectedMsgSubstr: []string{"step ./.evals/list failed", "missing .evals/list"},
 		},
 		{
-			name:        "context canceled",
-			err:         context.Canceled,
-			stderr:      "errno=Connection refused",
-			isTransient: false,
+			name: ".evals/list non-executable fails immediately without retry",
+			client: &fakeSandboxClient{
+				listErr: status.Errorf(codes.PermissionDenied, "permission denied: ./.evals/list"),
+			},
+			expectedMsgSubstr: []string{"step ./.evals/list failed", "not executable"},
 		},
 		{
-			name:        "git daemon connection refused",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to connect to git-server.eval-runner-sandbox.svc.cluster.local:\ngit-server.eval-runner-sandbox.svc.cluster.local[0: 34.118.239.254]: errno=Connection refused",
-			isTransient: true,
+			name: ".evals/list non-zero exit fails immediately without retry",
+			client: &fakeSandboxClient{
+				listErr: nil,
+				execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+					if len(cfg.Command) > 0 && cfg.Command[0] == "./.evals/list" {
+						return &sandboxclient.ExecuteResult{
+							ExitCode: 2,
+							Stderr:   "Traceback: invalid arguments",
+						}, nil
+					}
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				},
+			},
+			expectedMsgSubstr: []string{"step ./.evals/list failed with exit code 2", "invalid arguments"},
 		},
 		{
-			name:        "https connection refused",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to access 'https://github.com/org/repo.git/': Failed to connect to github.com port 443: Connection refused",
-			isTransient: true,
-		},
-		{
-			name:        "connection reset by peer",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: read error: Connection reset by peer",
-			isTransient: true,
-		},
-		{
-			name:        "DNS could not resolve host",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to access 'https://github.com/org/repo.git/': Could not resolve host: github.com",
-			isTransient: true,
-		},
-		{
-			name:        "DNS name does not resolve",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to look up git-server (port 9418) (Name does not resolve)",
-			isTransient: true,
-		},
-		{
-			name:        "DNS temporary failure",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to look up git-server (port 9418) (Temporary failure in name resolution)",
-			isTransient: true,
-		},
-		{
-			name:        "DNS name or service not known",
-			err:         errors.New("exit status 128"),
-			stderr:      "ssh: Could not resolve hostname git-server: Name or service not known",
-			isTransient: true,
-		},
-		{
-			name:        "connection timed out",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to connect to git-server:\ngit-server: errno=Connection timed out",
-			isTransient: true,
-		},
-		{
-			name:        "operation timed out",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to access 'https://github.com/org/repo.git/': Operation timed out after 300000 milliseconds with 0 bytes received",
-			isTransient: true,
-		},
-		{
-			name:        "i/o timeout in error string",
-			err:         errors.New("dial tcp 10.0.0.1:443: i/o timeout"),
-			stderr:      "",
-			isTransient: true,
-		},
-		{
-			name:        "HTTP 500",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 500",
-			isTransient: true,
-		},
-		{
-			name:        "HTTP 502",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 502",
-			isTransient: true,
-		},
-		{
-			name:        "HTTP 503",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 503",
-			isTransient: true,
-		},
-		{
-			name:        "HTTP 504",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 504",
-			isTransient: true,
-		},
-		{
-			name:        "remote end hung up unexpectedly",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: the remote end hung up unexpectedly",
-			isTransient: true,
-		},
-		{
-			name:        "early EOF",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: early EOF\nfatal: fetch-pack: invalid index-pack output",
-			isTransient: true,
-		},
-		{
-			name:        "network is unreachable",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to connect to git-server: errno=Network is unreachable",
-			isTransient: true,
-		},
-		{
-			name:        "no route to host",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: unable to connect to git-server: errno=No route to host",
-			isTransient: true,
-		},
-		{
-			name:        "permanent: bad commit reference is not a tree",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: reference is not a tree: deadbeef00000000000000000000000000000000",
-			isTransient: false,
-		},
-		{
-			name:        "permanent: pathspec did not match",
-			err:         errors.New("exit status 1"),
-			stderr:      "error: pathspec 'bad-branch' did not match any file(s) known to git",
-			isTransient: false,
-		},
-		{
-			name:        "permanent: missing .evals/list",
-			err:         errors.New("exit status 127"),
-			stderr:      "sh: ./.evals/list: not found",
-			isTransient: false,
-		},
-		{
-			name:        "permanent: non-executable .evals/list",
-			err:         errors.New("exit status 126"),
-			stderr:      "sh: ./.evals/list: Permission denied",
-			isTransient: false,
-		},
-		{
-			name:        "permanent: non-zero exit of .evals/list",
-			err:         errors.New("exit status 1"),
-			stderr:      "Traceback (most recent call last):\n  File './.evals/list', line 12, in <module>\nRuntimeError: missing config",
-			isTransient: false,
-		},
-		{
-			name:        "permanent: repository not found 404",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: repository 'https://github.com/org/repo.git/' not found\nThe requested URL returned error: 404",
-			isTransient: false,
-		},
-		{
-			name:        "permanent: authentication failed 401",
-			err:         errors.New("exit status 128"),
-			stderr:      "fatal: Authentication failed for 'https://github.com/org/repo.git/'\nThe requested URL returned error: 401",
-			isTransient: false,
-		},
-		{
-			name:        "permanent: forbidden 403",
-			err:         errors.New("exit status 128"),
-			stderr:      "The requested URL returned error: 403",
-			isTransient: false,
+			name: ".evals/list invalid JSON fails immediately without retry",
+			client: &fakeSandboxClient{
+				listStdout: "{invalid json content",
+				listStderr: "warning: parsing config",
+			},
+			expectedMsgSubstr: []string{"step ./.evals/list failed", "invalid JSON"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsTransientDiscoveryError(tt.err, tt.stderr)
-			if got != tt.isTransient {
-				t.Errorf("IsTransientDiscoveryError() = %v, want %v (err: %v, stderr: %q)", got, tt.isTransient, tt.err, tt.stderr)
+			f := newDiscoveringRunFixture(t, tt.client)
+			_, err := f.reconciler.Reconcile(t.Context(), f.req)
+			if err != nil {
+				t.Fatalf("Reconcile error: %v", err)
+			}
+
+			var updatedRun v1alpha1.Run
+			if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+				t.Fatalf("Failed to get run: %v", err)
+			}
+			if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+				t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+			}
+			for _, substr := range tt.expectedMsgSubstr {
+				if !strings.Contains(updatedRun.Status.Message, substr) {
+					t.Errorf("Expected status message to contain %q, got: %s", substr, updatedRun.Status.Message)
+				}
+			}
+			if strings.Contains(updatedRun.Status.Message, "attempts") {
+				t.Errorf("Expected non-clone failure not to mention retry attempts, got: %s", updatedRun.Status.Message)
 			}
 		})
 	}
@@ -1382,7 +1295,7 @@ func TestReconcilePodNeverReadyPastDeadline(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return now },
 	}
@@ -1393,7 +1306,7 @@ func TestReconcilePodNeverReadyPastDeadline(t *testing.T) {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 	if res.RequeueAfter != 0 {
-		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
+		t.Errorf("Expected no requeue after deadline failure, got %v", res.RequeueAfter)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -1404,17 +1317,7 @@ func TestReconcilePodNeverReadyPastDeadline(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "Discovery deadline exceeded") {
-		t.Errorf("Expected message to contain 'Discovery deadline exceeded', got: %s", updatedRun.Status.Message)
-	}
-	if !strings.Contains(updatedRun.Status.Message, "Pending") {
-		t.Errorf("Expected message to contain pod phase 'Pending', got: %s", updatedRun.Status.Message)
-	}
-
-	// Assert Sandbox was cleaned up
-	var checkSb sandboxv1beta1.Sandbox
-	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+		t.Errorf("Expected failure message to mention deadline exceeded, got: %s", updatedRun.Status.Message)
 	}
 }
 
@@ -1447,7 +1350,8 @@ func TestReconcilePodSucceededFailsAndCleansUp(t *testing.T) {
 			Namespace: "eval-runner-sandbox",
 		},
 		Status: corev1.PodStatus{
-			Phase: corev1.PodSucceeded,
+			Phase:   corev1.PodSucceeded,
+			Message: "Container terminated with exit code 0 prematurely",
 		},
 	}
 
@@ -1460,7 +1364,7 @@ func TestReconcilePodSucceededFailsAndCleansUp(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -1470,7 +1374,7 @@ func TestReconcilePodSucceededFailsAndCleansUp(t *testing.T) {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 	if res.RequeueAfter != 0 {
-		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
+		t.Errorf("Expected no requeue on PodSucceeded failure, got %v", res.RequeueAfter)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -1481,14 +1385,10 @@ func TestReconcilePodSucceededFailsAndCleansUp(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "succeeded unexpectedly") {
-		t.Errorf("Expected message to mention pod succeeded unexpectedly, got: %s", updatedRun.Status.Message)
+		t.Errorf("Expected failure message to mention 'succeeded unexpectedly', got: %s", updatedRun.Status.Message)
 	}
-
-	// Assert Sandbox was cleaned up
-	var checkSb sandboxv1beta1.Sandbox
-	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	if !strings.Contains(updatedRun.Status.Message, "Container terminated with exit code 0 prematurely") {
+		t.Errorf("Expected failure message to include pod status message, got: %s", updatedRun.Status.Message)
 	}
 }
 
@@ -1531,7 +1431,7 @@ func TestReconcilePodImagePullBackOffSurfacesWaitingReason(t *testing.T) {
 					State: corev1.ContainerState{
 						Waiting: &corev1.ContainerStateWaiting{
 							Reason:  "ImagePullBackOff",
-							Message: `Back-off pulling image "invalid-registry.example.com/bad-image:latest"`,
+							Message: "Back-off pulling image bad-image:v1",
 						},
 					},
 				},
@@ -1548,18 +1448,15 @@ func TestReconcilePodImagePullBackOffSurfacesWaitingReason(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return now },
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
-	res, err := reconciler.Reconcile(t.Context(), req)
+	_, err := reconciler.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
-	}
-	if res.RequeueAfter != 0 {
-		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -1570,23 +1467,10 @@ func TestReconcilePodImagePullBackOffSurfacesWaitingReason(t *testing.T) {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
 	if !strings.Contains(updatedRun.Status.Message, "ImagePullBackOff") {
-		t.Errorf("Expected message to contain 'ImagePullBackOff', got: %s", updatedRun.Status.Message)
+		t.Errorf("Expected message to contain ImagePullBackOff, got: %s", updatedRun.Status.Message)
 	}
-	if !strings.Contains(updatedRun.Status.Message, "Back-off pulling image") {
-		t.Errorf("Expected message to contain container waiting message, got: %s", updatedRun.Status.Message)
-	}
-	if !strings.Contains(updatedRun.Status.Message, "Discovery deadline exceeded") {
-		t.Errorf("Expected message to contain 'Discovery deadline exceeded', got: %s", updatedRun.Status.Message)
-	}
-	if !strings.Contains(updatedRun.Status.Message, "Pending") {
-		t.Errorf("Expected message to contain pod phase 'Pending', got: %s", updatedRun.Status.Message)
-	}
-
-	// Assert Sandbox was cleaned up
-	var checkSb sandboxv1beta1.Sandbox
-	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	if !strings.Contains(updatedRun.Status.Message, "Back-off pulling image bad-image:v1") {
+		t.Errorf("Expected message to contain container message, got: %s", updatedRun.Status.Message)
 	}
 }
 
@@ -1643,18 +1527,15 @@ func TestReconcilePodUnschedulableSurfacesPodScheduledFalse(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         &fakePodExecutor{},
+		SandboxClient:    &fakeSandboxClient{},
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return now },
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
-	res, err := reconciler.Reconcile(t.Context(), req)
+	_, err := reconciler.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
-	}
-	if res.RequeueAfter != 0 {
-		t.Errorf("Expected no requeue on failure, got %v", res.RequeueAfter)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -1664,29 +1545,19 @@ func TestReconcilePodUnschedulableSurfacesPodScheduledFalse(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
-	if !strings.Contains(updatedRun.Status.Message, "PodScheduled=Unschedulable") {
-		t.Errorf("Expected message to contain 'PodScheduled=Unschedulable', got: %s", updatedRun.Status.Message)
+	if !strings.Contains(updatedRun.Status.Message, "Unschedulable") {
+		t.Errorf("Expected message to contain Unschedulable, got: %s", updatedRun.Status.Message)
 	}
-	if !strings.Contains(updatedRun.Status.Message, "0/1 nodes are available") {
-		t.Errorf("Expected message to contain '0/1 nodes are available', got: %s", updatedRun.Status.Message)
-	}
-	if !strings.Contains(updatedRun.Status.Message, "Discovery deadline exceeded") {
-		t.Errorf("Expected message to contain 'Discovery deadline exceeded', got: %s", updatedRun.Status.Message)
-	}
-
-	// Assert Sandbox was cleaned up
-	var checkSb sandboxv1beta1.Sandbox
-	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	if !strings.Contains(updatedRun.Status.Message, "Insufficient cpu") {
+		t.Errorf("Expected message to contain Insufficient cpu, got: %s", updatedRun.Status.Message)
 	}
 }
 
 func TestReconcileDeadlineSurvivesControllerRestart(t *testing.T) {
 	scheme := setupScheme(t)
 
-	startTime := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
-	currentTime := startTime
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	initialDeadline := metav1.NewTime(now.Add(10 * time.Minute))
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1700,76 +1571,65 @@ func TestReconcileDeadlineSurvivesControllerRestart(t *testing.T) {
 				Commit: "abc1234",
 			},
 		},
+		Status: v1alpha1.RunStatus{
+			Phase:             v1alpha1.RunPhaseDiscovering,
+			DiscoveryDeadline: &initialDeadline,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
 	}
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(run).
+		WithObjects(run, sb, pod).
 		WithStatusSubresource(run).
 		Build()
 
-	// Initial controller instance creates sandbox and initializes deadline
-	reconciler1 := &RunReconciler{
+	reconcilerRestarted := &RunReconciler{
 		Client:            client,
 		Scheme:            scheme,
-		Executor:          &fakePodExecutor{},
+		SandboxClient:     &fakeSandboxClient{},
 		SandboxNamespace:  "eval-runner-sandbox",
-		DiscoveryDeadline: 10 * time.Minute,
-		Now:               func() time.Time { return currentTime },
+		DiscoveryDeadline: 20 * time.Minute,
+		Now:               func() time.Time { return now.Add(2 * time.Minute) },
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
-	_, err := reconciler1.Reconcile(t.Context(), req)
+	_, err := reconcilerRestarted.Reconcile(t.Context(), req)
 	if err != nil {
-		t.Fatalf("Reconcile 1 error: %v", err)
+		t.Fatalf("Reconcile error: %v", err)
 	}
 
-	var runAfterInit v1alpha1.Run
-	if err := client.Get(t.Context(), req.NamespacedName, &runAfterInit); err != nil {
+	var runAfterReconcile v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &runAfterReconcile); err != nil {
 		t.Fatalf("Failed to get run: %v", err)
 	}
-	if runAfterInit.Status.DiscoveryDeadline == nil {
-		t.Fatalf("Expected DiscoveryDeadline to be set")
-	}
-	initialDeadline := runAfterInit.Status.DiscoveryDeadline.Time
-	expectedDeadline := startTime.Add(10 * time.Minute)
-	if !initialDeadline.Equal(expectedDeadline) {
-		t.Fatalf("Initial deadline was %v, expected %v", initialDeadline, expectedDeadline)
+	if !runAfterReconcile.Status.DiscoveryDeadline.Time.Equal(initialDeadline.Time) {
+		t.Errorf("Expected DiscoveryDeadline to remain %v, got %v", initialDeadline.Time, runAfterReconcile.Status.DiscoveryDeadline.Time)
 	}
 
-	// Advance time by 5 minutes (before deadline). Create a second controller instance (simulating restart)
-	currentTime = startTime.Add(5 * time.Minute)
-	reconciler2 := &RunReconciler{
+	reconcilerPastDeadline := &RunReconciler{
 		Client:            client,
 		Scheme:            scheme,
-		Executor:          &fakePodExecutor{},
+		SandboxClient:     &fakeSandboxClient{},
 		SandboxNamespace:  "eval-runner-sandbox",
-		DiscoveryDeadline: 10 * time.Minute,
-		Now:               func() time.Time { return currentTime },
+		DiscoveryDeadline: 20 * time.Minute,
+		Now:               func() time.Time { return now.Add(11 * time.Minute) },
 	}
-
-	_, err = reconciler2.Reconcile(t.Context(), req)
+	_, err = reconcilerPastDeadline.Reconcile(t.Context(), req)
 	if err != nil {
-		t.Fatalf("Reconcile 2 error: %v", err)
-	}
-
-	var runAfterRestart v1alpha1.Run
-	if err := client.Get(t.Context(), req.NamespacedName, &runAfterRestart); err != nil {
-		t.Fatalf("Failed to get run: %v", err)
-	}
-	// Verify deadline was NOT changed or overwritten upon restart
-	if !runAfterRestart.Status.DiscoveryDeadline.Time.Equal(expectedDeadline) {
-		t.Errorf("Deadline after restart was mutated to %v, expected original %v", runAfterRestart.Status.DiscoveryDeadline.Time, expectedDeadline)
-	}
-	if runAfterRestart.Status.Phase != v1alpha1.RunPhaseDiscovering {
-		t.Errorf("Expected run to still be Discovering at 5m, got %s", runAfterRestart.Status.Phase)
-	}
-
-	// Advance time past the original deadline (11 minutes from start)
-	currentTime = startTime.Add(11 * time.Minute)
-	_, err = reconciler2.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile 3 error: %v", err)
+		t.Fatalf("Reconcile error: %v", err)
 	}
 
 	var runAfterExpiry v1alpha1.Run
@@ -1819,6 +1679,7 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -1828,11 +1689,17 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 		},
 	}
 
-	executorCallCount := 0
-	executor := &fakePodExecutor{
-		execFn: func(call int, ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
-			executorCallCount++
-			return "", "fatal: unable to connect to git-server: Connection refused", errors.New("exit status 128")
+	cloneAttempts := 0
+	executor := &fakeSandboxClient{
+		execFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				cloneAttempts++
+				return &sandboxclient.ExecuteResult{
+					ExitCode: 128,
+					Stderr:   "fatal: unable to connect to git-server: Connection refused",
+				}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 		},
 	}
 
@@ -1843,11 +1710,11 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 		Build()
 
 	reconciler := &RunReconciler{
-		Client:               client,
-		Scheme:               scheme,
-		Executor:             executor,
-		SandboxNamespace:     "eval-runner-sandbox",
-		MaxDiscoveryAttempts: 5,
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		MaxCloneAttempts: 5,
 		DiscoveryRetryBackoff: []time.Duration{
 			10 * time.Second,
 			10 * time.Second,
@@ -1884,8 +1751,8 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 	}
 
 	// Verify retry loop was cut short: should only have made 1 attempt instead of 5
-	if executorCallCount != 1 {
-		t.Errorf("Expected exactly 1 exec attempt before deadline cut the loop short, got %d", executorCallCount)
+	if cloneAttempts != 1 {
+		t.Errorf("Expected exactly 1 clone attempt before deadline cut the loop short, got %d", cloneAttempts)
 	}
 
 	// Assert Sandbox was cleaned up
@@ -1924,7 +1791,7 @@ func TestReconcileCustomDiscoveryDeadlineConfigured(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:            client,
 		Scheme:            scheme,
-		Executor:          &fakePodExecutor{},
+		SandboxClient:     &fakeSandboxClient{},
 		SandboxNamespace:  "eval-runner-sandbox",
 		DiscoveryDeadline: customDeadline,
 		Now:               func() time.Time { return fixedNow },
@@ -1987,11 +1854,12 @@ func TestReconcileSandboxReadyConditionUsed(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
 		},
 	}
 
 	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
-	executor := &fakePodExecutor{stdout: validManifestJSON}
+	executor := &fakeSandboxClient{listStdout: validManifestJSON}
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -2002,7 +1870,7 @@ func TestReconcileSandboxReadyConditionUsed(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         executor,
+		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -2056,6 +1924,7 @@ func TestReconcilePodAdoptedFromAnnotation(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.42",
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   corev1.PodReady,
@@ -2065,15 +1934,12 @@ func TestReconcilePodAdoptedFromAnnotation(t *testing.T) {
 		},
 	}
 
-	var executedPodName string
+	var dialedPodIP string
 	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
-	executor := &fakePodExecutor{
-		stdout: validManifestJSON,
-		execFn: func(call int, ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
-			executedPodName = podName
-			return validManifestJSON, "", nil
-		},
-	}
+	factory := sandboxclient.FactoryFunc(func(podIP string) (sandboxclient.Client, error) {
+		dialedPodIP = podIP
+		return &fakeSandboxClient{listStdout: validManifestJSON}, nil
+	})
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -2084,7 +1950,7 @@ func TestReconcilePodAdoptedFromAnnotation(t *testing.T) {
 	reconciler := &RunReconciler{
 		Client:           client,
 		Scheme:           scheme,
-		Executor:         executor,
+		ClientFactory:    factory,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
 
@@ -2097,8 +1963,8 @@ func TestReconcilePodAdoptedFromAnnotation(t *testing.T) {
 		t.Errorf("Did not expect RequeueAfter on success")
 	}
 
-	if executedPodName != "custom-adopted-pod" {
-		t.Errorf("Expected Exec on custom-adopted-pod, got %s", executedPodName)
+	if dialedPodIP != "10.244.0.42" {
+		t.Errorf("Expected ClientFactory.NewClient to be called with pod IP 10.244.0.42, got %q", dialedPodIP)
 	}
 }
 

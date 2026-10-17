@@ -23,11 +23,11 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	discoveryk8s "k8s.io/client-go/discovery"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -101,12 +101,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	clientset, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		setupLog.Error(err, "unable to create clientset")
-		os.Exit(1)
-	}
-
 	// Least-privilege namespaced caching per object:
 	// Runs are only cached in evalRunnerNamespace.
 	// Sandboxes and Pods are only cached in sandboxNamespace.
@@ -150,17 +144,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	executor := &controller.SPDYPodExecutor{
-		Config:      cfg,
-		Clientset:   clientset,
-		StdoutLimit: maxStdoutBytes,
-		StderrLimit: maxStderrBytes,
-	}
+	clientFactory := sandboxclient.DefaultFactory(
+		sandboxclient.WithStdoutLimit(maxStdoutBytes),
+		sandboxclient.WithStderrLimit(maxStderrBytes),
+	)
 
 	reconciler := &controller.RunReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
-		Executor:             executor,
+		ClientFactory:        clientFactory,
 		SandboxNamespace:     sandboxNamespace,
 		DiscoveryDeadline:    discoveryDeadline,
 		MaxStdoutBytes:       maxStdoutBytes,
