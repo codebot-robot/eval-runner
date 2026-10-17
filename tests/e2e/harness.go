@@ -116,15 +116,30 @@ func (h *Harness) DeployEvalRunner() {
 	// Apply namespaces
 	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/00-namespaces.yaml"))
 
-	// Apply Run CRD and wait for it to be established
+	// Apply Run and Comparison CRDs and wait for them to be established
 	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/evalrunner.gke-labs.dev_runs.yaml"))
 	h.runCmd("kubectl", "wait", "--for=condition=established", "--timeout=60s", "crd/runs.evalrunner.gke-labs.dev")
+
+	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/evalrunner.gke-labs.dev_comparisons.yaml"))
+	h.runCmd("kubectl", "wait", "--for=condition=established", "--timeout=60s", "crd/comparisons.evalrunner.gke-labs.dev")
 
 	// Apply RBAC
 	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/rbac.yaml"))
 
 	// Apply NetworkPolicy
 	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/sandbox-networkpolicy.yaml"))
+
+	// Apply eval-runner-config ConfigMap with artifactDir for local sink support
+	cmManifest := `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eval-runner-config
+  namespace: eval-runner
+data:
+  artifactDir: /tmp/artifacts
+`
+	h.KubectlApplyContent(cmManifest)
 
 	// Apply Deployment with image rewritten for kind local image
 	deployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/runner-deployment.yaml"))
@@ -268,6 +283,36 @@ func (h *Harness) WaitForRunDeleted(namespace, runName string, timeout time.Dura
 			h.t.Fatalf("Timeout waiting for Run %s/%s to be deleted; current: %s", namespace, runName, strings.TrimSpace(string(out)))
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func (h *Harness) WaitForComparisonVerdict(namespace, compName, expectedVerdict string, timeout time.Duration) *v1alpha1.Comparison {
+	h.t.Logf("Waiting for Comparison %s/%s to reach verdict %s (timeout %v)", namespace, compName, expectedVerdict, timeout)
+	start := time.Now()
+	var lastComp v1alpha1.Comparison
+	var lastErr error
+	for {
+		cmd := exec.Command("kubectl", "get", "comparison", compName, "-n", namespace, "-o", "json")
+		out, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+		} else {
+			var c v1alpha1.Comparison
+			if err := json.Unmarshal(out, &c); err != nil {
+				lastErr = err
+			} else {
+				lastComp = c
+				if string(c.Status.Verdict) == expectedVerdict {
+					return &c
+				}
+			}
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Comparison %s/%s to reach verdict %s; last verdict: %s, phase: %s, message: %s, lastErr: %v",
+				namespace, compName, expectedVerdict, lastComp.Status.Verdict, lastComp.Status.Phase, lastComp.Status.Message, lastErr)
+		}
+		time.Sleep(2 * time.Second)
 	}
 }
 

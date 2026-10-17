@@ -249,6 +249,12 @@ go run ./cmd/evalstats -from-run docs-comprehension-run -namespace eval-runner
 
 # Output cluster Run statistics as JSON
 go run ./cmd/evalstats -from-run docs-comprehension-run -json
+
+# Read and inspect a Comparison from the Kubernetes cluster (PR-comment mockup format)
+go run ./cmd/evalstats -from-comparison pr-418-eval
+
+# Output cluster Comparison statistics as JSON
+go run ./cmd/evalstats -from-comparison pr-418-eval -json
 ```
 
 ### Input Format (JSONL)
@@ -282,3 +288,29 @@ docs/readme_comprehension_blind  0.15 [0.05, 0.36]    20   wilson
 Tasks: 2 completed, 0 failed (2 total) · Total samples: 40
 Mean success rate: 0.58 (range 0.15-1.00)
 ```
+
+### Output Example (`-from-comparison` Mode)
+
+This output directly mirrors the PR comment mockup table layout:
+
+```text
+eval                       base   this PR   Δ (95% CI)             label        runs
+triage/runbook_lookup      0.61   0.84      +0.23 [+0.11, +0.35]   improved     48
+triage/escalation_policy   0.88   0.90      +0.02 [-0.05, +0.09]   unchanged    32
+triage/summary_quality     0.72   0.75      +0.03 [-0.08, +0.14]   inconclusive 16
+
+Verdict: IMPROVED · P(improvement) = 0.98
+Summary: IMPROVED: 1 task(s) improved, 1 task(s) unchanged, 1 task(s) inconclusive; net improvement probable
+```
+
+For two deterministic runs at the same commit (e.g. mockllm or identical Gemini runs):
+
+```text
+eval                             base   this PR   Δ (95% CI)             label       runs
+docs/readme_comprehension        1.00   1.00      +0.00 [+0.00, +0.00]   unchanged   20
+docs/readme_comprehension_blind  0.15   0.15      +0.00 [+0.00, +0.00]   unchanged   20
+
+Verdict: UNCHANGED · P(improvement) = 0.50
+Summary: UNCHANGED: all 2 task(s) statistically equivalent within margin ±0.05
+```
+

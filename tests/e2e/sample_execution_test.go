@@ -16,7 +16,9 @@ package e2e
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -109,5 +111,115 @@ spec:
 		if strings.Contains(secretsOut, "model") || strings.Contains(secretsOut, "gemini") {
 			t.Errorf("Unexpected model secret found in eval-runner-sandbox: %s", secretsOut)
 		}
+	})
+
+	t.Run("ComparisonMockLLMExecution", func(t *testing.T) {
+		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
+		baseRunName := "docs-comp-base"
+		candRunName := "docs-comp-cand"
+		compName := "docs-mockllm-comparison"
+
+		// Clean up any existing resources from prior runs
+		harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "run", baseRunName, candRunName, "-n", "eval-runner", "--ignore-not-found")
+
+		baseManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  limit: 10
+`, baseRunName, commit)
+
+		candManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  limit: 10
+`, candRunName, commit)
+
+		compManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Comparison
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  baseline:
+    run: %s
+  candidate:
+    run: %s
+  equivalenceMargin: 0.05
+`, compName, baseRunName, candRunName)
+
+		harness.KubectlApplyContent(baseManifest)
+		harness.KubectlApplyContent(candManifest)
+		harness.KubectlApplyContent(compManifest)
+
+		// Wait for both Runs to reach Completed
+		harness.WaitForRunPhase("eval-runner", baseRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+		harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		// Wait for Comparison to reach terminal UNCHANGED verdict
+		comp := harness.WaitForComparisonVerdict("eval-runner", compName, string(v1alpha1.ComparisonVerdictUnchanged), 60*time.Second)
+
+		if comp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Errorf("Expected comparison phase Completed, got %s", comp.Status.Phase)
+		}
+		if comp.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
+			t.Errorf("Expected comparison verdict UNCHANGED, got %s", comp.Status.Verdict)
+		}
+		if comp.Status.PImprovement == nil || math.Abs(*comp.Status.PImprovement-0.50) > 1e-4 {
+			t.Errorf("Expected pImprovement 0.50, got %v", comp.Status.PImprovement)
+		}
+		if len(comp.Status.Tasks) != 2 {
+			t.Fatalf("Expected 2 tasks in comparison status, got %d", len(comp.Status.Tasks))
+		}
+		for _, task := range comp.Status.Tasks {
+			if task.Label != v1alpha1.ComparisonTaskLabelUnchanged {
+				t.Errorf("Expected task %s label unchanged, got %s", task.ID, task.Label)
+			}
+			if task.Pairs != 10 {
+				t.Errorf("Expected task %s pairs 10, got %d", task.ID, task.Pairs)
+			}
+			if task.Delta == nil || math.Abs(*task.Delta) > 1e-4 {
+				t.Errorf("Expected task %s delta 0.0, got %v", task.ID, task.Delta)
+			}
+		}
+
+		if comp.Status.SummaryPath == "" {
+			t.Errorf("Expected non-empty summaryPath in comparison status")
+		}
+
+		// Verify evalstats -from-comparison output
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("Failed to get home dir: %v", err)
+		}
+		kubeconfigPath := filepath.Join(home, ".kube", "config")
+		statsOut := harness.runCmd("go", "run", "github.com/gke-labs/eval-runner/cmd/evalstats", "-kubeconfig", kubeconfigPath, "-from-comparison", compName, "-namespace", "eval-runner")
+		if !strings.Contains(statsOut, "UNCHANGED") {
+			t.Errorf("Expected evalstats output to contain UNCHANGED, got:\n%s", statsOut)
+		}
+		if !strings.Contains(statsOut, "eval") || !strings.Contains(statsOut, "base") || !strings.Contains(statsOut, "this PR") {
+			t.Errorf("Expected evalstats output to contain table header, got:\n%s", statsOut)
+		}
+
+		// Clean up
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
 	})
 }
