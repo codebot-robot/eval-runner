@@ -131,8 +131,9 @@ func Verdict(labels []TaskLabel) RunVerdict {
 //   - If the run verdict is REGRESSED, P(run improvement) collapses to min_k P(not_reg_k).
 //   - If UNCHANGED, headline P(run improvement) is 0.50.
 //   - If INCONCLUSIVE with only unchanged and inconclusive tasks (no improved and no regressed tasks),
-//     headline P(run improvement) is the arithmetic mean of per-task P(improvement_k), reporting
-//     a value near 0.50 without the bias of taking the maximum over tasks.
+//     headline P(run improvement) is the arithmetic mean of per-task P(improvement_k) capped by
+//     min_k P(not_reg_k) (P_run = min(mean_k P_k, min_k P(not_reg_k))), so one risky task cannot be diluted
+//     by many unchanged ones.
 //   - Otherwise (IMPROVED, or mixed IMPROVED + INCONCLUSIVE), P(run improvement) = min( max_k P(imp_k), min_k P(not_reg_k) ).
 func AggregateVerdict(tasks []TaskReport) RunVerdict {
 	if len(tasks) == 0 {
@@ -196,7 +197,7 @@ func AggregateVerdict(tasks []TaskReport) RunVerdict {
 		for _, t := range tasks {
 			sumP += t.PImprovement
 		}
-		verdict.PImprovement = sumP / float64(len(tasks))
+		verdict.PImprovement = math.Min(sumP/float64(len(tasks)), minPNotReg)
 	} else {
 		verdict.PImprovement = math.Min(maxPImp, minPNotReg)
 	}
