@@ -22,6 +22,8 @@ An agent is a distribution, not a function: evaluating an agent on the same prom
 
 The statistical core is implemented as a pure Go package in `pkg/stats` with no cluster or third-party dependencies.
 
+In the `eval-runner` controller, each completed task on a `Run` reports its point estimate in `status.tasks[].successRate` and its 95% confidence interval in `status.tasks[].successRateCI: {lower, upper, confidence: 0.95, method: "wilson"|"t"}` (see [API Reference: Run](api.md)). Aggregate run counts, total samples, and the range of task success rates are recorded in `status.summary`.
+
 ---
 
 ## 1. Single-Eval Success Rate & Confidence Intervals
@@ -54,6 +56,8 @@ Empirical simulation confirms that Wilson maintains ~95% coverage across small a
 
 Inspect scorers frequently emit continuous partial credit scores in $[0, 1]$ (e.g. model-graded fact scores). For non-binary scores, `Mean(scores []float64, confidence float64) Estimate` computes the sample mean and Student's t-distribution confidence interval:
 $$\bar{x} \pm t^*_{n-1} \cdot \frac{s}{\sqrt{n}}$$
+
+The controller selects the interval method dynamically based on parsed scores: if every parsed sample score is strictly 0.0 or 1.0 (or if results fallback is used with no individual sample scores), `wilson` is selected; if any sample receives a fractional score, `t` is selected. Note that a partial-credit scorer that happened to emit only 0.0 and 1.0 on a given run will therefore be labelled `wilson`.
 
 #### Caveats for Tiny $n$
 - **$n = 1$**: Sample variance is undefined ($df = 0$). The function returns point estimate $x_0$ with an uninformative interval $[0.0, 1.0]$.
@@ -236,6 +240,15 @@ go run ./cmd/evalstats -final path/to/scores.jsonl
 
 # JSON output mode with custom margin
 cat scores.jsonl | go run ./cmd/evalstats -margin 0.05 -json
+
+# Read and inspect a Run directly from the Kubernetes cluster
+go run ./cmd/evalstats -from-run docs-comprehension-run
+
+# Specify namespace (defaults to eval-runner)
+go run ./cmd/evalstats -from-run docs-comprehension-run -namespace eval-runner
+
+# Output cluster Run statistics as JSON
+go run ./cmd/evalstats -from-run docs-comprehension-run -json
 ```
 
 ### Input Format (JSONL)
@@ -248,7 +261,7 @@ Each line is a JSON object with `{task, sample_id, base_score, pr_score}`:
 {"task": "triage/escalation_policy", "sample_id": "policy-001", "base_score": 1.0, "pr_score": 1.0}
 ```
 
-### Output Example
+### Output Example (JSONL Mode)
 
 ```
 TASK                       BASE   THIS PR   Δ (95% CI)             LABEL        N    DROPPED
@@ -257,4 +270,15 @@ triage/runbook_lookup      0.61   0.84      +0.23 [+0.11, +0.35]   improved     
 
 VERDICT: IMPROVED · P(improvement) = 0.98
 Summary: IMPROVED: 1 task(s) improved, 1 unchanged
+```
+
+### Output Example (`-from-run` Mode)
+
+```
+TASK                             RATE (95% CI)        N    METHOD
+docs/readme_comprehension        1.00 [0.84, 1.00]    20   wilson
+docs/readme_comprehension_blind  0.15 [0.05, 0.36]    20   wilson
+
+Tasks: 2 completed, 0 failed (2 total) · Total samples: 40
+Mean success rate: 0.58 (range 0.15-1.00)
 ```

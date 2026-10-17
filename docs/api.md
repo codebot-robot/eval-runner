@@ -71,13 +71,36 @@ status:
       samples: 20
       successes: 17
       meanScore: 0.85
+      successRate: 0.85
+      successRateCI:
+        lower: 0.64
+        upper: 0.95
+        confidence: 0.95
+        method: wilson
       logPath: ""
     - id: docs/readme_comprehension_blind
       phase: Completed
       samples: 20
       successes: 5
       meanScore: 0.25
+      successRate: 0.25
+      successRateCI:
+        lower: 0.11
+        upper: 0.47
+        confidence: 0.95
+        method: wilson
       logPath: ""
+  summary:
+    tasks: "2/2"
+    tasksCompleted: 2
+    tasksFailed: 0
+    tasksTotal: 2
+    totalSamples: 40
+    meanSuccessRate: 0.55
+    successRateRange:
+      min: 0.25
+      max: 0.85
+    rates: "docs/readme_comprehension=0.85 [0.64, 0.95], docs/readme_comprehension_blind=0.25 [0.11, 0.47]"
 ```
 
 ## Specification (`spec`)
@@ -103,6 +126,7 @@ status:
 | `executionDeadline` | `*metav1.Time` | Overall deadline by which sample execution must complete. |
 | `tasks` | `[]TaskStatus` | Per-task execution results and score aggregates. See [Tasks](#taskstatus). |
 | `artifacts` | `string` | Storage base URI or prefix where artifacts for this Run are persisted (e.g. `gs://<bucket>/runs/<commit>/`). |
+| `summary` | `*RunSummary` | Aggregate execution counts and success rate range across tasks. See [Summary](#runsummary). |
 
 ### Phases
 
@@ -125,8 +149,44 @@ status:
 | `samples` | `int` | Number of samples scored. |
 | `successes` | `int` | Number of samples with score >= 1.0 (for binary scorers). |
 | `meanScore` | `*float64` | Mean of per-sample scores. Numeric values are taken as-is (unclamped), 'C'/'CORRECT'/'YES'/'TRUE' map to 1.0, 'P'/'PARTIAL' map to 0.5, and 'I'/'INCORRECT'/'N'/'NOANSWER' map to 0.0. |
+| `successRate` | `*float64` | Point estimate of the task success rate in [0, 1]. |
+| `successRateCI` | `*ConfidenceInterval` | 95% confidence interval for success rate. See [ConfidenceInterval](#confidenceinterval) and [Statistics](statistics.md). |
 | `message` | `string` | Failure detail or bounded error information if the task failed. |
 | `logPath` | `string` | Storage path or URI where the raw Inspect log was stored by the artifact sink. |
+
+### ConfidenceInterval
+
+| Field | Type | Description |
+|---|---|---|
+| `lower` | `float64` | Lower confidence bound (bounded in [0, 1]). |
+| `upper` | `float64` | Upper confidence bound (bounded in [0, 1]). |
+| `confidence` | `float64` | Confidence level (0.95 for 95% confidence). |
+| `method` | `string` | Method used: `"wilson"` for binary scorers via `stats.Proportion`, or `"t"` for partial credit continuous scores via `stats.Mean`. |
+
+### RunSummary (`status.summary`)
+
+| Field | Type | Description |
+|---|---|---|
+| `tasks` | `string` | Compact completed vs total tasks string (e.g. `"2/2"`). Displayed in `kubectl get runs` under `TASKS`. |
+| `tasksCompleted` | `int` | Number of tasks that completed successfully. |
+| `tasksFailed` | `int` | Number of tasks that failed. |
+| `tasksTotal` | `int` | Total number of tasks. |
+| `totalSamples` | `int` | Sum of scored samples across all tasks. Displayed in `kubectl get runs` under `SAMPLES`. |
+| `meanSuccessRate` | `*float64` | Simple arithmetic mean of task success rates across completed tasks. |
+| `successRateRange` | `*ScoreRange` | Min and max task success rates across completed tasks (`{min, max}`). |
+| `rates` | `string` | Compact per-task rates and confidence intervals `id=rate [lo,hi]` capped at 120 chars. Displayed in `kubectl get runs -o wide` under `RATES`. |
+
+### Printer Columns
+
+The `Run` CRD declares additional printer columns for `kubectl`:
+
+- **Standard view (`kubectl get runs`)**:
+  - `PHASE` (`.status.phase`): Current lifecycle phase.
+  - `TASKS` (`.status.summary.tasks`): Tasks completed / total (e.g. `2/2`).
+  - `SAMPLES` (`.status.summary.totalSamples`): Total samples evaluated across all tasks.
+  - `AGE` (`.metadata.creationTimestamp`): Age of the custom resource.
+- **Wide view (`kubectl get runs -o wide`)**:
+  - `RATES` (`.status.summary.rates`): Compact string of per-task rates and 95% confidence intervals (e.g. `docs/readme_comprehension=1.00 [0.84, 1.00]`), capped in length with ellipsis.
 
 ### Manifest (`status.manifest`)
 
