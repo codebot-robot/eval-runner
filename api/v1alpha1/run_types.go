@@ -60,6 +60,27 @@ const (
 	TaskPhaseFailed TaskPhase = "Failed"
 )
 
+// ConfidenceInterval represents a statistical confidence interval for a metric.
+type ConfidenceInterval struct {
+	// Lower is the lower confidence bound.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Lower float64 `json:"lower"`
+
+	// Upper is the upper confidence bound.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Upper float64 `json:"upper"`
+
+	// Confidence is the confidence level (e.g. 0.95 for 95% confidence).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Confidence float64 `json:"confidence"`
+
+	// Method is the estimation method used (e.g. "wilson", "t").
+	Method string `json:"method"`
+}
+
 // TaskStatus records the execution status and scores for a single eval task.
 type TaskStatus struct {
 	// ID is the unique identifier of the task (e.g. docs/readme_comprehension).
@@ -85,6 +106,16 @@ type TaskStatus struct {
 	// MeanScore is the mean of per-sample scores in [0, 1].
 	// +optional
 	MeanScore *float64 `json:"meanScore,omitempty"`
+
+	// SuccessRate is the point estimate of the success rate in [0, 1].
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	// +optional
+	SuccessRate *float64 `json:"successRate,omitempty"`
+
+	// SuccessRateCI is the confidence interval for the success rate.
+	// +optional
+	SuccessRateCI *ConfidenceInterval `json:"successRateCI,omitempty"`
 
 	// Message contains failure detail or bounded error information.
 	// +optional
@@ -182,6 +213,46 @@ type Manifest struct {
 	Tasks []ManifestTask `json:"tasks"`
 }
 
+// ScoreRange represents the minimum and maximum values of a score or rate.
+type ScoreRange struct {
+	// Min is the minimum value in the range.
+	Min float64 `json:"min"`
+
+	// Max is the maximum value in the range.
+	Max float64 `json:"max"`
+}
+
+// RunSummary provides aggregate statistics across tasks in a Run.
+type RunSummary struct {
+	// Tasks is a compact string representing completed vs total tasks (e.g. "2/2").
+	// +optional
+	Tasks string `json:"tasks,omitempty"`
+
+	// TasksCompleted is the number of tasks that completed successfully.
+	TasksCompleted int `json:"tasksCompleted"`
+
+	// TasksFailed is the number of tasks that failed.
+	TasksFailed int `json:"tasksFailed"`
+
+	// TasksTotal is the total number of tasks.
+	TasksTotal int `json:"tasksTotal"`
+
+	// TotalSamples is the total number of samples evaluated across all tasks.
+	TotalSamples int `json:"totalSamples"`
+
+	// MeanSuccessRate is the simple mean of task success rates across completed tasks.
+	// +optional
+	MeanSuccessRate *float64 `json:"meanSuccessRate,omitempty"`
+
+	// SuccessRateRange is the min and max of task success rates across completed tasks.
+	// +optional
+	SuccessRateRange *ScoreRange `json:"successRateRange,omitempty"`
+
+	// Rates is a compact string of per-task rates and confidence intervals for wide printer column display.
+	// +optional
+	Rates string `json:"rates,omitempty"`
+}
+
 // RunStatus defines the observed state of Run.
 type RunStatus struct {
 	// Phase is the current lifecycle phase of the Run.
@@ -217,12 +288,19 @@ type RunStatus struct {
 	// Artifacts is the base URI or prefix where artifacts for this Run are stored (e.g. gs://bucket/runs/<commit>/).
 	// +optional
 	Artifacts string `json:"artifacts,omitempty"`
+
+	// Summary provides aggregate statistics across tasks in the Run.
+	// +optional
+	Summary *RunSummary `json:"summary,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=run
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Tasks",type="string",JSONPath=".status.summary.tasks"
+// +kubebuilder:printcolumn:name="Samples",type="integer",JSONPath=".status.summary.totalSamples"
+// +kubebuilder:printcolumn:name="Rates",type="string",priority=1,JSONPath=".status.summary.rates"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Run is the Schema for the runs API.
