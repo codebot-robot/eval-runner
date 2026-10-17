@@ -244,17 +244,19 @@ The trust model establishes strict boundaries around untrusted repository code:
           |                                                |
           x (cannot access)                                v
     Kubernetes API                                Kubernetes API (namespaced RBAC)
+    Cloud Storage (no creds)                      GCS Bucket (Workload Identity)
 ```
 
 ### Credentials Matrix
 
 | Component | ServiceAccount Token | Cloud / Git Secrets | Filesystem Access |
 |---|---|---|---|
-| **Controller Pod** | Mounted (`eval-runner-controller` in `eval-runner`) | None mounted | Read-only root filesystem (`readOnlyRootFilesystem: true`) |
-| **Sandbox Pod** | **None** (`automountServiceAccountToken: false`) | **None** | Ephemeral container writable layer only |
+| **Controller Pod** | Mounted (`eval-runner-controller` in `eval-runner`) | None mounted; uses Workload Identity (`roles/storage.objectAdmin`) when `--artifact-bucket` configured | Read-only root filesystem (`readOnlyRootFilesystem: true`) |
+| **Sandbox Pod** | **None** (`automountServiceAccountToken: false`) | **None** (zero cloud credentials; cannot access GCS or bucket) | Ephemeral container writable layer only |
 
 ### Reachability and Containment
 
+- **Zero-trust artifact storage**: Eval logs and artifacts are pulled out of the sandbox by the controller via sandboxd REST `ReadFile`, and written to Google Cloud Storage by the controller only. The untrusted sandbox pod never possesses bucket credentials, ServiceAccount tokens, or cloud secrets.
 - **The Sandbox has no credentials for the Kubernetes API**: Because `automountServiceAccountToken: false` is set and no kubeconfig is injected, untrusted code running inside the sandbox has no cluster identity or credentials (no SA token, no kubeconfig).
 - **In-cluster agent protocol, bearer auth, and ingress NetworkPolicy**: The controller communicates with sandbox pods directly over the pod network using sandboxd's gRPC (`:9090`) and REST (`:8080`) ports. As defense in depth against environments without NetworkPolicy enforcement, sandboxd enforces per-sandbox bearer authentication via `--auth-token-sha256` (where only the digest is placed in the pod spec, and the token is managed by the controller). Because sandboxd does not terminate TLS, bearer tokens travel in cleartext over HTTP/h2c on the pod network; this exposure is bounded by per-sandbox token scoping, ephemeral token lifetimes, and NetworkPolicy ingress isolation. In addition, `k8s/sandbox-networkpolicy.yaml` applies an ingress `NetworkPolicy` selecting `evalrunner.gke-labs.dev/sandbox: "true"` across all sandbox roles that allows ingress on ports `9090` and `8080` only from controller pods labeled `app: eval-runner-controller` in namespace `eval-runner`, denying all other ingress.
 - **Network reachability and egress**: Sandbox pod network egress is currently standard container network egress to allow cloning repositories from Git (e.g. over HTTP/HTTPS or Git protocol). Restricting egress to only declared task resources is a follow-up (tracked in issue [#33](https://github.com/gke-labs/eval-runner/issues/33)).

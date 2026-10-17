@@ -393,3 +393,64 @@ func TestBuildTaskSandbox_EmptyAuthTokenPanics(t *testing.T) {
 		AuthTokenDigest: "",
 	})
 }
+
+func TestBuildTaskSandbox_NoGCSCredentialsOrVolumes(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "abcdef123456",
+			},
+			Model: "mockllm/model",
+		},
+	}
+
+	sb := BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
+		Namespace:         "eval-runner-sandbox",
+		SampleRunnerImage: "sample-runner:latest",
+		ModelSecret:       "model-secret",
+		AuthTokenDigest:   AuthTokenDigest("dummy-token"),
+	})
+
+	podSpec := sb.Spec.PodTemplate.Spec
+
+	// 1. Verify AutomountServiceAccountToken is explicitly false
+	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
+		t.Errorf("Expected AutomountServiceAccountToken to be false")
+	}
+
+	// 2. Verify ServiceAccountName is empty
+	if podSpec.ServiceAccountName != "" {
+		t.Errorf("Expected ServiceAccountName to be empty, got %q", podSpec.ServiceAccountName)
+	}
+
+	// 3. Verify no GCS or cloud credential volumes exist
+	for _, v := range podSpec.Volumes {
+		if v.Name != "sandboxd-bin" && v.Name != "workspace" {
+			t.Errorf("Unexpected volume %q in sandbox pod spec; only sandboxd-bin and workspace should exist", v.Name)
+		}
+		if v.Secret != nil || v.ConfigMap != nil || v.Projected != nil {
+			t.Errorf("Volume %q projects credentials into untrusted sandbox", v.Name)
+		}
+	}
+
+	// 4. Verify no GCS credential env vars exist in any container
+	allContainers := append(podSpec.InitContainers, podSpec.Containers...)
+	for _, c := range allContainers {
+		for _, env := range c.Env {
+			name := strings.ToUpper(env.Name)
+			if strings.Contains(name, "GOOGLE") || strings.Contains(name, "GCS") || strings.Contains(name, "BUCKET") || strings.Contains(name, "CREDENTIAL") {
+				t.Errorf("Sandbox container %q contains prohibited cloud credential env var %q", c.Name, env.Name)
+			}
+		}
+		for _, vm := range c.VolumeMounts {
+			if vm.Name != "sandboxd-bin" && vm.Name != "workspace" {
+				t.Errorf("Sandbox container %q has unexpected volume mount %q", c.Name, vm.Name)
+			}
+		}
+	}
+}

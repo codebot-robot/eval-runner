@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,8 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"google.golang.org/grpc/codes"
@@ -3562,5 +3565,308 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
 	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
 		t.Errorf("Expected task to fail after grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+}
+
+func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-gcs",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abcdef123456",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "docs/readme_comprehension", Spec: "eval.py@task"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "docs/readme_comprehension", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "docs/readme_comprehension", "model": "mockllm/model"},
+		"samples": [
+			{"id": 1, "scores": {"accuracy": {"value": 1.0}}},
+			{"id": 2, "scores": {"accuracy": {"value": 0.0}}}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "2026-10-17_readme_eval.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return []byte(inspectLog), nil
+		},
+	}
+
+	fakeGCSClient := gcs.NewFakeStorageClient()
+	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    executor,
+		ArtifactSink:     gcsSink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-gcs"}}
+
+	// Turn 1: Creates sandbox
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 1 error: %v", err)
+	}
+
+	// Create ready pod
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun("test-run-gcs", "docs/readme_comprehension"),
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.50",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Turn 2: Executes task and writes artifacts to GCS
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue to check completion")
+	}
+
+	// Turn 3: Run marked Completed
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 3 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("Expected Run phase Completed, got %s", updatedRun.Status.Phase)
+	}
+
+	expectedArtifactPrefix := "gs://justinbs-knotai-dev-eval-runner/runs/abcdef123456/"
+	if updatedRun.Status.Artifacts != expectedArtifactPrefix {
+		t.Errorf("Expected status.artifacts %q, got %q", expectedArtifactPrefix, updatedRun.Status.Artifacts)
+	}
+
+	if len(updatedRun.Status.Tasks) != 1 {
+		t.Fatalf("Expected 1 task status, got %d", len(updatedRun.Status.Tasks))
+	}
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Errorf("Expected task phase Completed, got %s", t1.Phase)
+	}
+	expectedLogPath := "gs://justinbs-knotai-dev-eval-runner/runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json"
+	if t1.LogPath != expectedLogPath {
+		t.Errorf("Expected task logPath %q, got %q", expectedLogPath, t1.LogPath)
+	}
+
+	// Verify log object exists in fake GCS
+	logObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json")
+	if !exists {
+		t.Fatalf("Log object was not uploaded to GCS")
+	}
+	if string(logObj.Data) != inspectLog {
+		t.Errorf("Log content mismatch")
+	}
+
+	// Verify summary.json exists in fake GCS
+	summaryObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/summary.json")
+	if !exists {
+		t.Fatalf("summary.json was not uploaded to GCS")
+	}
+
+	var summary artifacts.TaskSummary
+	if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
+		t.Fatalf("Failed to parse summary.json: %v", err)
+	}
+	if summary.TaskID != "docs/readme_comprehension" {
+		t.Errorf("Expected TaskID docs/readme_comprehension, got %s", summary.TaskID)
+	}
+	if summary.Samples != 2 {
+		t.Errorf("Expected 2 samples, got %d", summary.Samples)
+	}
+	if summary.Successes != 1 {
+		t.Errorf("Expected 1 success, got %d", summary.Successes)
+	}
+	if summary.MeanScore == nil || *summary.MeanScore != 0.5 {
+		t.Errorf("Expected meanScore 0.5, got %v", summary.MeanScore)
+	}
+	if summary.StartedAt == nil || summary.FinishedAt == nil {
+		t.Errorf("Expected StartedAt and FinishedAt to be populated")
+	}
+}
+
+func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-gcs-err",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abcdef123456",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-1", Spec: "eval.py@task"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "task-1"},
+		"samples": [{"id": 1, "scores": {"accuracy": {"value": 1.0}}}]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "log.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return []byte(inspectLog), nil
+		},
+	}
+
+	fakeGCSClient := gcs.NewFakeStorageClient()
+	// Inject storage write error
+	fakeGCSClient.Errors["my-bucket/runs/abcdef123456/task-1/log.json"] = errors.New("storage: 403 Forbidden: permission denied")
+
+	gcsSink, err := gcs.New(t.Context(), "gs://my-bucket", gcs.WithStorageClient(fakeGCSClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    executor,
+		ArtifactSink:     gcsSink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-gcs-err"}}
+
+	// Turn 1: Creates sandbox
+	_, _ = reconciler.Reconcile(t.Context(), req)
+
+	// Create ready pod
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun("test-run-gcs-err", "task-1"),
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.51",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: Executes task, storage fails
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	if len(updatedRun.Status.Tasks) != 1 {
+		t.Fatalf("Expected 1 task status, got %d", len(updatedRun.Status.Tasks))
+	}
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task phase Failed, got %s", t1.Phase)
+	}
+	if !strings.Contains(t1.Message, "failed to store artifact") || !strings.Contains(t1.Message, "permission denied") {
+		t.Errorf("Expected storage error in task message, got: %s", t1.Message)
+	}
+	if t1.LogPath != "" {
+		t.Errorf("Expected empty logPath on storage failure, got: %s", t1.LogPath)
+	}
+	if t1.Samples != 1 {
+		t.Errorf("Expected Samples=1 to survive storage failure, got %d", t1.Samples)
+	}
+	if t1.Successes != 1 {
+		t.Errorf("Expected Successes=1 to survive storage failure, got %d", t1.Successes)
+	}
+	if t1.MeanScore == nil || *t1.MeanScore != 1.0 {
+		t.Errorf("Expected MeanScore=1.0 to survive storage failure, got %v", t1.MeanScore)
 	}
 }
