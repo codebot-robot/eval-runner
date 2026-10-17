@@ -15,11 +15,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestEvalRecordParsing(t *testing.T) {
@@ -103,5 +106,157 @@ func TestJSONLStreamProcessing(t *testing.T) {
 	dec8 := stats.Decide(est8, 0.05, 8, 10, 0, 10)
 	if dec8.Label != stats.TaskLabelUnchanged {
 		t.Errorf("Escalation label for n=8 = %v, want unchanged", dec8.Label)
+	}
+}
+
+func TestPrintRunTable(t *testing.T) {
+	rate1 := 1.00
+	rate2 := 0.15
+	rate3 := 0.50
+	meanSuccess := 0.55
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gemini-docs-run",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "docs/readme_comprehension",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     20,
+					Successes:   20,
+					SuccessRate: &rate1,
+					SuccessRateCI: &v1alpha1.ConfidenceInterval{
+						Lower:      0.84,
+						Upper:      1.00,
+						Confidence: 0.95,
+						Method:     "wilson",
+					},
+				},
+				{
+					ID:          "docs/readme_comprehension_blind",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     20,
+					Successes:   3,
+					SuccessRate: &rate2,
+					SuccessRateCI: &v1alpha1.ConfidenceInterval{
+						Lower:      0.05,
+						Upper:      0.36,
+						Confidence: 0.95,
+						Method:     "wilson",
+					},
+				},
+				{
+					ID:          "task/partial",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     10,
+					Successes:   0,
+					SuccessRate: &rate3,
+					SuccessRateCI: &v1alpha1.ConfidenceInterval{
+						Lower:      0.20,
+						Upper:      0.80,
+						Confidence: 0.95,
+						Method:     "t",
+					},
+				},
+				{
+					ID:      "task/failed",
+					Phase:   v1alpha1.TaskPhaseFailed,
+					Samples: 0,
+					Message: "some failure",
+				},
+			},
+			Summary: &v1alpha1.RunSummary{
+				Tasks:           "3/4",
+				TasksCompleted:  3,
+				TasksFailed:     1,
+				TasksTotal:      4,
+				TotalSamples:    50,
+				MeanSuccessRate: &meanSuccess,
+				SuccessRateRange: &v1alpha1.ScoreRange{
+					Min: 0.15,
+					Max: 1.00,
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := PrintRunTable(&buf, run); err != nil {
+		t.Fatalf("PrintRunTable failed: %v", err)
+	}
+
+	out := buf.String()
+	// Check headers
+	if !strings.Contains(out, "TASK") || !strings.Contains(out, "RATE (95% CI)") || !strings.Contains(out, "METHOD") {
+		t.Errorf("Expected table headers in output, got:\n%s", out)
+	}
+	// Check acceptance criteria example line
+	if !strings.Contains(out, "docs/readme_comprehension") || !strings.Contains(out, "1.00 [0.84, 1.00]") || !strings.Contains(out, "wilson") {
+		t.Errorf("Expected docs/readme_comprehension line in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "docs/readme_comprehension_blind") || !strings.Contains(out, "0.15 [0.05, 0.36]") {
+		t.Errorf("Expected docs/readme_comprehension_blind line in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "task/partial") || !strings.Contains(out, "0.50 [0.20, 0.80]") || !strings.Contains(out, "t") {
+		t.Errorf("Expected task/partial line with method t in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "task/failed") || !strings.Contains(out, "failed") {
+		t.Errorf("Expected task/failed in output, got:\n%s", out)
+	}
+	// Check summary
+	if !strings.Contains(out, "Tasks: 3 completed, 1 failed (4 total) · Total samples: 50") {
+		t.Errorf("Expected summary counts in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Mean success rate: 0.55 (range 0.15-1.00)") {
+		t.Errorf("Expected mean success rate in output, got:\n%s", out)
+	}
+}
+
+func TestPrintRunJSON(t *testing.T) {
+	rate := 1.00
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-json",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "docs/readme_comprehension",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     20,
+					Successes:   20,
+					SuccessRate: &rate,
+					SuccessRateCI: &v1alpha1.ConfidenceInterval{
+						Lower:      0.84,
+						Upper:      1.00,
+						Confidence: 0.95,
+						Method:     "wilson",
+					},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := PrintRunJSON(&buf, run); err != nil {
+		t.Fatalf("PrintRunJSON failed: %v", err)
+	}
+
+	var parsed SingleRunOutput
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("Failed to unmarshal JSON output: %v", err)
+	}
+	if parsed.Run != "run-json" {
+		t.Errorf("Expected Run 'run-json', got %s", parsed.Run)
+	}
+	if len(parsed.Tasks) != 1 {
+		t.Fatalf("Expected 1 task, got %d", len(parsed.Tasks))
+	}
+	if parsed.Tasks[0].CI == nil || parsed.Tasks[0].CI.Method != "wilson" {
+		t.Errorf("Expected CI method wilson, got %+v", parsed.Tasks[0].CI)
 	}
 }

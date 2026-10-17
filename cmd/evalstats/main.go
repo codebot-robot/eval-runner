@@ -18,6 +18,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,7 +28,14 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 // EvalRecord represents one record in the input JSONL.
@@ -57,6 +65,24 @@ type RunOutput struct {
 	Verdict stats.RunVerdict `json:"verdict"`
 }
 
+// SingleRunTaskSummary holds per-task stats for JSON output from a Run object.
+type SingleRunTaskSummary struct {
+	Task        string                       `json:"task"`
+	Phase       string                       `json:"phase"`
+	Samples     int                          `json:"samples"`
+	Successes   int                          `json:"successes"`
+	SuccessRate *float64                     `json:"successRate,omitempty"`
+	CI          *v1alpha1.ConfidenceInterval `json:"ci,omitempty"`
+}
+
+// SingleRunOutput encapsulates the Run output in JSON mode.
+type SingleRunOutput struct {
+	Run     string                 `json:"run"`
+	Phase   string                 `json:"phase"`
+	Tasks   []SingleRunTaskSummary `json:"tasks"`
+	Summary *v1alpha1.RunSummary   `json:"summary,omitempty"`
+}
+
 func main() {
 	margin := flag.Float64("margin", 0.05, "Equivalence margin for stopping rule (e.g. 0.05 for ±0.05)")
 	conf := flag.Float64("confidence", 0.95, "Confidence level (e.g. 0.95 for 95% CI)")
@@ -65,16 +91,65 @@ func main() {
 	spent := flag.Float64("spent", 0.0, "Current spend in dollars")
 	final := flag.Bool("final", false, "Treat input as complete run: sets sample cap to samples run so unresolved tasks become inconclusive rather than continue")
 	jsonOut := flag.Bool("json", false, "Output results in JSON format")
+	fromRun := flag.String("from-run", "", "Read Run by name from Kubernetes cluster and print per-task statistics")
+	namespace := flag.String("namespace", "eval-runner", "Kubernetes namespace for -from-run (defaults to eval-runner)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: evalstats [flags] [file.jsonl]\n\n")
 		fmt.Fprintf(os.Stderr, "Reads JSONL lines of {task, sample_id, base_score, pr_score} and outputs\n")
 		fmt.Fprintf(os.Stderr, "per-task paired statistics and the run-level verdict.\n\n")
+		fmt.Fprintf(os.Stderr, "Alternatively, use -from-run <name> to inspect a Run from the cluster.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
 
 	flag.Parse()
+
+	if *fromRun != "" {
+		cfg, err := config.GetConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting Kubernetes config: %v\n", err)
+			os.Exit(1)
+		}
+
+		scheme := runtime.NewScheme()
+		utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+		utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+		cl, err := client.New(cfg, client.Options{Scheme: scheme})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating Kubernetes client: %v\n", err)
+			os.Exit(1)
+		}
+
+		runNS := *namespace
+		runName := *fromRun
+		if strings.Contains(runName, "/") {
+			parts := strings.SplitN(runName, "/", 2)
+			runNS = parts[0]
+			runName = parts[1]
+		}
+
+		var run v1alpha1.Run
+		if err := cl.Get(context.Background(), types.NamespacedName{Namespace: runNS, Name: runName}, &run); err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting Run %s/%s: %v\n", runNS, runName, err)
+			os.Exit(1)
+		}
+
+		if *jsonOut {
+			if err := PrintRunJSON(os.Stdout, &run); err != nil {
+				fmt.Fprintf(os.Stderr, "Error encoding JSON output: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		if err := PrintRunTable(os.Stdout, &run); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	var reader io.Reader = os.Stdin
 	if flag.NArg() > 0 && flag.Arg(0) != "-" {
@@ -237,4 +312,98 @@ func printTable(summaries []TaskSummary) error {
 		}
 	}
 	return w.Flush()
+}
+
+// PrintRunTable writes a formatted table of tasks with success rates and confidence intervals from a Run.
+func PrintRunTable(w io.Writer, run *v1alpha1.Run) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "TASK\tRATE (95% CI)\tN\tMETHOD"); err != nil {
+		return err
+	}
+
+	for _, t := range run.Status.Tasks {
+		var rateCI string
+		method := "-"
+
+		if t.SuccessRate != nil {
+			if t.SuccessRateCI != nil {
+				rateCI = fmt.Sprintf("%.2f [%.2f, %.2f]", *t.SuccessRate, t.SuccessRateCI.Lower, t.SuccessRateCI.Upper)
+				method = t.SuccessRateCI.Method
+			} else {
+				rateCI = fmt.Sprintf("%.2f", *t.SuccessRate)
+			}
+		} else if t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
+			est := stats.Proportion(t.Successes, t.Samples, 0.95)
+			rateCI = fmt.Sprintf("%.2f [%.2f, %.2f]", est.Point, est.CI.Lower, est.CI.Upper)
+			method = "wilson"
+		} else if t.Phase == v1alpha1.TaskPhaseFailed {
+			rateCI = "failed"
+		} else if t.Phase != "" {
+			rateCI = strings.ToLower(string(t.Phase))
+		} else {
+			rateCI = "-"
+		}
+
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n",
+			t.ID,
+			rateCI,
+			t.Samples,
+			method,
+		); err != nil {
+			return err
+		}
+	}
+
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	if run.Status.Summary != nil {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "Tasks: %d completed, %d failed (%d total) · Total samples: %d\n",
+			run.Status.Summary.TasksCompleted,
+			run.Status.Summary.TasksFailed,
+			run.Status.Summary.TasksTotal,
+			run.Status.Summary.TotalSamples,
+		); err != nil {
+			return err
+		}
+		if run.Status.Summary.MeanSuccessRate != nil && run.Status.Summary.SuccessRateRange != nil {
+			if _, err := fmt.Fprintf(w, "Mean success rate: %.2f (range %.2f-%.2f)\n",
+				*run.Status.Summary.MeanSuccessRate,
+				run.Status.Summary.SuccessRateRange.Min,
+				run.Status.Summary.SuccessRateRange.Max,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// PrintRunJSON writes JSON output for a Run.
+func PrintRunJSON(w io.Writer, run *v1alpha1.Run) error {
+	var taskSummaries []SingleRunTaskSummary
+	for _, t := range run.Status.Tasks {
+		taskSummaries = append(taskSummaries, SingleRunTaskSummary{
+			Task:        t.ID,
+			Phase:       string(t.Phase),
+			Samples:     t.Samples,
+			Successes:   t.Successes,
+			SuccessRate: t.SuccessRate,
+			CI:          t.SuccessRateCI,
+		})
+	}
+	out := SingleRunOutput{
+		Run:     run.Name,
+		Phase:   string(run.Status.Phase),
+		Tasks:   taskSummaries,
+		Summary: run.Status.Summary,
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
