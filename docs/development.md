@@ -148,6 +148,39 @@ View detailed status, conditions, and the discovered manifest:
 kubectl get run test-run -n eval-runner -o yaml
 ```
 
+### Web UI (`eval-runner-ui`)
+
+`eval-runner` includes a read-only web view (`eval-runner-ui`) that displays Runs and Comparisons with per-task success rates, 95% confidence interval bars, and PR-comment comparison tables.
+
+#### Port-Forwarding to the UI
+
+To access the UI running in your cluster:
+
+```bash
+kubectl -n eval-runner port-forward svc/eval-runner-ui 8080:80
+```
+
+Then open your browser:
+- `http://localhost:8080/runs`: view all Runs in the namespace with their phase, task completion, sample counts, and rates.
+- `http://localhost:8080/runs/<namespace>/<name>`: view detailed Run statistics with per-task rates, 95% CI bars against a 0–1 axis, sample counts, estimation method, and artifact pointers.
+- `http://localhost:8080/comparisons/<namespace>/<name>`: view paired comparison results in the PR-comment table shape with Δ CI bars drawn against a zero line, verdict chip, P(improvement), and base/candidate commits.
+- `http://localhost:8080/comparisons`: view all Comparisons in the namespace.
+
+#### Running the UI Locally
+
+You can also run the web UI binary locally against your active Kubernetes context:
+
+```bash
+go run ./cmd/eval-runner-ui --namespace=eval-runner --listen-addr=:8080
+```
+
+#### Security Architecture
+
+- **No Custom Auth**: The UI has no authentication mechanism of its own. Access is restricted to `kubectl port-forward` (authenticated via Kubernetes RBAC) or cluster-internal Services.
+- **Zero Secrets**: Nothing rendered in the UI is a secret. Model credentials and tokens never appear in custom resources or templates; the UI only displays public metadata and pointers.
+- **Least-Privilege RBAC**: The UI ServiceAccount (`eval-runner-ui`) has read-only (`get`, `list`, `watch`) access exclusively to `runs` and `comparisons` custom resources in the `eval-runner` namespace.
+- **PSA Restricted**: The UI Deployment runs as a non-root distroless container with a read-only root filesystem and all capabilities dropped, fully compliant with Pod Security Standards `restricted`.
+
 ### Inspecting Sandboxes in `eval-runner-sandbox`
 
 During discovery, the controller creates an isolated sandbox in the `eval-runner-sandbox` namespace:
