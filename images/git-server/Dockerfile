@@ -23,6 +23,10 @@ RUN git config --global user.email "test@example.com" && \
     git commit -m "initial commit" && \
     git clone --bare /work /git/support-agent.git && \
     touch /git/support-agent.git/git-daemon-export-ok && \
+    git rm -r .evals && \
+    git commit -m "remove evals list" && \
+    git clone --bare /work /git/no-evals.git && \
+    touch /git/no-evals.git/git-daemon-export-ok && \
     chown -R 65534:65534 /git && \
     git config --system --add safe.directory '*' && \
     rm -rf /work

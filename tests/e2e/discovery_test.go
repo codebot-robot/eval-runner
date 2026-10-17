@@ -140,8 +140,61 @@ spec:
 		if strings.TrimSpace(run.Status.Message) == "" {
 			t.Errorf("Expected non-empty failure message for bad commit")
 		}
+		if !strings.Contains(run.Status.Message, "checkout") {
+			t.Errorf("Expected failure message to name the checkout step, got: %s", run.Status.Message)
+		}
 		if strings.Contains(run.Status.Message, "attempts") {
 			t.Errorf("Expected bad commit to fail promptly without retries, got: %s", run.Status.Message)
+		}
+
+		// Assert sandbox was deleted from eval-runner-sandbox
+		out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("Expected sandbox %s to be deleted on failure, but found:\n%s", sandboxName, out)
+		}
+
+		// Delete Run and assert no sandbox remains
+		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+
+		out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
+		}
+	})
+
+	t.Run("MissingEvalsListFails", func(t *testing.T) {
+		noEvalsCommit := harness.GetGitServerCommit("eval-runner-sandbox", "no-evals.git")
+		t.Logf("Fixture repository without .evals/list commit: %s", noEvalsCommit)
+
+		runName := "support-agent-missing-evals"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/no-evals.git
+    commit: %s
+`, runName, noEvalsCommit)
+
+		harness.KubectlApplyContent(manifest)
+
+		// Assert sandbox was created in eval-runner-sandbox
+		sandboxName := discovery.SandboxNameForRun(runName)
+		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+
+		run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 60*time.Second)
+		if run.Status.DiscoveryDeadline == nil {
+			t.Errorf("Expected status.discoveryDeadline to be populated")
+		}
+		if !strings.Contains(run.Status.Message, ".evals/list") {
+			t.Errorf("Expected failure message to name .evals/list step, got: %s", run.Status.Message)
+		}
+		if strings.Contains(run.Status.Message, "attempts") {
+			t.Errorf("Expected missing .evals/list to fail promptly without retries, got: %s", run.Status.Message)
 		}
 
 		// Assert sandbox was deleted from eval-runner-sandbox

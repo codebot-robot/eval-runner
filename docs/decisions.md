@@ -94,3 +94,14 @@ Future pull requests that introduce an architectural decision should append an e
 - **Decision**: Deploy container images tagged with an explicit git commit SHA (with a `-dirty` suffix when the working tree has uncommitted modifications), never with the mutable `latest` tag. The `dev/tasks/deploy` script automates setting `IMAGE_TAG` from git, always executes `ap` at the repository-pinned version via `go run` (never from `PATH`), and verifies the pushed multi-arch index contains `linux/amd64` before applying manifests.
 - **Rationale**: Kubernetes `Deployment` controllers only initiate a rolling update when the pod template spec changes. Deploying with `latest` results in a byte-identical manifest, so `kubectl apply` reports `unchanged` and the cluster silently continues running previous image digests until manually restarted. Using git SHA tags ensures every deployment manifest change triggers a new ReplicaSet rollout. Multi-platform images pinned in `.ap/images.yaml` and verified for `linux/amd64` presence guard against deploying single-architecture (e.g. arm64-only) images that cause node ImagePullBackOff.
 
+### ADR-013: Adopt agent-sandbox's sandboxd for in-sandbox execution, step-based discovery, and ingress NetworkPolicy
+- **Date**: 2026-10-17
+- **Status**: Accepted
+- **Decision**: Replace `kubectl exec`-style SPDY execution with `kubernetes-sigs/agent-sandbox`'s `sandboxd` runtime daemon running directly inside the discovery sandbox pods. The daemon is injected via deployment topology B (initContainer copying `sandboxd` into a shared volume), exposing gRPC `ProcessService` on `:9090` and REST `FilesystemService` on `:8080`, with readiness determined by `/v1/health`. The controller connects directly to the sandbox Pod IP via `pkg/sandboxclient`. Discovery is executed as discrete steps:
+  1. `git clone -- <url> repo`: retries up to N times with backoff on non-zero exit;
+  2. `git checkout <commit>`: permanent failure on non-zero exit (no retry);
+  3. `./.evals/list`: executed in the repo directory, categorizing missing, non-executable, non-zero exit, and invalid JSON as distinct, typed failures without retries.
+  Controller RBAC drops `pods/exec`. An ingress `NetworkPolicy` in `eval-runner-sandbox` restricts ports `:9090` and `:8080` to controller pods in `eval-runner`.
+- **Rationale**: Driving execution via structured RPCs supersedes heuristic regex parsing of mixed stderr streams. Step-based discovery guarantees transient clone failures are retried without any risk of retrying permanent errors like missing `.evals/list` or non-existent commit SHAs. Direct in-cluster RPC avoids routing through the Kubernetes API server via `pods/exec`, adhering to least-privilege RBAC. Because sandboxd has no authentication, ingress NetworkPolicy ensures sandbox pods are only accessible by the authorized controller.
+
+

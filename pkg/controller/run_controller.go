@@ -18,13 +18,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -43,102 +45,19 @@ import (
 )
 
 const (
-	// DefaultMaxDiscoveryAttempts is the default maximum number of discovery attempts for transient errors.
+	// DefaultMaxDiscoveryAttempts is the default maximum number of discovery attempts for clone retries.
 	DefaultMaxDiscoveryAttempts = 5
 
 	// DefaultDiscoveryDeadline is the default overall deadline for discovery to complete.
 	DefaultDiscoveryDeadline = 10 * time.Minute
 )
 
-// DefaultDiscoveryRetryBackoff defines the default backoff intervals between discovery retry attempts.
+// DefaultDiscoveryRetryBackoff defines the default backoff intervals between clone retry attempts.
 var DefaultDiscoveryRetryBackoff = []time.Duration{
 	5 * time.Second,
 	10 * time.Second,
 	20 * time.Second,
 	40 * time.Second,
-}
-
-var (
-	transientPatterns = []*regexp.Regexp{
-		// Connection refused / reset
-		regexp.MustCompile(`(?i)connection refused`),
-		regexp.MustCompile(`(?i)connection reset`),
-		// DNS resolution
-		regexp.MustCompile(`(?i)could not resolve host`),
-		regexp.MustCompile(`(?i)name does not resolve`),
-		regexp.MustCompile(`(?i)name or service not known`),
-		regexp.MustCompile(`(?i)temporary failure in name resolution`),
-		regexp.MustCompile(`(?i)nodename nor servname provided`),
-		regexp.MustCompile(`(?i)unable to look up`),
-		// Timeouts
-		regexp.MustCompile(`(?i)connection timed out`),
-		regexp.MustCompile(`(?i)operation timed out`),
-		regexp.MustCompile(`(?i)timed out`),
-		regexp.MustCompile(`(?i)\bi/o timeout\b`),
-		regexp.MustCompile(`(?i)tls handshake timeout`),
-		// HTTP 5xx
-		regexp.MustCompile(`(?i)the requested url returned error: 5\d\d`),
-		regexp.MustCompile(`(?i)http[ /]5\d\d`),
-		regexp.MustCompile(`(?i)status( code)?:? 5\d\d`),
-		regexp.MustCompile(`(?i)rpc failed; curl \d+ the requested url returned error: 5`),
-		// Remote hung up / network routing
-		regexp.MustCompile(`(?i)remote end hung up unexpectedly`),
-		regexp.MustCompile(`(?i)early eof`),
-		regexp.MustCompile(`(?i)network is unreachable`),
-		regexp.MustCompile(`(?i)no route to host`),
-		regexp.MustCompile(`(?i)host is down`),
-		regexp.MustCompile(`(?i)empty reply from server`),
-	}
-
-	permanentPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)reference is not a tree`),
-		regexp.MustCompile(`(?i)did not match any file\(s\) known to git`),
-		regexp.MustCompile(`(?i)ambiguous argument`),
-		regexp.MustCompile(`(?i)\.evals/list`),
-		regexp.MustCompile(`(?i)repository not found`),
-		regexp.MustCompile(`(?i)repository '.*' does not exist`),
-		regexp.MustCompile(`(?i)authentication failed`),
-		regexp.MustCompile(`(?i)permission denied \(publickey\)`),
-		regexp.MustCompile(`(?i)the requested url returned error: 40[134]`),
-	}
-)
-
-// IsPermanentDiscoveryError reports whether a discovery execution error or stderr
-// represents a permanent failure (e.g. invalid commit or missing .evals/list) that
-// should not be retried.
-func IsPermanentDiscoveryError(err error, stderr string) bool {
-	combined := stderr
-	if err != nil {
-		combined += "\n" + err.Error()
-	}
-	for _, p := range permanentPatterns {
-		if p.MatchString(combined) {
-			return true
-		}
-	}
-	return false
-}
-
-// IsTransientDiscoveryError reports whether a discovery execution error or stderr
-// is a transient failure (e.g. connection refused, DNS lookup failure, timeout, HTTP 5xx)
-// suitable for retry with backoff.
-func IsTransientDiscoveryError(err error, stderr string) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	if IsPermanentDiscoveryError(err, stderr) {
-		return false
-	}
-	combined := stderr + "\n" + err.Error()
-	for _, p := range transientPatterns {
-		if p.MatchString(combined) {
-			return true
-		}
-	}
-	return false
 }
 
 func backoffForAttempt(backoffs []time.Duration, attempt int) time.Duration {
@@ -162,6 +81,14 @@ func formatAttemptCount(n int) string {
 	return fmt.Sprintf("%d attempts", n)
 }
 
+func isNotFoundError(err error) bool {
+	return status.Code(err) == codes.NotFound
+}
+
+func isPermissionError(err error) bool {
+	return status.Code(err) == codes.PermissionDenied
+}
+
 func defaultSleep(ctx context.Context, d time.Duration) error {
 	select {
 	case <-ctx.Done():
@@ -174,8 +101,10 @@ func defaultSleep(ctx context.Context, d time.Duration) error {
 // RunReconciler reconciles a Run object
 type RunReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	Executor         PodExecutor
+	Scheme        *runtime.Scheme
+	ClientFactory sandboxclient.Factory
+	// SandboxClient can be set directly to override ClientFactory (e.g. for unit testing).
+	SandboxClient    sandboxclient.Client
 	SandboxNamespace string
 	MaxStdoutBytes   int64
 	MaxStderrBytes   int64
@@ -188,11 +117,11 @@ type RunReconciler struct {
 	// Now returns the current time. In tests, this can be overridden.
 	Now func() time.Time
 
-	// MaxDiscoveryAttempts is the maximum number of discovery attempts for transient errors.
+	// MaxDiscoveryAttempts is the maximum number of attempts for the git clone step.
 	// Defaults to DefaultMaxDiscoveryAttempts (5) if <= 0.
 	MaxDiscoveryAttempts int
 
-	// DiscoveryRetryBackoff defines the backoff schedule between transient attempts.
+	// DiscoveryRetryBackoff defines the backoff schedule between clone retry attempts.
 	// Defaults to DefaultDiscoveryRetryBackoff if empty.
 	DiscoveryRetryBackoff []time.Duration
 
@@ -212,6 +141,13 @@ func (r *RunReconciler) discoveryDeadline() time.Duration {
 		return r.DiscoveryDeadline
 	}
 	return DefaultDiscoveryDeadline
+}
+
+func (r *RunReconciler) maxDiscoveryAttempts() int {
+	if r.MaxDiscoveryAttempts > 0 {
+		return r.MaxDiscoveryAttempts
+	}
+	return DefaultMaxDiscoveryAttempts
 }
 
 func (r *RunReconciler) requeueDelay(deadline *metav1.Time) time.Duration {
@@ -256,9 +192,12 @@ func (r *RunReconciler) maxStderrLines() int {
 
 // Reconcile handles the Run state machine:
 //  1. Pending -> ensure finalizer, create Sandbox in eval-runner-sandbox, set Discovering.
-//  2. Wait for sandbox pod Ready, exec git clone && git checkout && ./.evals/list.
+//  2. Wait for sandbox pod Ready, drive step-based discovery via sandboxd (gRPC ProcessService).
+//     - Step 1: git clone -- <url> repo (retries up to N times on failure)
+//     - Step 2: git checkout <commit> (fails immediately on error)
+//     - Step 3: ./.evals/list (fails immediately on error, typed outcomes)
 //  3. Parse and validate manifest, write status.manifest, set Discovered.
-//     On failure, set Failed with message and tail of stderr.
+//     On failure, set Failed with message naming the failed step.
 //  4. Delete sandbox when done, idempotent across restarts.
 //  5. On Run deletion, GC discovery sandbox and remove finalizer.
 func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -396,7 +335,6 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	podExists := (podErr == nil)
 
 	// Check if overall discovery deadline has been exceeded.
-	// Runs before the pod-exists check so that Runs where the pod was never created or is missing still fail on deadline expiry.
 	if run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time) {
 		var podPtr *corev1.Pod
 		if podExists {
@@ -452,9 +390,35 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 	}
 
-	// Step 3: Pod is Ready -> execute discovery command
-	logger.Info("Sandbox pod is ready; executing discovery", "pod", podKey)
-	cmd := discovery.BuildDiscoveryCommand(run.Spec.Repo.URL, run.Spec.Repo.Commit)
+	// Obtain sandbox client (via direct instance or factory from pod IP)
+	var sbClient sandboxclient.Client
+	if r.SandboxClient != nil {
+		sbClient = r.SandboxClient
+	} else {
+		if pod.Status.PodIP == "" {
+			logger.Info("Pod IP not yet assigned", "pod", podKey)
+			return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
+		}
+		factory := r.ClientFactory
+		if factory == nil {
+			factory = sandboxclient.DefaultFactory(
+				sandboxclient.WithStdoutLimit(r.maxStdoutBytes()),
+				sandboxclient.WithStderrLimit(r.maxStderrBytes()),
+			)
+		}
+		var clientErr error
+		sbClient, clientErr = factory.NewClient(pod.Status.PodIP)
+		if clientErr != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to create sandbox client for %s: %w", pod.Status.PodIP, clientErr)
+		}
+		defer func() {
+			if closeErr := sbClient.Close(); closeErr != nil {
+				logger.Error(closeErr, "failed to close sandbox client")
+			}
+		}()
+	}
+
+	// Set execution deadline context
 	execTimeout := 5 * time.Minute
 	if run.Status.DiscoveryDeadline != nil {
 		remaining := run.Status.DiscoveryDeadline.Sub(r.now())
@@ -467,11 +431,8 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 	execCtx, cancel := context.WithTimeout(ctx, execTimeout)
 	defer cancel()
-	maxAttempts := r.MaxDiscoveryAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = DefaultMaxDiscoveryAttempts
-	}
 
+	maxAttempts := r.maxDiscoveryAttempts()
 	backoffs := r.DiscoveryRetryBackoff
 	if len(backoffs) == 0 {
 		backoffs = DefaultDiscoveryRetryBackoff
@@ -482,21 +443,35 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		sleepFn = defaultSleep
 	}
 
-	var stdout, stderr string
-	var execErr error
-	var attempts int
+	// -------------------------------------------------------------------------
+	// Step 1: git clone -- <url> repo (retry up to N times on failure)
+	// -------------------------------------------------------------------------
+	logger.Info("Sandbox pod is ready; starting step 1: git clone", "pod", podKey)
+	var cloneRes *sandboxclient.ExecuteResult
+	var cloneErr error
+	var cloneAttempts int
 
-	for attempts = 1; attempts <= maxAttempts; attempts++ {
+	for cloneAttempts = 1; cloneAttempts <= maxAttempts; cloneAttempts++ {
 		if run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time) {
 			break
 		}
 
-		stdout, stderr, execErr = r.Executor.Exec(execCtx, sandboxNamespace, pod.Name, discovery.DiscoveryContainerName, cmd)
-		if execErr == nil {
+		// Clean up any previous partial clone before attempting
+		if _, cleanErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+			Command: []string{"rm", "-rf", "repo"},
+		}); cleanErr != nil {
+			logger.V(1).Info("Failed to clean repo directory before clone attempt", "error", cleanErr)
+		}
+
+		cloneRes, cloneErr = sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+			Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
+		})
+
+		if cloneErr == nil && cloneRes != nil && cloneRes.ExitCode == 0 {
 			break
 		}
 
-		if !IsTransientDiscoveryError(execErr, stderr) || attempts >= maxAttempts || execCtx.Err() != nil {
+		if cloneAttempts >= maxAttempts || execCtx.Err() != nil {
 			break
 		}
 
@@ -504,7 +479,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			break
 		}
 
-		backoffDuration := backoffForAttempt(backoffs, attempts)
+		backoffDuration := backoffForAttempt(backoffs, cloneAttempts)
 		if run.Status.DiscoveryDeadline != nil {
 			rem := run.Status.DiscoveryDeadline.Sub(r.now())
 			if rem <= 0 {
@@ -515,15 +490,15 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 		}
 
-		logger.Info("Transient error during discovery execution; retrying",
-			"attempt", attempts,
+		logger.Info("Clone step failed; retrying with backoff",
+			"attempt", cloneAttempts,
 			"maxAttempts", maxAttempts,
-			"error", execErr,
+			"error", cloneErr,
 			"backoff", backoffDuration,
 		)
 
-		attemptMsg := fmt.Sprintf("Running discovery in sandbox (attempt %d of %d failed; retrying)", attempts, maxAttempts)
-		retryMsg := fmt.Sprintf("Discovery attempt %d failed; retrying", attempts)
+		attemptMsg := fmt.Sprintf("Running discovery in sandbox (step git clone attempt %d of %d failed; retrying)", cloneAttempts, maxAttempts)
+		retryMsg := fmt.Sprintf("step git clone attempt %d of %d failed; retrying", cloneAttempts, maxAttempts)
 		if updateErr := r.updateRunStatus(execCtx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeDiscovered,
@@ -534,17 +509,24 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			})
 			status.Message = retryMsg
 		}); updateErr != nil {
-			logger.Error(updateErr, "failed to update run status during retry", "attempt", attempts)
+			logger.Error(updateErr, "failed to update run status during retry", "attempt", cloneAttempts)
 		}
 
 		if err := sleepFn(execCtx, backoffDuration); err != nil {
-			logger.Info("Context done while waiting to retry discovery", "error", err)
+			logger.Info("Context done while waiting to retry clone", "error", err)
 			break
 		}
 	}
 
-	if execErr != nil {
-		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+	// Evaluate git clone outcome
+	if cloneErr != nil || cloneRes == nil || cloneRes.ExitCode != 0 {
+		var cloneStderr string
+		var exitCode int
+		if cloneRes != nil {
+			cloneStderr = cloneRes.Stderr
+			exitCode = cloneRes.ExitCode
+		}
+		tail := extractStderrTail(cloneStderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
 		isDeadlineExceeded := (run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time)) ||
 			errors.Is(execCtx.Err(), context.DeadlineExceeded)
 		if isDeadlineExceeded {
@@ -554,31 +536,115 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 			return r.failRun(ctx, &run, &sandbox, msg)
 		}
+
 		var msg string
-		if attempts > 1 || (IsTransientDiscoveryError(execErr, stderr) && attempts >= maxAttempts) {
-			msg = fmt.Sprintf("Command execution failed after %s: %v", formatAttemptCount(attempts), execErr)
-		} else {
-			msg = fmt.Sprintf("Command execution failed: %v", execErr)
-		}
 		if tail != "" {
-			msg += "\n" + tail
+			msg = fmt.Sprintf("step git clone failed after %s: exit code %d: %s", formatAttemptCount(cloneAttempts), exitCode, tail)
+		} else if cloneErr != nil {
+			msg = fmt.Sprintf("step git clone failed after %s: %v", formatAttemptCount(cloneAttempts), cloneErr)
+		} else {
+			msg = fmt.Sprintf("step git clone failed after %s: exit code %d", formatAttemptCount(cloneAttempts), exitCode)
 		}
 		return r.failRun(ctx, &run, &sandbox, msg)
 	}
 
+	// -------------------------------------------------------------------------
+	// Step 2: git checkout <commit> (no retry: commit not found is permanent)
+	// -------------------------------------------------------------------------
+	logger.Info("Step 1 succeeded; starting step 2: git checkout", "commit", run.Spec.Repo.Commit)
+	checkoutRes, checkoutErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: []string{"git", "checkout", run.Spec.Repo.Commit},
+		Cwd:     "repo",
+	})
+	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
+		var checkoutStderr string
+		var exitCode int
+		if checkoutRes != nil {
+			checkoutStderr = checkoutRes.Stderr
+			exitCode = checkoutRes.ExitCode
+		}
+		tail := extractStderrTail(checkoutStderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		isDeadlineExceeded := (run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time)) ||
+			errors.Is(execCtx.Err(), context.DeadlineExceeded)
+		if isDeadlineExceeded {
+			msg := formatPodDeadlineMessage(&pod)
+			if tail != "" {
+				msg += "\n" + tail
+			}
+			return r.failRun(ctx, &run, &sandbox, msg)
+		}
+
+		var msg string
+		if tail != "" {
+			msg = fmt.Sprintf("step git checkout failed: exit code %d: %s", exitCode, tail)
+		} else if checkoutErr != nil {
+			msg = fmt.Sprintf("step git checkout failed: %v", checkoutErr)
+		} else {
+			msg = fmt.Sprintf("step git checkout failed: exit code %d", exitCode)
+		}
+		return r.failRun(ctx, &run, &sandbox, msg)
+	}
+
+	// -------------------------------------------------------------------------
+	// Step 3: ./.evals/list (no retry: missing/non-executable/non-zero/invalid JSON)
+	// -------------------------------------------------------------------------
+	logger.Info("Step 2 succeeded; starting step 3: ./.evals/list")
+	listRes, listErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: []string{"./.evals/list"},
+		Cwd:     "repo",
+	})
+
+	if listErr != nil {
+		var limitErr *discovery.LimitError
+		if errors.As(listErr, &limitErr) {
+			var tail string
+			if listRes != nil {
+				tail = extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+			}
+			msg := fmt.Sprintf("step ./.evals/list failed: %v", limitErr)
+			if tail != "" {
+				msg += "\n" + tail
+			}
+			return r.failRun(ctx, &run, &sandbox, msg)
+		}
+
+		if isNotFoundError(listErr) {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: missing .evals/list: %v", listErr))
+		}
+		if isPermissionError(listErr) {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: .evals/list is not executable: %v", listErr))
+		}
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", listErr))
+	}
+
+	if listRes == nil {
+		return r.failRun(ctx, &run, &sandbox, "step ./.evals/list failed: nil response")
+	}
+
+	if listRes.ExitCode != 0 {
+		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		var msg string
+		if tail != "" {
+			msg = fmt.Sprintf("step ./.evals/list failed with exit code %d: %s", listRes.ExitCode, tail)
+		} else {
+			msg = fmt.Sprintf("step ./.evals/list failed with exit code %d", listRes.ExitCode)
+		}
+		return r.failRun(ctx, &run, &sandbox, msg)
+	}
+
+	// Defense-in-depth: validate stdout and stderr sizes even if executor did not report limit error
 	stdoutLimit := r.maxStdoutBytes()
 	stderrLimit := r.maxStderrBytes()
 
-	// Defense-in-depth: validate stdout and stderr sizes even if executor did not report limit error
-	if int64(len(stdout)) > stdoutLimit {
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Command execution failed: %v", &discovery.LimitError{
+	if int64(len(listRes.Stdout)) > stdoutLimit {
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", &discovery.LimitError{
 			Stream: "stdout",
 			Limit:  stdoutLimit,
 		}))
 	}
-	if int64(len(stderr)) > stderrLimit {
-		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := fmt.Sprintf("Command execution failed: %v", &discovery.LimitError{
+	if int64(len(listRes.Stderr)) > stderrLimit {
+		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		msg := fmt.Sprintf("step ./.evals/list failed: %v", &discovery.LimitError{
 			Stream: "stderr",
 			Limit:  stderrLimit,
 		})
@@ -589,10 +655,10 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Step 4: Parse & validate manifest
-	manifest, err := discovery.ParseManifest([]byte(stdout))
+	manifest, err := discovery.ParseManifest([]byte(listRes.Stdout))
 	if err != nil {
-		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := fmt.Sprintf("Failed to parse manifest: %v", err)
+		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		msg := fmt.Sprintf("step ./.evals/list failed: invalid JSON: %v", err)
 		if tail != "" {
 			msg += "\n" + tail
 		}
@@ -604,16 +670,26 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Step 5: Success -> update Run to Discovered, then cleanup sandbox
-	logger.Info("Discovery successful; recording manifest and cleaning up sandbox", "tasks", len(manifest.Tasks))
+	successMsg := ""
+	condMsg := fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks))
+	if cloneAttempts > 1 {
+		successMsg = fmt.Sprintf("Discovered after %s", formatAttemptCount(cloneAttempts))
+		condMsg = fmt.Sprintf("Discovered %d tasks after %s", len(manifest.Tasks), formatAttemptCount(cloneAttempts))
+	}
+
+	logger.Info("Discovery successful; recording manifest and cleaning up sandbox",
+		"tasks", len(manifest.Tasks),
+		"cloneAttempts", cloneAttempts,
+	)
 	err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 		status.Phase = v1alpha1.RunPhaseDiscovered
-		status.Message = ""
+		status.Message = successMsg
 		status.Manifest = manifest
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionTypeDiscovered,
 			Status:             metav1.ConditionTrue,
 			Reason:             "Discovered",
-			Message:            fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks)),
+			Message:            condMsg,
 			ObservedGeneration: gen,
 		})
 	})

@@ -23,11 +23,11 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	discoveryk8s "k8s.io/client-go/discovery"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -77,7 +77,7 @@ func main() {
 	flag.DurationVar(&discoveryDeadline, "discovery-deadline", controller.DefaultDiscoveryDeadline, "Overall deadline for discovery to complete")
 	flag.Int64Var(&maxStdoutBytes, "max-stdout-bytes", discovery.MaxStdoutBytes, "Maximum stdout bytes buffered from discovery execution")
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
-	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of discovery retry attempts for transient errors")
+	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
 
 	opts := zap.Options{
 		Development: true,
@@ -98,12 +98,6 @@ func main() {
 
 	if err := checkSandboxCRD(discoveryClient); err != nil {
 		setupLog.Error(err, "agent-sandbox CRD (agents.x-k8s.io/v1beta1) is missing; agent-sandbox must be installed as a prerequisite")
-		os.Exit(1)
-	}
-
-	clientset, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		setupLog.Error(err, "unable to create clientset")
 		os.Exit(1)
 	}
 
@@ -150,17 +144,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	executor := &controller.SPDYPodExecutor{
-		Config:      cfg,
-		Clientset:   clientset,
-		StdoutLimit: maxStdoutBytes,
-		StderrLimit: maxStderrBytes,
-	}
+	clientFactory := sandboxclient.DefaultFactory(
+		sandboxclient.WithStdoutLimit(maxStdoutBytes),
+		sandboxclient.WithStderrLimit(maxStderrBytes),
+	)
 
 	reconciler := &controller.RunReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
-		Executor:             executor,
+		ClientFactory:        clientFactory,
 		SandboxNamespace:     sandboxNamespace,
 		DiscoveryDeadline:    discoveryDeadline,
 		MaxStdoutBytes:       maxStdoutBytes,
