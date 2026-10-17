@@ -1,0 +1,97 @@
+#!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+echo "=== 1. Testing platform check with fake inspect outputs ==="
+
+# Source functions from dev/tasks/deploy
+# shellcheck source=dev/tasks/deploy
+source "${REPO_ROOT}/dev/tasks/deploy"
+
+# Test Case A: Valid multi-arch inspect output (amd64 + arm64)
+FAKE_MULTI_ARCH="Name:      gcr.io/test-project/eval-runner:835f2bf
+MediaType: application/vnd.oci.image.index.v1+json
+Digest:    sha256:1111111111111111111111111111111111111111111111111111111111111111
+
+Manifests:
+  Name:        gcr.io/test-project/eval-runner:835f2bf@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    linux/amd64
+
+  Name:        gcr.io/test-project/eval-runner:835f2bf@sha256:3333333333333333333333333333333333333333333333333333333333333333
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    linux/arm64"
+
+if ! verify_index_has_amd64 "${FAKE_MULTI_ARCH}" "gcr.io/test-project/eval-runner:835f2bf"; then
+  echo "FAIL: Expected multi-arch inspect output with linux/amd64 to pass." >&2
+  exit 1
+fi
+echo "PASS: Multi-arch inspect with linux/amd64 accepted."
+
+# Test Case B: Stale arm64-only inspect output (lacks amd64)
+FAKE_ARM64_ONLY="Name:      gcr.io/test-project/eval-runner:835f2bf
+MediaType: application/vnd.oci.image.index.v1+json
+Digest:    sha256:1111111111111111111111111111111111111111111111111111111111111111
+
+Manifests:
+  Name:        gcr.io/test-project/eval-runner:835f2bf@sha256:3333333333333333333333333333333333333333333333333333333333333333
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    linux/arm64"
+
+ERR_OUT="$(verify_index_has_amd64 "${FAKE_ARM64_ONLY}" "gcr.io/test-project/eval-runner:835f2bf" 2>&1 || true)"
+if echo "${ERR_OUT}" | grep -q "ERROR: Pushed image index 'gcr.io/test-project/eval-runner:835f2bf' does not contain 'linux/amd64' platform."; then
+  echo "PASS: Arm64-only inspect output rejected fast with expected error message."
+else
+  echo "FAIL: Arm64-only inspect output was not rejected with expected error message. Got: ${ERR_OUT}" >&2
+  exit 1
+fi
+
+# Test Case C: Empty inspect output
+EMPTY_ERR_OUT="$(verify_index_has_amd64 "" "gcr.io/test-project/eval-runner:835f2bf" 2>&1 || true)"
+if echo "${EMPTY_ERR_OUT}" | grep -q "ERROR: Pushed image index 'gcr.io/test-project/eval-runner:835f2bf' does not contain 'linux/amd64' platform."; then
+  echo "PASS: Empty inspect output rejected fast."
+else
+  echo "FAIL: Empty inspect output did not fail properly. Got: ${EMPTY_ERR_OUT}" >&2
+  exit 1
+fi
+
+echo "=== 2. Testing that dev/tasks/deploy ignores bogus PATH ap binary ==="
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+# Create a bogus ap binary that fails if executed
+cat << 'EOF' > "${TMP_DIR}/ap"
+#!/bin/sh
+echo "FATAL: Bogus PATH ap binary was executed!" >&2
+exit 99
+EOF
+chmod +x "${TMP_DIR}/ap"
+
+# Run ./dev/tasks/deploy --dry-run with bogus ap first on PATH
+DEPLOY_OUT="$(PATH="${TMP_DIR}:${PATH}" "${REPO_ROOT}/dev/tasks/deploy" --dry-run 2>&1)"
+if echo "${DEPLOY_OUT}" | grep -q "Bogus PATH ap binary was executed"; then
+  echo "FAIL: dev/tasks/deploy used PATH ap binary instead of go run!" >&2
+  exit 1
+fi
+echo "PASS: dev/tasks/deploy ignored bogus PATH ap binary and invoked ap via go run."
+
+echo "=== All test-deploy checks passed successfully ==="
