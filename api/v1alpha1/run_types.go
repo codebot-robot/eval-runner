@@ -253,6 +253,29 @@ type RunSummary struct {
 	Rates string `json:"rates,omitempty"`
 }
 
+// DiscoveryStatus summarizes the outcome of task discovery and points to the stored manifest.
+type DiscoveryStatus struct {
+	// ManifestPath is the URI or path where the full manifest was stored by the artifact sink.
+	// +optional
+	ManifestPath string `json:"manifestPath,omitempty"`
+
+	// ManifestHash is the SHA-256 content hash of the raw manifest (sha256:<hex>).
+	// +optional
+	ManifestHash string `json:"manifestHash,omitempty"`
+
+	// TaskCount is the total number of tasks declared in the discovered manifest.
+	// +optional
+	TaskCount int `json:"taskCount"`
+
+	// EligibleTaskCount is the number of tasks eligible for execution (empty resources).
+	// +optional
+	EligibleTaskCount int `json:"eligibleTaskCount"`
+
+	// TaskIDs is a capped list of task IDs discovered from the manifest (up to 50).
+	// +optional
+	TaskIDs []string `json:"taskIDs,omitempty"`
+}
+
 // RunStatus defines the observed state of Run.
 type RunStatus struct {
 	// Phase is the current lifecycle phase of the Run.
@@ -269,9 +292,9 @@ type RunStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Manifest is the parsed output of .evals/list once discovery completes.
+	// Discovery summarizes the outcome of task discovery and points to the stored manifest.
 	// +optional
-	Manifest *Manifest `json:"manifest,omitempty"`
+	Discovery *DiscoveryStatus `json:"discovery,omitempty"`
 
 	// DiscoveryDeadline is the deadline by which discovery must complete.
 	// +optional

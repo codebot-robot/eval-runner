@@ -17,6 +17,7 @@ package e2e
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,11 +73,29 @@ spec:
 			t.Errorf("Expected status.discoveryDeadline to be populated")
 		}
 
-		if run.Status.Manifest == nil {
-			t.Fatalf("Expected status.manifest to be populated")
+		if run.Status.Discovery == nil {
+			t.Fatalf("Expected status.discovery to be populated")
 		}
-		if len(run.Status.Manifest.Tasks) != 3 {
-			t.Fatalf("Expected 3 tasks in manifest, got %d", len(run.Status.Manifest.Tasks))
+		if run.Status.Discovery.TaskCount != 3 {
+			t.Fatalf("Expected 3 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+		}
+		if run.Status.Discovery.ManifestPath == "" {
+			t.Errorf("Expected status.discovery.manifestPath to be populated")
+		} else {
+			expectedPath := filepath.Join("/tmp/artifacts", "runs", commit, "manifest.json")
+			if run.Status.Discovery.ManifestPath != expectedPath {
+				t.Errorf("Expected manifestPath %q, got %q", expectedPath, run.Status.Discovery.ManifestPath)
+			}
+			manifestOutput := harness.runCmd("kubectl", "exec", "-n", "eval-runner", "deployment/eval-runner-controller", "--", "cat", expectedPath)
+			if !strings.Contains(manifestOutput, "triage/runbook_lookup") {
+				t.Errorf("Expected stored manifest at %s to contain triage/runbook_lookup, got: %s", expectedPath, manifestOutput)
+			}
+		}
+		if run.Status.Discovery.ManifestHash == "" {
+			t.Errorf("Expected status.discovery.manifestHash to be populated")
+		}
+		if run.Status.Discovery.EligibleTaskCount != 3 {
+			t.Errorf("Expected 3 eligible tasks, got %d", run.Status.Discovery.EligibleTaskCount)
 		}
 
 		expectedTasks := map[string]bool{
@@ -84,11 +103,11 @@ spec:
 			"triage/escalation_policy": false,
 			"triage/summary_quality":   false,
 		}
-		for _, task := range run.Status.Manifest.Tasks {
-			if _, ok := expectedTasks[task.ID]; !ok {
-				t.Errorf("Unexpected task id: %s", task.ID)
+		for _, taskID := range run.Status.Discovery.TaskIDs {
+			if _, ok := expectedTasks[taskID]; !ok {
+				t.Errorf("Unexpected task id: %s", taskID)
 			} else {
-				expectedTasks[task.ID] = true
+				expectedTasks[taskID] = true
 			}
 		}
 		for taskID, found := range expectedTasks {

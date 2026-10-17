@@ -34,6 +34,7 @@ type FakeObject struct {
 	Object      string
 	ContentType string
 	Data        []byte
+	Metadata    map[string]string
 }
 
 // NewFakeStorageClient creates a new FakeStorageClient.
@@ -44,8 +45,13 @@ func NewFakeStorageClient() *FakeStorageClient {
 	}
 }
 
-// WriteObject records the object write in memory.
+// WriteObject records the object write in memory without metadata.
 func (f *FakeStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
+	return f.WriteObjectWithMetadata(ctx, bucket, object, contentType, data, nil)
+}
+
+// WriteObjectWithMetadata records the object write and metadata in memory.
+func (f *FakeStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, data []byte, metadata map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -60,11 +66,19 @@ func (f *FakeStorageClient) WriteObject(ctx context.Context, bucket, object, con
 
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
+	var metaCopy map[string]string
+	if metadata != nil {
+		metaCopy = make(map[string]string, len(metadata))
+		for k, v := range metadata {
+			metaCopy[k] = v
+		}
+	}
 	f.Objects[key] = FakeObject{
 		Bucket:      bucket,
 		Object:      object,
 		ContentType: contentType,
 		Data:        dataCopy,
+		Metadata:    metaCopy,
 	}
 	return nil
 }

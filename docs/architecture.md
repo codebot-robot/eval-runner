@@ -78,7 +78,7 @@ The `Run` custom resource represents an evaluation request against a specific co
   - `phase`: Lifecycle phase: `Pending`, `Discovering`, `Discovered`, or `Failed`.
   - `message`: Human-readable status or bounded error description.
   - `conditions`: Kubernetes conditions, including condition `Discovered` (`True` or `False`).
-  - `manifest`: Parsed manifest (`*Manifest`) populated when discovery succeeds, listing declared container images and eval tasks (`id`, `workdir`, `spec`, `resources`, `images`).
+  - `discovery`: Summary of task discovery (`*DiscoveryStatus`), including `manifestPath`, `manifestHash`, `taskCount`, `eligibleTaskCount`, and `taskIDs` (capped at 50). The full manifest is stored in the artifact store (`runs/<commit>/manifest.json`).
   - `discoveryDeadline`: Overall deadline (`metav1.Time`) by which discovery must complete, set at `Pending` -> `Discovering` and back-filled for in-flight Runs.
 - **Finalizer**: `evalrunner.gke-labs.dev/discovery-sandbox` ensures discovery sandboxes in `eval-runner-sandbox` are cleaned up if a Run is deleted.
 
@@ -115,9 +115,10 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
       |              Drive step-based discovery via sandboxd (5m deadline)
       |                Step 1: git clone -- <url> repo (retry up to N times)
       |                Step 2: git checkout <commit> (no retry)
-      |                Step 3: ./.evals/list (no retry, typed failures)
+      |                Step 3: ./.evals/list > /out/manifest.json (no retry, typed failures)
       |              Enforce stdout (1 MiB) & stderr (64 KiB) limits
-      |              Validate manifest
+      |              Read /out/manifest.json via sandboxd ReadFile
+      |              Validate manifest & upload to artifact store
       |
       +------------> Success: Delete Sandbox, phase = Discovered
       |
@@ -138,7 +139,7 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
    - Once the pod is ready, the controller dials the pod IP directly on `:9090` using `pkg/sandboxclient` and executes discovery through discrete steps:
      - **Step 1 (`git clone`)**: `git clone -- <url> repo`. If the clone exits non-zero, it retries up to N times (default: 5, configured via `--max-discovery-attempts`) with backoff (5s, 10s, 20s, 40s), cleaning up any partial directory before retrying. All attempts are bounded by the discovery deadline. If all attempts are exhausted, the Run fails and the attempt count is recorded in `status.message`.
      - **Step 2 (`git checkout`)**: `git checkout <commit>` with working directory `repo`. If checkout exits non-zero, the Run fails immediately without retry (commit not found is permanent).
-     - **Step 3 (`./.evals/list`)**: Executed inside `repo` without retries. Outcomes are typed into distinct failure messages:
+     - **Step 3 (`./.evals/list > /out/manifest.json`)**: Executed inside `repo` without retries, writing output to `/out/manifest.json`. Outcomes are typed into distinct failure messages:
        - Missing executable (`codes.NotFound` / not found)
        - Non-executable permissions (`codes.PermissionDenied` / permission denied)
        - Non-zero exit code
@@ -149,16 +150,20 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
    - Exec streams from sandboxd are captured through `LimitWriter` instances (`pkg/discovery/limit_writer.go`).
    - If stdout exceeds 1 MiB (`MaxStdoutBytes`), output beyond the cap is discarded and the step fails with a `LimitError`.
    - If stderr exceeds 64 KiB (`MaxStderrBytes`), output beyond the cap is discarded and the step fails with a `LimitError`.
-5. **Manifest Parsing and Validation**:
-   - The stdout output of step 3 is parsed as a JSON `Manifest` (`pkg/discovery/manifest.go`).
+5. **Manifest Reading, Validation, and Storage**:
+   - The controller pulls `/out/manifest.json` from the sandbox using sandboxd REST `ReadFile` (bounded by the 10 MiB client limit) and enforces a 1 MiB discovery manifest cap.
+   - The output is parsed as a JSON `Manifest` (`pkg/discovery/manifest.go`).
    - Validation enforces:
      - Manifest must not be nil.
      - `tasks` list must not be empty.
      - `tasks` count must not exceed 1,000 (`MaxTasks`).
      - Each task must have a non-empty, unique `id`.
      - Each task must have a non-empty `spec`.
+   - The controller calculates the SHA-256 hash (`sha256:<hex>`).
+   - The controller uploads the raw manifest to the artifact store at `runs/<commit>/manifest.json` via `ArtifactSink.StoreManifest`.
+   - The manifest is cached in-memory per Run for subsequent sample execution.
 6. **Completion**:
-   - **On Success**: `status.phase` is set to `Discovered`, condition `Discovered=True` is recorded (recording attempt count if retried), `status.manifest` is populated, and the sandbox CR is deleted.
+   - **On Success**: `status.phase` is set to `Discovered`, condition `Discovered=True` is recorded (recording attempt count if retried), `status.discovery` is populated (`manifestPath`, `manifestHash`, `taskCount`, `eligibleTaskCount`, `taskIDs`), and the sandbox CR is deleted.
    - **On Failure**: `status.phase` is set to `Failed`, condition `Discovered=False` (reason `DiscoveryFailed`) is recorded, `status.message` is populated with the failed step name, attempt count, error description, pod phase, container waiting reasons/messages (e.g. `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`), and `PodScheduled=False` reason for unschedulable pods, appended to any bounded stderr tail (up to 10 lines / 3 KiB; total message bounded to 4 KiB), and the sandbox CR is deleted.
 
 ### Finalizer-Based Cleanup
@@ -214,11 +219,14 @@ sequenceDiagram
     Pod->>Git: git clone repo.url
     Git-->>Pod: Repository data
     Ctrl->>Pod: gRPC Execute: git checkout repo.commit (cwd=repo)
-    Ctrl->>Pod: gRPC Execute: ./.evals/list (cwd=repo)
-    Pod-->>Ctrl: gRPC ExecuteResponse (exit_code, stdout, stderr)
+    Ctrl->>Pod: gRPC Execute: ./.evals/list > /out/manifest.json (cwd=repo)
+    Pod-->>Ctrl: gRPC ExecuteResponse (exit_code, stderr)
+    Ctrl->>Pod: REST ReadFile: /out/manifest.json
+    Pod-->>Ctrl: manifest.json raw bytes
     Ctrl->>Ctrl: Enforce stream limits (1 MiB stdout, 64 KiB stderr)
     Ctrl->>Ctrl: Parse and validate manifest (unique IDs, at most 1000 tasks)
-    Ctrl->>API: Update Run status: phase=Discovered, status.manifest populated
+    Ctrl->>Store: StoreManifest: runs/<commit>/manifest.json
+    Ctrl->>API: Update Run status: phase=Discovered, status.discovery populated
     Ctrl->>API: Delete Sandbox CR in eval-runner-sandbox
     API-->>SB: Watch event: Sandbox deleted
     SB->>API: Delete Pod
@@ -316,7 +324,7 @@ The repository employs three testing tiers:
    - Automates downloading pinned versions of `kind` (v0.31.0) and `kubectl` (v1.35.0) into `.build/bin/`.
    - Automatically installs `agent-sandbox` v1.0.7, builds and loads images, deploys the controller and fixture `git-server`, and runs `TestRunDiscovery`.
    - Test cases in `tests/e2e/discovery_test.go`:
-     - `DiscoveredSuccess`: Verifies full discovery of 3 tasks from `examples/support-agent`, status manifest population, and sandbox pod deletion.
+     - `DiscoveredSuccess`: Verifies full discovery of 3 tasks from `examples/support-agent`, status.discovery population, and sandbox pod deletion.
      - `BadCommitFails`: Verifies failure handling on non-existent commit SHA and sandbox cleanup.
      - `DeleteMidDiscovery`: Verifies that deleting a Run while discovery is running invokes the finalizer and cleanly deletes the sandbox.
 3. **Documentation Comprehension Evals (`./dev/tasks/test-evals`)**:

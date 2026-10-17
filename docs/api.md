@@ -26,8 +26,8 @@ limitations under the License.
 ## Overview
 
 A `Run` represents an evaluation run against a specific commit of a git repository. The eval-runner controller reconciles `Run` objects in two stages:
-1. **Discovery**: Executes `.evals/list` discovery inside an untrusted, zero-privilege sandbox in the `eval-runner-sandbox` namespace and records the discovered task manifest in `status.manifest`. If `spec.model` is empty, the Run stops at `Discovered`.
-2. **Sample Execution**: If `spec.model` is set, the controller executes eligible tasks from the manifest in isolated sandboxes in `eval-runner-sandbox` using Inspect, pulls out results, computes aggregate scores, and records per-task status in `status.tasks`.
+1. **Discovery**: Executes `.evals/list > /out/manifest.json` discovery inside an untrusted, zero-privilege sandbox in the `eval-runner-sandbox` namespace, uploads the full manifest to the artifact store at `runs/<commit>/manifest.json`, and records pointers and summary counts in `status.discovery`. If `spec.model` is empty, the Run stops at `Discovered`.
+2. **Sample Execution**: If `spec.model` is set, the controller fetches the manifest from the artifact store, executes eligible tasks from the manifest in isolated sandboxes in `eval-runner-sandbox` using Inspect, pulls out results, computes aggregate scores, and records per-task status in `status.tasks`.
 
 ## Example
 
@@ -54,17 +54,14 @@ status:
       status: "True"
       reason: Discovered
       message: "Discovered 2 tasks"
-  manifest:
-    images: []
-    tasks:
-      - id: docs/readme_comprehension
-        workdir: evals
-        spec: docs_comprehension.py@readme_comprehension
-        resources: []
-      - id: docs/readme_comprehension_blind
-        workdir: evals
-        spec: docs_comprehension.py@readme_comprehension_blind
-        resources: []
+  discovery:
+    manifestPath: gs://my-eval-bucket/runs/abc123def456.../manifest.json
+    manifestHash: sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069
+    taskCount: 2
+    eligibleTaskCount: 2
+    taskIDs:
+      - docs/readme_comprehension
+      - docs/readme_comprehension_blind
   tasks:
     - id: docs/readme_comprehension
       phase: Completed
@@ -121,7 +118,7 @@ status:
 | `phase` | `string` | The current lifecycle phase of the run. See [Phases](#phases). |
 | `message` | `string` | Human-readable explanation or error details (including stderr tail on failure). |
 | `conditions` | `[]metav1.Condition` | Standard Kubernetes condition list. Includes condition `Discovered`. |
-| `manifest` | `*Manifest` | The parsed output of `.evals/list` upon successful discovery. |
+| `discovery` | `*DiscoveryStatus` | Summary outcome of task discovery, pointers to the artifact store (`manifestPath`, `manifestHash`), and summary counts (`taskCount`, `eligibleTaskCount`, `taskIDs`). |
 | `discoveryDeadline` | `*metav1.Time` | Overall deadline by which discovery must complete. |
 | `executionDeadline` | `*metav1.Time` | Overall deadline by which sample execution must complete. |
 | `tasks` | `[]TaskStatus` | Per-task execution results and score aggregates. See [Tasks](#taskstatus). |
@@ -134,7 +131,7 @@ status:
 |---|---|
 | `Pending` | The Run has been created and is queued for discovery. |
 | `Discovering` | A sandbox is running in `eval-runner-sandbox` performing discovery via git clone and `.evals/list`. |
-| `Discovered` | Discovery succeeded. `status.manifest` contains the parsed tasks and the discovery sandbox has been cleaned up. (Terminal if `spec.model` is empty). |
+| `Discovered` | Discovery succeeded. The full manifest is stored in the artifact store (`status.discovery.manifestPath`) and `status.discovery` contains task summary counts and content hash. The discovery sandbox has been cleaned up. (Terminal if `spec.model` is empty). |
 | `Running` | Sample tasks are actively executing in parallel sandboxes in `eval-runner-sandbox`. |
 | `Completed` | All sample tasks have finished execution and per-task aggregates are recorded in `status.tasks`. |
 | `Failed` | Discovery or execution encountered a terminal error (e.g. invalid commit, non-zero command exit, invalid manifest, deadline exceeded). Details are in `status.message`. |
@@ -188,7 +185,21 @@ The `Run` CRD declares additional printer columns for `kubectl`:
 - **Wide view (`kubectl get runs -o wide`)**:
   - `RATES` (`.status.summary.rates`): Compact string of per-task rates and 95% confidence intervals (e.g. `docs/readme_comprehension=1.00 [0.84, 1.00]`), capped in length with ellipsis.
 
-### Manifest (`status.manifest`)
+### Discovery (`status.discovery`)
+
+> **Breaking Status Change (v1alpha1)**: The full output of `.evals/list` is no longer stored directly in the `Run` CRD (`status.manifest` has been removed). Instead, the full manifest is stored in the artifact store (`runs/<commit>/manifest.json`) and the CRD status carries pointers and summary metrics under `status.discovery`.
+
+| Field | Type | Description |
+|---|---|---|
+| `manifestPath` | `string` | Storage path or URI where the full manifest was stored by the artifact sink (`runs/<commit>/manifest.json`). |
+| `manifestHash` | `string` | Hex SHA-256 content hash of the raw manifest (`sha256:<hex>`) for consumer drift detection. |
+| `taskCount` | `int` | Total number of tasks declared in the discovered manifest. |
+| `eligibleTaskCount` | `int` | Number of tasks eligible for execution (`resources: []`). |
+| `taskIDs` | `[]string` | Capped list of discovered task IDs (up to 50) for `kubectl get`-level visibility. |
+
+### Stored Manifest Format (`runs/<commit>/manifest.json`)
+
+The artifact store persists the raw JSON output of `.evals/list` with the following schema:
 
 | Field | Type | Description |
 |---|---|---|

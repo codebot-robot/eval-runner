@@ -15,6 +15,7 @@
 package discovery
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -193,5 +194,21 @@ func TestValidateManifest(t *testing.T) {
 				t.Errorf("ValidateManifest unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestManifestHash(t *testing.T) {
+	data := []byte(`{"tasks":[{"id":"t1","spec":"eval.py@task1"}]}`)
+	h1 := ManifestHash(data)
+	if !strings.HasPrefix(h1, "sha256:") {
+		t.Fatalf("expected sha256: prefix, got %q", h1)
+	}
+	h2 := ManifestHash(data)
+	if h1 != h2 {
+		t.Fatalf("expected deterministic hash: %s vs %s", h1, h2)
+	}
+	otherHash := ManifestHash([]byte(`{"tasks":[]}`))
+	if h1 == otherHash {
+		t.Fatalf("expected different hash for different data")
 	}
 }

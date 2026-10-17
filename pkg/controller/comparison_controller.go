@@ -133,11 +133,6 @@ func (r *ComparisonReconciler) determineTaskIDs(comp *v1alpha1.Comparison, baseR
 	}
 
 	taskMap := make(map[string]bool)
-	if candRun.Status.Manifest != nil {
-		for _, t := range candRun.Status.Manifest.Tasks {
-			taskMap[t.ID] = true
-		}
-	}
 	for _, t := range candRun.Status.Tasks {
 		taskMap[t.ID] = true
 	}

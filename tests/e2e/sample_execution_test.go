@@ -69,8 +69,14 @@ spec:
 		// Wait for Run to reach Completed
 		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
 
-		if run.Status.Manifest == nil {
-			t.Fatalf("Expected status.manifest to be populated")
+		if run.Status.Discovery == nil {
+			t.Fatalf("Expected status.discovery to be populated")
+		}
+		if run.Status.Discovery.ManifestPath == "" {
+			t.Errorf("Expected status.discovery.manifestPath to be populated")
+		}
+		if run.Status.Discovery.TaskCount != 2 {
+			t.Errorf("Expected status.discovery.taskCount to be 2, got %d", run.Status.Discovery.TaskCount)
 		}
 
 		if len(run.Status.Tasks) != 2 {

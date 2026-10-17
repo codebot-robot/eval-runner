@@ -16,6 +16,7 @@ package sandboxclient
 
 import (
 	"context"
+	"strings"
 	"sync"
 )
 
@@ -32,6 +33,7 @@ type FakeClient struct {
 	ListStdout string
 	ListStderr string
 	ListErr    error
+	ListExit   int
 
 	CloneErr    error
 	CloneExit   int
@@ -78,6 +80,7 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 	f.ReadFileCalls = append(f.ReadFileCalls, path)
 	fn := f.ReadFileFn
 	inspectLog := f.InspectLog
+	listStdout := f.ListStdout
 	f.mu.Unlock()
 
 	if fn != nil {
@@ -85,6 +88,9 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 	}
 	if inspectLog != nil {
 		return inspectLog, nil
+	}
+	if path == "/out/manifest.json" && listStdout != "" {
+		return []byte(listStdout), nil
 	}
 	return nil, nil
 }
@@ -138,11 +144,11 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 		return &ExecuteResult{ExitCode: f.CheckoutExit, Stderr: f.CheckoutStderr}, nil
 	}
 
-	if cmd0 == "./.evals/list" {
+	if cmd0 == "./.evals/list" || (len(cfg.Command) > 2 && strings.Contains(cfg.Command[2], "./.evals/list")) {
 		if f.ListErr != nil {
 			return nil, f.ListErr
 		}
-		return &ExecuteResult{ExitCode: 0, Stdout: f.ListStdout, Stderr: f.ListStderr}, nil
+		return &ExecuteResult{ExitCode: f.ListExit, Stdout: "", Stderr: f.ListStderr}, nil
 	}
 
 	if cmd0 == "inspect" {

@@ -557,6 +557,10 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string, authTokenDigest st
 										Name:      "workspace",
 										MountPath: "/workspace",
 									},
+									{
+										Name:      "out",
+										MountPath: "/out",
+									},
 								},
 							},
 						},
@@ -569,6 +573,12 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string, authTokenDigest st
 							},
 							{
 								Name: "workspace",
+								VolumeSource: corev1.VolumeSource{
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
+								},
+							},
+							{
+								Name: "out",
 								VolumeSource: corev1.VolumeSource{
 									EmptyDir: &corev1.EmptyDirVolumeSource{},
 								},

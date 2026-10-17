@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,75 @@ import (
 	fakek8s "k8s.io/client-go/kubernetes/fake"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
+
+var defaultTestSink = artifacts.NewInMemorySink()
+
+func testRunDiscovery(t *testing.T, commit string, tasks []v1alpha1.ManifestTask) *v1alpha1.DiscoveryStatus {
+	manifest := &v1alpha1.Manifest{Tasks: tasks}
+	manifestJSON, _ := json.Marshal(manifest)
+	hash := discovery.ManifestHash(manifestJSON)
+	if commit == "" {
+		commit = "default-commit"
+	}
+	meta := artifacts.ManifestMetadata{
+		Commit:    commit,
+		TaskCount: len(tasks),
+	}
+	path, err := defaultTestSink.StoreManifest(t.Context(), meta, manifestJSON)
+	if err != nil {
+		panic(err)
+	}
+	var taskIDs []string
+	eligibleCount := 0
+	for i, t := range tasks {
+		if len(t.Resources) == 0 {
+			eligibleCount++
+		}
+		if i < 50 {
+			taskIDs = append(taskIDs, t.ID)
+		}
+	}
+
+	return &v1alpha1.DiscoveryStatus{
+		ManifestPath:      path,
+		ManifestHash:      hash,
+		TaskCount:         len(tasks),
+		EligibleTaskCount: eligibleCount,
+		TaskIDs:           taskIDs,
+	}
+}
+
+func testRunDiscoveryGCS(t *testing.T, sink artifacts.ArtifactSink, commit string, tasks []v1alpha1.ManifestTask) *v1alpha1.DiscoveryStatus {
+	manifest := &v1alpha1.Manifest{Tasks: tasks}
+	manifestJSON, _ := json.Marshal(manifest)
+	hash := discovery.ManifestHash(manifestJSON)
+	meta := artifacts.ManifestMetadata{
+		Commit:    commit,
+		TaskCount: len(tasks),
+	}
+	path, err := sink.StoreManifest(t.Context(), meta, manifestJSON)
+	if err != nil {
+		panic(err)
+	}
+	var taskIDs []string
+	eligibleCount := 0
+	for i, t := range tasks {
+		if len(t.Resources) == 0 {
+			eligibleCount++
+		}
+		if i < 50 {
+			taskIDs = append(taskIDs, t.ID)
+		}
+	}
+
+	return &v1alpha1.DiscoveryStatus{
+		ManifestPath:      path,
+		ManifestHash:      hash,
+		TaskCount:         len(tasks),
+		EligibleTaskCount: eligibleCount,
+		TaskIDs:           taskIDs,
+	}
+}
 
 func setupScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -206,8 +276,17 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
 		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
 	}
-	if updatedRun.Status.Manifest == nil || len(updatedRun.Status.Manifest.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks in manifest, got: %+v", updatedRun.Status.Manifest)
+	if updatedRun.Status.Discovery == nil || updatedRun.Status.Discovery.TaskCount != 2 {
+		t.Fatalf("Expected 2 tasks in discovery, got: %+v", updatedRun.Status.Discovery)
+	}
+	if updatedRun.Status.Discovery.ManifestPath == "" {
+		t.Errorf("Expected ManifestPath to be set")
+	}
+	if updatedRun.Status.Discovery.ManifestHash == "" {
+		t.Errorf("Expected ManifestHash to be set")
+	}
+	if updatedRun.Status.Discovery.EligibleTaskCount != 2 {
+		t.Errorf("Expected 2 eligible tasks, got %d", updatedRun.Status.Discovery.EligibleTaskCount)
 	}
 
 	// Assert Sandbox was cleaned up
@@ -849,8 +928,8 @@ func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
 		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
 	}
-	if !strings.Contains(updatedRun.Status.Message, "stdout limit exceeded") {
-		t.Errorf("Expected message to contain 'stdout limit exceeded', got: %s", updatedRun.Status.Message)
+	if !strings.Contains(updatedRun.Status.Message, "manifest limit exceeded") {
+		t.Errorf("Expected message to contain 'manifest limit exceeded', got: %s", updatedRun.Status.Message)
 	}
 }
 
@@ -927,6 +1006,7 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 
 	cloneAttempts := 0
 	executor := &sandboxclient.FakeClient{
+		ListStdout: validManifestJSON,
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
 			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
 				cloneAttempts++
@@ -939,8 +1019,8 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 				}
 				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 			}
-			if len(cfg.Command) > 0 && cfg.Command[0] == "./.evals/list" {
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: validManifestJSON}, nil
+			if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || (len(cfg.Command) > 2 && strings.Contains(cfg.Command[2], "./.evals/list"))) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 			}
 			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 		},
@@ -982,8 +1062,17 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
 		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
 	}
-	if updatedRun.Status.Manifest == nil || len(updatedRun.Status.Manifest.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks in manifest, got: %+v", updatedRun.Status.Manifest)
+	if updatedRun.Status.Discovery == nil || updatedRun.Status.Discovery.TaskCount != 2 {
+		t.Fatalf("Expected 2 tasks in discovery, got: %+v", updatedRun.Status.Discovery)
+	}
+	if updatedRun.Status.Discovery.ManifestPath == "" {
+		t.Errorf("Expected ManifestPath to be set")
+	}
+	if updatedRun.Status.Discovery.ManifestHash == "" {
+		t.Errorf("Expected ManifestHash to be set")
+	}
+	if updatedRun.Status.Discovery.EligibleTaskCount != 2 {
+		t.Errorf("Expected 2 eligible tasks, got %d", updatedRun.Status.Discovery.EligibleTaskCount)
 	}
 	// Assert attempts are recorded on success
 	if !strings.Contains(updatedRun.Status.Message, "3 attempts") {
@@ -1132,7 +1221,7 @@ func TestStepBasedFailures(t *testing.T) {
 			client: &sandboxclient.FakeClient{
 				ListErr: nil,
 				ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-					if len(cfg.Command) > 0 && cfg.Command[0] == "./.evals/list" {
+					if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || (len(cfg.Command) > 2 && strings.Contains(cfg.Command[2], "./.evals/list"))) {
 						return &sandboxclient.ExecuteResult{
 							ExitCode: 2,
 							Stderr:   "Traceback: invalid arguments",
@@ -2486,11 +2575,9 @@ func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-1", Spec: "eval.py@task1", Workdir: "evals"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-1", Spec: "eval.py@task1", Workdir: "evals"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -2522,6 +2609,7 @@ func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -2627,12 +2715,10 @@ func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-fail", Spec: "eval.py@fail"},
-					{ID: "task-ok", Spec: "eval.py@ok"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-fail", Spec: "eval.py@fail"},
+				{ID: "task-ok", Spec: "eval.py@ok"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-fail", Phase: v1alpha1.TaskPhasePending},
 				{ID: "task-ok", Phase: v1alpha1.TaskPhasePending},
@@ -2676,6 +2762,7 @@ func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -2762,12 +2849,10 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-1", Spec: "eval.py@task1"},
-					{ID: "task-2", Spec: "eval.py@task2"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-1", Spec: "eval.py@task1"},
+				{ID: "task-2", Spec: "eval.py@task2"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
 				{ID: "task-2", Phase: v1alpha1.TaskPhasePending},
@@ -2813,6 +2898,7 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      DefaultModelSecret,
 	}
 
@@ -2964,11 +3050,9 @@ func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-gemini", Spec: "eval.py@gemini"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -2992,6 +3076,7 @@ func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      "gemini-api-key-secret",
 	}
 
@@ -3026,11 +3111,9 @@ func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-gemini", Spec: "eval.py@gemini"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3047,6 +3130,7 @@ func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      DefaultModelSecret,
 	}
 
@@ -3102,11 +3186,9 @@ func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-mock", Spec: "eval.py@mock"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-mock", Spec: "eval.py@mock"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3123,6 +3205,7 @@ func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      DefaultModelSecret,
 	}
 
@@ -3164,11 +3247,9 @@ func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-mock", Spec: "eval.py@mock"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-mock", Spec: "eval.py@mock"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3192,6 +3273,7 @@ func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      DefaultModelSecret,
 	}
 
@@ -3226,11 +3308,9 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-gemini", Spec: "eval.py@gemini"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3255,6 +3335,7 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      "", // explicitly disabled
 	}
 
@@ -3295,11 +3376,9 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-mock", Spec: "eval.py@mock"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-mock", Spec: "eval.py@mock"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3316,6 +3395,7 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      "", // explicitly disabled
 	}
 
@@ -3356,11 +3436,9 @@ func TestReconcileModelSecret_CustomNameAbsentNonMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-gemini", Spec: "eval.py@gemini"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3377,6 +3455,7 @@ func TestReconcileModelSecret_CustomNameAbsentNonMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		ModelSecret:      "custom-secret",
 	}
 
@@ -3462,11 +3541,9 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-missing", Spec: "eval.py@task"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-missing", Spec: "eval.py@task"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-missing", Phase: v1alpha1.TaskPhaseRunning},
 			},
@@ -3483,6 +3560,7 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-missing-sb"}}
@@ -3522,11 +3600,9 @@ func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-lag", Spec: "eval.py@lag"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-lag", Spec: "eval.py@lag"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-lag", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3562,6 +3638,7 @@ func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		Now:              func() time.Time { return currentTime },
 	}
 
@@ -3642,11 +3719,9 @@ func TestReconcileRunningTaskSandboxCacheLagRecoversBeforeGracePeriod(t *testing
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-recover", Spec: "eval.py@recover"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-recover", Spec: "eval.py@recover"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-recover", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3680,6 +3755,7 @@ func TestReconcileRunningTaskSandboxCacheLagRecoversBeforeGracePeriod(t *testing
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		Now:              func() time.Time { return currentTime },
 	}
 
@@ -3763,11 +3839,9 @@ func TestReconcileRunningTaskSandboxCacheLagDirectAPIReader(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-direct", Spec: "eval.py@direct"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-direct", Spec: "eval.py@direct"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-direct", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3805,6 +3879,7 @@ func TestReconcileRunningTaskSandboxCacheLagDirectAPIReader(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-api-reader"}}
@@ -3867,11 +3942,9 @@ func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T)
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-del", Spec: "eval.py@del"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-del", Spec: "eval.py@del"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-del", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -3888,6 +3961,7 @@ func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T)
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		Now:              func() time.Time { return currentTime },
 	}
 
@@ -3958,11 +4032,9 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-secret-time", Spec: "eval.py@test"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "default-commit", []v1alpha1.ManifestTask{
+				{ID: "task-secret-time", Spec: "eval.py@test"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-secret-time", Phase: v1alpha1.TaskPhaseRunning}, // StartedAt is nil
 			},
@@ -3989,6 +4061,7 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 		Now:              func() time.Time { return currentTime },
 	}
 
@@ -4026,6 +4099,12 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 	scheme := setupScheme(t)
 
+	fakeGCSClient := gcs.NewFakeStorageClient()
+	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-gcs",
@@ -4040,11 +4119,9 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "docs/readme_comprehension", Spec: "eval.py@task"},
-				},
-			},
+			Discovery: testRunDiscoveryGCS(t, gcsSink, "abcdef123456", []v1alpha1.ManifestTask{
+				{ID: "docs/readme_comprehension", Spec: "eval.py@task"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "docs/readme_comprehension", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -4071,12 +4148,6 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 			return []byte(inspectLog), nil
 		},
-	}
-
-	fakeGCSClient := gcs.NewFakeStorageClient()
-	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
-	if err != nil {
-		t.Fatalf("Failed to create GCSSink: %v", err)
 	}
 
 	cl := fake.NewClientBuilder().
@@ -4202,6 +4273,15 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) {
 	scheme := setupScheme(t)
 
+	fakeGCSClient := gcs.NewFakeStorageClient()
+	// Inject storage write error
+	fakeGCSClient.Errors["my-bucket/runs/abcdef123456/task-1/log.json"] = errors.New("storage: 403 Forbidden: permission denied")
+
+	gcsSink, err := gcs.New(t.Context(), "gs://my-bucket", gcs.WithStorageClient(fakeGCSClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-gcs-err",
@@ -4216,11 +4296,9 @@ func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) 
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-1", Spec: "eval.py@task"},
-				},
-			},
+			Discovery: testRunDiscoveryGCS(t, gcsSink, "abcdef123456", []v1alpha1.ManifestTask{
+				{ID: "task-1", Spec: "eval.py@task"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -4244,15 +4322,6 @@ func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) 
 		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 			return []byte(inspectLog), nil
 		},
-	}
-
-	fakeGCSClient := gcs.NewFakeStorageClient()
-	// Inject storage write error
-	fakeGCSClient.Errors["my-bucket/runs/abcdef123456/task-1/log.json"] = errors.New("storage: 403 Forbidden: permission denied")
-
-	gcsSink, err := gcs.New(t.Context(), "gs://my-bucket", gcs.WithStorageClient(fakeGCSClient))
-	if err != nil {
-		t.Fatalf("Failed to create GCSSink: %v", err)
 	}
 
 	cl := fake.NewClientBuilder().
@@ -4343,11 +4412,9 @@ func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-binary", Spec: "eval.py@task1", Workdir: "evals"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-binary", Spec: "eval.py@task1", Workdir: "evals"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-binary", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -4381,6 +4448,7 @@ func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -4490,11 +4558,9 @@ func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-partial", Spec: "eval.py@task_partial", Workdir: "evals"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-partial", Spec: "eval.py@task_partial", Workdir: "evals"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-partial", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -4528,6 +4594,7 @@ func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -4616,11 +4683,9 @@ func TestReconcileSampleExecution_Wilson20_20(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-perfect", Spec: "eval.py@task_perfect", Workdir: "evals"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-perfect", Spec: "eval.py@task_perfect", Workdir: "evals"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-perfect", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -4653,6 +4718,7 @@ func TestReconcileSampleExecution_Wilson20_20(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -4731,11 +4797,9 @@ func TestReconcileSampleExecution_ZeroSamplesFailed(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-fail", Spec: "eval.py@task_fail", Workdir: "evals"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-fail", Spec: "eval.py@task_fail", Workdir: "evals"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-fail", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -4757,6 +4821,7 @@ func TestReconcileSampleExecution_ZeroSamplesFailed(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -4852,11 +4917,9 @@ func TestReconcileSampleExecution_ScorelessLogFailsWithNoScoredSamples(t *testin
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-scoreless", Spec: "eval.py@task_scoreless", Workdir: "evals"},
-				},
-			},
+			Discovery: testRunDiscovery(t, "abc1234", []v1alpha1.ManifestTask{
+				{ID: "task-scoreless", Spec: "eval.py@task_scoreless", Workdir: "evals"},
+			}),
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-scoreless", Phase: v1alpha1.TaskPhasePending},
 			},
@@ -4889,6 +4952,7 @@ func TestReconcileSampleExecution_ScorelessLogFailsWithNoScoredSamples(t *testin
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     defaultTestSink,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-scoreless"}}
@@ -5042,5 +5106,529 @@ func TestPrinterColumnFormatting(t *testing.T) {
 	}
 	if !strings.HasSuffix(capped, "...") {
 		t.Errorf("Expected capped string to end with '...', got %s", capped)
+	}
+}
+
+func TestRunStatus_SerializedSizeWith500TasksFixture(t *testing.T) {
+	scheme := setupScheme(t)
+
+	// Create a 500-task manifest
+	var tasks []v1alpha1.ManifestTask
+	for i := 0; i < 500; i++ {
+		tasks = append(tasks, v1alpha1.ManifestTask{
+			ID:   fmt.Sprintf("bench/task_%03d", i),
+			Spec: fmt.Sprintf("eval.py@task_%03d", i),
+		})
+	}
+	manifest := &v1alpha1.Manifest{Tasks: tasks}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Failed to marshal manifest fixture: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "run-500-tasks",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abcdef1234567890",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(run.Name)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	executor := &sandboxclient.FakeClient{
+		ListStdout: string(manifestBytes),
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	sink := artifacts.NewInMemorySink()
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink,
+	}
+	reconciler.setAuthToken(types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}.String(), "test")
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: run.Name}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Fatalf("Expected phase Discovered, got %s (message: %s)", updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+
+	if updatedRun.Status.Discovery == nil {
+		t.Fatalf("Expected status.Discovery to be populated")
+	}
+	if updatedRun.Status.Discovery.TaskCount != 500 {
+		t.Errorf("Expected TaskCount 500, got %d", updatedRun.Status.Discovery.TaskCount)
+	}
+	if updatedRun.Status.Discovery.EligibleTaskCount != 500 {
+		t.Errorf("Expected EligibleTaskCount 500, got %d", updatedRun.Status.Discovery.EligibleTaskCount)
+	}
+	if len(updatedRun.Status.Discovery.TaskIDs) != 50 {
+		t.Errorf("Expected TaskIDs capped at 50, got %d", len(updatedRun.Status.Discovery.TaskIDs))
+	}
+	if updatedRun.Status.Discovery.ManifestPath == "" {
+		t.Errorf("Expected ManifestPath to be populated")
+	}
+	if updatedRun.Status.Discovery.ManifestHash == "" {
+		t.Errorf("Expected ManifestHash to be populated")
+	}
+
+	// Verify status serialization size is small
+	statusJSON, err := json.Marshal(updatedRun.Status)
+	if err != nil {
+		t.Fatalf("Failed to marshal RunStatus: %v", err)
+	}
+
+	if strings.Contains(string(statusJSON), "\"manifest\":") {
+		t.Errorf("Serialized RunStatus must not contain 'manifest' field")
+	}
+
+	t.Logf("Serialized 500-task RunStatus size: %d bytes", len(statusJSON))
+	if len(statusJSON) > 4096 {
+		t.Errorf("Expected serialized RunStatus size < 4096 bytes, got %d bytes", len(statusJSON))
+	}
+}
+
+func TestControllerRestart_RecoversFromStoredManifest(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifestTasks := []v1alpha1.ManifestTask{
+		{ID: "task-alpha", Spec: "eval.py@alpha", Workdir: "evals"},
+		{ID: "task-beta", Spec: "eval.py@beta", Workdir: "evals"},
+	}
+	manifest := &v1alpha1.Manifest{Tasks: manifestTasks}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Failed to marshal manifest: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "restart-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "c0ffee123456",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(run.Name)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	executor := &sandboxclient.FakeClient{
+		ListStdout: string(manifestBytes),
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	sink := artifacts.NewInMemorySink()
+
+	// Controller instance #1 drives discovery
+	reconciler1 := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink,
+	}
+	reconciler1.setAuthToken(types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}.String(), "test")
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: run.Name}}
+	_, err = reconciler1.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 1 error: %v", err)
+	}
+
+	var postDiscoveryRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &postDiscoveryRun); err != nil {
+		t.Fatalf("Failed to get post-discovery run: %v", err)
+	}
+	if postDiscoveryRun.Status.Phase != v1alpha1.RunPhaseRunning {
+		t.Fatalf("Expected phase Running, got %s", postDiscoveryRun.Status.Phase)
+	}
+	if postDiscoveryRun.Status.Discovery == nil || postDiscoveryRun.Status.Discovery.ManifestPath == "" {
+		t.Fatalf("Expected manifestPath to be populated in sink")
+	}
+
+	// Verify that the manifest was indeed stored in the sink
+	storedData, err := sink.Load(t.Context(), postDiscoveryRun.Status.Discovery.ManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to load stored manifest from sink: %v", err)
+	}
+	if string(storedData) != string(manifestBytes) {
+		t.Fatalf("Stored manifest mismatch: %s vs %s", storedData, manifestBytes)
+	}
+
+	// --- SIMULATE CONTROLLER RESTART ---
+	// Create a brand new RunReconciler instance #2 with empty in-memory cache
+	sampleExecutor := &sandboxclient.FakeClient{
+		InspectLog: []byte(`{"version": 2, "samples": [{"id": 1, "scores": {"choice": {"value": "C"}}}]}`),
+	}
+
+	reconciler2 := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    sampleExecutor,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink, // Same store, but reconciler2 has NO cached manifests
+	}
+
+	// Verify reconciler2 has no cached manifest for this Run
+	if _, ok := reconciler2.getCachedManifest(req.NamespacedName.String()); ok {
+		t.Fatalf("Expected reconciler2 in-memory cache to be empty before reconcile")
+	}
+
+	// Reconciler turn 2: Reconciler2 recovers manifest from sink and schedules tasks
+	_, err = reconciler2.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+
+	// Verify reconciler2 successfully loaded and cached the manifest from the sink
+	cachedM, ok := reconciler2.getCachedManifest(req.NamespacedName.String())
+	if !ok || cachedM == nil {
+		t.Fatalf("Expected reconciler2 to have loaded and cached the manifest from sink")
+	}
+	if len(cachedM.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks in recovered manifest, got %d", len(cachedM.Tasks))
+	}
+}
+
+func TestRun_ManifestHashMismatchFailsWithDrift(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-1", Spec: "eval.py@task1"},
+		},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+	origHash := discovery.ManifestHash(manifestBytes)
+
+	// Tampered data in durable LocalDirSink
+	tempDir, err := os.MkdirTemp("", "drift-manifest-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+	tamperedBytes := []byte(`{"tasks":[{"id":"tampered-task","spec":"eval.py@tampered"}]}`)
+	manifestPath, err := sink.StoreManifest(t.Context(), artifacts.ManifestMetadata{
+		RunName:      "drift-run",
+		RunNamespace: "eval-runner",
+		Commit:       "c111222",
+		TaskCount:    1,
+	}, tamperedBytes)
+	if err != nil {
+		t.Fatalf("StoreManifest failed: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "drift-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "c111222",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovered,
+			Discovery: &v1alpha1.DiscoveryStatus{
+				ManifestPath:      manifestPath,
+				ManifestHash:      origHash, // Expected hash differs from stored bytes
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "drift-run"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile returned unexpected error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected non-zero RequeueAfter for drift error backoff")
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	// For a durable sink, hash drift does NOT destroy state or reset to Pending; it surfaces error in status.Message
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected run to maintain phase Discovered on drift, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "drift detected") {
+		t.Errorf("Expected status message to mention 'drift detected', got: %s", updatedRun.Status.Message)
+	}
+}
+
+func TestRun_TransientLoadErrorDoesNotWipeTasks(t *testing.T) {
+	scheme := setupScheme(t)
+
+	fakeGCSClient := gcs.NewFakeStorageClient()
+	// Inject transient 503 error for manifest load
+	fakeGCSClient.Errors["my-bucket/runs/c555666/manifest.json"] = errors.New("storage: 503 Service Unavailable")
+
+	gcsSink, err := gcs.New(t.Context(), "gs://my-bucket", gcs.WithStorageClient(fakeGCSClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "transient-err-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "c555666",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.DiscoveryStatus{
+				ManifestPath:      "gs://my-bucket/runs/c555666/manifest.json",
+				ManifestHash:      "sha256:abcd",
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     gcsSink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "transient-err-run"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter > 0 for transient error backoff")
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	// Transient error must NOT wipe tasks or reset phase to Pending
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseRunning {
+		t.Errorf("Expected phase Running, got %s", updatedRun.Status.Phase)
+	}
+	if len(updatedRun.Status.Tasks) != 1 {
+		t.Errorf("Expected tasks to remain intact, got %d", len(updatedRun.Status.Tasks))
+	}
+	if !strings.Contains(updatedRun.Status.Message, "transient error loading manifest") {
+		t.Errorf("Expected status.Message to record transient error, got: %s", updatedRun.Status.Message)
+	}
+}
+
+func TestRun_InMemorySinkRestartReDiscovers(t *testing.T) {
+	scheme := setupScheme(t)
+
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	oldDeadline := metav1.NewTime(now.Add(-15 * time.Minute))
+
+	// Run was running, but in-memory sink was wiped on controller restart.
+	// Has a stale DiscoveryDeadline that is already past.
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "lost-manifest-run",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "c999888",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:             v1alpha1.RunPhaseRunning,
+			DiscoveryDeadline: &oldDeadline,
+			Discovery: &v1alpha1.DiscoveryStatus{
+				ManifestPath:      "mem://runs/c999888/manifest.json",
+				ManifestHash:      "sha256:dummy",
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	// New empty in-memory sink simulates restart
+	freshSink := artifacts.NewInMemorySink()
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     freshSink,
+		Now:              func() time.Time { return now },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "lost-manifest-run"}}
+
+	// Turn 1: Manifest is missing from in-memory sink -> transition to Pending and clear stale DiscoveryDeadline
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile returned unexpected error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhasePending {
+		t.Errorf("Expected run to transition to Pending for cheap re-discovery, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "re-discovering") {
+		t.Errorf("Expected message to mention 're-discovering', got: %s", updatedRun.Status.Message)
+	}
+	if updatedRun.Status.DiscoveryDeadline != nil {
+		t.Errorf("Expected DiscoveryDeadline to be cleared on reset to Pending, got: %v", updatedRun.Status.DiscoveryDeadline)
+	}
+
+	// Turn 2: Advance clock by 20 minutes (well past the old deadline) and reconcile again
+	now = now.Add(20 * time.Minute)
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run after turn 2: %v", err)
+	}
+
+	// Must transition to Discovering with a fresh deadline, NOT fail due to the old expired deadline
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovering {
+		t.Errorf("Expected run to transition to Discovering with fresh deadline, got %s (message: %s)",
+			updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+	if updatedRun.Status.DiscoveryDeadline == nil {
+		t.Errorf("Expected fresh DiscoveryDeadline to be populated")
+	} else if !updatedRun.Status.DiscoveryDeadline.Time.After(now) {
+		t.Errorf("Expected fresh DiscoveryDeadline to be in the future relative to %v, got %v",
+			now, updatedRun.Status.DiscoveryDeadline.Time)
 	}
 }

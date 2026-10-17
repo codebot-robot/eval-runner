@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"cloud.google.com/go/storage"
@@ -34,6 +35,7 @@ const (
 // StorageClient defines the interface for interacting with GCS.
 type StorageClient interface {
 	WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error
+	WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, data []byte, metadata map[string]string) error
 	ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error)
 	Close() error
 }
@@ -43,9 +45,16 @@ type realStorageClient struct {
 }
 
 func (c *realStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
+	return c.WriteObjectWithMetadata(ctx, bucket, object, contentType, data, nil)
+}
+
+func (c *realStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, data []byte, metadata map[string]string) error {
 	w := c.client.Bucket(bucket).Object(object).NewWriter(ctx)
 	if contentType != "" {
 		w.ContentType = contentType
+	}
+	if len(metadata) > 0 {
+		w.Metadata = metadata
 	}
 	if _, err := w.Write(data); err != nil {
 		return errors.Join(err, w.Close())
@@ -229,6 +238,38 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// StoreManifest writes the raw manifest to GCS as runs/<commit>/manifest.json with metadata and returns the gs:// URI.
+func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.ManifestMetadata, data []byte) (string, error) {
+	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+		return "", err
+	}
+	if s.bucket == "" {
+		return "", fmt.Errorf("bucket name is empty")
+	}
+
+	capLimit := s.maxUploadBytes
+	if capLimit <= 0 {
+		capLimit = DefaultMaxUploadBytes
+	}
+
+	if int64(len(data)) > capLimit {
+		return "", fmt.Errorf("manifest size (%d bytes) exceeds maximum upload cap (%d bytes)", len(data), capLimit)
+	}
+
+	manifestObject := fmt.Sprintf("runs/%s/manifest.json", meta.Commit)
+	objMetadata := map[string]string{
+		"run":        meta.RunName,
+		"commit":     meta.Commit,
+		"task-count": strconv.Itoa(meta.TaskCount),
+	}
+
+	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, manifestObject, "application/json", data, objMetadata); err != nil {
+		return "", fmt.Errorf("failed to write %s to GCS: %w", manifestObject, err)
+	}
+
+	return fmt.Sprintf("gs://%s/%s", s.bucket, manifestObject), nil
 }
 
 // StoreArtifact writes the inspect log and summary.json to GCS and returns the gs:// URI.

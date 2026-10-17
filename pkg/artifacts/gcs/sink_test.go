@@ -458,3 +458,64 @@ func TestGCSSink_StoreComparisonAndLoad(t *testing.T) {
 		t.Errorf("Expected error for oversized artifact load, got nil")
 	}
 }
+
+func TestGCSSink_StoreManifest(t *testing.T) {
+	fakeClient := NewFakeStorageClient()
+	sink, err := New(t.Context(), "gs://eval-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	meta := artifacts.ManifestMetadata{
+		RunName:      "test-run",
+		RunNamespace: "eval-runner",
+		Commit:       "commit-gcs-123",
+		TaskCount:    10,
+	}
+	manifestData := []byte(`{"tasks":[{"id":"task-1","spec":"eval.py@task1"}]}`)
+
+	uri, err := sink.StoreManifest(t.Context(), meta, manifestData)
+	if err != nil {
+		t.Fatalf("StoreManifest failed: %v", err)
+	}
+
+	expectedURI := "gs://eval-bucket/runs/commit-gcs-123/manifest.json"
+	if uri != expectedURI {
+		t.Errorf("Expected URI %q, got %q", expectedURI, uri)
+	}
+
+	obj, ok := fakeClient.Objects["eval-bucket/runs/commit-gcs-123/manifest.json"]
+	if !ok {
+		t.Fatalf("Object not found in fake client")
+	}
+	if string(obj.Data) != string(manifestData) {
+		t.Errorf("Data mismatch: got %s, want %s", obj.Data, manifestData)
+	}
+	if obj.Metadata["run"] != "test-run" {
+		t.Errorf("Expected run metadata 'test-run', got %q", obj.Metadata["run"])
+	}
+	if obj.Metadata["commit"] != "commit-gcs-123" {
+		t.Errorf("Expected commit metadata 'commit-gcs-123', got %q", obj.Metadata["commit"])
+	}
+	if obj.Metadata["task-count"] != "10" {
+		t.Errorf("Expected task-count metadata '10', got %q", obj.Metadata["task-count"])
+	}
+
+	// Verify loading via sink.Load
+	loaded, err := sink.Load(t.Context(), uri)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if string(loaded) != string(manifestData) {
+		t.Errorf("Loaded data mismatch: got %s, want %s", loaded, manifestData)
+	}
+
+	// Invalid commit traversal rejected
+	badMeta := artifacts.ManifestMetadata{
+		Commit:    "../escape",
+		TaskCount: 1,
+	}
+	if _, err := sink.StoreManifest(t.Context(), badMeta, manifestData); err == nil {
+		t.Errorf("Expected error on traversal commit")
+	}
+}

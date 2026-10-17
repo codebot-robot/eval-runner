@@ -216,3 +216,139 @@ func TestLocalDirSink_StoreComparisonAndLoad(t *testing.T) {
 		t.Errorf("Expected error on escaping base directory in Load")
 	}
 }
+
+func TestLocalDirSink_StoreManifest(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "artifacts-manifest-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	sink := &LocalDirSink{BaseDir: tempDir}
+	meta := ManifestMetadata{
+		RunName:      "run-manifest",
+		RunNamespace: "eval-runner",
+		Commit:       "commit-abc",
+		TaskCount:    5,
+	}
+
+	payload := []byte(`{"tasks":[{"id":"task-1","spec":"eval.py@task1"}]}`)
+	savedPath, err := sink.StoreManifest(t.Context(), meta, payload)
+	if err != nil {
+		t.Fatalf("StoreManifest failed: %v", err)
+	}
+
+	expectedPath := filepath.Join(tempDir, "runs", "commit-abc", "manifest.json")
+	if savedPath != expectedPath {
+		t.Errorf("Expected path %q, got %q", expectedPath, savedPath)
+	}
+
+	loaded, err := sink.Load(t.Context(), savedPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if string(loaded) != string(payload) {
+		t.Errorf("Expected loaded content %s, got %s", payload, loaded)
+	}
+
+	// Traversal rejection
+	badMeta := ManifestMetadata{Commit: "../escape"}
+	if _, err := sink.StoreManifest(t.Context(), badMeta, payload); err == nil {
+		t.Errorf("Expected error on traversal commit in StoreManifest")
+	}
+}
+
+func TestInMemorySink(t *testing.T) {
+	sink := NewInMemorySink()
+
+	// Store and load manifest
+	meta := ManifestMetadata{
+		RunName:      "test-run",
+		RunNamespace: "eval-runner",
+		Commit:       "c12345",
+		TaskCount:    2,
+	}
+	manifestData := []byte(`{"tasks":[{"id":"t1","spec":"eval.py@t1"},{"id":"t2","spec":"eval.py@t2"}]}`)
+	manifestURI, err := sink.StoreManifest(t.Context(), meta, manifestData)
+	if err != nil {
+		t.Fatalf("StoreManifest failed: %v", err)
+	}
+	expectedURI := "mem://runs/c12345/manifest.json"
+	if manifestURI != expectedURI {
+		t.Errorf("Expected URI %q, got %q", expectedURI, manifestURI)
+	}
+
+	loadedManifest, err := sink.Load(t.Context(), manifestURI)
+	if err != nil {
+		t.Fatalf("Load with mem:// failed: %v", err)
+	}
+	if string(loadedManifest) != string(manifestData) {
+		t.Errorf("Expected %s, got %s", manifestData, loadedManifest)
+	}
+
+	// Load without mem:// prefix
+	loadedWithoutScheme, err := sink.Load(t.Context(), "runs/c12345/manifest.json")
+	if err != nil {
+		t.Fatalf("Load without mem:// failed: %v", err)
+	}
+	if string(loadedWithoutScheme) != string(manifestData) {
+		t.Errorf("Expected %s, got %s", manifestData, loadedWithoutScheme)
+	}
+
+	// Store and load artifact
+	artMeta := RunMetadata{
+		RunName:      "test-run",
+		RunNamespace: "eval-runner",
+		TaskID:       "task-1",
+		Commit:       "c12345",
+	}
+	artData := []byte(`{"version":2}`)
+	artURI, err := sink.StoreArtifact(t.Context(), artMeta, "log.json", artData)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+	loadedArt, err := sink.Load(t.Context(), artURI)
+	if err != nil {
+		t.Fatalf("Load artifact failed: %v", err)
+	}
+	if string(loadedArt) != string(artData) {
+		t.Errorf("Expected %s, got %s", artData, loadedArt)
+	}
+
+	// Store and load comparison
+	compData := []byte(`{"verdict":"IMPROVED"}`)
+	compURI, err := sink.StoreComparison(t.Context(), "comp-1", compData)
+	if err != nil {
+		t.Fatalf("StoreComparison failed: %v", err)
+	}
+	loadedComp, err := sink.Load(t.Context(), compURI)
+	if err != nil {
+		t.Fatalf("Load comparison failed: %v", err)
+	}
+	if string(loadedComp) != string(compData) {
+		t.Errorf("Expected %s, got %s", compData, loadedComp)
+	}
+
+	// ArtifactPrefix
+	prefix := sink.ArtifactPrefix("c12345")
+	if prefix != "mem://runs/c12345/" {
+		t.Errorf("Expected prefix mem://runs/c12345/, got %q", prefix)
+	}
+	if sink.ArtifactPrefix("") != "" {
+		t.Errorf("Expected empty prefix for empty commit")
+	}
+
+	// Error cases
+	if _, err := sink.Load(t.Context(), "mem://runs/nonexistent/manifest.json"); err == nil {
+		t.Errorf("Expected error for nonexistent path")
+	}
+	if _, err := sink.Load(t.Context(), ""); err == nil {
+		t.Errorf("Expected error for empty path")
+	}
+	if _, err := sink.StoreManifest(t.Context(), ManifestMetadata{}, manifestData); err == nil {
+		t.Errorf("Expected error for empty commit in StoreManifest")
+	}
+	if _, err := sink.StoreComparison(t.Context(), "", compData); err == nil {
+		t.Errorf("Expected error for empty comparisonName")
+	}
+}

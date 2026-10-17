@@ -202,8 +202,30 @@ func TestBuildSandbox(t *testing.T) {
 	}
 
 	// Volumes
-	if len(podSpec.Volumes) != 2 {
-		t.Fatalf("Expected 2 volumes, got %d", len(podSpec.Volumes))
+	if len(podSpec.Volumes) != 3 {
+		t.Fatalf("Expected 3 volumes, got %d", len(podSpec.Volumes))
+	}
+	var hasOutVol bool
+	for _, v := range podSpec.Volumes {
+		if v.Name == "out" {
+			hasOutVol = true
+		}
+	}
+	if !hasOutVol {
+		t.Errorf("Expected 'out' volume in podSpec.Volumes")
+	}
+
+	if len(c.VolumeMounts) != 3 {
+		t.Fatalf("Expected 3 volume mounts, got %d", len(c.VolumeMounts))
+	}
+	var hasOutMount bool
+	for _, vm := range c.VolumeMounts {
+		if vm.Name == "out" && vm.MountPath == "/out" {
+			hasOutMount = true
+		}
+	}
+	if !hasOutMount {
+		t.Errorf("Expected 'out' volume mounted at '/out'")
 	}
 
 	// Negative assertion: discovery sandbox container has no EnvFrom

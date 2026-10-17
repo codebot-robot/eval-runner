@@ -252,7 +252,7 @@ func main() {
 		sandboxclient.WithStderrLimit(maxStderrBytes),
 	)
 
-	var sink artifacts.ArtifactSink = &artifacts.NoopSink{}
+	var sink artifacts.ArtifactSink = artifacts.NewInMemorySink()
 	if clusterConfig.ArtifactBucket != "" {
 		gcsSink, err := gcs.New(context.Background(), clusterConfig.ArtifactBucket)
 		if err != nil {

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const (
@@ -40,6 +41,11 @@ func (s *NoopSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename
 	return "", nil
 }
 
+// StoreManifest implements ArtifactSink for NoopSink.
+func (s *NoopSink) StoreManifest(ctx context.Context, meta ManifestMetadata, data []byte) (string, error) {
+	return "", nil
+}
+
 // StoreComparison implements ArtifactSink for NoopSink.
 func (s *NoopSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
 	return "", nil
@@ -53,6 +59,124 @@ func (s *NoopSink) Load(ctx context.Context, path string) ([]byte, error) {
 // ArtifactPrefix implements ArtifactSink for NoopSink.
 func (s *NoopSink) ArtifactPrefix(commit string) string {
 	return ""
+}
+
+// InMemorySink is an in-memory ArtifactSink used for local development and fallback when no durable sink is configured.
+// Mid-run controller restarts lose artifacts stored in-memory, requiring cheap re-discovery.
+type InMemorySink struct {
+	mu      sync.RWMutex
+	objects map[string][]byte
+}
+
+var _ ArtifactSink = (*InMemorySink)(nil)
+
+// NewInMemorySink returns a new thread-safe InMemorySink.
+func NewInMemorySink() *InMemorySink {
+	return &InMemorySink{
+		objects: make(map[string][]byte),
+	}
+}
+
+// StoreArtifact implements ArtifactSink for InMemorySink.
+func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	escapedTaskID := url.QueryEscape(meta.TaskID)
+	var relPath string
+	if meta.Commit != "" {
+		relPath = fmt.Sprintf("runs/%s/%s/%s", meta.Commit, escapedTaskID, filename)
+	} else {
+		relPath = fmt.Sprintf("%s/%s/%s/%s", meta.RunNamespace, meta.RunName, escapedTaskID, filename)
+	}
+	uri := "mem://" + relPath
+
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	s.objects[uri] = dataCopy
+	s.objects[relPath] = dataCopy
+	return uri, nil
+}
+
+// StoreManifest implements ArtifactSink for InMemorySink.
+func (s *InMemorySink) StoreManifest(ctx context.Context, meta ManifestMetadata, data []byte) (string, error) {
+	if strings.TrimSpace(meta.Commit) == "" {
+		return "", fmt.Errorf("commit must not be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	relPath := fmt.Sprintf("runs/%s/manifest.json", meta.Commit)
+	uri := "mem://" + relPath
+
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	s.objects[uri] = dataCopy
+	s.objects[relPath] = dataCopy
+	return uri, nil
+}
+
+// StoreComparison implements ArtifactSink for InMemorySink.
+func (s *InMemorySink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
+	if strings.TrimSpace(comparisonName) == "" {
+		return "", fmt.Errorf("comparisonName must not be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	relPath := fmt.Sprintf("comparisons/%s.json", comparisonName)
+	uri := "mem://" + relPath
+
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	s.objects[uri] = dataCopy
+	s.objects[relPath] = dataCopy
+	return uri, nil
+}
+
+// Load implements ArtifactSink for InMemorySink.
+func (s *InMemorySink) Load(ctx context.Context, path string) ([]byte, error) {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return nil, fmt.Errorf("artifact path must not be empty")
+	}
+
+	trimmed := strings.TrimPrefix(cleanPath, "mem://")
+	trimmed = strings.TrimPrefix(trimmed, "/")
+	if !strings.HasPrefix(trimmed, "runs/") && !strings.HasPrefix(trimmed, "comparisons/") {
+		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data, ok := s.objects[cleanPath]
+	if !ok {
+		data, ok = s.objects[trimmed]
+		if !ok {
+			data, ok = s.objects["mem://"+trimmed]
+		}
+	}
+	if !ok {
+		return nil, fmt.Errorf("artifact %q not found in memory sink", path)
+	}
+
+	limit := DefaultMaxLoadBytes
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("artifact %q exceeds maximum load size of %d bytes", path, limit)
+	}
+
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	return dataCopy, nil
+}
+
+// ArtifactPrefix implements ArtifactSink for InMemorySink.
+func (s *InMemorySink) ArtifactPrefix(commit string) string {
+	if strings.TrimSpace(commit) == "" {
+		return ""
+	}
+	return fmt.Sprintf("mem://runs/%s/", commit)
 }
 
 // LocalDirSink is an ArtifactSink that writes artifacts to a local directory hierarchy.
@@ -148,6 +272,36 @@ func validateSafeComponent(name, val string) error {
 		return fmt.Errorf("%s %q contains invalid characters or traversal elements", name, val)
 	}
 	return nil
+}
+
+// StoreManifest implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) StoreManifest(ctx context.Context, meta ManifestMetadata, data []byte) (string, error) {
+	if strings.TrimSpace(s.BaseDir) == "" {
+		return "", fmt.Errorf("base directory must not be empty")
+	}
+	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+		return "", err
+	}
+
+	targetDir := filepath.Join(s.BaseDir, "runs", meta.Commit)
+	targetPath := filepath.Join(targetDir, "manifest.json")
+
+	cleanBase := filepath.Clean(s.BaseDir)
+	cleanTarget := filepath.Clean(targetPath)
+	rel, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return "", fmt.Errorf("artifact path %q escapes base directory %q", targetPath, s.BaseDir)
+	}
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", err
+	}
+
+	if err := os.WriteFile(targetPath, data, 0644); err != nil {
+		return "", err
+	}
+
+	return targetPath, nil
 }
 
 // StoreArtifact implements ArtifactSink for LocalDirSink.

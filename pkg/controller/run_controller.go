@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -171,6 +172,12 @@ type RunReconciler struct {
 
 	mu     sync.RWMutex
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
+
+	manifestMu    sync.RWMutex
+	manifestCache map[string]*v1alpha1.Manifest // key: manifestPath or namespace/name -> *Manifest
+
+	defaultSinkMu sync.Mutex
+	defaultSink   artifacts.ArtifactSink
 }
 
 func (r *RunReconciler) getAuthToken(key string) (string, bool) {
@@ -418,11 +425,129 @@ func (r *RunReconciler) sampleRunnerImage() string {
 	return discovery.DefaultSampleRunnerImage
 }
 
+func (r *RunReconciler) getCachedManifest(key string) (*v1alpha1.Manifest, bool) {
+	r.manifestMu.RLock()
+	defer r.manifestMu.RUnlock()
+	if r.manifestCache == nil {
+		return nil, false
+	}
+	m, ok := r.manifestCache[key]
+	return m, ok
+}
+
+func (r *RunReconciler) setCachedManifest(key string, m *v1alpha1.Manifest) {
+	r.manifestMu.Lock()
+	defer r.manifestMu.Unlock()
+	if r.manifestCache == nil {
+		r.manifestCache = make(map[string]*v1alpha1.Manifest)
+	}
+	r.manifestCache[key] = m
+}
+
+// CacheManifest stores a manifest in the reconciler's in-memory cache for a given key.
+func (r *RunReconciler) CacheManifest(key string, m *v1alpha1.Manifest) {
+	r.setCachedManifest(key, m)
+}
+
+// CacheRunManifest associates a manifest with a Run in the reconciler's in-memory cache.
+func (r *RunReconciler) CacheRunManifest(run *v1alpha1.Run, manifest *v1alpha1.Manifest) {
+	if run != nil {
+		runKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}.String()
+		r.setCachedManifest(runKey, manifest)
+		if run.Status.Discovery != nil && run.Status.Discovery.ManifestPath != "" {
+			r.setCachedManifest(run.Status.Discovery.ManifestPath, manifest)
+		}
+	}
+}
+
+func (r *RunReconciler) evictManifest(runKey, manifestPath string) {
+	r.manifestMu.Lock()
+	defer r.manifestMu.Unlock()
+	if r.manifestCache != nil {
+		delete(r.manifestCache, runKey)
+		if manifestPath != "" {
+			delete(r.manifestCache, manifestPath)
+		}
+	}
+}
+
 func (r *RunReconciler) artifactSink() artifacts.ArtifactSink {
 	if r.ArtifactSink != nil {
 		return r.ArtifactSink
 	}
-	return &artifacts.NoopSink{}
+	r.defaultSinkMu.Lock()
+	defer r.defaultSinkMu.Unlock()
+	if r.defaultSink == nil {
+		r.defaultSink = artifacts.NewInMemorySink()
+	}
+	return r.defaultSink
+}
+
+func isManifestNotFoundError(err error, sink artifacts.ArtifactSink) bool {
+	if err == nil {
+		return false
+	}
+	// In-memory sink is non-durable: any error loading the manifest indicates it was lost on restart
+	if _, ok := sink.(*artifacts.InMemorySink); ok {
+		return true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "not found in memory sink") ||
+		strings.Contains(msg, "no such file or directory") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "ErrObjectNotExist") ||
+		strings.Contains(msg, "storage: object doesn't exist") {
+		return true
+	}
+	return false
+}
+
+func (r *RunReconciler) getOrLoadManifest(ctx context.Context, run *v1alpha1.Run) (*v1alpha1.Manifest, error) {
+	if run == nil {
+		return nil, fmt.Errorf("run cannot be nil")
+	}
+	runKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}.String()
+	if m, ok := r.getCachedManifest(runKey); ok && m != nil {
+		return m, nil
+	}
+
+	if run.Status.Discovery == nil || strings.TrimSpace(run.Status.Discovery.ManifestPath) == "" {
+		return nil, fmt.Errorf("no manifest path in run status discovery")
+	}
+
+	manifestPath := run.Status.Discovery.ManifestPath
+	if m, ok := r.getCachedManifest(manifestPath); ok && m != nil {
+		r.setCachedManifest(runKey, m)
+		return m, nil
+	}
+
+	data, err := r.artifactSink().Load(ctx, manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load manifest from %q: %w", manifestPath, err)
+	}
+
+	// Verify content hash if recorded
+	if run.Status.Discovery.ManifestHash != "" {
+		h := discovery.ManifestHash(data)
+		if h != run.Status.Discovery.ManifestHash {
+			return nil, fmt.Errorf("manifest hash mismatch (drift detected): expected %s, got %s", run.Status.Discovery.ManifestHash, h)
+		}
+	}
+
+	m, err := discovery.ParseManifest(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse loaded manifest JSON: %w", err)
+	}
+	if err := discovery.ValidateManifest(m); err != nil {
+		return nil, fmt.Errorf("loaded manifest failed validation: %w", err)
+	}
+
+	r.setCachedManifest(manifestPath, m)
+	r.setCachedManifest(runKey, m)
+	return m, nil
 }
 
 func (r *RunReconciler) maxDiscoveryAttempts() int {
@@ -478,7 +603,7 @@ func (r *RunReconciler) maxStderrLines() int {
 //     - Step 1: git clone -- <url> repo (retries up to N times on failure)
 //     - Step 2: git checkout <commit> (fails immediately on error)
 //     - Step 3: ./.evals/list (fails immediately on error, typed outcomes)
-//  3. Parse and validate manifest, write status.manifest, set Discovered.
+//  3. Parse and validate manifest, upload to artifact sink, write status.discovery, set Discovered.
 //     On failure, set Failed with message naming the failed step.
 //  4. Delete sandbox when done, idempotent across restarts.
 //  5. On Run deletion, GC discovery sandbox and remove finalizer.
@@ -505,8 +630,13 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	// Deletion lifecycle: Run is marked for deletion. Clean up all sandboxes and remove finalizer.
+	// Deletion lifecycle: Run is marked for deletion. Clean up all sandboxes, evict cache, and remove finalizer.
 	if !run.DeletionTimestamp.IsZero() {
+		var mPath string
+		if run.Status.Discovery != nil {
+			mPath = run.Status.Discovery.ManifestPath
+		}
+		r.evictManifest(req.NamespacedName.String(), mPath)
 		if controllerutil.ContainsFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox) {
 			logger.Info("Run is being deleted; cleaning up sandboxes", "run", run.Name)
 			if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
@@ -520,12 +650,17 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Terminal states: already finished, do nothing (clean up any leftover sandboxes).
+	// Terminal states: already finished, do nothing (clean up any leftover sandboxes and evict cache).
 	isTerminal := run.Status.Phase == v1alpha1.RunPhaseCompleted ||
 		run.Status.Phase == v1alpha1.RunPhaseFailed ||
 		(run.Status.Phase == v1alpha1.RunPhaseDiscovered && run.Spec.Model == "")
 
 	if isTerminal {
+		var mPath string
+		if run.Status.Discovery != nil {
+			mPath = run.Status.Discovery.ManifestPath
+		}
+		r.evictManifest(req.NamespacedName.String(), mPath)
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete leftover sandboxes for terminal run", "sandbox", sandboxName)
 		}
@@ -547,9 +682,27 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// If Run is in Discovered phase and Spec.Model is set, transition to Running
 	if run.Status.Phase == v1alpha1.RunPhaseDiscovered && run.Spec.Model != "" {
-		initialTasks := r.initializeTasks(run.Spec, run.Status.Manifest)
+		manifest, err := r.getOrLoadManifest(ctx, &run)
+		if err != nil {
+			logger.Error(err, "failed to load manifest for discovered run", "run", run.Name)
+			if isManifestNotFoundError(err, r.artifactSink()) {
+				return ctrl.Result{}, r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+					status.Phase = v1alpha1.RunPhasePending
+					status.Message = fmt.Sprintf("manifest lost from store (%v); re-discovering", err)
+					status.Discovery = nil
+					status.Tasks = nil
+					status.DiscoveryDeadline = nil
+					status.ExecutionDeadline = nil
+				})
+			}
+			updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Message = fmt.Sprintf("transient error loading manifest: %v", err)
+			})
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, updateErr
+		}
+		initialTasks := r.initializeTasks(run.Spec, manifest)
 		dl := metav1.NewTime(r.now().Add(r.executionDeadline()))
-		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+		err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseRunning
 			status.Tasks = initialTasks
 			status.ExecutionDeadline = &dl
@@ -923,7 +1076,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// -------------------------------------------------------------------------
 	logger.Info("Step 2 succeeded; starting step 3: ./.evals/list")
 	listRes, listErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
-		Command: []string{"./.evals/list"},
+		Command: []string{"/bin/sh", "-c", "./.evals/list > /out/manifest.json"},
 		Cwd:     "repo",
 	})
 
@@ -972,12 +1125,6 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	stdoutLimit := r.maxStdoutBytes()
 	stderrLimit := r.maxStderrBytes()
 
-	if int64(len(listRes.Stdout)) > stdoutLimit {
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", &discovery.LimitError{
-			Stream: "stdout",
-			Limit:  stdoutLimit,
-		}))
-	}
 	if int64(len(listRes.Stderr)) > stderrLimit {
 		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
 		msg := fmt.Sprintf("step ./.evals/list failed: %v", &discovery.LimitError{
@@ -990,8 +1137,25 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.failRun(ctx, &run, &sandbox, msg)
 	}
 
+	// Read manifest from sandbox
+	manifestBytes, readErr := sbClient.ReadFile(execCtx, "/out/manifest.json")
+	if readErr != nil {
+		var limitErr *discovery.LimitError
+		if errors.As(readErr, &limitErr) {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", limitErr))
+		}
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: read manifest: %v", readErr))
+	}
+
+	if int64(len(manifestBytes)) > stdoutLimit {
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", &discovery.LimitError{
+			Stream: "manifest",
+			Limit:  stdoutLimit,
+		}))
+	}
+
 	// Step 4: Parse & validate manifest
-	manifest, err := discovery.ParseManifest([]byte(listRes.Stdout))
+	manifest, err := discovery.ParseManifest(manifestBytes)
 	if err != nil {
 		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
 		msg := fmt.Sprintf("step ./.evals/list failed: invalid JSON: %v", err)
@@ -1003,6 +1167,43 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	if err := discovery.ValidateManifest(manifest); err != nil {
 		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Manifest validation failed: %v", err))
+	}
+
+	manifestHash := discovery.ManifestHash(manifestBytes)
+	eligibleCount := 0
+	var taskIDs []string
+	for i, task := range manifest.Tasks {
+		if len(task.Resources) == 0 {
+			eligibleCount++
+		}
+		if i < 50 {
+			taskIDs = append(taskIDs, task.ID)
+		}
+	}
+
+	manifestMeta := artifacts.ManifestMetadata{
+		RunName:      run.Name,
+		RunNamespace: run.Namespace,
+		Commit:       run.Spec.Repo.Commit,
+		TaskCount:    len(manifest.Tasks),
+	}
+	manifestPath, storeErr := r.artifactSink().StoreManifest(ctx, manifestMeta, manifestBytes)
+	if storeErr != nil {
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("failed to store manifest in artifact sink: %v", storeErr))
+	}
+
+	runKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}.String()
+	r.setCachedManifest(runKey, manifest)
+	if manifestPath != "" {
+		r.setCachedManifest(manifestPath, manifest)
+	}
+
+	discoveryStatus := &v1alpha1.DiscoveryStatus{
+		ManifestPath:      manifestPath,
+		ManifestHash:      manifestHash,
+		TaskCount:         len(manifest.Tasks),
+		EligibleTaskCount: eligibleCount,
+		TaskIDs:           taskIDs,
 	}
 
 	// Step 5: Success -> update Run to Discovered (or Running if spec.model is set), then cleanup sandbox
@@ -1022,7 +1223,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseDiscovered
 			status.Message = successMsg
-			status.Manifest = manifest
+			status.Discovery = discoveryStatus
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeDiscovered,
 				Status:             metav1.ConditionTrue,
@@ -1048,7 +1249,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 		status.Phase = v1alpha1.RunPhaseRunning
 		status.Message = successMsg
-		status.Manifest = manifest
+		status.Discovery = discoveryStatus
 		status.Tasks = initialTasks
 		status.ExecutionDeadline = &dl
 		if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
@@ -1232,6 +1433,29 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			})
 		})
 		return ctrl.Result{}, err
+	}
+
+	// 3. Ensure manifest is available from store or memory cache
+	if _, err := r.getOrLoadManifest(ctx, run); err != nil {
+		logger.Error(err, "manifest could not be loaded for running run", "run", run.Name)
+		if isManifestNotFoundError(err, r.artifactSink()) {
+			if delErr := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); delErr != nil {
+				logger.Error(delErr, "failed to delete sandboxes on manifest re-discovery", "run", run.Name)
+			}
+			updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Phase = v1alpha1.RunPhasePending
+				status.Message = fmt.Sprintf("manifest lost from store (%v); re-discovering", err)
+				status.Discovery = nil
+				status.Tasks = nil
+				status.DiscoveryDeadline = nil
+				status.ExecutionDeadline = nil
+			})
+			return ctrl.Result{}, updateErr
+		}
+		updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Message = fmt.Sprintf("transient error loading manifest: %v", err)
+		})
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, updateErr
 	}
 
 	// List current task sandboxes in sandbox namespace
@@ -1583,19 +1807,24 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 
 	var targetTask *v1alpha1.ManifestTask
-	if run.Status.Manifest != nil {
-		for i := range run.Status.Manifest.Tasks {
-			if run.Status.Manifest.Tasks[i].ID == taskID {
-				targetTask = &run.Status.Manifest.Tasks[i]
+	manifest, loadErr := r.getOrLoadManifest(ctx, run)
+	if loadErr == nil && manifest != nil {
+		for i := range manifest.Tasks {
+			if manifest.Tasks[i].ID == taskID {
+				targetTask = &manifest.Tasks[i]
 				break
 			}
 		}
 	}
 	if targetTask == nil {
+		msg := "task definition not found in manifest"
+		if loadErr != nil {
+			msg = fmt.Sprintf("task definition not found in manifest: %v", loadErr)
+		}
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
-			message: "task definition not found in manifest",
+			message: msg,
 		}
 	}
 

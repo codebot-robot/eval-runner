@@ -15,6 +15,7 @@
 package discovery
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -22,6 +23,12 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 )
+
+// ManifestHash returns the SHA-256 digest of data formatted as sha256:<hex>.
+func ManifestHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", h)
+}
 
 // ParseManifest unmarshals raw JSON bytes into a Manifest.
 func ParseManifest(data []byte) (*v1alpha1.Manifest, error) {

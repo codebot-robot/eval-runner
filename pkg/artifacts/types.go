@@ -49,10 +49,21 @@ type TaskSummary struct {
 	CapBytes   int64      `json:"capBytes,omitempty"`
 }
 
+// ManifestMetadata provides metadata about the manifest for artifact storage.
+type ManifestMetadata struct {
+	RunName      string
+	RunNamespace string
+	Commit       string
+	TaskCount    int
+}
+
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.
 type ArtifactSink interface {
 	// StoreArtifact persists the raw log bytes for a task and returns the storage path or URI.
 	StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error)
+
+	// StoreManifest persists the raw manifest JSON as runs/<commit>/manifest.json and returns the storage path or URI.
+	StoreManifest(ctx context.Context, meta ManifestMetadata, data []byte) (string, error)
 
 	// StoreComparison persists comparison summary data as comparisons/<comparisonName>.json and returns the storage path or URI.
 	StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error)
