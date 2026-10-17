@@ -53,6 +53,9 @@ type ComparisonTaskArtifact struct {
 	Delta         float64                          `json:"delta"`
 	DeltaCI       v1alpha1.DeltaConfidenceInterval `json:"deltaCI"`
 	Pairs         int                              `json:"pairs"`
+	Wins          int                              `json:"wins"`
+	Losses        int                              `json:"losses"`
+	Ties          int                              `json:"ties"`
 	Dropped       v1alpha1.ComparisonDropped       `json:"dropped"`
 	Label         string                           `json:"label"`
 	PImprovement  float64                          `json:"pImprovement"`
@@ -388,7 +391,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				Lower: est.CI.Lower,
 				Upper: est.CI.Upper,
 			},
-			Pairs: est.NumPairs,
+			Pairs:  est.NumPairs,
+			Wins:   est.Wins,
+			Losses: est.Losses,
+			Ties:   est.Ties,
 			Dropped: v1alpha1.ComparisonDropped{
 				Candidate: est.DroppedCandidate,
 				Baseline:  est.DroppedBaseline,
@@ -442,7 +448,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				Lower: est.CI.Lower,
 				Upper: est.CI.Upper,
 			},
-			Pairs: est.NumPairs,
+			Pairs:  est.NumPairs,
+			Wins:   est.Wins,
+			Losses: est.Losses,
+			Ties:   est.Ties,
 			Dropped: v1alpha1.ComparisonDropped{
 				Candidate: est.DroppedCandidate,
 				Baseline:  est.DroppedBaseline,

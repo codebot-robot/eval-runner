@@ -290,8 +290,11 @@ func TestPrintComparisonTable(t *testing.T) {
 						Lower: 0.11,
 						Upper: 0.35,
 					},
-					Pairs: 48,
-					Label: v1alpha1.ComparisonTaskLabelImproved,
+					Pairs:  48,
+					Wins:   15,
+					Losses: 4,
+					Ties:   29,
+					Label:  v1alpha1.ComparisonTaskLabelImproved,
 				},
 				{
 					ID:            "triage/escalation_policy",
@@ -302,8 +305,11 @@ func TestPrintComparisonTable(t *testing.T) {
 						Lower: -0.05,
 						Upper: 0.09,
 					},
-					Pairs: 32,
-					Label: v1alpha1.ComparisonTaskLabelUnchanged,
+					Pairs:  32,
+					Wins:   2,
+					Losses: 1,
+					Ties:   29,
+					Label:  v1alpha1.ComparisonTaskLabelUnchanged,
 				},
 				{
 					ID:            "triage/summary_quality",
@@ -314,8 +320,11 @@ func TestPrintComparisonTable(t *testing.T) {
 						Lower: -0.08,
 						Upper: 0.14,
 					},
-					Pairs: 16,
-					Label: v1alpha1.ComparisonTaskLabelInconclusive,
+					Pairs:  16,
+					Wins:   2,
+					Losses: 1,
+					Ties:   13,
+					Label:  v1alpha1.ComparisonTaskLabelInconclusive,
 				},
 			},
 		},
@@ -329,19 +338,23 @@ func TestPrintComparisonTable(t *testing.T) {
 	out := buf.String()
 	// Check headers
 	if !strings.Contains(out, "eval") || !strings.Contains(out, "base") || !strings.Contains(out, "this PR") ||
-		!strings.Contains(out, "Δ (95% CI)") || !strings.Contains(out, "label") || !strings.Contains(out, "runs") {
+		!strings.Contains(out, "Δ (95% CI)") || !strings.Contains(out, "label") || !strings.Contains(out, "runs") ||
+		!strings.Contains(out, "wins/losses/ties") {
 		t.Errorf("Expected table headers matching PR comment mockup, got:\n%s", out)
 	}
 
 	// Check rows
 	if !strings.Contains(out, "triage/runbook_lookup") || !strings.Contains(out, "0.61") || !strings.Contains(out, "0.84") ||
-		!strings.Contains(out, "+0.23 [+0.11, +0.35]") || !strings.Contains(out, "improved") || !strings.Contains(out, "48") {
+		!strings.Contains(out, "+0.23 [+0.11, +0.35]") || !strings.Contains(out, "improved") || !strings.Contains(out, "48") ||
+		!strings.Contains(out, "15/4/29") {
 		t.Errorf("Expected triage/runbook_lookup row in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "triage/escalation_policy") || !strings.Contains(out, "+0.02 [-0.05, +0.09]") || !strings.Contains(out, "unchanged") || !strings.Contains(out, "32") {
+	if !strings.Contains(out, "triage/escalation_policy") || !strings.Contains(out, "+0.02 [-0.05, +0.09]") || !strings.Contains(out, "unchanged") || !strings.Contains(out, "32") ||
+		!strings.Contains(out, "2/1/29") {
 		t.Errorf("Expected triage/escalation_policy row in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "triage/summary_quality") || !strings.Contains(out, "+0.03 [-0.08, +0.14]") || !strings.Contains(out, "inconclusive") || !strings.Contains(out, "16") {
+	if !strings.Contains(out, "triage/summary_quality") || !strings.Contains(out, "+0.03 [-0.08, +0.14]") || !strings.Contains(out, "inconclusive") || !strings.Contains(out, "16") ||
+		!strings.Contains(out, "2/1/13") {
 		t.Errorf("Expected triage/summary_quality row in output, got:\n%s", out)
 	}
 

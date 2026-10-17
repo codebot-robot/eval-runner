@@ -71,17 +71,20 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 	taskID := "docs/readme_comprehension"
 
 	tests := []struct {
-		name          string
-		candScores    []stats.SampleScore
-		baseScores    []stats.SampleScore
-		candPhase     v1alpha1.RunPhase
-		basePhase     v1alpha1.RunPhase
-		expectedLabel v1alpha1.ComparisonTaskLabel
-		expectedVerd  v1alpha1.ComparisonVerdict
-		expectedPhase v1alpha1.ComparisonPhase
-		expectedPairs int
-		expectedDropC int
-		expectedDropB int
+		name           string
+		candScores     []stats.SampleScore
+		baseScores     []stats.SampleScore
+		candPhase      v1alpha1.RunPhase
+		basePhase      v1alpha1.RunPhase
+		expectedLabel  v1alpha1.ComparisonTaskLabel
+		expectedVerd   v1alpha1.ComparisonVerdict
+		expectedPhase  v1alpha1.ComparisonPhase
+		expectedPairs  int
+		expectedWins   int
+		expectedLosses int
+		expectedTies   int
+		expectedDropC  int
+		expectedDropB  int
 	}{
 		{
 			name: "improved - candidate strictly higher than baseline",
@@ -99,12 +102,15 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				}
 				return s
 			}(),
-			candPhase:     v1alpha1.RunPhaseCompleted,
-			basePhase:     v1alpha1.RunPhaseCompleted,
-			expectedLabel: v1alpha1.ComparisonTaskLabelImproved,
-			expectedVerd:  v1alpha1.ComparisonVerdictImproved,
-			expectedPhase: v1alpha1.ComparisonPhaseCompleted,
-			expectedPairs: 20,
+			candPhase:      v1alpha1.RunPhaseCompleted,
+			basePhase:      v1alpha1.RunPhaseCompleted,
+			expectedLabel:  v1alpha1.ComparisonTaskLabelImproved,
+			expectedVerd:   v1alpha1.ComparisonVerdictImproved,
+			expectedPhase:  v1alpha1.ComparisonPhaseCompleted,
+			expectedPairs:  20,
+			expectedWins:   20,
+			expectedLosses: 0,
+			expectedTies:   0,
 		},
 		{
 			name: "regressed - candidate strictly lower than baseline",
@@ -122,12 +128,15 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				}
 				return s
 			}(),
-			candPhase:     v1alpha1.RunPhaseCompleted,
-			basePhase:     v1alpha1.RunPhaseCompleted,
-			expectedLabel: v1alpha1.ComparisonTaskLabelRegressed,
-			expectedVerd:  v1alpha1.ComparisonVerdictRegressed,
-			expectedPhase: v1alpha1.ComparisonPhaseCompleted,
-			expectedPairs: 20,
+			candPhase:      v1alpha1.RunPhaseCompleted,
+			basePhase:      v1alpha1.RunPhaseCompleted,
+			expectedLabel:  v1alpha1.ComparisonTaskLabelRegressed,
+			expectedVerd:   v1alpha1.ComparisonVerdictRegressed,
+			expectedPhase:  v1alpha1.ComparisonPhaseCompleted,
+			expectedPairs:  20,
+			expectedWins:   0,
+			expectedLosses: 20,
+			expectedTies:   0,
 		},
 		{
 			name: "unchanged - identical scores at n >= 8",
@@ -145,12 +154,15 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				}
 				return s
 			}(),
-			candPhase:     v1alpha1.RunPhaseCompleted,
-			basePhase:     v1alpha1.RunPhaseCompleted,
-			expectedLabel: v1alpha1.ComparisonTaskLabelUnchanged,
-			expectedVerd:  v1alpha1.ComparisonVerdictUnchanged,
-			expectedPhase: v1alpha1.ComparisonPhaseCompleted,
-			expectedPairs: 20,
+			candPhase:      v1alpha1.RunPhaseCompleted,
+			basePhase:      v1alpha1.RunPhaseCompleted,
+			expectedLabel:  v1alpha1.ComparisonTaskLabelUnchanged,
+			expectedVerd:   v1alpha1.ComparisonVerdictUnchanged,
+			expectedPhase:  v1alpha1.ComparisonPhaseCompleted,
+			expectedPairs:  20,
+			expectedWins:   0,
+			expectedLosses: 0,
+			expectedTies:   20,
 		},
 		{
 			name: "inconclusive at small n - 4 samples below MinPairsToDecide",
@@ -166,12 +178,15 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				{ID: "3", Score: 1.0},
 				{ID: "4", Score: 0.0},
 			},
-			candPhase:     v1alpha1.RunPhaseCompleted,
-			basePhase:     v1alpha1.RunPhaseCompleted,
-			expectedLabel: v1alpha1.ComparisonTaskLabelInconclusive,
-			expectedVerd:  v1alpha1.ComparisonVerdictInconclusive,
-			expectedPhase: v1alpha1.ComparisonPhaseCompleted,
-			expectedPairs: 4,
+			candPhase:      v1alpha1.RunPhaseCompleted,
+			basePhase:      v1alpha1.RunPhaseCompleted,
+			expectedLabel:  v1alpha1.ComparisonTaskLabelInconclusive,
+			expectedVerd:   v1alpha1.ComparisonVerdictInconclusive,
+			expectedPhase:  v1alpha1.ComparisonPhaseCompleted,
+			expectedPairs:  4,
+			expectedWins:   1,
+			expectedLosses: 1,
+			expectedTies:   2,
 		},
 		{
 			name: "dropped unpaired ids",
@@ -189,14 +204,17 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				{ID: "5", Score: 1.0},
 				{ID: "6", Score: 1.0},
 			},
-			candPhase:     v1alpha1.RunPhaseCompleted,
-			basePhase:     v1alpha1.RunPhaseCompleted,
-			expectedLabel: v1alpha1.ComparisonTaskLabelInconclusive,
-			expectedVerd:  v1alpha1.ComparisonVerdictInconclusive,
-			expectedPhase: v1alpha1.ComparisonPhaseCompleted,
-			expectedPairs: 4,
-			expectedDropC: 1,
-			expectedDropB: 1,
+			candPhase:      v1alpha1.RunPhaseCompleted,
+			basePhase:      v1alpha1.RunPhaseCompleted,
+			expectedLabel:  v1alpha1.ComparisonTaskLabelInconclusive,
+			expectedVerd:   v1alpha1.ComparisonVerdictInconclusive,
+			expectedPhase:  v1alpha1.ComparisonPhaseCompleted,
+			expectedPairs:  4,
+			expectedWins:   0,
+			expectedLosses: 0,
+			expectedTies:   4,
+			expectedDropC:  1,
+			expectedDropB:  1,
 		},
 		{
 			name: "disjoint sample ids - zero pairs -> inconclusive",
@@ -362,6 +380,15 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 			if tt.expectedPairs > 0 && taskRes.Pairs != tt.expectedPairs {
 				t.Errorf("Pairs: got %d, want %d", taskRes.Pairs, tt.expectedPairs)
 			}
+			if taskRes.Wins != tt.expectedWins {
+				t.Errorf("Wins: got %d, want %d", taskRes.Wins, tt.expectedWins)
+			}
+			if taskRes.Losses != tt.expectedLosses {
+				t.Errorf("Losses: got %d, want %d", taskRes.Losses, tt.expectedLosses)
+			}
+			if taskRes.Ties != tt.expectedTies {
+				t.Errorf("Ties: got %d, want %d", taskRes.Ties, tt.expectedTies)
+			}
 			if taskRes.Dropped.Candidate != tt.expectedDropC {
 				t.Errorf("DroppedCandidate: got %d, want %d", taskRes.Dropped.Candidate, tt.expectedDropC)
 			}
@@ -388,6 +415,15 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				}
 				if len(artifact.Tasks) != 1 {
 					t.Fatalf("Artifact tasks: got %d, want 1", len(artifact.Tasks))
+				}
+				if artifact.Tasks[0].Wins != tt.expectedWins {
+					t.Errorf("Artifact task Wins: got %d, want %d", artifact.Tasks[0].Wins, tt.expectedWins)
+				}
+				if artifact.Tasks[0].Losses != tt.expectedLosses {
+					t.Errorf("Artifact task Losses: got %d, want %d", artifact.Tasks[0].Losses, tt.expectedLosses)
+				}
+				if artifact.Tasks[0].Ties != tt.expectedTies {
+					t.Errorf("Artifact task Ties: got %d, want %d", artifact.Tasks[0].Ties, tt.expectedTies)
 				}
 				if tt.expectedPairs > 0 && len(artifact.Tasks[0].PairsTable) != tt.expectedPairs {
 					t.Errorf("Artifact pairsTable length: got %d, want %d", len(artifact.Tasks[0].PairsTable), tt.expectedPairs)
