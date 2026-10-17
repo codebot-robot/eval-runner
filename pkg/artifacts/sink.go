@@ -16,11 +16,18 @@ package artifacts
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+)
+
+const (
+	// DefaultMaxLoadBytes is the default cap on loaded artifact size (10 MiB).
+	DefaultMaxLoadBytes int64 = 10 * 1024 * 1024
 )
 
 // NoopSink is an ArtifactSink that does not store artifacts and returns an empty log path.
@@ -31,6 +38,16 @@ var _ ArtifactSink = (*NoopSink)(nil)
 // StoreArtifact implements ArtifactSink for NoopSink.
 func (s *NoopSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
 	return "", nil
+}
+
+// StoreComparison implements ArtifactSink for NoopSink.
+func (s *NoopSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
+	return "", nil
+}
+
+// Load implements ArtifactSink for NoopSink.
+func (s *NoopSink) Load(ctx context.Context, path string) ([]byte, error) {
+	return nil, fmt.Errorf("noop sink cannot load artifacts")
 }
 
 // ArtifactPrefix implements ArtifactSink for NoopSink.
@@ -45,9 +62,79 @@ type LocalDirSink struct {
 
 var _ ArtifactSink = (*LocalDirSink)(nil)
 
+// StoreComparison implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
+	if strings.TrimSpace(s.BaseDir) == "" {
+		return "", fmt.Errorf("base directory must not be empty")
+	}
+	if err := validateSafeComponent("comparisonName", comparisonName); err != nil {
+		return "", err
+	}
+
+	targetDir := filepath.Join(s.BaseDir, "comparisons")
+	targetPath := filepath.Join(targetDir, comparisonName+".json")
+
+	cleanBase := filepath.Clean(s.BaseDir)
+	cleanTarget := filepath.Clean(targetPath)
+	rel, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return "", fmt.Errorf("artifact path %q escapes base directory %q", targetPath, s.BaseDir)
+	}
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", err
+	}
+
+	if err := os.WriteFile(targetPath, data, 0644); err != nil {
+		return "", err
+	}
+
+	return targetPath, nil
+}
+
+// Load implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) Load(ctx context.Context, path string) ([]byte, error) {
+	if strings.TrimSpace(s.BaseDir) == "" {
+		return nil, fmt.Errorf("base directory must not be empty")
+	}
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("artifact path must not be empty")
+	}
+
+	cleanBase := filepath.Clean(s.BaseDir)
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(cleanBase, cleanPath)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return nil, fmt.Errorf("artifact path %q escapes base directory %q", path, s.BaseDir)
+	}
+	if !strings.HasPrefix(rel, "runs"+string(filepath.Separator)) && rel != "runs" {
+		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' prefix", path)
+	}
+
+	f, err := os.Open(cleanPath)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := DefaultMaxLoadBytes
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	closeErr := f.Close()
+	if err != nil {
+		return nil, errors.Join(err, closeErr)
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("artifact %q exceeds maximum load size of %d bytes", path, limit)
+	}
+
+	return data, nil
+}
+
 // ArtifactPrefix implements ArtifactSink for LocalDirSink.
 func (s *LocalDirSink) ArtifactPrefix(commit string) string {
-	if s.BaseDir == "" {
+	if s.BaseDir == "" || strings.TrimSpace(commit) == "" {
 		return ""
 	}
 	return filepath.Join(s.BaseDir, "runs", commit) + "/"
@@ -86,7 +173,15 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 	}
 
 	escapedTaskID := url.QueryEscape(meta.TaskID)
-	targetDir := filepath.Join(s.BaseDir, meta.RunNamespace, meta.RunName, escapedTaskID)
+	var targetDir string
+	if meta.Commit != "" {
+		if err := validateSafeComponent("commit", meta.Commit); err != nil {
+			return "", err
+		}
+		targetDir = filepath.Join(s.BaseDir, "runs", meta.Commit, escapedTaskID)
+	} else {
+		targetDir = filepath.Join(s.BaseDir, meta.RunNamespace, meta.RunName, escapedTaskID)
+	}
 	targetPath := filepath.Join(targetDir, filename)
 
 	cleanBase := filepath.Clean(s.BaseDir)

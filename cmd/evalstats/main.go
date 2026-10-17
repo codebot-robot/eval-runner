@@ -92,18 +92,65 @@ func main() {
 	final := flag.Bool("final", false, "Treat input as complete run: sets sample cap to samples run so unresolved tasks become inconclusive rather than continue")
 	jsonOut := flag.Bool("json", false, "Output results in JSON format")
 	fromRun := flag.String("from-run", "", "Read Run by name from Kubernetes cluster and print per-task statistics")
-	namespace := flag.String("namespace", "eval-runner", "Kubernetes namespace for -from-run (defaults to eval-runner)")
+	fromComparison := flag.String("from-comparison", "", "Read Comparison by name from Kubernetes cluster and print comparison statistics")
+	namespace := flag.String("namespace", "eval-runner", "Kubernetes namespace for -from-run and -from-comparison (defaults to eval-runner)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: evalstats [flags] [file.jsonl]\n\n")
 		fmt.Fprintf(os.Stderr, "Reads JSONL lines of {task, sample_id, base_score, pr_score} and outputs\n")
 		fmt.Fprintf(os.Stderr, "per-task paired statistics and the run-level verdict.\n\n")
-		fmt.Fprintf(os.Stderr, "Alternatively, use -from-run <name> to inspect a Run from the cluster.\n\n")
+		fmt.Fprintf(os.Stderr, "Alternatively, use -from-run <name> or -from-comparison <name> to inspect results from the cluster.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
 
 	flag.Parse()
+
+	if *fromComparison != "" {
+		cfg, err := config.GetConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting Kubernetes config: %v\n", err)
+			os.Exit(1)
+		}
+
+		scheme := runtime.NewScheme()
+		utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+		utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+		cl, err := client.New(cfg, client.Options{Scheme: scheme})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating Kubernetes client: %v\n", err)
+			os.Exit(1)
+		}
+
+		compNS := *namespace
+		compName := *fromComparison
+		if strings.Contains(compName, "/") {
+			parts := strings.SplitN(compName, "/", 2)
+			compNS = parts[0]
+			compName = parts[1]
+		}
+
+		var comp v1alpha1.Comparison
+		if err := cl.Get(context.Background(), types.NamespacedName{Namespace: compNS, Name: compName}, &comp); err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting Comparison %s/%s: %v\n", compNS, compName, err)
+			os.Exit(1)
+		}
+
+		if *jsonOut {
+			if err := PrintComparisonJSON(os.Stdout, &comp); err != nil {
+				fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		if err := PrintComparisonTable(os.Stdout, &comp); err != nil {
+			fmt.Fprintf(os.Stderr, "Error printing table: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *fromRun != "" {
 		cfg, err := config.GetConfig()
@@ -402,6 +449,99 @@ func PrintRunJSON(w io.Writer, run *v1alpha1.Run) error {
 		Phase:   string(run.Status.Phase),
 		Tasks:   taskSummaries,
 		Summary: run.Status.Summary,
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// ComparisonOutput encapsulates the Comparison output in JSON mode.
+type ComparisonOutput struct {
+	Comparison   string                          `json:"comparison"`
+	Phase        string                          `json:"phase,omitempty"`
+	Verdict      string                          `json:"verdict,omitempty"`
+	PImprovement *float64                        `json:"pImprovement,omitempty"`
+	Baseline     string                          `json:"baseline"`
+	Candidate    string                          `json:"candidate"`
+	Tasks        []v1alpha1.ComparisonTaskStatus `json:"tasks"`
+	SummaryPath  string                          `json:"summaryPath,omitempty"`
+	Message      string                          `json:"message,omitempty"`
+}
+
+// PrintComparisonTable writes a formatted table of comparison results matching the PR comment mockup.
+func PrintComparisonTable(w io.Writer, comp *v1alpha1.Comparison) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "eval\tbase\tthis PR\tΔ (95% CI)\tlabel\truns"); err != nil {
+		return err
+	}
+
+	for _, t := range comp.Status.Tasks {
+		baseStr := "-"
+		if t.BaseRate != nil {
+			baseStr = fmt.Sprintf("%.2f", *t.BaseRate)
+		}
+		prStr := "-"
+		if t.CandidateRate != nil {
+			prStr = fmt.Sprintf("%.2f", *t.CandidateRate)
+		}
+		deltaStr := "-"
+		if t.Delta != nil && t.DeltaCI != nil {
+			deltaStr = fmt.Sprintf("%+.2f [%+.2f, %+.2f]", *t.Delta, t.DeltaCI.Lower, t.DeltaCI.Upper)
+		} else if t.Delta != nil {
+			deltaStr = fmt.Sprintf("%+.2f", *t.Delta)
+		}
+		labelStr := string(t.Label)
+		runsStr := fmt.Sprintf("%d", t.Pairs)
+
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			t.ID,
+			baseStr,
+			prStr,
+			deltaStr,
+			labelStr,
+			runsStr,
+		); err != nil {
+			return err
+		}
+	}
+
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	if comp.Status.Verdict != "" {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		verdictLine := fmt.Sprintf("Verdict: %s", comp.Status.Verdict)
+		if comp.Status.PImprovement != nil {
+			verdictLine += fmt.Sprintf(" · P(improvement) = %.2f", *comp.Status.PImprovement)
+		}
+		if _, err := fmt.Fprintln(w, verdictLine); err != nil {
+			return err
+		}
+	}
+	if comp.Status.Message != "" {
+		if _, err := fmt.Fprintf(w, "Summary: %s\n", comp.Status.Message); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// PrintComparisonJSON writes JSON output for a Comparison.
+func PrintComparisonJSON(w io.Writer, comp *v1alpha1.Comparison) error {
+	out := ComparisonOutput{
+		Comparison:   comp.Name,
+		Phase:        string(comp.Status.Phase),
+		Verdict:      string(comp.Status.Verdict),
+		PImprovement: comp.Status.PImprovement,
+		Baseline:     comp.Spec.Baseline.Run,
+		Candidate:    comp.Spec.Candidate.Run,
+		Tasks:        comp.Status.Tasks,
+		SummaryPath:  comp.Status.SummaryPath,
+		Message:      comp.Status.Message,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

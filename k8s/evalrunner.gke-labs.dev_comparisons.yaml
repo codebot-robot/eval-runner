@@ -1,0 +1,241 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: comparisons.evalrunner.gke-labs.dev
+spec:
+  group: evalrunner.gke-labs.dev
+  names:
+    kind: Comparison
+    listKind: ComparisonList
+    plural: comparisons
+    shortNames:
+    - comp
+    - comparison
+    singular: comparison
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.verdict
+      name: Verdict
+      type: string
+    - jsonPath: .status.pImprovement
+      name: P(imp)
+      type: number
+    - jsonPath: .status.summary.tasks
+      name: Tasks
+      type: string
+    - jsonPath: .spec.baseline.run
+      name: Baseline
+      type: string
+    - jsonPath: .spec.candidate.run
+      name: Candidate
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Comparison is the Schema for the comparisons API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ComparisonSpec defines the desired state of Comparison.
+            properties:
+              baseline:
+                description: Baseline specifies the baseline Run to compare against.
+                properties:
+                  run:
+                    description: Run is the name of the Run resource in the same namespace.
+                    type: string
+                required:
+                - run
+                type: object
+              candidate:
+                description: Candidate specifies the candidate (e.g. PR) Run.
+                properties:
+                  run:
+                    description: Run is the name of the Run resource in the same namespace.
+                    type: string
+                required:
+                - run
+                type: object
+              equivalenceMargin:
+                default: 0.05
+                description: 'EquivalenceMargin is the statistical equivalence margin
+                  (default: 0.05 for ±0.05).'
+                maximum: 0.5
+                minimum: 0
+                type: number
+              tasks:
+                description: |-
+                  Tasks is an optional allow-list of task IDs to compare.
+                  If empty, all tasks present in both candidate and baseline runs are compared.
+                items:
+                  type: string
+                type: array
+            required:
+            - baseline
+            - candidate
+            type: object
+          status:
+            description: ComparisonStatus defines the observed state of Comparison.
+            properties:
+              message:
+                description: Message is human-readable detail on failure or current
+                  status.
+                type: string
+              pImprovement:
+                description: PImprovement is the posterior probability that the candidate
+                  is a net improvement.
+                maximum: 1
+                minimum: 0
+                type: number
+              phase:
+                description: Phase is the lifecycle phase of the comparison (Running,
+                  Completed, Failed).
+                enum:
+                - Pending
+                - Running
+                - Completed
+                - Failed
+                type: string
+              summary:
+                description: Summary provides aggregate statistics across tasks in
+                  the Comparison.
+                properties:
+                  tasks:
+                    description: Tasks is a compact string representing completed
+                      vs total tasks (e.g. "2/2").
+                    type: string
+                type: object
+              summaryPath:
+                description: SummaryPath is the storage path or URI where comparisons/<name>.json
+                  was written to the artifact sink.
+                type: string
+              tasks:
+                description: Tasks records the status and paired comparison results
+                  for each evaluated task.
+                items:
+                  description: ComparisonTaskStatus records the paired comparison
+                    results for a single task.
+                  properties:
+                    baseRate:
+                      description: BaseRate is the mean score or success rate of baseline
+                        samples.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    candidateRate:
+                      description: CandidateRate is the mean score or success rate
+                        of candidate samples.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    delta:
+                      description: Delta is the sample mean difference (candidate
+                        - baseline).
+                      maximum: 1
+                      minimum: -1
+                      type: number
+                    deltaCI:
+                      description: DeltaCI is the confidence interval on the paired
+                        delta.
+                      properties:
+                        lower:
+                          description: Lower is the lower confidence bound.
+                          maximum: 1
+                          minimum: -1
+                          type: number
+                        upper:
+                          description: Upper is the upper confidence bound.
+                          maximum: 1
+                          minimum: -1
+                          type: number
+                      required:
+                      - lower
+                      - upper
+                      type: object
+                    dropped:
+                      description: Dropped records the number of unpaired samples
+                        dropped from candidate and baseline.
+                      properties:
+                        baseline:
+                          description: Baseline is the number of baseline samples
+                            dropped due to lack of a matching candidate.
+                          type: integer
+                        candidate:
+                          description: Candidate is the number of candidate samples
+                            dropped due to lack of a matching baseline.
+                          type: integer
+                      type: object
+                    id:
+                      description: ID is the unique identifier of the task (e.g. docs/readme_comprehension).
+                      type: string
+                    label:
+                      description: 'Label is the decision outcome for this task: improved,
+                        regressed, unchanged, inconclusive, or running.'
+                      enum:
+                      - improved
+                      - regressed
+                      - unchanged
+                      - inconclusive
+                      - running
+                      type: string
+                    pairs:
+                      description: Pairs is the number of matched (paired) sample
+                        pairs.
+                      type: integer
+                  required:
+                  - id
+                  type: object
+                type: array
+              verdict:
+                description: Verdict is the aggregate run-level verdict (IMPROVED,
+                  REGRESSED, UNCHANGED, INCONCLUSIVE, RUNNING).
+                enum:
+                - IMPROVED
+                - REGRESSED
+                - UNCHANGED
+                - INCONCLUSIVE
+                - RUNNING
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

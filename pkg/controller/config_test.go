@@ -475,6 +475,7 @@ func TestLoadClusterConfig_ReaderError(t *testing.T) {
 func TestFlagsFromFlagSet(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	bucket := fs.String("artifact-bucket", "", "artifact bucket")
+	dir := fs.String("artifact-dir", "", "artifact dir")
 	discovery := fs.Duration("discovery-deadline", 10*time.Minute, "discovery deadline")
 	execution := fs.Duration("execution-deadline", 30*time.Minute, "execution deadline")
 	parallel := fs.Int("max-parallel-tasks", 4, "max parallel tasks")
@@ -487,7 +488,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *secret, *discovery, *execution, *grace, *parallel)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *discovery, *execution, *grace, *parallel)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -499,5 +500,41 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	}
 	if rawFlags.IsExplicit("model-secret") {
 		t.Errorf("expected model-secret NOT to be explicit")
+	}
+}
+
+func TestResolveConfig_ArtifactDir(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyArtifactDir: "/tmp/artifacts",
+		},
+	}
+
+	flags := RawFlags{
+		Explicit: map[string]bool{},
+	}
+
+	cfg, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("ResolveConfig failed: %v", err)
+	}
+	if cfg.ArtifactDir != "/tmp/artifacts" {
+		t.Errorf("expected ArtifactDir /tmp/artifacts, got %q", cfg.ArtifactDir)
+	}
+
+	// Flag override takes precedence
+	flags.ArtifactDir = "/custom/dir"
+	flags.Explicit["artifact-dir"] = true
+
+	cfgOverride, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("ResolveConfig failed: %v", err)
+	}
+	if cfgOverride.ArtifactDir != "/custom/dir" {
+		t.Errorf("expected ArtifactDir /custom/dir, got %q", cfgOverride.ArtifactDir)
 	}
 }

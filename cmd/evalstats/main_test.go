@@ -260,3 +260,147 @@ func TestPrintRunJSON(t *testing.T) {
 		t.Errorf("Expected CI method wilson, got %+v", parsed.Tasks[0].CI)
 	}
 }
+
+func TestPrintComparisonTable(t *testing.T) {
+	base1, pr1, d1 := 0.61, 0.84, 0.23
+	base2, pr2, d2 := 0.88, 0.90, 0.02
+	base3, pr3, d3 := 0.72, 0.75, 0.03
+	pImp := 0.98
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-comparison",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "main-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "pr-418-run"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			Verdict:      v1alpha1.ComparisonVerdictImproved,
+			PImprovement: &pImp,
+			Message:      "IMPROVED: 1 task(s) improved, 1 task(s) unchanged; net improvement probable",
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "triage/runbook_lookup",
+					BaseRate:      &base1,
+					CandidateRate: &pr1,
+					Delta:         &d1,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: 0.11,
+						Upper: 0.35,
+					},
+					Pairs: 48,
+					Label: v1alpha1.ComparisonTaskLabelImproved,
+				},
+				{
+					ID:            "triage/escalation_policy",
+					BaseRate:      &base2,
+					CandidateRate: &pr2,
+					Delta:         &d2,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: -0.05,
+						Upper: 0.09,
+					},
+					Pairs: 32,
+					Label: v1alpha1.ComparisonTaskLabelUnchanged,
+				},
+				{
+					ID:            "triage/summary_quality",
+					BaseRate:      &base3,
+					CandidateRate: &pr3,
+					Delta:         &d3,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: -0.08,
+						Upper: 0.14,
+					},
+					Pairs: 16,
+					Label: v1alpha1.ComparisonTaskLabelInconclusive,
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := PrintComparisonTable(&buf, comp); err != nil {
+		t.Fatalf("PrintComparisonTable failed: %v", err)
+	}
+
+	out := buf.String()
+	// Check headers
+	if !strings.Contains(out, "eval") || !strings.Contains(out, "base") || !strings.Contains(out, "this PR") ||
+		!strings.Contains(out, "Δ (95% CI)") || !strings.Contains(out, "label") || !strings.Contains(out, "runs") {
+		t.Errorf("Expected table headers matching PR comment mockup, got:\n%s", out)
+	}
+
+	// Check rows
+	if !strings.Contains(out, "triage/runbook_lookup") || !strings.Contains(out, "0.61") || !strings.Contains(out, "0.84") ||
+		!strings.Contains(out, "+0.23 [+0.11, +0.35]") || !strings.Contains(out, "improved") || !strings.Contains(out, "48") {
+		t.Errorf("Expected triage/runbook_lookup row in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "triage/escalation_policy") || !strings.Contains(out, "+0.02 [-0.05, +0.09]") || !strings.Contains(out, "unchanged") || !strings.Contains(out, "32") {
+		t.Errorf("Expected triage/escalation_policy row in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "triage/summary_quality") || !strings.Contains(out, "+0.03 [-0.08, +0.14]") || !strings.Contains(out, "inconclusive") || !strings.Contains(out, "16") {
+		t.Errorf("Expected triage/summary_quality row in output, got:\n%s", out)
+	}
+
+	// Check verdict
+	if !strings.Contains(out, "Verdict: IMPROVED · P(improvement) = 0.98") {
+		t.Errorf("Expected verdict line in output, got:\n%s", out)
+	}
+}
+
+func TestPrintComparisonJSON(t *testing.T) {
+	d := 0.0
+	pImp := 0.50
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "comp-json",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			Verdict:      v1alpha1.ComparisonVerdictUnchanged,
+			PImprovement: &pImp,
+			SummaryPath:  "gs://bucket/comparisons/comp-json.json",
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:    "docs/readme_comprehension",
+					Delta: &d,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: 0.0,
+						Upper: 0.0,
+					},
+					Pairs: 20,
+					Label: v1alpha1.ComparisonTaskLabelUnchanged,
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := PrintComparisonJSON(&buf, comp); err != nil {
+		t.Fatalf("PrintComparisonJSON failed: %v", err)
+	}
+
+	var parsed ComparisonOutput
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("Failed to unmarshal JSON output: %v", err)
+	}
+	if parsed.Comparison != "comp-json" {
+		t.Errorf("Expected Comparison 'comp-json', got %s", parsed.Comparison)
+	}
+	if parsed.Verdict != "UNCHANGED" {
+		t.Errorf("Expected Verdict 'UNCHANGED', got %s", parsed.Verdict)
+	}
+	if parsed.PImprovement == nil || *parsed.PImprovement != 0.50 {
+		t.Errorf("Expected PImprovement 0.50, got %v", parsed.PImprovement)
+	}
+	if len(parsed.Tasks) != 1 || parsed.Tasks[0].Label != v1alpha1.ComparisonTaskLabelUnchanged {
+		t.Errorf("Expected 1 unchanged task, got %+v", parsed.Tasks)
+	}
+}

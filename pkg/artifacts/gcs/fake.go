@@ -16,6 +16,7 @@ package gcs
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -66,6 +67,31 @@ func (f *FakeStorageClient) WriteObject(ctx context.Context, bucket, object, con
 		Data:        dataCopy,
 	}
 	return nil
+}
+
+// ReadObject retrieves the object data from memory, bounded by maxBytes.
+func (f *FakeStorageClient) ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := bucket + "/" + object
+	if err, ok := f.Errors[key]; ok {
+		return nil, err
+	}
+	if err, ok := f.Errors[bucket+"/*"]; ok {
+		return nil, err
+	}
+
+	obj, ok := f.Objects[key]
+	if !ok {
+		return nil, fmt.Errorf("object %s not found", key)
+	}
+	if maxBytes > 0 && int64(len(obj.Data)) > maxBytes {
+		return nil, fmt.Errorf("object gs://%s/%s exceeds maximum size of %d bytes", bucket, object, maxBytes)
+	}
+	dataCopy := make([]byte, len(obj.Data))
+	copy(dataCopy, obj.Data)
+	return dataCopy, nil
 }
 
 // Close marks the client as closed.

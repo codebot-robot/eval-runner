@@ -220,5 +220,70 @@ Because `.evals/list` and `inspect eval` execute within untrusted sandboxes, the
 | Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` to disable). |
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
 | Artifact bucket | `--artifact-bucket` / ConfigMap `artifactBucket` | `""` (no-op sink) | GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored. |
+| Artifact directory | `--artifact-dir` | `""` (no-op sink) | Local filesystem directory for storing evaluation logs and comparison artifacts when GCS is not configured. |
 | Artifact upload size | `DefaultMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded Inspect log; uploads are capped to this size and recorded in `summary.json`. |
+| Artifact load size | `DefaultMaxLoadBytes` | `10485760` (10 MiB) | Maximum size of an Inspect log loaded from the sink for sample-level pairing. |
+
+---
+
+# Comparison (`evalrunner.gke-labs.dev/v1alpha1`)
+
+The `Comparison` custom resource specifies and reports a paired statistical evaluation between two `Run` resources (baseline and candidate) evaluated on identical sample inputs. The controller loads per-sample Inspect logs from the artifact sink, matches samples by sample ID, computes paired differences and confidence intervals, assigns task-level decision labels, and produces a run-level verdict with $P(\text{improvement})$.
+
+## Example
+
+```yaml
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Comparison
+metadata:
+  name: pr-418-eval
+  namespace: eval-runner
+spec:
+  baseline:
+    run: run-main-a81d0c4
+  candidate:
+    run: run-pr-418-3f9c2e1
+  equivalenceMargin: 0.05
+  tasks:
+  - triage/runbook_lookup
+  - triage/escalation_policy
+```
+
+## Spec (`spec`)
+
+| Field | Type | Description |
+|---|---|---|
+| `baseline` | `ComparisonRunRef` | **Required.** Reference to the baseline `Run` resource in the same namespace (`spec.baseline.run`). |
+| `candidate` | `ComparisonRunRef` | **Required.** Reference to the candidate (e.g. PR) `Run` resource in the same namespace (`spec.candidate.run`). |
+| `equivalenceMargin` | `float64` | Statistical equivalence margin $\delta$ (default: `0.05` for $\pm 0.05$). |
+| `tasks` | `[]string` | Optional allow-list of task IDs to evaluate. When omitted, all tasks present in both runs are compared. |
+
+## Status (`status`)
+
+| Field | Type | Description |
+|---|---|---|
+| `phase` | `ComparisonPhase` | High-level comparison lifecycle phase: `Pending`, `Running`, `Completed`, `Failed`. |
+| `verdict` | `ComparisonVerdict` | Aggregate run-level verdict: `IMPROVED`, `REGRESSED`, `UNCHANGED`, `INCONCLUSIVE`, `RUNNING`. |
+| `pImprovement` | `*float64` | Posterior probability that the candidate is a net improvement across evaluated tasks (range `[0, 1]`). |
+| `tasks` | `[]ComparisonTaskStatus` | Per-task paired comparison statistics and labels. |
+| `tasks[].id` | `string` | Unique task identifier (e.g. `triage/runbook_lookup`). |
+| `tasks[].baseRate` | `*float64` | Mean score or success rate on baseline samples. |
+| `tasks[].candidateRate` | `*float64` | Mean score or success rate on candidate samples. |
+| `tasks[].delta` | `*float64` | Mean paired difference ($\text{candidate} - \text{baseline}$). |
+| `tasks[].deltaCI` | `*DeltaConfidenceInterval` | 95% confidence interval on the delta (`lower`, `upper`). |
+| `tasks[].pairs` | `int` | Number of matched sample pairs evaluated. |
+| `tasks[].dropped` | `ComparisonDropped` | Samples dropped without matches (`candidate`, `baseline`). |
+| `tasks[].label` | `ComparisonTaskLabel` | Decision outcome: `improved`, `regressed`, `unchanged`, `inconclusive`, `running`. |
+| `summaryPath` | `string` | Storage path or URI where the complete paired table was stored (`comparisons/<name>.json`). |
+| `message` | `string` | Human-readable explanation of the aggregate verdict or failure. |
+
+## Printer Columns
+
+`kubectl get comparisons` displays:
+
+```text
+NAME          VERDICT     P(IMP)   BASELINE             CANDIDATE             AGE
+pr-418-eval   IMPROVED    0.98     run-main-a81d0c4     run-pr-418-3f9c2e1    2m
+```
+
 
