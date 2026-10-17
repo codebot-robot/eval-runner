@@ -214,11 +214,11 @@ Because `.evals/list` and `inspect eval` execute within untrusted sandboxes, the
 | Failure message length | `MaxMessageBytes` | `4096` | Truncated safely with `\n... [truncated]`. |
 | Stderr tail lines | `MaxStderrLines` | `10` | Only the most recent lines of stderr are retained. |
 | Stderr tail bytes | `MaxStderrTailBytes` | `3072` | Stderr tail is capped before inclusion in failure message. |
-| Discovery deadline | `--discovery-deadline` | `10m` | Overall discovery deadline exceeded; Run marked `Failed` and sandbox deleted. |
-| Execution deadline | `--execution-deadline` | `30m` | Overall sample execution deadline exceeded; Run marked `Failed` and sandboxes deleted. |
-| Max parallel tasks | `--max-parallel-tasks` | `4` | Caps concurrent task sandboxes executing at one time. |
-| Model credentials | `--model-secret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` to disable). |
+| Discovery deadline | `--discovery-deadline` / ConfigMap `discoveryDeadline` | `10m` | Overall discovery deadline exceeded; Run marked `Failed` and sandbox deleted. |
+| Execution deadline | `--execution-deadline` / ConfigMap `executionDeadline` | `30m` | Overall sample execution deadline exceeded; Run marked `Failed` and sandboxes deleted. |
+| Max parallel tasks | `--max-parallel-tasks` / ConfigMap `maxParallelTasks` | `4` | Caps concurrent task sandboxes executing at one time. |
+| Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` to disable). |
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
-| Artifact bucket | `--artifact-bucket` | `""` (no-op sink) | GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored. |
+| Artifact bucket | `--artifact-bucket` / ConfigMap `artifactBucket` | `""` (no-op sink) | GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored. |
 | Artifact upload size | `DefaultMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded Inspect log; uploads are capped to this size and recorded in `summary.json`. |
 

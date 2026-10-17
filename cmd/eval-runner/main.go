@@ -104,6 +104,16 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	rawFlags := controller.FlagsFromFlagSet(
+		flag.CommandLine,
+		artifactBucket,
+		modelSecret,
+		discoveryDeadline,
+		executionDeadline,
+		taskGracePeriod,
+		maxParallelTasks,
+	)
+
 	cfg := ctrl.GetConfigOrDie()
 
 	kubeClient, err := kubernetes.NewForConfig(cfg)
@@ -111,9 +121,6 @@ func main() {
 		setupLog.Error(err, "unable to create kubernetes client")
 		os.Exit(1)
 	}
-
-	// Operational visibility check for model credentials secret at startup
-	controller.CheckModelSecretAtStartup(context.Background(), kubeClient, sandboxNamespace, modelSecret, setupLog)
 
 	if sampleRunnerImage == "" {
 		podName := os.Getenv("POD_NAME")
@@ -192,6 +199,7 @@ func main() {
 			Cache: &client.CacheOptions{
 				DisableFor: []client.Object{
 					&corev1.Secret{},
+					&corev1.ConfigMap{},
 				},
 			},
 		},
@@ -202,6 +210,25 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	cfgCtx, cfgCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cfgCancel()
+
+	clusterConfig, err := controller.LoadAndResolveClusterConfig(
+		cfgCtx,
+		mgr.GetAPIReader(),
+		evalRunnerNamespace,
+		controller.DefaultConfigMapName,
+		rawFlags,
+		setupLog,
+	)
+	if err != nil {
+		setupLog.Error(err, "failed to load cluster configuration", "configmap", controller.DefaultConfigMapName, "namespace", evalRunnerNamespace)
+		os.Exit(1)
+	}
+
+	// Operational visibility check for model credentials secret at startup
+	controller.CheckModelSecretAtStartup(context.Background(), kubeClient, sandboxNamespace, clusterConfig.ModelSecret, setupLog)
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
@@ -218,10 +245,10 @@ func main() {
 	)
 
 	var sink artifacts.ArtifactSink = &artifacts.NoopSink{}
-	if artifactBucket != "" {
-		gcsSink, err := gcs.New(context.Background(), artifactBucket)
+	if clusterConfig.ArtifactBucket != "" {
+		gcsSink, err := gcs.New(context.Background(), clusterConfig.ArtifactBucket)
 		if err != nil {
-			setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", artifactBucket)
+			setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", clusterConfig.ArtifactBucket)
 			os.Exit(1)
 		}
 		sink = gcsSink
@@ -233,15 +260,15 @@ func main() {
 		Scheme:               mgr.GetScheme(),
 		ClientFactory:        clientFactory,
 		SandboxNamespace:     sandboxNamespace,
-		DiscoveryDeadline:    discoveryDeadline,
-		ExecutionDeadline:    executionDeadline,
-		TaskGracePeriod:      taskGracePeriod,
+		DiscoveryDeadline:    clusterConfig.DiscoveryDeadline,
+		ExecutionDeadline:    clusterConfig.ExecutionDeadline,
+		TaskGracePeriod:      clusterConfig.TaskGracePeriod,
 		MaxStdoutBytes:       maxStdoutBytes,
 		MaxStderrBytes:       maxStderrBytes,
 		MaxMessageBytes:      discovery.MaxMessageBytes,
 		MaxDiscoveryAttempts: maxDiscoveryAttempts,
-		MaxParallelTasks:     maxParallelTasks,
-		ModelSecret:          modelSecret,
+		MaxParallelTasks:     clusterConfig.MaxParallelTasks,
+		ModelSecret:          clusterConfig.ModelSecret,
 		SampleRunnerImage:    sampleRunnerImage,
 		ArtifactSink:         sink,
 	}
