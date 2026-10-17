@@ -121,6 +121,9 @@ func (h *Harness) DeployEvalRunner() {
 	// Apply RBAC
 	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/rbac.yaml"))
 
+	// Apply NetworkPolicy
+	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/sandbox-networkpolicy.yaml"))
+
 	// Apply Deployment with image rewritten for kind local image
 	deployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/runner-deployment.yaml"))
 	if err != nil {
