@@ -60,26 +60,6 @@ func TestSandboxNameForRun(t *testing.T) {
 	}
 }
 
-func TestBuildDiscoveryCommand(t *testing.T) {
-	url := "git://git-server/repo.git"
-	commit := "abc1234"
-	cmd := BuildDiscoveryCommand(url, commit)
-
-	if len(cmd) != 6 {
-		t.Fatalf("Unexpected cmd length %d: %v", len(cmd), cmd)
-	}
-	if cmd[0] != "sh" || cmd[1] != "-c" {
-		t.Errorf("Unexpected command prefix: %v", cmd)
-	}
-	expectedScript := `rm -rf /tmp/repo && git clone -q -- "$1" /tmp/repo && cd /tmp/repo && git checkout -q "$2" && ./.evals/list`
-	if cmd[2] != expectedScript {
-		t.Errorf("Unexpected script: %s", cmd[2])
-	}
-	if cmd[3] != "--" || cmd[4] != url || cmd[5] != commit {
-		t.Errorf("Unexpected positional args for command: %v", cmd)
-	}
-}
-
 func TestBuildSandbox(t *testing.T) {
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -137,6 +117,22 @@ func TestBuildSandbox(t *testing.T) {
 		t.Errorf("Pod SeccompProfile must be RuntimeDefault, got: %v", podSpec.SecurityContext.SeccompProfile)
 	}
 
+	// InitContainers check (topology B injection)
+	if len(podSpec.InitContainers) != 1 {
+		t.Fatalf("Expected 1 initContainer, got %d", len(podSpec.InitContainers))
+	}
+	initC := podSpec.InitContainers[0]
+	if initC.Name != SandboxdInitContainerName {
+		t.Errorf("Expected initContainer name %s, got %s", SandboxdInitContainerName, initC.Name)
+	}
+	if initC.Image != SandboxdImage {
+		t.Errorf("Expected sandboxd image %s, got %s", SandboxdImage, initC.Image)
+	}
+	if initC.SecurityContext == nil || initC.SecurityContext.RunAsNonRoot == nil || !*initC.SecurityContext.RunAsNonRoot {
+		t.Errorf("InitContainer must run as non-root")
+	}
+
+	// App container check
 	if len(podSpec.Containers) != 1 {
 		t.Fatalf("Expected 1 container, got %d", len(podSpec.Containers))
 	}
@@ -161,11 +157,46 @@ func TestBuildSandbox(t *testing.T) {
 		t.Errorf("Container SeccompProfile must be RuntimeDefault, got: %v", c.SecurityContext.SeccompProfile)
 	}
 
+	// Command should run sandboxd
+	if len(c.Command) == 0 || !strings.Contains(c.Command[0], "sandboxd") {
+		t.Errorf("Expected container command to run sandboxd, got: %v", c.Command)
+	}
+
+	// Ports: 8080 (REST) and 9090 (gRPC)
+	if len(c.Ports) != 2 {
+		t.Fatalf("Expected 2 container ports, got %d", len(c.Ports))
+	}
+	var has8080, has9090 bool
+	for _, p := range c.Ports {
+		if p.ContainerPort == 8080 {
+			has8080 = true
+		}
+		if p.ContainerPort == 9090 {
+			has9090 = true
+		}
+	}
+	if !has8080 || !has9090 {
+		t.Errorf("Expected ports 8080 and 9090, got: %v", c.Ports)
+	}
+
+	// Readiness probe
+	if c.ReadinessProbe == nil || c.ReadinessProbe.HTTPGet == nil {
+		t.Fatalf("Expected HTTPGet readiness probe")
+	}
+	if c.ReadinessProbe.HTTPGet.Path != "/v1/health" || c.ReadinessProbe.HTTPGet.Port.IntValue() != 8080 {
+		t.Errorf("Expected readiness probe GET /v1/health on 8080, got: %+v", c.ReadinessProbe.HTTPGet)
+	}
+
 	// Resources checks
 	if c.Resources.Requests.Cpu().IsZero() || c.Resources.Requests.Memory().IsZero() {
 		t.Errorf("Resource requests must be set, got: %+v", c.Resources.Requests)
 	}
 	if c.Resources.Limits.Cpu().IsZero() || c.Resources.Limits.Memory().IsZero() {
 		t.Errorf("Resource limits must be set, got: %+v", c.Resources.Limits)
+	}
+
+	// Volumes
+	if len(podSpec.Volumes) != 2 {
+		t.Fatalf("Expected 2 volumes, got %d", len(podSpec.Volumes))
 	}
 }
