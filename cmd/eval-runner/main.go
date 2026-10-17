@@ -151,6 +151,7 @@ func main() {
 
 	reconciler := &controller.RunReconciler{
 		Client:               mgr.GetClient(),
+		APIReader:            mgr.GetAPIReader(),
 		Scheme:               mgr.GetScheme(),
 		ClientFactory:        clientFactory,
 		SandboxNamespace:     sandboxNamespace,

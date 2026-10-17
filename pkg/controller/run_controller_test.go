@@ -139,7 +139,7 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -231,7 +231,7 @@ func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -320,7 +320,7 @@ func TestReconcileControllerRestartMidReconcile(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -435,7 +435,7 @@ func TestReconcileDeleteRunMidDiscoveryRemovesSandbox(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -484,7 +484,7 @@ func TestReconcileDeletedRunNotFoundCleansUpSandbox(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun(runName)
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -535,7 +535,7 @@ func TestReconcileTerminalRunWithLeftoverSandboxRemovesSandbox(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun(runName)
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -588,7 +588,7 @@ func TestReconcileStatusUpdateConflictDoesNotRerunDiscovery(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun(runName)
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -681,7 +681,7 @@ func newDiscoveringRunFixture(t *testing.T, clientInstance sandboxclient.Client)
 	}
 
 	sandboxName := discovery.SandboxNameForRun(runName)
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -892,7 +892,7 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run-retry")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1010,7 +1010,7 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run-exhaust")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1197,7 +1197,7 @@ func TestReconcilePodNeverReadyPastDeadline(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1265,7 +1265,7 @@ func TestReconcilePodSucceededFailsAndCleansUp(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1339,7 +1339,7 @@ func TestReconcilePodImagePullBackOffSurfacesWaitingReason(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1421,7 +1421,7 @@ func TestReconcilePodUnschedulableSurfacesPodScheduledFalse(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1501,7 +1501,7 @@ func TestReconcileDeadlineSurvivesControllerRestart(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1593,7 +1593,7 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1761,7 +1761,7 @@ func TestReconcileSandboxReadyConditionUsed(t *testing.T) {
 	}
 
 	sandboxName := discovery.SandboxNameForRun("test-run")
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 	sb.Status.Conditions = []metav1.Condition{
 		{
 			Type:   string(sandboxv1beta1.SandboxConditionReady),
@@ -1835,7 +1835,7 @@ func TestReconcilePodAdoptedFromAnnotation(t *testing.T) {
 		},
 	}
 
-	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
 	sb.Annotations = map[string]string{
 		sandboxv1beta1.SandboxPodNameAnnotation: "custom-adopted-pod",
 	}
@@ -1859,7 +1859,7 @@ func TestReconcilePodAdoptedFromAnnotation(t *testing.T) {
 
 	var dialedPodIP string
 	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
-	factory := sandboxclient.FactoryFunc(func(podIP string) (sandboxclient.Client, error) {
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
 		dialedPodIP = podIP
 		return &sandboxclient.FakeClient{ListStdout: validManifestJSON}, nil
 	})
@@ -1918,5 +1918,396 @@ func TestRequeueDelay(t *testing.T) {
 	dl3 := metav1.NewTime(now.Add(-5 * time.Second))
 	if got := r.requeueDelay(&dl3); got != 0 {
 		t.Errorf("requeueDelay(-5s) = %v, want 0", got)
+	}
+}
+
+func TestReconcileBearerAuthSecretLifecycleAndRestart(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-auth-lifecycle",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+	}
+
+	var passedToken string
+	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		var o sandboxclient.ClientOptions
+		for _, opt := range opts {
+			opt(&o)
+		}
+		passedToken = o.AuthToken
+		return &sandboxclient.FakeClient{ListStdout: validManifestJSON}, nil
+	})
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler1 := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		ClientFactory:    factory,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-auth-lifecycle"}}
+
+	// 1. Initial reconcile: Pending -> Discovering
+	// Sandbox and label-free Secret should be created
+	res, err := reconciler1.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter when sandbox was created")
+	}
+
+	// Verify label-free Secret in eval-runner namespace
+	secretName := discovery.AuthSecretNameForRun(run.Name)
+	var authSecret corev1.Secret
+	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: secretName}, &authSecret); err != nil {
+		t.Fatalf("Failed to get auth Secret in eval-runner namespace: %v", err)
+	}
+	if len(authSecret.Labels) != 0 {
+		t.Errorf("Expected Secret to be label-free, but got labels: %+v", authSecret.Labels)
+	}
+	secretToken := string(authSecret.Data["token"])
+	if secretToken == "" {
+		t.Fatalf("Expected Secret to contain non-empty token")
+	}
+
+	// Verify Sandbox created with matching --auth-token-sha256 digest and LabelSandbox: "true"
+	sandboxName := discovery.SandboxNameForRun(run.Name)
+	var createdSb sandboxv1beta1.Sandbox
+	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &createdSb); err != nil {
+		t.Fatalf("Failed to get created Sandbox: %v", err)
+	}
+	if createdSb.Labels[discovery.LabelSandbox] != "true" {
+		t.Errorf("Expected Sandbox label %s=true, got: %s", discovery.LabelSandbox, createdSb.Labels[discovery.LabelSandbox])
+	}
+	if createdSb.Spec.PodTemplate.ObjectMeta.Labels[discovery.LabelSandbox] != "true" {
+		t.Errorf("Expected PodTemplate label %s=true, got: %s", discovery.LabelSandbox, createdSb.Spec.PodTemplate.ObjectMeta.Labels[discovery.LabelSandbox])
+	}
+
+	expectedDigest := discovery.AuthTokenDigest(secretToken)
+	expectedFlag := "--auth-token-sha256=" + expectedDigest
+	containers := createdSb.Spec.PodTemplate.Spec.Containers
+	if len(containers) != 1 {
+		t.Fatalf("Expected 1 container, got %d", len(containers))
+	}
+	var foundAuthFlag bool
+	for _, arg := range containers[0].Command {
+		if arg == expectedFlag {
+			foundAuthFlag = true
+			break
+		}
+	}
+	if !foundAuthFlag {
+		t.Errorf("Expected container command to contain %q, got: %v", expectedFlag, containers[0].Command)
+	}
+
+	// 2. Simulate controller restart by instantiating a fresh RunReconciler without memory state
+	reconciler2 := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		ClientFactory:    factory,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	// Create backing pod in Ready state
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+			Labels:    createdSb.Spec.PodTemplate.ObjectMeta.Labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.55",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	if err := client.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Reconcile with restarted controller: should load token from Secret and present to client factory
+	res, err = reconciler2.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error after restart: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue after successful discovery")
+	}
+
+	if passedToken != secretToken {
+		t.Errorf("Expected factory to receive token %q from Secret, got %q", secretToken, passedToken)
+	}
+
+	// Verify Run is Discovered
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
+	}
+
+	// 3. Verify Sandbox AND Secret are cleaned up after completion
+	var checkSb sandboxv1beta1.Sandbox
+	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb); err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected Sandbox to be deleted after discovery, got err: %v", err)
+	}
+	var checkSecret corev1.Secret
+	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: secretName}, &checkSecret); err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected auth Secret to be deleted after discovery, got err: %v", err)
+	}
+}
+
+func TestReconcileAuthSecretCleanedUpOnFailure(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-auth-failure",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "deadbeef00000000000000000000000000000000",
+			},
+		},
+	}
+
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		return &sandboxclient.FakeClient{
+			CloneErr: errors.New("fatal: repository not found"),
+		}, nil
+	})
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		ClientFactory:    factory,
+		SandboxNamespace: "eval-runner-sandbox",
+		Sleep:            func(ctx context.Context, d time.Duration) error { return nil },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-auth-failure"}}
+
+	// 1. First reconcile: create sandbox and secret
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	sandboxName := discovery.SandboxNameForRun(run.Name)
+	secretName := discovery.AuthSecretNameForRun(run.Name)
+
+	// Verify Secret was created
+	var secret corev1.Secret
+	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: secretName}, &secret); err != nil {
+		t.Fatalf("Expected Secret to exist: %v", err)
+	}
+
+	// 2. Add ready pod and reconcile to fail
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.66",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	if err := client.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	// 3. Verify Secret was cleaned up on failure
+	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: secretName}, &secret); err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected auth Secret to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcileUnauthenticatedFailsFastWithoutRetry(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-unauth",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+	}
+
+	fakeClient := &sandboxclient.FakeClient{
+		CloneErr: status.Error(codes.Unauthenticated, "missing or invalid bearer token"),
+	}
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		return fakeClient, nil
+	})
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		ClientFactory:    factory,
+		SandboxNamespace: "eval-runner-sandbox",
+		Sleep:            func(ctx context.Context, d time.Duration) error { return nil },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-unauth"}}
+
+	// 1. Initial reconcile: create sandbox and secret
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	sandboxName := discovery.SandboxNameForRun(run.Name)
+
+	// 2. Add ready pod
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.77",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	if err := client.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// 3. Reconcile: unauthenticated error should fail immediately on attempt 1 without retry
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	cloneCount := 0
+	for _, call := range fakeClient.Calls {
+		if len(call.Command) > 1 && call.Command[1] == "clone" {
+			cloneCount++
+		}
+	}
+	if cloneCount != 1 {
+		t.Errorf("Expected exactly 1 clone call (no retries for Unauthenticated), got %d", cloneCount)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "unauthenticated") {
+		t.Errorf("Expected message to mention unauthenticated, got: %s", updatedRun.Status.Message)
+	}
+}
+
+func TestReconcileExistingSecretLacksTokenFails(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-bad-secret",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+	}
+
+	// Pre-create Secret with no token data
+	secretName := discovery.AuthSecretNameForRun(run.Name)
+	badSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: "eval-runner",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, badSecret).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-bad-secret"}}
+
+	// Reconcile should fail because existing Secret lacks a token
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err == nil {
+		t.Fatalf("Expected reconcile to fail when existing Secret lacks token")
+	}
+	if !strings.Contains(err.Error(), "lacks a token") {
+		t.Errorf("Expected error to mention 'lacks a token', got: %v", err)
 	}
 }

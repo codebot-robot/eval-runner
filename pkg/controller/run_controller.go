@@ -16,9 +16,12 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -101,6 +104,7 @@ func defaultSleep(ctx context.Context, d time.Duration) error {
 // RunReconciler reconciles a Run object
 type RunReconciler struct {
 	client.Client
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	ClientFactory sandboxclient.Factory
 	// SandboxClient can be set directly to override ClientFactory (e.g. for unit testing).
@@ -127,6 +131,128 @@ type RunReconciler struct {
 
 	// Sleep pauses execution between retries. In tests, this can be overridden to return immediately.
 	Sleep func(ctx context.Context, d time.Duration) error
+
+	mu     sync.RWMutex
+	tokens map[string]string // key: namespace/sandboxName -> bearer token
+}
+
+func (r *RunReconciler) getAuthToken(key string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.tokens == nil {
+		return "", false
+	}
+	t, ok := r.tokens[key]
+	return t, ok
+}
+
+func (r *RunReconciler) setAuthToken(key, token string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tokens == nil {
+		r.tokens = make(map[string]string)
+	}
+	r.tokens[key] = token
+}
+
+func (r *RunReconciler) deleteAuthToken(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tokens != nil {
+		delete(r.tokens, key)
+	}
+}
+
+func generateAuthToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate auth token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func (r *RunReconciler) ensureAuthToken(ctx context.Context, run *v1alpha1.Run, sandboxKey types.NamespacedName) (string, error) {
+	if token, ok := r.getAuthToken(sandboxKey.String()); ok && token != "" {
+		return token, nil
+	}
+
+	secretNamespace := run.Namespace
+	if secretNamespace == "" {
+		secretNamespace = discovery.DefaultControllerNamespace
+	}
+	secretName := discovery.AuthSecretNameForRun(run.Name)
+	secretKey := types.NamespacedName{Namespace: secretNamespace, Name: secretName}
+
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+
+	var secret corev1.Secret
+	if err := reader.Get(ctx, secretKey, &secret); err == nil {
+		if tokenBytes, ok := secret.Data["token"]; ok && len(tokenBytes) > 0 {
+			token := string(tokenBytes)
+			r.setAuthToken(sandboxKey.String(), token)
+			return token, nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get auth secret: %w", err)
+	}
+
+	token, err := generateAuthToken()
+	if err != nil {
+		return "", err
+	}
+
+	secret = corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: secretNamespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token": []byte(token),
+		},
+	}
+	if r.Scheme != nil {
+		if err := controllerutil.SetControllerReference(run, &secret, r.Scheme); err != nil {
+			return "", fmt.Errorf("failed to set controller reference on auth secret: %w", err)
+		}
+	}
+
+	if err := r.Create(ctx, &secret); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("failed to create auth secret: %w", err)
+		}
+		if getErr := reader.Get(ctx, secretKey, &secret); getErr != nil {
+			return "", fmt.Errorf("failed to get existing auth secret: %w", getErr)
+		}
+		tokenBytes, ok := secret.Data["token"]
+		if !ok || len(tokenBytes) == 0 {
+			return "", fmt.Errorf("existing auth secret %s lacks a token", secretKey)
+		}
+		token = string(tokenBytes)
+	}
+
+	r.setAuthToken(sandboxKey.String(), token)
+	return token, nil
+}
+
+func (r *RunReconciler) cleanupAuthToken(ctx context.Context, runNamespace, runName string, sandboxKey types.NamespacedName) {
+	r.deleteAuthToken(sandboxKey.String())
+	if runNamespace == "" {
+		runNamespace = discovery.DefaultControllerNamespace
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.AuthSecretNameForRun(runName),
+			Namespace: runNamespace,
+		},
+	}
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("Failed to delete auth secret", "secret", secret.Name, "error", err)
+	}
 }
 
 func (r *RunReconciler) now() time.Time {
@@ -264,8 +390,14 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// Step 1: Create sandbox if it does not exist
 	if !sandboxExists {
+		authToken, tokenErr := r.ensureAuthToken(ctx, &run, sandboxKey)
+		if tokenErr != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to ensure auth token: %w", tokenErr)
+		}
+		tokenDigest := discovery.AuthTokenDigest(authToken)
+
 		logger.Info("Creating discovery sandbox", "sandbox", sandboxName, "namespace", sandboxNamespace)
-		desiredSandbox := discovery.BuildSandbox(&run, sandboxNamespace)
+		desiredSandbox := discovery.BuildSandbox(&run, sandboxNamespace, tokenDigest)
 		if err := r.Create(ctx, desiredSandbox); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
 				return ctrl.Result{}, fmt.Errorf("failed to create sandbox: %w", err)
@@ -406,8 +538,16 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				sandboxclient.WithStderrLimit(r.maxStderrBytes()),
 			)
 		}
+		authToken, tokenErr := r.ensureAuthToken(ctx, &run, sandboxKey)
+		if tokenErr != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to retrieve auth token for sandbox: %w", tokenErr)
+		}
+		var opts []sandboxclient.Option
+		if authToken != "" {
+			opts = append(opts, sandboxclient.WithAuthToken(authToken))
+		}
 		var clientErr error
-		sbClient, clientErr = factory.NewClient(pod.Status.PodIP)
+		sbClient, clientErr = factory.NewClient(pod.Status.PodIP, opts...)
 		if clientErr != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to create sandbox client for %s: %w", pod.Status.PodIP, clientErr)
 		}
@@ -468,6 +608,10 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		})
 
 		if cloneErr == nil && cloneRes != nil && cloneRes.ExitCode == 0 {
+			break
+		}
+
+		if status.Code(cloneErr) == codes.Unauthenticated {
 			break
 		}
 
@@ -538,7 +682,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 
 		var msg string
-		if tail != "" {
+		if status.Code(cloneErr) == codes.Unauthenticated {
+			msg = fmt.Sprintf("step git clone failed: unauthenticated: %v", cloneErr)
+		} else if tail != "" {
 			msg = fmt.Sprintf("step git clone failed after %s: exit code %d: %s", formatAttemptCount(cloneAttempts), exitCode, tail)
 		} else if cloneErr != nil {
 			msg = fmt.Sprintf("step git clone failed after %s: %v", formatAttemptCount(cloneAttempts), cloneErr)
@@ -557,6 +703,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		Cwd:     "repo",
 	})
 	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
+		if status.Code(checkoutErr) == codes.Unauthenticated {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr))
+		}
 		var checkoutStderr string
 		var exitCode int
 		if checkoutRes != nil {
@@ -608,6 +757,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			return r.failRun(ctx, &run, &sandbox, msg)
 		}
 
+		if status.Code(listErr) == codes.Unauthenticated {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: unauthenticated: %v", listErr))
+		}
 		if isNotFoundError(listErr) {
 			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: missing .evals/list: %v", listErr))
 		}
@@ -700,6 +852,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := r.Delete(ctx, &sandbox); err != nil && !apierrors.IsNotFound(err) {
 		logger.Error(err, "failed to delete sandbox", "sandbox", sandbox.Name)
 	}
+	r.cleanupAuthToken(ctx, run.Namespace, run.Name, sandboxKey)
 
 	return ctrl.Result{}, nil
 }
@@ -708,9 +861,16 @@ func (r *RunReconciler) deleteSandboxIfMatching(ctx context.Context, sandboxKey 
 	logger := log.FromContext(ctx)
 	var sb sandboxv1beta1.Sandbox
 	if err := r.Get(ctx, sandboxKey, &sb); err != nil {
+		if apierrors.IsNotFound(err) {
+			if _, ok := r.getAuthToken(sandboxKey.String()); ok {
+				r.cleanupAuthToken(ctx, runNamespace, runName, sandboxKey)
+			}
+			return nil
+		}
 		return client.IgnoreNotFound(err)
 	}
 	if sb.Labels[discovery.LabelRunName] == runName && sb.Labels[discovery.LabelRunNamespace] == runNamespace {
+		r.cleanupAuthToken(ctx, runNamespace, runName, sandboxKey)
 		if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "failed to delete sandbox", "sandbox", sandboxKey.Name)
 			return err
@@ -754,6 +914,15 @@ func (r *RunReconciler) failRun(ctx context.Context, run *v1alpha1.Run, sandbox 
 			logger := log.FromContext(ctx)
 			logger.Error(err, "failed to delete sandbox on failure", "sandbox", sandbox.Name)
 		}
+		sandboxKey := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
+		r.cleanupAuthToken(ctx, run.Namespace, run.Name, sandboxKey)
+	} else {
+		sbNamespace := r.SandboxNamespace
+		if sbNamespace == "" {
+			sbNamespace = discovery.DefaultSandboxNamespace
+		}
+		sandboxKey := types.NamespacedName{Namespace: sbNamespace, Name: discovery.SandboxNameForRun(run.Name)}
+		r.cleanupAuthToken(ctx, run.Namespace, run.Name, sandboxKey)
 	}
 
 	return ctrl.Result{}, nil

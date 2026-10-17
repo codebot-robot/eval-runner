@@ -75,7 +75,7 @@ func TestBuildSandbox(t *testing.T) {
 		},
 	}
 
-	sb := BuildSandbox(run, "eval-runner-sandbox")
+	sb := BuildSandbox(run, "eval-runner-sandbox", AuthTokenDigest("test"))
 
 	if sb.Name != "discovery-test-run-123" {
 		t.Errorf("Unexpected sandbox name: %s", sb.Name)
@@ -96,6 +96,12 @@ func TestBuildSandbox(t *testing.T) {
 	}
 	if sb.Labels[LabelRole] != "discovery" {
 		t.Errorf("Missing/incorrect %s label: %s", LabelRole, sb.Labels[LabelRole])
+	}
+	if sb.Labels[LabelSandbox] != "true" {
+		t.Errorf("Missing/incorrect %s label: %s", LabelSandbox, sb.Labels[LabelSandbox])
+	}
+	if sb.Spec.PodTemplate.ObjectMeta.Labels[LabelSandbox] != "true" {
+		t.Errorf("Missing/incorrect pod template %s label: %s", LabelSandbox, sb.Spec.PodTemplate.ObjectMeta.Labels[LabelSandbox])
 	}
 
 	// Zero-privilege checks (concept §3.2)
@@ -199,4 +205,74 @@ func TestBuildSandbox(t *testing.T) {
 	if len(podSpec.Volumes) != 2 {
 		t.Fatalf("Expected 2 volumes, got %d", len(podSpec.Volumes))
 	}
+}
+
+func TestBuildSandbox_WithAuthToken(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-auth",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "git://git-server/repo.git",
+			},
+		},
+	}
+
+	token := "test-secret-token-12345"
+	digest := AuthTokenDigest(token)
+	if digest == "" || len(digest) != 64 {
+		t.Fatalf("Expected 64-char hex digest, got %q", digest)
+	}
+
+	sb := BuildSandbox(run, "eval-runner-sandbox", digest)
+	containers := sb.Spec.PodTemplate.Spec.Containers
+	if len(containers) != 1 {
+		t.Fatalf("Expected 1 container, got %d", len(containers))
+	}
+
+	cmd := containers[0].Command
+	expectedFlag := "--auth-token-sha256=" + digest
+	var found bool
+	for _, arg := range cmd {
+		if arg == expectedFlag {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected command to contain %q, got: %v", expectedFlag, cmd)
+	}
+}
+
+func TestAuthSecretNameForRun(t *testing.T) {
+	name := AuthSecretNameForRun("short-name")
+	if name != "discovery-auth-short-name" {
+		t.Errorf("Unexpected secret name: %s", name)
+	}
+
+	longName := strings.Repeat("a", 100)
+	gotLong := AuthSecretNameForRun(longName)
+	if len(gotLong) > 63 {
+		t.Errorf("Secret name exceeds 63 characters: %d (%s)", len(gotLong), gotLong)
+	}
+	if !strings.HasPrefix(gotLong, "discovery-auth-") {
+		t.Errorf("Secret name missing prefix: %s", gotLong)
+	}
+}
+
+func TestBuildSandbox_EmptyAuthTokenPanics(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-empty-token",
+			Namespace: "eval-runner",
+		},
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("Expected BuildSandbox to panic on empty authTokenDigest")
+		}
+	}()
+	BuildSandbox(run, "eval-runner-sandbox", "")
 }
