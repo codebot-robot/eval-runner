@@ -50,6 +50,9 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -78,3 +81,6 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+      volumes:
+      - name: tmp
+        emptyDir: {}

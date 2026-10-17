@@ -81,6 +81,7 @@ func main() {
 	var modelSecret string
 	var sampleRunnerImage string
 	var artifactBucket string
+	var artifactDir string
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -95,6 +96,7 @@ func main() {
 	flag.StringVar(&modelSecret, "model-secret", controller.DefaultModelSecret, "Name of Secret in sandbox namespace containing model credentials")
 	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
+	flag.StringVar(&artifactDir, "artifact-dir", "", "Local filesystem directory for storing evaluation artifacts")
 
 	opts := zap.Options{
 		Development: true,
@@ -107,6 +109,7 @@ func main() {
 	rawFlags := controller.FlagsFromFlagSet(
 		flag.CommandLine,
 		artifactBucket,
+		artifactDir,
 		modelSecret,
 		discoveryDeadline,
 		executionDeadline,
@@ -170,11 +173,16 @@ func main() {
 	}
 
 	// Least-privilege namespaced caching per object:
-	// Runs are only cached in evalRunnerNamespace.
+	// Runs and Comparisons are only cached in evalRunnerNamespace.
 	// Sandboxes and Pods are only cached in sandboxNamespace.
 	cacheOptions := cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
 			&v1alpha1.Run{}: {
+				Namespaces: map[string]cache.Config{
+					evalRunnerNamespace: {},
+				},
+			},
+			&v1alpha1.Comparison{}: {
 				Namespaces: map[string]cache.Config{
 					evalRunnerNamespace: {},
 				},
@@ -252,6 +260,8 @@ func main() {
 			os.Exit(1)
 		}
 		sink = gcsSink
+	} else if clusterConfig.ArtifactDir != "" {
+		sink = &artifacts.LocalDirSink{BaseDir: clusterConfig.ArtifactDir}
 	}
 
 	reconciler := &controller.RunReconciler{
@@ -275,6 +285,18 @@ func main() {
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Run")
+		os.Exit(1)
+	}
+
+	comparisonReconciler := &controller.ComparisonReconciler{
+		Client:       mgr.GetClient(),
+		APIReader:    mgr.GetAPIReader(),
+		Scheme:       mgr.GetScheme(),
+		ArtifactSink: sink,
+	}
+
+	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Comparison")
 		os.Exit(1)
 	}
 

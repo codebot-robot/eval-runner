@@ -38,6 +38,8 @@ const (
 
 	// ConfigMapKeyArtifactBucket is the ConfigMap key for the GCS artifact bucket.
 	ConfigMapKeyArtifactBucket = "artifactBucket"
+	// ConfigMapKeyArtifactDir is the ConfigMap key for the local artifact directory.
+	ConfigMapKeyArtifactDir = "artifactDir"
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.
 	ConfigMapKeyDiscoveryDeadline = "discoveryDeadline"
 	// ConfigMapKeyExecutionDeadline is the ConfigMap key for sample execution deadline.
@@ -54,6 +56,7 @@ const (
 // explicit flag > ConfigMap key > built-in default.
 type ClusterConfig struct {
 	ArtifactBucket    string
+	ArtifactDir       string
 	DiscoveryDeadline time.Duration
 	ExecutionDeadline time.Duration
 	MaxParallelTasks  int
@@ -64,6 +67,7 @@ type ClusterConfig struct {
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
 type RawFlags struct {
 	ArtifactBucket    string
+	ArtifactDir       string
 	DiscoveryDeadline time.Duration
 	ExecutionDeadline time.Duration
 	MaxParallelTasks  int
@@ -84,6 +88,7 @@ func (f RawFlags) IsExplicit(name string) bool {
 func DefaultClusterConfig() ClusterConfig {
 	return ClusterConfig{
 		ArtifactBucket:    "",
+		ArtifactDir:       "",
 		DiscoveryDeadline: DefaultDiscoveryDeadline,
 		ExecutionDeadline: DefaultExecutionDeadline,
 		MaxParallelTasks:  DefaultMaxParallelTasks,
@@ -95,7 +100,7 @@ func DefaultClusterConfig() ClusterConfig {
 // FlagsFromFlagSet extracts RawFlags from a parsed flag.FlagSet.
 func FlagsFromFlagSet(
 	fs *flag.FlagSet,
-	artifactBucket, modelSecret string,
+	artifactBucket, artifactDir, modelSecret string,
 	discoveryDeadline, executionDeadline, taskGracePeriod time.Duration,
 	maxParallelTasks int,
 ) RawFlags {
@@ -105,6 +110,7 @@ func FlagsFromFlagSet(
 	})
 	return RawFlags{
 		ArtifactBucket:    artifactBucket,
+		ArtifactDir:       artifactDir,
 		DiscoveryDeadline: discoveryDeadline,
 		ExecutionDeadline: executionDeadline,
 		MaxParallelTasks:  maxParallelTasks,
@@ -139,6 +145,12 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			} else {
 				cfg.ArtifactBucket = ""
 			}
+		}
+
+		// 1b. artifactDir
+		if val, ok := cm.Data[ConfigMapKeyArtifactDir]; ok {
+			trimmed := strings.TrimSpace(val)
+			cfg.ArtifactDir = trimmed
 		}
 
 		// 2. discoveryDeadline
@@ -218,6 +230,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	// Apply explicit flag overrides
 	if flags.IsExplicit("artifact-bucket") {
 		cfg.ArtifactBucket = flags.ArtifactBucket
+	}
+	if flags.IsExplicit("artifact-dir") {
+		cfg.ArtifactDir = flags.ArtifactDir
 	}
 	if flags.IsExplicit("discovery-deadline") {
 		cfg.DiscoveryDeadline = flags.DiscoveryDeadline
