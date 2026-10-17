@@ -39,11 +39,13 @@ The system consists of the following components running inside a Kubernetes clus
 |  |  +--------------+--------------+  |    |  +-------------+--------------+  |  |
 |  |                 | watches/updates |    |                | creates/deletes |  |
 |  |  +--------------v--------------+  |    |  +-------------v--------------+  |  |
-|  |  | eval-runner Controller      +--------->| Discovery Pod (agent)      |  |  |
-|  |  | (cmd/eval-runner)           |  SPDY |  | - alpine/git:v2.47.2       |  |  |
-|  |  +-----------------------------+  exec |  | - automountToken: false    |  |  |
-|  |                                   |    |  | - runAsUser: 1000          |  |  |
-|  +-----------------------------------+    |  | - drop: [ALL]              |  |  |
+|  |  | eval-runner Controller      +--------->| Discovery Pod              |  |  |
+|  |  | (cmd/eval-runner)           |  gRPC |  | - init: inject sandboxd    |  |  |
+|  |  +-----------------------------+  :9090|  | - agent: alpine/git:v2.47.2|  |  |
+|  |                                   |  REST |  |   + sandboxd runtime daemon|  |  |
+|  +-----------------------------------+  :8080|  | - automountToken: false    |  |  |
+|                                           |  | - runAsUser: 1000          |  |  |
+|                                           |  | - drop: [ALL]              |  |  |
 |                                           |  | - seccomp: RuntimeDefault  |  |  |
 |                                           |  +----------------------------+  |  |
 |                                           +----------------------------------+  |
@@ -60,8 +62,8 @@ Key implementation details:
   - `v1alpha1.Run` objects are cached solely in the controller namespace (`eval-runner`).
   - `sandboxv1beta1.Sandbox` and core `v1.Pod` objects are cached solely in the sandbox namespace (`eval-runner-sandbox`).
 - **Health probes**: Exposes HTTP health endpoints on port `:8081` (`/healthz` and `/readyz`).
-- **Pod execution**: Uses an `SPDYPodExecutor` backed by `k8s.io/client-go/tools/remotecommand` to stream `exec` commands into running sandbox containers.
-- **Configurable limits**: Command-line flags `--max-stdout-bytes` (default: 1 MiB) and `--max-stderr-bytes` (default: 64 KiB) configure buffer caps for exec streams.
+- **Pod execution**: Drives discovery through a typed client (`pkg/sandboxclient`) connecting directly to the sandbox pod IP: gRPC `ProcessService` on `:9090` and REST `FilesystemService` on `:8080`. Controller RBAC drops `pods/exec`.
+- **Configurable limits**: Command-line flags `--max-stdout-bytes` (default: 1 MiB) and `--max-stderr-bytes` (default: 64 KiB) configure buffer caps for captured process streams.
 
 ### The `Run` CRD (`evalrunner.gke-labs.dev/v1alpha1`)
 
@@ -110,7 +112,10 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
       |              Create Sandbox in eval-runner-sandbox
       v
 (Discovering) -----> Wait for backing Pod Ready
-      |              Exec clone & .evals/list (5m deadline)
+      |              Drive step-based discovery via sandboxd (5m deadline)
+      |                Step 1: git clone -- <url> repo (retry up to N times)
+      |                Step 2: git checkout <commit> (no retry)
+      |                Step 3: ./.evals/list (no retry, typed failures)
       |              Enforce stdout (1 MiB) & stderr (64 KiB) limits
       |              Validate manifest
       |
@@ -128,19 +133,24 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
    - The overall discovery deadline check runs before checking whether the pod exists; if expired, the Run is failed immediately and the sandbox is cleaned up.
    - If the pod is not yet ready, the controller requeues after `min(2s, remaining deadline)`.
    - If the pod enters `PodFailed` or `PodSucceeded` unexpectedly, or if the Sandbox condition `Finished=True`, the Run transitions to `Failed`.
-   - Readiness is satisfied via the Sandbox `Ready` condition OR backing pod readiness.
-3. **Execution**:
-   - Once the pod is ready, the controller executes the discovery command inside the `agent` container:
-     ```sh
-     rm -rf /tmp/repo && git clone -q -- "$1" /tmp/repo && cd /tmp/repo && git checkout -q "$2" && ./.evals/list
-     ```
-   - **Timeout**: The exec command context timeout is derived from the remaining discovery deadline budget (capped at `5*time.Minute`). Transient retry attempts and backoff sleep also respect this deadline.
+   - Readiness is satisfied via the Sandbox `Ready` condition OR backing pod readiness (which reflects sandboxd's `/v1/health` HTTP probe).
+3. **Execution as Discrete Steps**:
+   - Once the pod is ready, the controller dials the pod IP directly on `:9090` using `pkg/sandboxclient` and executes discovery through discrete steps:
+     - **Step 1 (`git clone`)**: `git clone -- <url> repo`. If the clone exits non-zero, it retries up to N times (default: 5, configured via `--max-discovery-attempts`) with backoff (5s, 10s, 20s, 40s), cleaning up any partial directory before retrying. All attempts are bounded by the discovery deadline. If all attempts are exhausted, the Run fails and the attempt count is recorded in `status.message`.
+     - **Step 2 (`git checkout`)**: `git checkout <commit>` with working directory `repo`. If checkout exits non-zero, the Run fails immediately without retry (commit not found is permanent).
+     - **Step 3 (`./.evals/list`)**: Executed inside `repo` without retries. Outcomes are typed into distinct failure messages:
+       - Missing executable (`codes.NotFound` / not found)
+       - Non-executable permissions (`codes.PermissionDenied` / permission denied)
+       - Non-zero exit code
+       - Output limit exceeded
+       - Invalid JSON
+   - **Timeout**: The per-step execution context timeout is derived from the remaining discovery deadline budget (capped at `5*time.Minute`).
 4. **Output Capture and Limits**:
-   - Exec streams are captured through `LimitWriter` instances (`pkg/discovery/limit_writer.go`).
-   - If stdout exceeds 1 MiB (`MaxStdoutBytes`), output beyond the cap is discarded and the Run fails with a `LimitError` once the exec completes; cancelling the exec on trip is tracked in [#22](https://github.com/gke-labs/eval-runner/issues/22).
-   - If stderr exceeds 64 KiB (`MaxStderrBytes`), output beyond the cap is discarded and the Run fails with a `LimitError` once the exec completes; cancelling the exec on trip is tracked in [#22](https://github.com/gke-labs/eval-runner/issues/22).
+   - Exec streams from sandboxd are captured through `LimitWriter` instances (`pkg/discovery/limit_writer.go`).
+   - If stdout exceeds 1 MiB (`MaxStdoutBytes`), output beyond the cap is discarded and the step fails with a `LimitError`.
+   - If stderr exceeds 64 KiB (`MaxStderrBytes`), output beyond the cap is discarded and the step fails with a `LimitError`.
 5. **Manifest Parsing and Validation**:
-   - The stdout output is parsed as a JSON `Manifest` (`pkg/discovery/manifest.go`).
+   - The stdout output of step 3 is parsed as a JSON `Manifest` (`pkg/discovery/manifest.go`).
    - Validation enforces:
      - Manifest must not be nil.
      - `tasks` list must not be empty.
@@ -148,8 +158,8 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
      - Each task must have a non-empty, unique `id`.
      - Each task must have a non-empty `spec`.
 6. **Completion**:
-   - **On Success**: `status.phase` is set to `Discovered`, condition `Discovered=True` is recorded, `status.manifest` is populated, and the sandbox CR is deleted.
-   - **On Failure**: `status.phase` is set to `Failed`, condition `Discovered=False` (reason `DiscoveryFailed`) is recorded, `status.message` is populated with the error description, pod phase, container waiting reasons/messages (e.g. `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`), and `PodScheduled=False` reason for unschedulable pods, appended to any bounded stderr tail (up to 10 lines / 3 KiB; total message bounded to 4 KiB), and the sandbox CR is deleted.
+   - **On Success**: `status.phase` is set to `Discovered`, condition `Discovered=True` is recorded (recording attempt count if retried), `status.manifest` is populated, and the sandbox CR is deleted.
+   - **On Failure**: `status.phase` is set to `Failed`, condition `Discovered=False` (reason `DiscoveryFailed`) is recorded, `status.message` is populated with the failed step name, attempt count, error description, pod phase, container waiting reasons/messages (e.g. `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`), and `PodScheduled=False` reason for unschedulable pods, appended to any bounded stderr tail (up to 10 lines / 3 KiB; total message bounded to 4 KiB), and the sandbox CR is deleted.
 
 ### Finalizer-Based Cleanup
 
@@ -162,14 +172,16 @@ To prevent orphaned sandboxes:
 
 ### Zero-Privilege Sandbox Specification
 
-The discovery sandbox pod implements concept §3.2 ("empty resources = zero privilege"):
+The discovery sandbox pod implements deployment topology B and concept §3.2 ("empty resources = zero privilege"):
+- **InitContainer injection (Topology B)**: `install-sandboxd` initContainer copies `/usr/local/bin/sandboxd` from the pinned image `us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:v20261015-v1.0.7` into a shared `/sandboxd-bin` emptyDir volume.
+- **Agent Container**: Runs `alpine/git:v2.47.2` invoking `/sandboxd-bin/sandboxd --root-dir=/workspace --rest-port=8080 --grpc-port=9090`. All commands execute in the base image's rootfs where `git` is available.
+- **Ports & Readiness**: Exposes port `:8080` (REST FilesystemService and health probe) and `:9090` (gRPC ProcessService). Readiness probe checks HTTP GET `/v1/health` on port `:8080`.
 - **No ServiceAccount token**: `automountServiceAccountToken: false`. No token volume is projected.
 - **Non-root**: `runAsNonRoot: true`, `runAsUser: 1000`, `runAsGroup: 1000`, `fsGroup: 1000`.
 - **No privilege escalation**: `allowPrivilegeEscalation: false`.
 - **Capabilities**: All Linux capabilities dropped (`drop: ["ALL"]`).
 - **Seccomp**: `seccompProfile.type: RuntimeDefault`.
 - **Pod Security Admission**: `eval-runner-sandbox` namespace is labeled with `pod-security.kubernetes.io/{enforce,warn,audit}: restricted`.
-- **Pinned base image**: `alpine/git:v2.47.2`.
 - **Resource requests and limits**: Requests 100m CPU / 128Mi RAM; limits 500m CPU / 512Mi RAM.
 
 ---
@@ -196,14 +208,14 @@ sequenceDiagram
     API-->>SB: Watch event: Sandbox created
     SB->>API: Create Pod in eval-runner-sandbox
     loop Poll until Ready
-        Ctrl->>API: Get Pod status (PodRunning && PodReady)
+        Ctrl->>API: Get Pod status (PodRunning && PodReady via /v1/health)
     end
-    Ctrl->>Pod: SPDY exec: git clone, checkout, ./.evals/list (5m deadline)
+    Ctrl->>Pod: gRPC Execute: git clone -- repo.url repo (retries on transient failure)
     Pod->>Git: git clone repo.url
     Git-->>Pod: Repository data
-    Pod->>Pod: git checkout repo.commit
-    Pod->>Pod: Exec ./.evals/list
-    Pod-->>Ctrl: SPDY stream stdout (JSON) and stderr (bounded)
+    Ctrl->>Pod: gRPC Execute: git checkout repo.commit (cwd=repo)
+    Ctrl->>Pod: gRPC Execute: ./.evals/list (cwd=repo)
+    Pod-->>Ctrl: gRPC ExecuteResponse (exit_code, stdout, stderr)
     Ctrl->>Ctrl: Enforce stream limits (1 MiB stdout, 64 KiB stderr)
     Ctrl->>Ctrl: Parse and validate manifest (unique IDs, at most 1000 tasks)
     Ctrl->>API: Update Run status: phase=Discovered, status.manifest populated
@@ -225,9 +237,9 @@ The trust model establishes strict boundaries around untrusted repository code:
 | No SA Token       |                         | SA: eval-runner-controller
 | UID 1000          |                         | Read-only rootfs        |
 | Drop ALL caps     |                         | UID 65532 (nonroot)     |
-| PSA restricted    |                         | Drops ALL caps          |
-|                   |   SPDY exec (pull-only) |                         |
-| .evals/list stdout+------------------------>| LimitWriter (1 MiB max) |
+| PSA restricted    |  gRPC :9090 (in-cluster)| Drops ALL caps          |
+| Ingress NetPolicy |<------------------------+ sandboxclient           |
+| sandboxd daemon   |  REST :8080 (read files)| LimitWriter (1 MiB max) |
 +-------------------+                         +-------------------------+
           |                                                |
           x (cannot access)                                v
@@ -244,8 +256,8 @@ The trust model establishes strict boundaries around untrusted repository code:
 ### Reachability and Containment
 
 - **The Sandbox has no credentials for the Kubernetes API**: Because `automountServiceAccountToken: false` is set and no kubeconfig is injected, untrusted code running inside the sandbox has no cluster identity or credentials (no SA token, no kubeconfig).
-- **The Sandbox cannot push data**: The sandbox does not push results or logs. The controller connects to the pod via Kubernetes SPDY `remotecommand` exec and **pulls** stdout and stderr out.
-- **Network reachability and egress**: There is no NetworkPolicy in `k8s/` today, so sandbox pod network egress is unrestricted: it has ordinary cluster network reachability (it can reach the Kubernetes API server and controller probe port `:8081`, though it lacks credentials to authenticate). It also has standard container network egress to clone repositories from Git (e.g. over HTTP/HTTPS or Git protocol). Adding a default-deny egress NetworkPolicy for `eval-runner-sandbox` (allowing only DNS and Git traffic) is tracked in issue [#33](https://github.com/gke-labs/eval-runner/issues/33).
+- **In-cluster agent protocol and ingress NetworkPolicy**: The controller communicates with sandbox pods directly over the pod network using sandboxd's gRPC (`:9090`) and REST (`:8080`) ports. Because sandboxd does not authenticate clients, `k8s/sandbox-networkpolicy.yaml` applies an ingress `NetworkPolicy` to all sandbox pods in `eval-runner-sandbox` that allows ingress on ports `9090` and `8080` only from controller pods labeled `app: eval-runner-controller` in namespace `eval-runner`, denying all other ingress.
+- **Network reachability and egress**: Sandbox pod network egress is currently standard container network egress to allow cloning repositories from Git (e.g. over HTTP/HTTPS or Git protocol). Restricting egress to only declared task resources is a follow-up (tracked in issue [#33](https://github.com/gke-labs/eval-runner/issues/33)).
 - **Memory and API protection**: Even if `.evals/list` attempts a denial-of-service by printing gigabytes of output, the controller's `LimitWriter` cuts off consumption at 1 MiB for stdout and 64 KiB for stderr. This guarantees that status updates to the Kubernetes API server never exceed etcd's ~1.5 MiB request limit.
 
 ### Controller RBAC Permissions
@@ -253,11 +265,11 @@ The trust model establishes strict boundaries around untrusted repository code:
 The controller uses strictly namespaced RBAC with **no ClusterRole**:
 
 1. **In namespace `eval-runner` (Role `eval-runner-controller`)**:
-   - `evalrunner.gke-labs.dev/runs` and `runs/status`: `get`, `list`, `watch`, `update`, `patch`.
+   - `evalrunner.gke-labs.dev/runs` and `runs/status`: `get`, `list`, `watch`, `create`, `update`, `patch`, `delete`.
+   - Core `events`: `create`, `patch`.
 2. **In namespace `eval-runner-sandbox` (Role `eval-runner-controller-sandbox`)**:
    - `agents.x-k8s.io/sandboxes`: `create`, `get`, `list`, `watch`, `delete`.
-   - Core `pods`: `get`, `list`, `watch`.
-   - Core `pods/exec`: `create`.
+   - Core `pods`: `get`, `list`, `watch` (used to look up sandbox pod IP addresses; `pods/exec` is dropped).
 
 The controller cannot create, read, or modify resources in any other namespace.
 
