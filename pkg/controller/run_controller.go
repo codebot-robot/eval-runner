@@ -1152,19 +1152,33 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 	// 1. Check if all tasks have reached a terminal phase
 	allFinished := true
+	completedCount := 0
 	for _, t := range run.Status.Tasks {
-		if t.Phase != v1alpha1.TaskPhaseCompleted && t.Phase != v1alpha1.TaskPhaseFailed {
+		if t.Phase == v1alpha1.TaskPhaseCompleted {
+			completedCount++
+		} else if t.Phase == v1alpha1.TaskPhaseFailed {
+			// failed
+		} else {
 			allFinished = false
 			break
 		}
 	}
 	if allFinished {
-		logger.Info("All tasks finished; marking Run as Completed", "run", run.Name)
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete sandboxes on run completion", "run", run.Name)
 		}
+		if completedCount > 0 {
+			logger.Info("Tasks finished with at least one completed; marking Run as Completed", "run", run.Name, "completed", completedCount)
+			err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Phase = v1alpha1.RunPhaseCompleted
+			})
+			return ctrl.Result{}, err
+		}
+		msg := fmt.Sprintf("all %d tasks failed", len(run.Status.Tasks))
+		logger.Info("All tasks failed; marking Run as Failed", "run", run.Name, "message", msg)
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
-			status.Phase = v1alpha1.RunPhaseCompleted
+			status.Phase = v1alpha1.RunPhaseFailed
+			status.Message = msg
 		})
 		return ctrl.Result{}, err
 	}
@@ -1521,25 +1535,40 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	})
 	if cloneErr != nil || cloneRes == nil || cloneRes.ExitCode != 0 {
 		if status.Code(cloneErr) == codes.Unauthenticated {
+			msg := fmt.Sprintf("step git clone failed: unauthenticated: %v", cloneErr)
+			logger.Error(cloneErr, "Task step git clone failed", "task", taskID)
 			return taskExecutionResult{
 				taskID:  taskID,
 				phase:   v1alpha1.TaskPhaseFailed,
-				message: fmt.Sprintf("step git clone failed: unauthenticated: %v", cloneErr),
+				message: msg,
 			}
 		}
 		var stderr string
+		var exitCode int
 		if cloneRes != nil {
 			stderr = cloneRes.Stderr
+			exitCode = cloneRes.ExitCode
 		}
 		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := "step git clone failed"
-		if tail != "" {
-			msg = fmt.Sprintf("step git clone failed: %s", tail)
+		var msg string
+		if cloneRes != nil && cloneRes.ExitCode != 0 {
+			if tail != "" {
+				msg = fmt.Sprintf("step git clone failed with exit code %d: %s", cloneRes.ExitCode, tail)
+			} else {
+				msg = fmt.Sprintf("step git clone failed with exit code %d", cloneRes.ExitCode)
+			}
+		} else if tail != "" {
+			if cloneErr != nil {
+				msg = fmt.Sprintf("step git clone failed: %v: %s", cloneErr, tail)
+			} else {
+				msg = fmt.Sprintf("step git clone failed: %s", tail)
+			}
 		} else if cloneErr != nil {
 			msg = fmt.Sprintf("step git clone failed: %v", cloneErr)
-		} else if cloneRes != nil {
-			msg = fmt.Sprintf("step git clone failed with exit code %d", cloneRes.ExitCode)
+		} else {
+			msg = "step git clone failed"
 		}
+		logger.Error(errors.New(msg), "Task step git clone failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
@@ -1555,25 +1584,40 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	})
 	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
 		if status.Code(checkoutErr) == codes.Unauthenticated {
+			msg := fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr)
+			logger.Error(checkoutErr, "Task step git checkout failed", "task", taskID)
 			return taskExecutionResult{
 				taskID:  taskID,
 				phase:   v1alpha1.TaskPhaseFailed,
-				message: fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr),
+				message: msg,
 			}
 		}
 		var stderr string
+		var exitCode int
 		if checkoutRes != nil {
 			stderr = checkoutRes.Stderr
+			exitCode = checkoutRes.ExitCode
 		}
 		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := "step git checkout failed"
-		if tail != "" {
-			msg = fmt.Sprintf("step git checkout failed: %s", tail)
+		var msg string
+		if checkoutRes != nil && checkoutRes.ExitCode != 0 {
+			if tail != "" {
+				msg = fmt.Sprintf("step git checkout failed with exit code %d: %s", checkoutRes.ExitCode, tail)
+			} else {
+				msg = fmt.Sprintf("step git checkout failed with exit code %d", checkoutRes.ExitCode)
+			}
+		} else if tail != "" {
+			if checkoutErr != nil {
+				msg = fmt.Sprintf("step git checkout failed: %v: %s", checkoutErr, tail)
+			} else {
+				msg = fmt.Sprintf("step git checkout failed: %s", tail)
+			}
 		} else if checkoutErr != nil {
 			msg = fmt.Sprintf("step git checkout failed: %v", checkoutErr)
-		} else if checkoutRes != nil {
-			msg = fmt.Sprintf("step git checkout failed with exit code %d", checkoutRes.ExitCode)
+		} else {
+			msg = "step git checkout failed"
 		}
+		logger.Error(errors.New(msg), "Task step git checkout failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
@@ -1599,25 +1643,40 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	})
 	if inspectErr != nil || inspectRes == nil || inspectRes.ExitCode != 0 {
 		if status.Code(inspectErr) == codes.Unauthenticated {
+			msg := fmt.Sprintf("step inspect eval failed: unauthenticated: %v", inspectErr)
+			logger.Error(inspectErr, "Task step inspect eval failed", "task", taskID)
 			return taskExecutionResult{
 				taskID:  taskID,
 				phase:   v1alpha1.TaskPhaseFailed,
-				message: fmt.Sprintf("step inspect eval failed: unauthenticated: %v", inspectErr),
+				message: msg,
 			}
 		}
 		var stderr string
+		var exitCode int
 		if inspectRes != nil {
 			stderr = inspectRes.Stderr
+			exitCode = inspectRes.ExitCode
 		}
 		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := "step inspect eval failed"
-		if tail != "" {
-			msg = fmt.Sprintf("step inspect eval failed: %s", tail)
+		var msg string
+		if inspectRes != nil && inspectRes.ExitCode != 0 {
+			if tail != "" {
+				msg = fmt.Sprintf("step inspect eval failed with exit code %d: %s", inspectRes.ExitCode, tail)
+			} else {
+				msg = fmt.Sprintf("step inspect eval failed with exit code %d", inspectRes.ExitCode)
+			}
+		} else if tail != "" {
+			if inspectErr != nil {
+				msg = fmt.Sprintf("step inspect eval failed: %v: %s", inspectErr, tail)
+			} else {
+				msg = fmt.Sprintf("step inspect eval failed: %s", tail)
+			}
 		} else if inspectErr != nil {
 			msg = fmt.Sprintf("step inspect eval failed: %v", inspectErr)
-		} else if inspectRes != nil {
-			msg = fmt.Sprintf("step inspect eval failed with exit code %d", inspectRes.ExitCode)
+		} else {
+			msg = "step inspect eval failed"
 		}
+		logger.Error(errors.New(msg), "Task step inspect eval failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
@@ -1630,10 +1689,12 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		Command: []string{"ls", "/out"},
 	})
 	if lsErr != nil || lsRes == nil {
+		msg := fmt.Sprintf("failed to list /out: %v", lsErr)
+		logger.Error(lsErr, "Task step list /out failed", "task", taskID)
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
-			message: fmt.Sprintf("failed to list /out: %v", lsErr),
+			message: msg,
 		}
 	}
 
@@ -1646,10 +1707,12 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}
 	if len(validFiles) == 0 {
+		msg := "no valid JSON log found in /out"
+		logger.Error(errors.New(msg), "Task step find JSON log failed", "task", taskID)
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
-			message: "no valid JSON log found in /out",
+			message: msg,
 		}
 	}
 
@@ -1658,20 +1721,24 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	logBytes, readErr := sbClient.ReadFile(execCtx, filepath.Join("/out", logFilename))
 	if readErr != nil {
+		msg := fmt.Sprintf("failed to read inspect log: %v", readErr)
+		logger.Error(readErr, "Task step read inspect log failed", "task", taskID)
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
-			message: fmt.Sprintf("failed to read inspect log: %v", readErr),
+			message: msg,
 		}
 	}
 
 	// Step 5: Parse Inspect log
 	agg, parseErr := artifacts.ParseInspectLog(logBytes)
 	if parseErr != nil {
+		msg := fmt.Sprintf("failed to parse inspect log: %v", parseErr)
+		logger.Error(parseErr, "Task step parse inspect log failed", "task", taskID)
 		return taskExecutionResult{
 			taskID:  taskID,
 			phase:   v1alpha1.TaskPhaseFailed,
-			message: fmt.Sprintf("failed to parse inspect log: %v", parseErr),
+			message: msg,
 		}
 	}
 
