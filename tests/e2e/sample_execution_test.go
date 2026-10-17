@@ -195,6 +195,9 @@ spec:
 			if task.Pairs != 10 {
 				t.Errorf("Expected task %s pairs 10, got %d", task.ID, task.Pairs)
 			}
+			if task.Wins != 0 || task.Losses != 0 || task.Ties != 10 {
+				t.Errorf("Expected task %s wins/losses/ties 0/0/10, got %d/%d/%d", task.ID, task.Wins, task.Losses, task.Ties)
+			}
 			if task.Delta == nil || math.Abs(*task.Delta) > 1e-4 {
 				t.Errorf("Expected task %s delta 0.0, got %v", task.ID, task.Delta)
 			}
@@ -214,8 +217,8 @@ spec:
 		if !strings.Contains(statsOut, "UNCHANGED") {
 			t.Errorf("Expected evalstats output to contain UNCHANGED, got:\n%s", statsOut)
 		}
-		if !strings.Contains(statsOut, "eval") || !strings.Contains(statsOut, "base") || !strings.Contains(statsOut, "this PR") {
-			t.Errorf("Expected evalstats output to contain table header, got:\n%s", statsOut)
+		if !strings.Contains(statsOut, "eval") || !strings.Contains(statsOut, "base") || !strings.Contains(statsOut, "this PR") || !strings.Contains(statsOut, "wins/losses/ties") {
+			t.Errorf("Expected evalstats output to contain table header with wins/losses/ties, got:\n%s", statsOut)
 		}
 
 		// Clean up

@@ -215,9 +215,21 @@ spec:
                       - inconclusive
                       - running
                       type: string
+                    losses:
+                      description: Losses is the number of paired samples where the
+                        candidate scored lower than baseline.
+                      type: integer
                     pairs:
                       description: Pairs is the number of matched (paired) sample
                         pairs.
+                      type: integer
+                    ties:
+                      description: Ties is the number of paired samples where candidate
+                        and baseline scored equally.
+                      type: integer
+                    wins:
+                      description: Wins is the number of paired samples where the
+                        candidate scored higher than baseline.
                       type: integer
                   required:
                   - id

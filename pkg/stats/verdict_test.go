@@ -205,3 +205,92 @@ func TestAggregateVerdictWithProbabilities(t *testing.T) {
 		t.Errorf("PImprovement with regression = %v, want 0.04", vRegressed.PImprovement)
 	}
 }
+
+func TestAggregateVerdictUnchangedAndInconclusive(t *testing.T) {
+	// Acceptance criterion: run-level P for {unchanged, inconclusive} is near 0.5.
+	// Example from GKE docs-eval-same-commit:
+	// docs/readme_comprehension: 20 ties {0 x20} -> unchanged, P = 0.50
+	// docs/readme_comprehension_blind: 19 ties, 1 loss {-1, 0 x19} -> inconclusive, P ≈ 0.25 (Beta(1, 2))
+	diffsComp := make([]float64, 20)
+	diffsBlind := make([]float64, 20)
+	diffsBlind[0] = -1.0
+
+	estComp := CompareDifferences(diffsComp, 0.95, 42)
+	estBlind := CompareDifferences(diffsBlind, 0.95, 43)
+
+	tasksSameCommit := []TaskReport{
+		{
+			ID:           "docs/readme_comprehension",
+			Label:        TaskLabelUnchanged,
+			Estimate:     estComp,
+			PImprovement: estComp.PImprovement,
+		},
+		{
+			ID:           "docs/readme_comprehension_blind",
+			Label:        TaskLabelInconclusive,
+			Estimate:     estBlind,
+			PImprovement: estBlind.PImprovement,
+		},
+	}
+	vSameCommit := AggregateVerdict(tasksSameCommit)
+	if vSameCommit.Verdict != VerdictInconclusive {
+		t.Errorf("Verdict = %v, want INCONCLUSIVE", vSameCommit.Verdict)
+	}
+	// Expected headline P is arithmetic mean: (0.50 + ~0.25) / 2 = 0.375
+	expectedP := (estComp.PImprovement + estBlind.PImprovement) / 2.0
+	if math.Abs(vSameCommit.PImprovement-expectedP) > 1e-6 {
+		t.Errorf("PImprovement for {unchanged, inconclusive} = %v, want %v",
+			vSameCommit.PImprovement, expectedP)
+	}
+	if math.Abs(vSameCommit.PImprovement-0.375) > 0.02 {
+		t.Errorf("PImprovement for same-commit = %v, want ~0.375", vSameCommit.PImprovement)
+	}
+
+	// Multiple unchanged and inconclusive tasks:
+	tasksMultiple := []TaskReport{
+		{
+			ID:           "task-1",
+			Label:        TaskLabelUnchanged,
+			PImprovement: 0.50,
+		},
+		{
+			ID:           "task-2",
+			Label:        TaskLabelUnchanged,
+			PImprovement: 0.50,
+		},
+		{
+			ID:           "task-3",
+			Label:        TaskLabelInconclusive,
+			PImprovement: 0.53,
+		},
+	}
+	vMultiple := AggregateVerdict(tasksMultiple)
+	if vMultiple.Verdict != VerdictInconclusive {
+		t.Errorf("Verdict = %v, want INCONCLUSIVE", vMultiple.Verdict)
+	}
+	expectedMultipleP := (0.50 + 0.50 + 0.53) / 3.0
+	if math.Abs(vMultiple.PImprovement-expectedMultipleP) > 1e-6 {
+		t.Errorf("PImprovement = %v, want %v", vMultiple.PImprovement, expectedMultipleP)
+	}
+
+	// All inconclusive tasks (no improved, no regressed):
+	tasksAllInconclusive := []TaskReport{
+		{
+			ID:           "task-a",
+			Label:        TaskLabelInconclusive,
+			PImprovement: 0.46,
+		},
+		{
+			ID:           "task-b",
+			Label:        TaskLabelInconclusive,
+			PImprovement: 0.54,
+		},
+	}
+	vAllInconclusive := AggregateVerdict(tasksAllInconclusive)
+	if vAllInconclusive.Verdict != VerdictInconclusive {
+		t.Errorf("Verdict = %v, want INCONCLUSIVE", vAllInconclusive.Verdict)
+	}
+	if math.Abs(vAllInconclusive.PImprovement-0.50) > 1e-6 {
+		t.Errorf("PImprovement = %v, want 0.50", vAllInconclusive.PImprovement)
+	}
+}

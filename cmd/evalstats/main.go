@@ -471,7 +471,7 @@ type ComparisonOutput struct {
 // PrintComparisonTable writes a formatted table of comparison results matching the PR comment mockup.
 func PrintComparisonTable(w io.Writer, comp *v1alpha1.Comparison) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "eval\tbase\tthis PR\tΔ (95% CI)\tlabel\truns"); err != nil {
+	if _, err := fmt.Fprintln(tw, "eval\tbase\tthis PR\tΔ (95% CI)\tlabel\truns\twins/losses/ties"); err != nil {
 		return err
 	}
 
@@ -492,14 +492,16 @@ func PrintComparisonTable(w io.Writer, comp *v1alpha1.Comparison) error {
 		}
 		labelStr := string(t.Label)
 		runsStr := fmt.Sprintf("%d", t.Pairs)
+		wltStr := fmt.Sprintf("%d/%d/%d", t.Wins, t.Losses, t.Ties)
 
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			t.ID,
 			baseStr,
 			prStr,
 			deltaStr,
 			labelStr,
 			runsStr,
+			wltStr,
 		); err != nil {
 			return err
 		}

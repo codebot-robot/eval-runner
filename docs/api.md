@@ -272,6 +272,9 @@ spec:
 | `tasks[].delta` | `*float64` | Mean paired difference ($\text{candidate} - \text{baseline}$). |
 | `tasks[].deltaCI` | `*DeltaConfidenceInterval` | 95% confidence interval on the delta (`lower`, `upper`). |
 | `tasks[].pairs` | `int` | Number of matched sample pairs evaluated. |
+| `tasks[].wins` | `int` | Number of pairs where candidate scored higher than baseline. |
+| `tasks[].losses` | `int` | Number of pairs where candidate scored lower than baseline. |
+| `tasks[].ties` | `int` | Number of pairs where candidate and baseline scored equally. |
 | `tasks[].dropped` | `ComparisonDropped` | Samples dropped without matches (`candidate`, `baseline`). |
 | `tasks[].label` | `ComparisonTaskLabel` | Decision outcome: `improved`, `regressed`, `unchanged`, `inconclusive`, `running`. |
 | `summaryPath` | `string` | Storage path or URI where the complete paired table was stored (`comparisons/<name>.json`). |

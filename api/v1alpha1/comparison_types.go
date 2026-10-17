@@ -146,6 +146,18 @@ type ComparisonTaskStatus struct {
 	// +optional
 	Pairs int `json:"pairs"`
 
+	// Wins is the number of paired samples where the candidate scored higher than baseline.
+	// +optional
+	Wins int `json:"wins"`
+
+	// Losses is the number of paired samples where the candidate scored lower than baseline.
+	// +optional
+	Losses int `json:"losses"`
+
+	// Ties is the number of paired samples where candidate and baseline scored equally.
+	// +optional
+	Ties int `json:"ties"`
+
 	// Dropped records the number of unpaired samples dropped from candidate and baseline.
 	// +optional
 	Dropped ComparisonDropped `json:"dropped"`

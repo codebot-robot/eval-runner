@@ -91,16 +91,23 @@ Samples with missing pairs (e.g. candidate evaluated on an ID not in baseline, o
    - *Degenerate intervals at small $n$*: If all paired differences in a sample are identical (for example, 1 win, or 2 ties), all bootstrap resamples produce the exact same mean, yielding a zero-width interval $[d, d]$. The stopping rule in `Decide` guards against premature termination by requiring a minimum sample count (`MinPairsToDecide = 8`) before CI-based stopping rules can fire.
 2. **Normal Approximation CI**: Classical $\bar{d} \pm z \cdot (s_d / \sqrt{n})$ reported alongside for direct analytical comparison.
 
-### 2.4 Posterior P(improvement)
+### 2.4 Posterior P(improvement) and Tie Splitting
 
-`PImprovement` is the posterior probability that the true delta is positive ($P(\Delta > 0)$).
+`PImprovement` is the posterior probability that the candidate configuration is superior to the baseline:
+$$P(\text{improvement}) = P(\Delta > 0) + 0.5 \cdot P(\Delta = 0)$$
+
+Ties are split evenly ($0.5 \cdot P(\Delta = 0)$). When paired differences are identical or all-tied (such as two runs evaluating the exact same commit), probability mass concentrated at zero splits evenly, yielding $P = 0.50$ matching intuition and the `unchanged` label rather than $0.00$.
 
 `eval-runner` implements **Rubin's Bayesian Bootstrap** (1981):
 - Rather than integer resampling, Dirichlet weights $(w_1, \dots, w_n) \sim \text{Dirichlet}(1, \dots, 1)$ are drawn across observations by sampling standard exponentials $e_i = -\ln(U_i)$.
-- For each draw $b$, the weighted mean $\mu^*_b = \sum_{i=1}^n w_i d_i$ is computed.
-- $P(\text{improvement}) = \frac{1}{B} \sum_{b=1}^B \mathbb{I}(\mu^*_b > 0)$.
+- To prevent zero posterior probability when no wins or no losses have been observed among ties (e.g. $0\text{W}/1\text{L}/19\text{T}$ where non-parametric bootstrap mass sits entirely on non-positive outcomes), the posterior is regularised with a uniform prior consisting of two symmetric pseudo-observations at $+1.0$ and $-1.0$. For binary differences, this corresponds analytically to $P(\text{Beta}(W+1, L+1) > 0.5)$ (e.g. $0/1/19 \to 0.25$, $1/0/19 \to 0.75$, $3/2/15 \to 0.656$).
+- For each draw $b$, the weighted mean $\mu^*_b = \sum_{i=1}^{n+2} w_i d_i$ is computed.
+- Posterior probability is estimated by splitting ties:
+  $$P(\text{improvement}) = \frac{1}{B} \sum_{b=1}^B \left( \mathbb{I}(\mu^*_b > 0) + 0.5 \cdot \mathbb{I}(\mu^*_b = 0) \right)$$
+- An analytical normal-approximation fallback is also provided:
+  When $\text{se} = 0$, degenerate mass at 0 yields $P = 0.50$ (or $1.0$ for $\bar{d} > 0$, $0.0$ for $\bar{d} < 0$). When $\text{se} > 0$, $P(\Delta = 0) = 0$ and $P(\text{improvement}) = \Phi(\bar{d} / \text{se})$.
 
-*Rationale*: Unlike Beta-Binomial models that collapse differences into win/loss/tie buckets, the Bayesian Bootstrap operates directly on continuous differences, seamlessly handling Inspect partial credit while preserving exact Bayesian posterior interpretation.
+*Rationale*: Unlike Beta-Binomial models that collapse differences into win/loss/tie buckets, the Bayesian Bootstrap operates directly on continuous differences, seamlessly handling Inspect partial credit while preserving exact Bayesian posterior interpretation. Tie splitting ensures neutral expectations ($P \approx 0.50$) on parity benchmarks, while the uniform prior prevents degenerate zero posterior probabilities on small sample counts with ties.
 
 ---
 
@@ -184,7 +191,12 @@ This powers the UI action: `▶ run 32 more samples (~$1.40)`.
    - *Headline value rules*:
      - If the aggregate verdict is `REGRESSED`, $P(\text{run improvement}) = \min_k P(\text{not\_reg}_k)$.
      - If `UNCHANGED`, headline $P(\text{run improvement}) = 0.50$.
-     - Otherwise, $P(\text{run improvement}) = \min(\max_k P(\text{imp}_k), \min_k P(\text{not\_reg}_k))$.
+     - If `INCONCLUSIVE` with only `unchanged` and `inconclusive` tasks (no `improved` and no `regressed` tasks), headline $P(\text{run improvement})$ is the arithmetic mean across tasks:
+       $$\bar{P} = \frac{1}{K} \sum_{k=1}^K P(\text{imp}_k)$$
+       reporting a headline $P$ near $0.50$ (such as identical configuration or same-commit comparisons) without the bias of taking the maximum over tasks or collapsing to zero under regression bounds.
+       *Note on dilution*: For runs with only `{unchanged, inconclusive}` tasks, arithmetic averaging serves as a neutral summary across tasks. In comparisons with many unchanged tasks and one weak inconclusive task (e.g. `{0.50, 0.50, 0.50, 0.05}`), averaging dilutes the isolated regression risk in proportion to the number of unchanged tasks (yielding $0.39$); callers requiring strict per-task regression bounding before declaring overall improvement rely on the `IMPROVED` aggregation rule $\min(\max P, \min P_{\text{not\_reg}})$.
+     - Otherwise (`IMPROVED`, or mixed `IMPROVED` + `INCONCLUSIVE`):
+       $$P(\text{run improvement}) = \min\left(\max_{k} P(\text{imp}_k), \; \min_{k} P(\text{not\_reg}_k)\right)$$
 
 ---
 
@@ -194,11 +206,11 @@ This worked example traces the numbers from `docs/concept/functionality.md` and 
 
 ### 5.1 Per-Task Results
 
-| Task | Base | PR | Paired $\Delta$ (95% CI) | Decision Label | $n$ | $P(\text{improvement})$ |
-|---|---|---|---|---|---|---|
-| `triage/runbook_lookup` | 0.61 | 0.84 | $+0.23 \; [+0.11, +0.35]$ | `improved` | 48 | 0.99 |
-| `triage/escalation_policy` | 0.88 | 0.90 | $+0.02 \; [-0.05, +0.09]$ | `unchanged` | 32 | 0.55 |
-| `triage/summary_quality` | 0.72 | 0.75 | $+0.03 \; [-0.08, +0.14]$ | `inconclusive` | 16 | 0.60 |
+| Task | Base | PR | Paired $\Delta$ (95% CI) | Decision Label | $n$ | Wins/Losses/Ties | $P(\text{improvement})$ |
+|---|---|---|---|---|---|---|---|
+| `triage/runbook_lookup` | 0.61 | 0.84 | $+0.23 \; [+0.11, +0.35]$ | `improved` | 48 | 15/4/29 | 0.99 |
+| `triage/escalation_policy` | 0.88 | 0.90 | $+0.02 \; [-0.05, +0.09]$ | `unchanged` | 32 | 2/1/29 | 0.55 |
+| `triage/summary_quality` | 0.72 | 0.75 | $+0.03 \; [-0.08, +0.14]$ | `inconclusive` | 16 | 2/1/13 | 0.60 |
 
 ### 5.2 Adaptive Narrowing for `triage/runbook_lookup` (`budget.html`)
 
@@ -294,10 +306,10 @@ Mean success rate: 0.58 (range 0.15-1.00)
 This output directly mirrors the PR comment mockup table layout:
 
 ```text
-eval                       base   this PR   Δ (95% CI)             label        runs
-triage/runbook_lookup      0.61   0.84      +0.23 [+0.11, +0.35]   improved     48
-triage/escalation_policy   0.88   0.90      +0.02 [-0.05, +0.09]   unchanged    32
-triage/summary_quality     0.72   0.75      +0.03 [-0.08, +0.14]   inconclusive 16
+eval                       base   this PR   Δ (95% CI)             label        runs   wins/losses/ties
+triage/runbook_lookup      0.61   0.84      +0.23 [+0.11, +0.35]   improved     48     15/4/29
+triage/escalation_policy   0.88   0.90      +0.02 [-0.05, +0.09]   unchanged    32     2/1/29
+triage/summary_quality     0.72   0.75      +0.03 [-0.08, +0.14]   inconclusive 16     2/1/13
 
 Verdict: IMPROVED · P(improvement) = 0.98
 Summary: IMPROVED: 1 task(s) improved, 1 task(s) unchanged, 1 task(s) inconclusive; net improvement probable
@@ -306,11 +318,30 @@ Summary: IMPROVED: 1 task(s) improved, 1 task(s) unchanged, 1 task(s) inconclusi
 For two deterministic runs at the same commit (e.g. mockllm or identical Gemini runs):
 
 ```text
-eval                             base   this PR   Δ (95% CI)             label       runs
-docs/readme_comprehension        1.00   1.00      +0.00 [+0.00, +0.00]   unchanged   20
-docs/readme_comprehension_blind  0.15   0.15      +0.00 [+0.00, +0.00]   unchanged   20
+eval                             base   this PR   Δ (95% CI)             label       runs   wins/losses/ties
+docs/readme_comprehension        1.00   1.00      +0.00 [+0.00, +0.00]   unchanged   20     0/0/20
+docs/readme_comprehension_blind  0.15   0.15      +0.00 [+0.00, +0.00]   unchanged   20     0/0/20
 
 Verdict: UNCHANGED · P(improvement) = 0.50
 Summary: UNCHANGED: all 2 task(s) statistically equivalent within margin ±0.05
 ```
+
+### Real Example: Same-Commit Comparison on GKE (`docs-eval-same-commit`)
+
+On a live cluster, comparing two runs of the same commit (`05ce4d8`) evaluated 20 pairs per task:
+
+```text
+eval                              base   this PR   Δ (95% CI)             label          runs   wins/losses/ties
+docs/readme_comprehension         1.00   1.00      +0.00 [+0.00, +0.00]   unchanged      20     0/0/20
+docs/readme_comprehension_blind   0.20   0.15      -0.05 [-0.15, +0.00]   inconclusive   20     0/1/19
+
+Verdict: INCONCLUSIVE · P(improvement) = 0.38
+Summary: INCONCLUSIVE: 0 task(s) improved, 1 task(s) unchanged, 1 task(s) inconclusive; net improvement unproven
+```
+
+In this real run:
+1. `docs/readme_comprehension` had 20 identical pairs (all ties, `0/0/20`), reporting $P = 0.50$ matching the `unchanged` label.
+2. `docs/readme_comprehension_blind` had 19 ties and 1 loss (`0/1/19`). With the Bayesian bootstrap regularised by a uniform prior ($+1, -1$ pseudo-observations), $P(\text{improvement}) = 0.25$ (matching the exact Beta posterior $P(\text{Beta}(1, 2) > 0.5) = 0.25$ for 0 wins and 1 loss).
+3. Because the run contains only `{unchanged, inconclusive}` tasks, `AggregateVerdict` averages per-task probabilities ($(0.50 + 0.25)/2 = 0.375 \approx 0.38$). This reflects an honest headline for a comparison with one loss and no wins, while remaining well clear of the $0.00$ collapse caused by unregularised zero-mass.
+4. Surfacing `wins/losses/ties` (`0/1/19`) immediately explains to readers why the confidence interval $[-0.15, +0.00]$ is wide: 19 out of 20 evaluations were ties, so uncertainty stems from the high proportion of tied samples rather than extreme variance.
 

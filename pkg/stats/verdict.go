@@ -128,17 +128,35 @@ func Verdict(labels []TaskLabel) RunVerdict {
 // - For all other tasks (regressed, inconclusive, running), P(not_regressed) is taken as P(improvement).
 //
 // Headline value rules:
-// - If the run verdict is REGRESSED, P(run improvement) collapses to min_k P(not_reg_k).
-// - If UNCHANGED, headline P(run improvement) is 0.50.
-// - Otherwise, P(run improvement) = min( max_k P(imp_k), min_k P(not_reg_k) ).
+//   - If the run verdict is REGRESSED, P(run improvement) collapses to min_k P(not_reg_k).
+//   - If UNCHANGED, headline P(run improvement) is 0.50.
+//   - If INCONCLUSIVE with only unchanged and inconclusive tasks (no improved and no regressed tasks),
+//     headline P(run improvement) is the arithmetic mean of per-task P(improvement_k), reporting
+//     a value near 0.50 without the bias of taking the maximum over tasks.
+//   - Otherwise (IMPROVED, or mixed IMPROVED + INCONCLUSIVE), P(run improvement) = min( max_k P(imp_k), min_k P(not_reg_k) ).
 func AggregateVerdict(tasks []TaskReport) RunVerdict {
 	if len(tasks) == 0 {
 		return Verdict(nil)
 	}
 
 	labels := make([]TaskLabel, len(tasks))
+	var numImproved, numRegressed, numUnchanged, numInconclusive, numRunning int
 	for i, t := range tasks {
 		labels[i] = t.Label
+		switch t.Label {
+		case TaskLabelRunning, TaskLabelQueued, TaskLabelContinue:
+			numRunning++
+		case TaskLabelRegressed:
+			numRegressed++
+		case TaskLabelInconclusive:
+			numInconclusive++
+		case TaskLabelImproved:
+			numImproved++
+		case TaskLabelUnchanged:
+			numUnchanged++
+		default:
+			numInconclusive++
+		}
 	}
 
 	verdict := Verdict(labels)
@@ -173,6 +191,12 @@ func AggregateVerdict(tasks []TaskReport) RunVerdict {
 		verdict.PImprovement = minPNotReg
 	} else if verdict.Verdict == VerdictUnchanged {
 		verdict.PImprovement = 0.50
+	} else if numImproved == 0 && numRegressed == 0 && numRunning == 0 && numInconclusive > 0 {
+		var sumP float64
+		for _, t := range tasks {
+			sumP += t.PImprovement
+		}
+		verdict.PImprovement = sumP / float64(len(tasks))
 	} else {
 		verdict.PImprovement = math.Min(maxPImp, minPNotReg)
 	}
