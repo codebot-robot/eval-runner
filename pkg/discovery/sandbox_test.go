@@ -205,6 +205,11 @@ func TestBuildSandbox(t *testing.T) {
 	if len(podSpec.Volumes) != 2 {
 		t.Fatalf("Expected 2 volumes, got %d", len(podSpec.Volumes))
 	}
+
+	// Negative assertion: discovery sandbox container has no EnvFrom
+	if len(c.EnvFrom) != 0 {
+		t.Errorf("Discovery container must not have EnvFrom, got: %+v", c.EnvFrom)
+	}
 }
 
 func TestBuildSandbox_WithAuthToken(t *testing.T) {
@@ -262,6 +267,16 @@ func TestAuthSecretNameForRun(t *testing.T) {
 	}
 }
 
+func TestTaskAuthSecretNameForRun(t *testing.T) {
+	name := TaskAuthSecretNameForRun("short-run", "docs/readme_comprehension")
+	if len(name) > 63 {
+		t.Errorf("Task auth secret name exceeds 63 characters: %d (%s)", len(name), name)
+	}
+	if !strings.HasPrefix(name, "task-auth-") {
+		t.Errorf("Task auth secret name missing prefix: %s", name)
+	}
+}
+
 func TestBuildSandbox_EmptyAuthTokenPanics(t *testing.T) {
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -275,4 +290,106 @@ func TestBuildSandbox_EmptyAuthTokenPanics(t *testing.T) {
 		}
 	}()
 	BuildSandbox(run, "eval-runner-sandbox", "")
+}
+
+func TestTaskSandboxNameForRun(t *testing.T) {
+	name1 := TaskSandboxNameForRun("my-run", "docs/readme_comprehension")
+	if len(name1) > 63 {
+		t.Errorf("TaskSandboxNameForRun exceeded 63 chars: %d", len(name1))
+	}
+	if !strings.HasPrefix(name1, "task-my-run-") {
+		t.Errorf("Expected prefix 'task-my-run-', got %s", name1)
+	}
+
+	// Long run name and task ID
+	longRun := strings.Repeat("a", 50)
+	longTask := strings.Repeat("b", 50)
+	name2 := TaskSandboxNameForRun(longRun, longTask)
+	if len(name2) > 63 {
+		t.Errorf("TaskSandboxNameForRun for long names exceeded 63 chars: %d", len(name2))
+	}
+}
+
+func TestBuildTaskSandbox_WithAndWithoutModelSecret(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+			UID:       types.UID("run-uid-123"),
+		},
+	}
+
+	token := "sample-task-auth-token-12345"
+	digest := AuthTokenDigest(token)
+
+	// Case 1: Without model secret
+	sbNoSecret := BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
+		Namespace:         "eval-runner-sandbox",
+		SampleRunnerImage: "sample-runner:e2e",
+		ModelSecret:       "",
+		AuthTokenDigest:   digest,
+	})
+
+	if sbNoSecret.Labels[LabelRole] != RoleSample {
+		t.Errorf("Expected role %s, got %s", RoleSample, sbNoSecret.Labels[LabelRole])
+	}
+	if sbNoSecret.Labels[LabelSandbox] != "true" {
+		t.Errorf("Expected sandbox label 'true', got %s", sbNoSecret.Labels[LabelSandbox])
+	}
+	if sbNoSecret.Annotations[AnnotationTaskID] != "docs/readme_comprehension" {
+		t.Errorf("Expected task ID annotation, got %s", sbNoSecret.Annotations[AnnotationTaskID])
+	}
+
+	cNoSecret := sbNoSecret.Spec.PodTemplate.Spec.Containers[0]
+	if cNoSecret.Image != "sample-runner:e2e" {
+		t.Errorf("Expected image sample-runner:e2e, got %s", cNoSecret.Image)
+	}
+	if len(cNoSecret.EnvFrom) != 0 {
+		t.Errorf("Expected no EnvFrom when modelSecret is empty, got: %v", cNoSecret.EnvFrom)
+	}
+
+	expectedFlag := "--auth-token-sha256=" + digest
+	var foundFlag bool
+	for _, arg := range cNoSecret.Command {
+		if arg == expectedFlag {
+			foundFlag = true
+			break
+		}
+	}
+	if !foundFlag {
+		t.Errorf("Expected command to contain %q, got: %v", expectedFlag, cNoSecret.Command)
+	}
+
+	// Case 2: With model secret
+	sbWithSecret := BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
+		Namespace:         "eval-runner-sandbox",
+		SampleRunnerImage: "sample-runner:e2e",
+		ModelSecret:       "gemini-credentials",
+		AuthTokenDigest:   digest,
+	})
+
+	cWithSecret := sbWithSecret.Spec.PodTemplate.Spec.Containers[0]
+	if len(cWithSecret.EnvFrom) != 1 {
+		t.Fatalf("Expected 1 EnvFrom source, got %d", len(cWithSecret.EnvFrom))
+	}
+	if cWithSecret.EnvFrom[0].SecretRef == nil || cWithSecret.EnvFrom[0].SecretRef.Name != "gemini-credentials" {
+		t.Errorf("Expected SecretRef 'gemini-credentials', got: %+v", cWithSecret.EnvFrom[0].SecretRef)
+	}
+}
+
+func TestBuildTaskSandbox_EmptyAuthTokenPanics(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("Expected BuildTaskSandbox to panic on empty authTokenDigest")
+		}
+	}()
+	BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
+		AuthTokenDigest: "",
+	})
 }

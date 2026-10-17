@@ -20,12 +20,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"google.golang.org/grpc/codes"
@@ -39,6 +44,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -53,6 +59,12 @@ const (
 
 	// DefaultDiscoveryDeadline is the default overall deadline for discovery to complete.
 	DefaultDiscoveryDeadline = 10 * time.Minute
+
+	// DefaultExecutionDeadline is the default overall deadline for sample execution.
+	DefaultExecutionDeadline = 30 * time.Minute
+
+	// DefaultMaxParallelTasks is the default maximum number of concurrent task sandboxes.
+	DefaultMaxParallelTasks = 4
 )
 
 // DefaultDiscoveryRetryBackoff defines the default backoff intervals between clone retry attempts.
@@ -117,6 +129,23 @@ type RunReconciler struct {
 	// DiscoveryDeadline is the overall deadline duration for discovery to complete.
 	// Defaults to DefaultDiscoveryDeadline (10m) if <= 0.
 	DiscoveryDeadline time.Duration
+
+	// ExecutionDeadline is the overall deadline duration for sample execution.
+	// Defaults to DefaultExecutionDeadline (30m) if <= 0.
+	ExecutionDeadline time.Duration
+
+	// MaxParallelTasks is the maximum number of task sandboxes to run concurrently.
+	// Defaults to DefaultMaxParallelTasks (4) if <= 0.
+	MaxParallelTasks int
+
+	// ModelSecret is the name of a Secret in SandboxNamespace containing model credentials.
+	ModelSecret string
+
+	// SampleRunnerImage is the image used for sample execution sandboxes.
+	SampleRunnerImage string
+
+	// ArtifactSink stores raw Inspect logs and returns their storage path.
+	ArtifactSink artifacts.ArtifactSink
 
 	// Now returns the current time. In tests, this can be overridden.
 	Now func() time.Time
@@ -255,6 +284,90 @@ func (r *RunReconciler) cleanupAuthToken(ctx context.Context, runNamespace, runN
 	}
 }
 
+func (r *RunReconciler) ensureTaskAuthToken(ctx context.Context, run *v1alpha1.Run, taskID string, sandboxKey types.NamespacedName) (string, error) {
+	if token, ok := r.getAuthToken(sandboxKey.String()); ok && token != "" {
+		return token, nil
+	}
+
+	secretNamespace := run.Namespace
+	if secretNamespace == "" {
+		secretNamespace = discovery.DefaultControllerNamespace
+	}
+	secretName := discovery.TaskAuthSecretNameForRun(run.Name, taskID)
+	secretKey := types.NamespacedName{Namespace: secretNamespace, Name: secretName}
+
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+
+	var secret corev1.Secret
+	if err := reader.Get(ctx, secretKey, &secret); err == nil {
+		if tokenBytes, ok := secret.Data["token"]; ok && len(tokenBytes) > 0 {
+			token := string(tokenBytes)
+			r.setAuthToken(sandboxKey.String(), token)
+			return token, nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get task auth secret: %w", err)
+	}
+
+	token, err := generateAuthToken()
+	if err != nil {
+		return "", err
+	}
+
+	secret = corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: secretNamespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token": []byte(token),
+		},
+	}
+	if r.Scheme != nil {
+		if err := controllerutil.SetControllerReference(run, &secret, r.Scheme); err != nil {
+			return "", fmt.Errorf("failed to set controller reference on task auth secret: %w", err)
+		}
+	}
+
+	if err := r.Create(ctx, &secret); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("failed to create task auth secret: %w", err)
+		}
+		if getErr := reader.Get(ctx, secretKey, &secret); getErr != nil {
+			return "", fmt.Errorf("failed to get existing task auth secret: %w", getErr)
+		}
+		tokenBytes, ok := secret.Data["token"]
+		if !ok || len(tokenBytes) == 0 {
+			return "", fmt.Errorf("existing task auth secret %s lacks a token", secretKey)
+		}
+		token = string(tokenBytes)
+	}
+
+	r.setAuthToken(sandboxKey.String(), token)
+	return token, nil
+}
+
+func (r *RunReconciler) cleanupTaskAuthToken(ctx context.Context, runNamespace, runName, taskID string, sandboxKey types.NamespacedName) {
+	r.deleteAuthToken(sandboxKey.String())
+	if runNamespace == "" {
+		runNamespace = discovery.DefaultControllerNamespace
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskAuthSecretNameForRun(runName, taskID),
+			Namespace: runNamespace,
+		},
+	}
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("Failed to delete task auth secret", "secret", secret.Name, "error", err)
+	}
+}
+
 func (r *RunReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
@@ -267,6 +380,34 @@ func (r *RunReconciler) discoveryDeadline() time.Duration {
 		return r.DiscoveryDeadline
 	}
 	return DefaultDiscoveryDeadline
+}
+
+func (r *RunReconciler) executionDeadline() time.Duration {
+	if r.ExecutionDeadline > 0 {
+		return r.ExecutionDeadline
+	}
+	return DefaultExecutionDeadline
+}
+
+func (r *RunReconciler) maxParallelTasks() int {
+	if r.MaxParallelTasks > 0 {
+		return r.MaxParallelTasks
+	}
+	return DefaultMaxParallelTasks
+}
+
+func (r *RunReconciler) sampleRunnerImage() string {
+	if r.SampleRunnerImage != "" {
+		return r.SampleRunnerImage
+	}
+	return discovery.DefaultSampleRunnerImage
+}
+
+func (r *RunReconciler) artifactSink() artifacts.ArtifactSink {
+	if r.ArtifactSink != nil {
+		return r.ArtifactSink
+	}
+	return &artifacts.NoopSink{}
 }
 
 func (r *RunReconciler) maxDiscoveryAttempts() int {
@@ -349,11 +490,11 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	// Deletion lifecycle: Run is marked for deletion. Clean up sandbox and remove finalizer.
+	// Deletion lifecycle: Run is marked for deletion. Clean up all sandboxes and remove finalizer.
 	if !run.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox) {
-			logger.Info("Run is being deleted; cleaning up discovery sandbox", "run", run.Name)
-			if err := r.deleteSandboxIfMatching(ctx, sandboxKey, run.Namespace, run.Name); err != nil {
+			logger.Info("Run is being deleted; cleaning up sandboxes", "run", run.Name)
+			if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 				return ctrl.Result{}, err
 			}
 			controllerutil.RemoveFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox)
@@ -364,10 +505,14 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Terminal states: already finished, do nothing (clean up any leftover sandbox).
-	if run.Status.Phase == v1alpha1.RunPhaseDiscovered || run.Status.Phase == v1alpha1.RunPhaseFailed {
-		if err := r.deleteSandboxIfMatching(ctx, sandboxKey, run.Namespace, run.Name); err != nil {
-			logger.Error(err, "failed to delete leftover sandbox for terminal run", "sandbox", sandboxName)
+	// Terminal states: already finished, do nothing (clean up any leftover sandboxes).
+	isTerminal := run.Status.Phase == v1alpha1.RunPhaseCompleted ||
+		run.Status.Phase == v1alpha1.RunPhaseFailed ||
+		(run.Status.Phase == v1alpha1.RunPhaseDiscovered && run.Spec.Model == "")
+
+	if isTerminal {
+		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
+			logger.Error(err, "failed to delete leftover sandboxes for terminal run", "sandbox", sandboxName)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -378,6 +523,26 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if err := r.Update(ctx, &run); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// If Run is already in Running phase, proceed to task sample execution
+	if run.Status.Phase == v1alpha1.RunPhaseRunning {
+		return r.reconcileRunning(ctx, req, &run)
+	}
+
+	// If Run is in Discovered phase and Spec.Model is set, transition to Running
+	if run.Status.Phase == v1alpha1.RunPhaseDiscovered && run.Spec.Model != "" {
+		initialTasks := r.initializeTasks(run.Spec, run.Status.Manifest)
+		dl := metav1.NewTime(r.now().Add(r.executionDeadline()))
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Phase = v1alpha1.RunPhaseRunning
+			status.Tasks = initialTasks
+			status.ExecutionDeadline = &dl
+		})
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	var sandbox sandboxv1beta1.Sandbox
@@ -821,7 +986,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Manifest validation failed: %v", err))
 	}
 
-	// Step 5: Success -> update Run to Discovered, then cleanup sandbox
+	// Step 5: Success -> update Run to Discovered (or Running if spec.model is set), then cleanup sandbox
 	successMsg := ""
 	condMsg := fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks))
 	if cloneAttempts > 1 {
@@ -833,10 +998,40 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		"tasks", len(manifest.Tasks),
 		"cloneAttempts", cloneAttempts,
 	)
+
+	if run.Spec.Model == "" {
+		err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Phase = v1alpha1.RunPhaseDiscovered
+			status.Message = successMsg
+			status.Manifest = manifest
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionTypeDiscovered,
+				Status:             metav1.ConditionTrue,
+				Reason:             "Discovered",
+				Message:            condMsg,
+				ObservedGeneration: gen,
+			})
+		})
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Delete(ctx, &sandbox); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "failed to delete discovery sandbox", "sandbox", sandbox.Name)
+		}
+		r.cleanupAuthToken(ctx, run.Namespace, run.Name, sandboxKey)
+
+		return ctrl.Result{}, nil
+	}
+
+	initialTasks := r.initializeTasks(run.Spec, manifest)
+	dl := metav1.NewTime(r.now().Add(r.executionDeadline()))
 	err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
-		status.Phase = v1alpha1.RunPhaseDiscovered
+		status.Phase = v1alpha1.RunPhaseRunning
 		status.Message = successMsg
 		status.Manifest = manifest
+		status.Tasks = initialTasks
+		status.ExecutionDeadline = &dl
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionTypeDiscovered,
 			Status:             metav1.ConditionTrue,
@@ -850,11 +1045,657 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	if err := r.Delete(ctx, &sandbox); err != nil && !apierrors.IsNotFound(err) {
-		logger.Error(err, "failed to delete sandbox", "sandbox", sandbox.Name)
+		logger.Error(err, "failed to delete discovery sandbox", "sandbox", sandbox.Name)
 	}
 	r.cleanupAuthToken(ctx, run.Namespace, run.Name, sandboxKey)
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{Requeue: true}, nil
+}
+
+func (r *RunReconciler) sandboxNamespace() string {
+	if r.SandboxNamespace != "" {
+		return r.SandboxNamespace
+	}
+	return discovery.DefaultSandboxNamespace
+}
+
+func (r *RunReconciler) deleteAllSandboxesForRun(ctx context.Context, runNamespace, runName string) error {
+	logger := log.FromContext(ctx)
+	if runNamespace == "" {
+		runNamespace = discovery.DefaultControllerNamespace
+	}
+
+	discoverySBKey := types.NamespacedName{
+		Namespace: r.sandboxNamespace(),
+		Name:      discovery.SandboxNameForRun(runName),
+	}
+	r.cleanupAuthToken(ctx, runNamespace, runName, discoverySBKey)
+
+	var sandboxList sandboxv1beta1.SandboxList
+	if err := r.List(ctx, &sandboxList, client.InNamespace(r.sandboxNamespace()), client.MatchingLabels{
+		discovery.LabelRunName:      runName,
+		discovery.LabelRunNamespace: runNamespace,
+	}); err != nil {
+		return err
+	}
+	for i := range sandboxList.Items {
+		sb := &sandboxList.Items[i]
+		sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+		taskID := sb.Annotations[discovery.AnnotationTaskID]
+		if taskID != "" {
+			r.cleanupTaskAuthToken(ctx, runNamespace, runName, taskID, sbKey)
+		}
+		if err := r.Delete(ctx, sb); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "failed to delete sandbox for run", "sandbox", sb.Name, "run", runName)
+		}
+	}
+	return nil
+}
+
+func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha1.Manifest) []v1alpha1.TaskStatus {
+	var statuses []v1alpha1.TaskStatus
+	manifestMap := make(map[string]v1alpha1.ManifestTask)
+	if manifest != nil {
+		for _, t := range manifest.Tasks {
+			manifestMap[t.ID] = t
+		}
+	}
+
+	if len(spec.Tasks) > 0 {
+		for _, taskID := range spec.Tasks {
+			task, exists := manifestMap[taskID]
+			if !exists {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseFailed,
+					Message: "task not found in manifest",
+				})
+				continue
+			}
+
+			if len(task.Resources) > 0 {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseFailed,
+					Message: "resources not supported yet",
+				})
+				continue
+			}
+
+			statuses = append(statuses, v1alpha1.TaskStatus{
+				ID:    taskID,
+				Phase: v1alpha1.TaskPhasePending,
+			})
+		}
+	} else if manifest != nil {
+		for _, task := range manifest.Tasks {
+			if len(task.Resources) > 0 {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:      task.ID,
+					Phase:   v1alpha1.TaskPhaseFailed,
+					Message: "resources not supported yet",
+				})
+				continue
+			}
+
+			statuses = append(statuses, v1alpha1.TaskStatus{
+				ID:    task.ID,
+				Phase: v1alpha1.TaskPhasePending,
+			})
+		}
+	}
+	return statuses
+}
+
+func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Request, run *v1alpha1.Run) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// 1. Check if all tasks have reached a terminal phase
+	allFinished := true
+	for _, t := range run.Status.Tasks {
+		if t.Phase != v1alpha1.TaskPhaseCompleted && t.Phase != v1alpha1.TaskPhaseFailed {
+			allFinished = false
+			break
+		}
+	}
+	if allFinished {
+		logger.Info("All tasks finished; marking Run as Completed", "run", run.Name)
+		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
+			logger.Error(err, "failed to delete sandboxes on run completion", "run", run.Name)
+		}
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Phase = v1alpha1.RunPhaseCompleted
+		})
+		return ctrl.Result{}, err
+	}
+
+	// 2. Check execution deadline
+	if run.Status.ExecutionDeadline != nil && !r.now().Before(run.Status.ExecutionDeadline.Time) {
+		msg := "Execution deadline exceeded"
+		logger.Info(msg, "run", run.Name)
+		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
+			logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
+		}
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Phase = v1alpha1.RunPhaseFailed
+			status.Message = msg
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               "Completed",
+				Status:             metav1.ConditionFalse,
+				Reason:             "ExecutionDeadlineExceeded",
+				Message:            msg,
+				ObservedGeneration: gen,
+			})
+		})
+		return ctrl.Result{}, err
+	}
+
+	// List current task sandboxes in sandbox namespace
+	var sandboxList sandboxv1beta1.SandboxList
+	if err := r.List(ctx, &sandboxList, client.InNamespace(r.sandboxNamespace()), client.MatchingLabels{
+		discovery.LabelRunName:      run.Name,
+		discovery.LabelRunNamespace: run.Namespace,
+		discovery.LabelRole:         discovery.RoleSample,
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	sandboxesByTask := make(map[string]sandboxv1beta1.Sandbox)
+	for _, sb := range sandboxList.Items {
+		taskID := sb.Annotations[discovery.AnnotationTaskID]
+		if taskID != "" {
+			sandboxesByTask[taskID] = sb
+		}
+	}
+
+	// Count active running tasks
+	runningCount := 0
+	for _, t := range run.Status.Tasks {
+		if t.Phase == v1alpha1.TaskPhaseRunning {
+			runningCount++
+		}
+	}
+
+	// Start pending tasks up to MaxParallelTasks
+	availableSlots := r.maxParallelTasks() - runningCount
+	if availableSlots > 0 {
+		var tasksToStart []string
+		for _, t := range run.Status.Tasks {
+			if t.Phase == v1alpha1.TaskPhasePending && availableSlots > 0 {
+				tasksToStart = append(tasksToStart, t.ID)
+				availableSlots--
+			}
+		}
+
+		if len(tasksToStart) > 0 {
+			var started []string
+			failedTasks := make(map[string]string)
+			for _, taskID := range tasksToStart {
+				sbName := discovery.TaskSandboxNameForRun(run.Name, taskID)
+				sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
+				token, tokenErr := r.ensureTaskAuthToken(ctx, run, taskID, sbKey)
+				if tokenErr != nil {
+					logger.Error(tokenErr, "Failed to ensure task auth token", "task", taskID)
+					failedTasks[taskID] = fmt.Sprintf("failed to ensure task auth token: %v", tokenErr)
+					continue
+				}
+				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
+					Namespace:         r.sandboxNamespace(),
+					SampleRunnerImage: r.sampleRunnerImage(),
+					ModelSecret:       r.ModelSecret,
+					AuthTokenDigest:   discovery.AuthTokenDigest(token),
+				})
+				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
+					logger.Error(err, "Failed to create task sandbox", "task", taskID)
+					failedTasks[taskID] = fmt.Sprintf("failed to create sandbox: %v", err)
+				} else {
+					started = append(started, taskID)
+					sandboxesByTask[taskID] = *desiredSandbox
+				}
+			}
+
+			if len(started) > 0 || len(failedTasks) > 0 {
+				err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+					for i := range status.Tasks {
+						tid := status.Tasks[i].ID
+						if failMsg, failed := failedTasks[tid]; failed {
+							status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
+							status.Tasks[i].Message = failMsg
+						} else {
+							for _, s := range started {
+								if s == tid {
+									status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
+									break
+								}
+							}
+						}
+					}
+				})
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				for i := range run.Status.Tasks {
+					tid := run.Status.Tasks[i].ID
+					if failMsg, failed := failedTasks[tid]; failed {
+						run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
+						run.Status.Tasks[i].Message = failMsg
+					} else {
+						for _, s := range started {
+							if s == tid {
+								run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check running tasks for ready pods
+	type readyTaskItem struct {
+		task    v1alpha1.TaskStatus
+		sandbox sandboxv1beta1.Sandbox
+		pod     corev1.Pod
+	}
+	var readyTasks []readyTaskItem
+	terminalFailures := make(map[string]string)
+
+	for _, t := range run.Status.Tasks {
+		if t.Phase != v1alpha1.TaskPhaseRunning {
+			continue
+		}
+
+		sb, hasSB := sandboxesByTask[t.ID]
+		if !hasSB {
+			terminalFailures[t.ID] = "task sandbox missing while in Running phase"
+			continue
+		}
+
+		podName := sb.Name
+		if name, ok := sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
+			podName = name
+		}
+		podKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: podName}
+		var pod corev1.Pod
+		if err := r.Get(ctx, podKey, &pod); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Task pod not yet created", "task", t.ID)
+			}
+			continue
+		}
+
+		if pod.Status.Phase == corev1.PodFailed {
+			terminalFailures[t.ID] = "task pod failed"
+			continue
+		}
+		if pod.Status.Phase == corev1.PodSucceeded {
+			terminalFailures[t.ID] = "task pod succeeded unexpectedly before execution"
+			continue
+		}
+
+		finishedCond := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+		if finishedCond != nil && finishedCond.Status == metav1.ConditionTrue {
+			terminalFailures[t.ID] = fmt.Sprintf("task sandbox finished: %s", finishedCond.Message)
+			continue
+		}
+
+		sandboxReady := meta.IsStatusConditionTrue(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+		if (sandboxReady || isPodReady(&pod)) && pod.Status.PodIP != "" {
+			readyTasks = append(readyTasks, readyTaskItem{
+				task:    t,
+				sandbox: sb,
+				pod:     pod,
+			})
+		}
+	}
+
+	if len(terminalFailures) > 0 {
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			for i := range status.Tasks {
+				if msg, failed := terminalFailures[status.Tasks[i].ID]; failed {
+					status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
+					status.Tasks[i].Message = msg
+				}
+			}
+		})
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		for tid := range terminalFailures {
+			if sb, ok := sandboxesByTask[tid]; ok {
+				sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
+					logger.Error(err, "failed to delete task sandbox on terminal failure", "task", tid)
+				}
+				r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
+			}
+		}
+	}
+
+	if len(readyTasks) == 0 {
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+
+	resultsChan := make(chan taskExecutionResult, len(readyTasks))
+	var wg sync.WaitGroup
+
+	for _, item := range readyTasks {
+		wg.Add(1)
+		go func(task v1alpha1.TaskStatus, sb sandboxv1beta1.Sandbox, pod corev1.Pod) {
+			defer wg.Done()
+			res := r.executeTask(ctx, run, task.ID, &sb, &pod)
+			resultsChan <- res
+		}(item.task, item.sandbox, item.pod)
+	}
+
+	wg.Wait()
+	close(resultsChan)
+
+	taskResults := make(map[string]taskExecutionResult)
+	for res := range resultsChan {
+		taskResults[res.taskID] = res
+	}
+
+	// Update task statuses FIRST before deleting sandboxes
+	err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+		for i := range status.Tasks {
+			if res, ok := taskResults[status.Tasks[i].ID]; ok {
+				status.Tasks[i].Phase = res.phase
+				status.Tasks[i].Samples = res.samples
+				status.Tasks[i].Successes = res.successes
+				status.Tasks[i].MeanScore = res.meanScore
+				status.Tasks[i].Message = res.message
+				status.Tasks[i].LogPath = res.logPath
+			}
+		}
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Delete task sandboxes and clean up auth tokens only after status update succeeds
+	for taskID := range taskResults {
+		if sb, ok := sandboxesByTask[taskID]; ok {
+			sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+			if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "failed to delete task sandbox after execution", "task", taskID)
+			}
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, taskID, sbKey)
+		}
+	}
+
+	return ctrl.Result{Requeue: true}, nil
+}
+
+type taskExecutionResult struct {
+	taskID    string
+	phase     v1alpha1.TaskPhase
+	samples   int
+	successes int
+	meanScore *float64
+	message   string
+	logPath   string
+}
+
+func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) taskExecutionResult {
+	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
+
+	var targetTask *v1alpha1.ManifestTask
+	if run.Status.Manifest != nil {
+		for i := range run.Status.Manifest.Tasks {
+			if run.Status.Manifest.Tasks[i].ID == taskID {
+				targetTask = &run.Status.Manifest.Tasks[i]
+				break
+			}
+		}
+	}
+	if targetTask == nil {
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: "task definition not found in manifest",
+		}
+	}
+
+	execCtx := ctx
+	if run.Status.ExecutionDeadline != nil {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithDeadline(ctx, run.Status.ExecutionDeadline.Time)
+		defer cancel()
+	}
+
+	sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+	authToken, tokenErr := r.ensureTaskAuthToken(execCtx, run, taskID, sbKey)
+	if tokenErr != nil {
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: fmt.Sprintf("failed to get task auth token: %v", tokenErr),
+		}
+	}
+
+	var sbClient sandboxclient.Client
+	var err error
+	if r.SandboxClient != nil {
+		sbClient = r.SandboxClient
+	} else {
+		var opts []sandboxclient.Option
+		if authToken != "" {
+			opts = append(opts, sandboxclient.WithAuthToken(authToken))
+		}
+		factory := r.ClientFactory
+		if factory == nil {
+			factory = sandboxclient.DefaultFactory(
+				sandboxclient.WithStdoutLimit(r.maxStdoutBytes()),
+				sandboxclient.WithStderrLimit(r.maxStderrBytes()),
+			)
+		}
+		sbClient, err = factory.NewClient(pod.Status.PodIP, opts...)
+	}
+	if err != nil {
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: fmt.Sprintf("failed to create sandbox client: %v", err),
+		}
+	}
+	defer func() {
+		if closeErr := sbClient.Close(); closeErr != nil {
+			logger.Error(closeErr, "failed to close sandbox client")
+		}
+	}()
+
+	// Ensure /workspace/out exists
+	if _, mkdirErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: []string{"mkdir", "-p", "/workspace/out"},
+	}); mkdirErr != nil {
+		logger.V(1).Info("mkdir /workspace/out returned error", "error", mkdirErr)
+	}
+
+	// Step 1: Clone repo
+	logger.Info("Starting task step 1: git clone", "url", run.Spec.Repo.URL)
+	cloneRes, cloneErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
+	})
+	if cloneErr != nil || cloneRes == nil || cloneRes.ExitCode != 0 {
+		if status.Code(cloneErr) == codes.Unauthenticated {
+			return taskExecutionResult{
+				taskID:  taskID,
+				phase:   v1alpha1.TaskPhaseFailed,
+				message: fmt.Sprintf("step git clone failed: unauthenticated: %v", cloneErr),
+			}
+		}
+		var stderr string
+		if cloneRes != nil {
+			stderr = cloneRes.Stderr
+		}
+		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		msg := "step git clone failed"
+		if tail != "" {
+			msg = fmt.Sprintf("step git clone failed: %s", tail)
+		} else if cloneErr != nil {
+			msg = fmt.Sprintf("step git clone failed: %v", cloneErr)
+		} else if cloneRes != nil {
+			msg = fmt.Sprintf("step git clone failed with exit code %d", cloneRes.ExitCode)
+		}
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: msg,
+		}
+	}
+
+	// Step 2: Checkout commit
+	logger.Info("Starting task step 2: git checkout", "commit", run.Spec.Repo.Commit)
+	checkoutRes, checkoutErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: []string{"git", "checkout", run.Spec.Repo.Commit},
+		Cwd:     "repo",
+	})
+	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
+		if status.Code(checkoutErr) == codes.Unauthenticated {
+			return taskExecutionResult{
+				taskID:  taskID,
+				phase:   v1alpha1.TaskPhaseFailed,
+				message: fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr),
+			}
+		}
+		var stderr string
+		if checkoutRes != nil {
+			stderr = checkoutRes.Stderr
+		}
+		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		msg := "step git checkout failed"
+		if tail != "" {
+			msg = fmt.Sprintf("step git checkout failed: %s", tail)
+		} else if checkoutErr != nil {
+			msg = fmt.Sprintf("step git checkout failed: %v", checkoutErr)
+		} else if checkoutRes != nil {
+			msg = fmt.Sprintf("step git checkout failed with exit code %d", checkoutRes.ExitCode)
+		}
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: msg,
+		}
+	}
+
+	// Step 3: inspect eval
+	cwd := "repo"
+	if targetTask.Workdir != "" {
+		cwd = filepath.Join("repo", targetTask.Workdir)
+	}
+
+	inspectCmd := []string{"inspect", "eval", targetTask.Spec, "--model", run.Spec.Model, "--log-dir", "/out", "--log-format", "json"}
+	if run.Spec.Limit != nil {
+		inspectCmd = append(inspectCmd, "--limit", strconv.Itoa(*run.Spec.Limit))
+	}
+
+	logger.Info("Starting task step 3: inspect eval", "command", inspectCmd, "cwd", cwd)
+	inspectRes, inspectErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: inspectCmd,
+		Cwd:     cwd,
+	})
+	if inspectErr != nil || inspectRes == nil || inspectRes.ExitCode != 0 {
+		if status.Code(inspectErr) == codes.Unauthenticated {
+			return taskExecutionResult{
+				taskID:  taskID,
+				phase:   v1alpha1.TaskPhaseFailed,
+				message: fmt.Sprintf("step inspect eval failed: unauthenticated: %v", inspectErr),
+			}
+		}
+		var stderr string
+		if inspectRes != nil {
+			stderr = inspectRes.Stderr
+		}
+		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+		msg := "step inspect eval failed"
+		if tail != "" {
+			msg = fmt.Sprintf("step inspect eval failed: %s", tail)
+		} else if inspectErr != nil {
+			msg = fmt.Sprintf("step inspect eval failed: %v", inspectErr)
+		} else if inspectRes != nil {
+			msg = fmt.Sprintf("step inspect eval failed with exit code %d", inspectRes.ExitCode)
+		}
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: msg,
+		}
+	}
+
+	// Step 4: List /out for json log
+	lsRes, lsErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: []string{"ls", "/out"},
+	})
+	if lsErr != nil || lsRes == nil {
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: fmt.Sprintf("failed to list /out: %v", lsErr),
+		}
+	}
+
+	logFileRegex := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.json$`)
+	var validFiles []string
+	for _, raw := range strings.Fields(lsRes.Stdout) {
+		base := filepath.Base(raw)
+		if logFileRegex.MatchString(base) && !strings.Contains(base, "..") && !strings.Contains(base, "/") && !strings.Contains(base, "\\") {
+			validFiles = append(validFiles, base)
+		}
+	}
+	if len(validFiles) == 0 {
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: "no valid JSON log found in /out",
+		}
+	}
+
+	sort.Sort(sort.Reverse(sort.StringSlice(validFiles)))
+	logFilename := validFiles[0]
+
+	logBytes, readErr := sbClient.ReadFile(execCtx, filepath.Join("/out", logFilename))
+	if readErr != nil {
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: fmt.Sprintf("failed to read inspect log: %v", readErr),
+		}
+	}
+
+	// Step 5: Parse Inspect log
+	agg, parseErr := artifacts.ParseInspectLog(logBytes)
+	if parseErr != nil {
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: fmt.Sprintf("failed to parse inspect log: %v", parseErr),
+		}
+	}
+
+	// Step 6: Store artifact
+	meta := artifacts.RunMetadata{
+		RunName:      run.Name,
+		RunNamespace: run.Namespace,
+		TaskID:       taskID,
+		Model:        run.Spec.Model,
+		Commit:       run.Spec.Repo.Commit,
+	}
+	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
+	if storeErr != nil {
+		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
+	}
+
+	return taskExecutionResult{
+		taskID:    taskID,
+		phase:     v1alpha1.TaskPhaseCompleted,
+		samples:   agg.Samples,
+		successes: agg.Successes,
+		meanScore: agg.MeanScore,
+		logPath:   logPath,
+	}
 }
 
 func (r *RunReconciler) deleteSandboxIfMatching(ctx context.Context, sandboxKey types.NamespacedName, runNamespace, runName string) error {
@@ -1028,6 +1869,7 @@ func truncateMessage(msg string, maxBytes int) string {
 // SetupWithManager sets up the controller with the Manager.
 func (r *RunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 4}).
 		For(&v1alpha1.Run{}).
 		Watches(
 			&sandboxv1beta1.Sandbox{},

@@ -67,17 +67,30 @@ func main() {
 	var sandboxNamespace string
 	var probeAddr string
 	var discoveryDeadline time.Duration
+	var executionDeadline time.Duration
 	var maxStdoutBytes int64
 	var maxStderrBytes int64
 	var maxDiscoveryAttempts int
+	var maxParallelTasks int
+	var modelSecret string
+	var sampleRunnerImage string
+
+	defaultSampleRunnerImage := os.Getenv("SAMPLE_RUNNER_IMAGE")
+	if defaultSampleRunnerImage == "" {
+		defaultSampleRunnerImage = discovery.DefaultSampleRunnerImage
+	}
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.DurationVar(&discoveryDeadline, "discovery-deadline", controller.DefaultDiscoveryDeadline, "Overall deadline for discovery to complete")
+	flag.DurationVar(&executionDeadline, "execution-deadline", controller.DefaultExecutionDeadline, "Overall deadline for sample execution to complete")
 	flag.Int64Var(&maxStdoutBytes, "max-stdout-bytes", discovery.MaxStdoutBytes, "Maximum stdout bytes buffered from discovery execution")
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
+	flag.IntVar(&maxParallelTasks, "max-parallel-tasks", controller.DefaultMaxParallelTasks, "Maximum number of task sandboxes to run concurrently")
+	flag.StringVar(&modelSecret, "model-secret", "", "Name of Secret in sandbox namespace containing model credentials")
+	flag.StringVar(&sampleRunnerImage, "sample-runner-image", defaultSampleRunnerImage, "Container image used for sample execution sandboxes")
 
 	opts := zap.Options{
 		Development: true,
@@ -156,10 +169,14 @@ func main() {
 		ClientFactory:        clientFactory,
 		SandboxNamespace:     sandboxNamespace,
 		DiscoveryDeadline:    discoveryDeadline,
+		ExecutionDeadline:    executionDeadline,
 		MaxStdoutBytes:       maxStdoutBytes,
 		MaxStderrBytes:       maxStderrBytes,
 		MaxMessageBytes:      discovery.MaxMessageBytes,
 		MaxDiscoveryAttempts: maxDiscoveryAttempts,
+		MaxParallelTasks:     maxParallelTasks,
+		ModelSecret:          modelSecret,
+		SampleRunnerImage:    sampleRunnerImage,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

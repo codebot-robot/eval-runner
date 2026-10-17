@@ -17,6 +17,7 @@ package discovery
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -59,6 +60,18 @@ const (
 
 	// LabelSandbox indicates whether the pod is a sandbox managed by eval-runner.
 	LabelSandbox = "evalrunner.gke-labs.dev/sandbox"
+
+	// RoleDiscovery is the role value for discovery sandboxes.
+	RoleDiscovery = "discovery"
+
+	// RoleSample is the role value for sample execution sandboxes.
+	RoleSample = "sample"
+
+	// DefaultSampleRunnerImage is the default image used for sample sandboxes.
+	DefaultSampleRunnerImage = "sample-runner:latest"
+
+	// AnnotationTaskID tracks the original task ID on the sandbox.
+	AnnotationTaskID = "evalrunner.gke-labs.dev/task-id"
 )
 
 // AuthTokenDigest calculates the hex SHA-256 digest of the given bearer token.
@@ -68,7 +81,7 @@ func AuthTokenDigest(token string) string {
 }
 
 // AuthSecretNameForRun deterministically generates a valid Kubernetes resource name
-// for a Run's auth Secret (DNS-1123 label, max 63 characters).
+// for a Run's discovery auth Secret (DNS-1123 label, max 63 characters).
 func AuthSecretNameForRun(runName string) string {
 	prefix := "discovery-auth-"
 	fullName := prefix + runName
@@ -80,6 +93,284 @@ func AuthSecretNameForRun(runName string) string {
 	hashSuffix := "-" + hex.EncodeToString(h[:4]) // 9 chars: -12345678
 	maxPrefixLen := 63 - len(hashSuffix)
 	return fullName[:maxPrefixLen] + hashSuffix
+}
+
+// TaskAuthSecretNameForRun deterministically generates a valid Kubernetes resource name
+// for a Run's task auth Secret (DNS-1123 label, max 63 characters).
+func TaskAuthSecretNameForRun(runName, taskID string) string {
+	prefix := "task-auth-"
+	sanitized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return '-'
+	}, taskID)
+	sanitized = strings.Trim(sanitized, "-")
+
+	h := sha256.Sum256([]byte(runName + "/" + taskID))
+	hashSuffix := "-" + hex.EncodeToString(h[:4])
+
+	fullName := prefix + runName + "-" + sanitized + hashSuffix
+	if len(fullName) <= 63 {
+		return fullName
+	}
+
+	maxBaseLen := 63 - len(hashSuffix)
+	base := prefix + runName + "-" + sanitized
+	if len(base) > maxBaseLen {
+		base = base[:maxBaseLen]
+		base = strings.TrimRight(base, "-")
+	}
+	return base + hashSuffix
+}
+
+// TaskSandboxNameForRun deterministically generates a valid Kubernetes resource name
+// for a Run's task execution sandbox (DNS-1123 label, max 63 characters).
+func TaskSandboxNameForRun(runName, taskID string) string {
+	prefix := "task-"
+	sanitized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return '-'
+	}, taskID)
+	sanitized = strings.Trim(sanitized, "-")
+
+	h := sha256.Sum256([]byte(taskID))
+	hashSuffix := "-" + hex.EncodeToString(h[:4]) // -12345678 (9 chars)
+
+	fullName := prefix + runName + "-" + sanitized + hashSuffix
+	if len(fullName) <= 63 {
+		return fullName
+	}
+
+	maxBaseLen := 63 - len(hashSuffix)
+	base := prefix + runName + "-" + sanitized
+	if len(base) > maxBaseLen {
+		base = base[:maxBaseLen]
+		base = strings.TrimRight(base, "-")
+	}
+	return base + hashSuffix
+}
+
+// TaskSandboxConfig configures task sandbox creation.
+type TaskSandboxConfig struct {
+	Namespace         string
+	SampleRunnerImage string
+	ModelSecret       string
+	AuthTokenDigest   string
+}
+
+// BuildTaskSandbox constructs the Sandbox CR for executing an eval task for a Run.
+func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *sandboxv1beta1.Sandbox {
+	if cfg.AuthTokenDigest == "" {
+		panic("authTokenDigest is required")
+	}
+	sandboxNamespace := cfg.Namespace
+	if sandboxNamespace == "" {
+		sandboxNamespace = DefaultSandboxNamespace
+	}
+	image := cfg.SampleRunnerImage
+	if image == "" {
+		image = DefaultSampleRunnerImage
+	}
+
+	automountToken := false
+	runAsNonRoot := true
+	runAsUser := int64(1000)
+	runAsGroup := int64(1000)
+	allowPrivilegeEscalation := false
+	seccompProfile := corev1.SeccompProfile{
+		Type: corev1.SeccompProfileTypeRuntimeDefault,
+	}
+
+	labels := map[string]string{
+		LabelRunName:      run.Name,
+		LabelRunNamespace: run.Namespace,
+		LabelRole:         RoleSample,
+		LabelSandbox:      "true",
+	}
+	if run.UID != "" {
+		labels[LabelRunUID] = string(run.UID)
+	}
+
+	annotations := map[string]string{
+		AnnotationTaskID: taskID,
+	}
+
+	var envFrom []corev1.EnvFromSource
+	if cfg.ModelSecret != "" {
+		envFrom = append(envFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: cfg.ModelSecret,
+				},
+			},
+		})
+	}
+
+	cmd := []string{
+		"/sandboxd-bin/sandboxd",
+		"--root-dir=/workspace",
+		"--rest-port=8080",
+		"--grpc-port=9090",
+		"--auth-token-sha256=" + cfg.AuthTokenDigest,
+	}
+
+	return &sandboxv1beta1.Sandbox{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: sandboxv1beta1.GroupVersion.String(),
+			Kind:       "Sandbox",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        TaskSandboxNameForRun(run.Name, taskID),
+			Namespace:   sandboxNamespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels:      labels,
+						Annotations: annotations,
+					},
+					Spec: corev1.PodSpec{
+						AutomountServiceAccountToken: &automountToken,
+						SecurityContext: &corev1.PodSecurityContext{
+							RunAsNonRoot:   &runAsNonRoot,
+							RunAsUser:      &runAsUser,
+							RunAsGroup:     &runAsGroup,
+							FSGroup:        &runAsGroup,
+							SeccompProfile: &seccompProfile,
+						},
+						RestartPolicy: corev1.RestartPolicyNever,
+						InitContainers: []corev1.Container{
+							{
+								Name:  SandboxdInitContainerName,
+								Image: SandboxdImage,
+								Command: []string{
+									"/bin/sh",
+									"-c",
+									"cp /usr/local/bin/sandboxd /sandboxd-bin/sandboxd",
+								},
+								SecurityContext: &corev1.SecurityContext{
+									AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+									RunAsNonRoot:             &runAsNonRoot,
+									RunAsUser:                &runAsUser,
+									RunAsGroup:               &runAsGroup,
+									Capabilities: &corev1.Capabilities{
+										Drop: []corev1.Capability{"ALL"},
+									},
+									SeccompProfile: &seccompProfile,
+								},
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("100m"),
+										corev1.ResourceMemory: resource.MustParse("128Mi"),
+									},
+									Limits: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("500m"),
+										corev1.ResourceMemory: resource.MustParse("512Mi"),
+									},
+								},
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										Name:      "sandboxd-bin",
+										MountPath: "/sandboxd-bin",
+									},
+								},
+							},
+						},
+						Containers: []corev1.Container{
+							{
+								Name:    DiscoveryContainerName,
+								Image:   image,
+								EnvFrom: envFrom,
+								Command: cmd,
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "rest",
+										ContainerPort: 8080,
+										Protocol:      corev1.ProtocolTCP,
+									},
+									{
+										Name:          "grpc",
+										ContainerPort: 9090,
+										Protocol:      corev1.ProtocolTCP,
+									},
+								},
+								ReadinessProbe: &corev1.Probe{
+									ProbeHandler: corev1.ProbeHandler{
+										HTTPGet: &corev1.HTTPGetAction{
+											Path: "/v1/health",
+											Port: intstr.FromInt(8080),
+										},
+									},
+									InitialDelaySeconds: 1,
+									PeriodSeconds:       1,
+									TimeoutSeconds:      2,
+									SuccessThreshold:    1,
+									FailureThreshold:    3,
+								},
+								SecurityContext: &corev1.SecurityContext{
+									AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+									RunAsNonRoot:             &runAsNonRoot,
+									RunAsUser:                &runAsUser,
+									RunAsGroup:               &runAsGroup,
+									Capabilities: &corev1.Capabilities{
+										Drop: []corev1.Capability{"ALL"},
+									},
+									SeccompProfile: &seccompProfile,
+								},
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("100m"),
+										corev1.ResourceMemory: resource.MustParse("128Mi"),
+									},
+									Limits: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("500m"),
+										corev1.ResourceMemory: resource.MustParse("512Mi"),
+									},
+								},
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										Name:      "sandboxd-bin",
+										MountPath: "/sandboxd-bin",
+										ReadOnly:  true,
+									},
+									{
+										Name:      "workspace",
+										MountPath: "/workspace",
+									},
+								},
+							},
+						},
+						Volumes: []corev1.Volume{
+							{
+								Name: "sandboxd-bin",
+								VolumeSource: corev1.VolumeSource{
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
+								},
+							},
+							{
+								Name: "workspace",
+								VolumeSource: corev1.VolumeSource{
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // SandboxNameForRun deterministically generates a valid Kubernetes resource name

@@ -41,6 +41,12 @@ type FakeClient struct {
 	CheckoutExit   int
 	CheckoutStderr string
 
+	InspectErr    error
+	InspectExit   int
+	InspectStdout string
+	InspectStderr string
+	InspectLog    []byte
+
 	ReadFileCalls []string
 	ReadFileFn    func(ctx context.Context, path string) ([]byte, error)
 
@@ -71,10 +77,14 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 	f.mu.Lock()
 	f.ReadFileCalls = append(f.ReadFileCalls, path)
 	fn := f.ReadFileFn
+	inspectLog := f.InspectLog
 	f.mu.Unlock()
 
 	if fn != nil {
 		return fn(ctx, path)
+	}
+	if inspectLog != nil {
+		return inspectLog, nil
 	}
 	return nil, nil
 }
@@ -133,6 +143,17 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 			return nil, f.ListErr
 		}
 		return &ExecuteResult{ExitCode: 0, Stdout: f.ListStdout, Stderr: f.ListStderr}, nil
+	}
+
+	if cmd0 == "inspect" {
+		if f.InspectErr != nil {
+			return nil, f.InspectErr
+		}
+		return &ExecuteResult{ExitCode: f.InspectExit, Stdout: f.InspectStdout, Stderr: f.InspectStderr}, nil
+	}
+
+	if cmd0 == "ls" {
+		return &ExecuteResult{ExitCode: 0, Stdout: "sample_log.json\n"}, nil
 	}
 
 	return &ExecuteResult{ExitCode: 0}, nil
