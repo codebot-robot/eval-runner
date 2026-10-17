@@ -270,6 +270,7 @@ The controller uses strictly namespaced RBAC with **no ClusterRole**:
 2. **In namespace `eval-runner-sandbox` (Role `eval-runner-controller-sandbox`)**:
    - `agents.x-k8s.io/sandboxes`: `create`, `get`, `list`, `watch`, `delete`.
    - Core `pods`: `get`, `list`, `watch` (used to look up sandbox pod IP addresses; `pods/exec` is dropped).
+   - Core `secrets`: `get` (scoped to `model-credentials` to dynamically check for optional model provider credentials).
 
 The controller cannot create, read, or modify resources in any other namespace.
 

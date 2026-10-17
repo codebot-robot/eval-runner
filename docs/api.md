@@ -156,6 +156,6 @@ Because `.evals/list` and `inspect eval` execute within untrusted sandboxes, the
 | Discovery deadline | `--discovery-deadline` | `10m` | Overall discovery deadline exceeded; Run marked `Failed` and sandbox deleted. |
 | Execution deadline | `--execution-deadline` | `30m` | Overall sample execution deadline exceeded; Run marked `Failed` and sandboxes deleted. |
 | Max parallel tasks | `--max-parallel-tasks` | `4` | Caps concurrent task sandboxes executing at one time. |
-| Model credentials | `--model-secret` | `""` (none) | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes. |
+| Model credentials | `--model-secret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` to disable). |
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
 

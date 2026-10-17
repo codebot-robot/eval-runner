@@ -89,7 +89,7 @@ func main() {
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
 	flag.IntVar(&maxParallelTasks, "max-parallel-tasks", controller.DefaultMaxParallelTasks, "Maximum number of task sandboxes to run concurrently")
-	flag.StringVar(&modelSecret, "model-secret", "", "Name of Secret in sandbox namespace containing model credentials")
+	flag.StringVar(&modelSecret, "model-secret", controller.DefaultModelSecret, "Name of Secret in sandbox namespace containing model credentials")
 	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
 
 	opts := zap.Options{
@@ -102,17 +102,20 @@ func main() {
 
 	cfg := ctrl.GetConfigOrDie()
 
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes client")
+		os.Exit(1)
+	}
+
+	// Operational visibility check for model credentials secret at startup
+	controller.CheckModelSecretAtStartup(context.Background(), kubeClient, sandboxNamespace, modelSecret, setupLog)
+
 	if sampleRunnerImage == "" {
 		podName := os.Getenv("POD_NAME")
 		podNamespace := os.Getenv("POD_NAMESPACE")
 		if podName == "" || podNamespace == "" {
 			setupLog.Error(fmt.Errorf("POD_NAME and POD_NAMESPACE environment variables are required when --sample-runner-image is unset"), "cannot derive sample-runner image from controller pod")
-			os.Exit(1)
-		}
-
-		kubeClient, err := kubernetes.NewForConfig(cfg)
-		if err != nil {
-			setupLog.Error(err, "unable to create kubernetes client to derive sample-runner image")
 			os.Exit(1)
 		}
 
@@ -179,8 +182,15 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
-		Cache:                  cacheOptions,
+		Scheme: scheme,
+		Cache:  cacheOptions,
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{
+					&corev1.Secret{},
+				},
+			},
+		},
 		LeaderElection:         false,
 		HealthProbeBindAddress: probeAddr,
 	})
