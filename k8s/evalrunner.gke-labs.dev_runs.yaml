@@ -99,6 +99,10 @@ spec:
           status:
             description: RunStatus defines the observed state of Run.
             properties:
+              artifacts:
+                description: Artifacts is the base URI or prefix where artifacts for
+                  this Run are stored (e.g. gs://bucket/runs/<commit>/).
+                type: string
               conditions:
                 description: Conditions represent the latest observations of the Run's
                   state.

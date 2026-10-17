@@ -213,6 +213,10 @@ type RunStatus struct {
 	// Tasks records the status and results for each executed eval task.
 	// +optional
 	Tasks []TaskStatus `json:"tasks,omitempty"`
+
+	// Artifacts is the base URI or prefix where artifacts for this Run are stored (e.g. gs://bucket/runs/<commit>/).
+	// +optional
+	Artifacts string `json:"artifacts,omitempty"`
 }
 
 // +kubebuilder:object:root=true
