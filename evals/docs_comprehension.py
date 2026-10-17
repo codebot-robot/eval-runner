@@ -29,7 +29,14 @@ DATASET_PATH = CURRENT_DIR / "datasets" / "readme_questions.jsonl"
 
 
 def _resolve_model():
-    """Returns the active model from CLI or environment if specified, else DEFAULT_MODEL."""
+    """Returns the active model from CLI or environment if specified, else DEFAULT_MODEL.
+
+    Inspect AI does not expose a public API to query the CLI-specified active model
+    at task creation time. If Task(model=DEFAULT_MODEL) were hardcoded, Inspect would
+    prioritize Task.model over CLI flags such as `--model mockllm/model`, breaking offline
+    CI runs without API keys. We therefore query `inspect_ai.model._model.active_model()`
+    to honor CLI/environment model overrides while falling back to DEFAULT_MODEL.
+    """
     try:
         from inspect_ai.model._model import active_model
 
@@ -70,7 +77,7 @@ def _load_dataset():
             input="input",
             choices="choices",
             target="target",
-            metadata=["source", "evidence"],
+            metadata=["source", "evidence", "absent"],
         ),
     )
 
