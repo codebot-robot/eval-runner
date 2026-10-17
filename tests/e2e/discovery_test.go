@@ -133,6 +133,9 @@ spec:
 		if strings.TrimSpace(run.Status.Message) == "" {
 			t.Errorf("Expected non-empty failure message for bad commit")
 		}
+		if strings.Contains(run.Status.Message, "attempts") {
+			t.Errorf("Expected bad commit to fail promptly without retries, got: %s", run.Status.Message)
+		}
 
 		// Assert sandbox was deleted from eval-runner-sandbox
 		out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")

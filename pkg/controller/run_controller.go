@@ -16,7 +16,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -40,6 +42,132 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
+const (
+	// DefaultMaxDiscoveryAttempts is the default maximum number of discovery attempts for transient errors.
+	DefaultMaxDiscoveryAttempts = 5
+)
+
+// DefaultDiscoveryRetryBackoff defines the default backoff intervals between discovery retry attempts.
+var DefaultDiscoveryRetryBackoff = []time.Duration{
+	5 * time.Second,
+	10 * time.Second,
+	20 * time.Second,
+	40 * time.Second,
+}
+
+var (
+	transientPatterns = []*regexp.Regexp{
+		// Connection refused / reset
+		regexp.MustCompile(`(?i)connection refused`),
+		regexp.MustCompile(`(?i)connection reset`),
+		// DNS resolution
+		regexp.MustCompile(`(?i)could not resolve host`),
+		regexp.MustCompile(`(?i)name does not resolve`),
+		regexp.MustCompile(`(?i)name or service not known`),
+		regexp.MustCompile(`(?i)temporary failure in name resolution`),
+		regexp.MustCompile(`(?i)nodename nor servname provided`),
+		regexp.MustCompile(`(?i)unable to look up`),
+		// Timeouts
+		regexp.MustCompile(`(?i)connection timed out`),
+		regexp.MustCompile(`(?i)operation timed out`),
+		regexp.MustCompile(`(?i)timed out`),
+		regexp.MustCompile(`(?i)\bi/o timeout\b`),
+		regexp.MustCompile(`(?i)tls handshake timeout`),
+		// HTTP 5xx
+		regexp.MustCompile(`(?i)the requested url returned error: 5\d\d`),
+		regexp.MustCompile(`(?i)http[ /]5\d\d`),
+		regexp.MustCompile(`(?i)status( code)?:? 5\d\d`),
+		regexp.MustCompile(`(?i)rpc failed; curl \d+ the requested url returned error: 5`),
+		// Remote hung up / network routing
+		regexp.MustCompile(`(?i)remote end hung up unexpectedly`),
+		regexp.MustCompile(`(?i)early eof`),
+		regexp.MustCompile(`(?i)network is unreachable`),
+		regexp.MustCompile(`(?i)no route to host`),
+		regexp.MustCompile(`(?i)host is down`),
+		regexp.MustCompile(`(?i)empty reply from server`),
+	}
+
+	permanentPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)reference is not a tree`),
+		regexp.MustCompile(`(?i)did not match any file\(s\) known to git`),
+		regexp.MustCompile(`(?i)ambiguous argument`),
+		regexp.MustCompile(`(?i)\.evals/list`),
+		regexp.MustCompile(`(?i)repository not found`),
+		regexp.MustCompile(`(?i)repository '.*' does not exist`),
+		regexp.MustCompile(`(?i)authentication failed`),
+		regexp.MustCompile(`(?i)permission denied \(publickey\)`),
+		regexp.MustCompile(`(?i)the requested url returned error: 40[134]`),
+	}
+)
+
+// IsPermanentDiscoveryError reports whether a discovery execution error or stderr
+// represents a permanent failure (e.g. invalid commit or missing .evals/list) that
+// should not be retried.
+func IsPermanentDiscoveryError(err error, stderr string) bool {
+	combined := stderr
+	if err != nil {
+		combined += "\n" + err.Error()
+	}
+	for _, p := range permanentPatterns {
+		if p.MatchString(combined) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsTransientDiscoveryError reports whether a discovery execution error or stderr
+// is a transient failure (e.g. connection refused, DNS lookup failure, timeout, HTTP 5xx)
+// suitable for retry with backoff.
+func IsTransientDiscoveryError(err error, stderr string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if IsPermanentDiscoveryError(err, stderr) {
+		return false
+	}
+	combined := stderr + "\n" + err.Error()
+	for _, p := range transientPatterns {
+		if p.MatchString(combined) {
+			return true
+		}
+	}
+	return false
+}
+
+func backoffForAttempt(backoffs []time.Duration, attempt int) time.Duration {
+	if len(backoffs) == 0 {
+		return 5 * time.Second
+	}
+	idx := attempt - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(backoffs) {
+		idx = len(backoffs) - 1
+	}
+	return backoffs[idx]
+}
+
+func formatAttemptCount(n int) string {
+	if n == 1 {
+		return "1 attempt"
+	}
+	return fmt.Sprintf("%d attempts", n)
+}
+
+func defaultSleep(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
 // RunReconciler reconciles a Run object
 type RunReconciler struct {
 	client.Client
@@ -49,6 +177,17 @@ type RunReconciler struct {
 	MaxStdoutBytes   int64
 	MaxStderrBytes   int64
 	MaxMessageBytes  int
+
+	// MaxDiscoveryAttempts is the maximum number of discovery attempts for transient errors.
+	// Defaults to DefaultMaxDiscoveryAttempts (5) if <= 0.
+	MaxDiscoveryAttempts int
+
+	// DiscoveryRetryBackoff defines the backoff schedule between transient attempts.
+	// Defaults to DefaultDiscoveryRetryBackoff if empty.
+	DiscoveryRetryBackoff []time.Duration
+
+	// Sleep pauses execution between retries. In tests, this can be overridden to return immediately.
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 func (r *RunReconciler) maxStdoutBytes() int64 {
@@ -214,10 +353,72 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	cmd := discovery.BuildDiscoveryCommand(run.Spec.Repo.URL, run.Spec.Repo.Commit)
 	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	stdout, stderr, err := r.Executor.Exec(execCtx, sandboxNamespace, pod.Name, discovery.DiscoveryContainerName, cmd)
-	if err != nil {
+	maxAttempts := r.MaxDiscoveryAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = DefaultMaxDiscoveryAttempts
+	}
+
+	backoffs := r.DiscoveryRetryBackoff
+	if len(backoffs) == 0 {
+		backoffs = DefaultDiscoveryRetryBackoff
+	}
+
+	sleepFn := r.Sleep
+	if sleepFn == nil {
+		sleepFn = defaultSleep
+	}
+
+	var stdout, stderr string
+	var execErr error
+	var attempts int
+
+	for attempts = 1; attempts <= maxAttempts; attempts++ {
+		stdout, stderr, execErr = r.Executor.Exec(execCtx, sandboxNamespace, pod.Name, discovery.DiscoveryContainerName, cmd)
+		if execErr == nil {
+			break
+		}
+
+		if !IsTransientDiscoveryError(execErr, stderr) || attempts >= maxAttempts || execCtx.Err() != nil {
+			break
+		}
+
+		backoffDuration := backoffForAttempt(backoffs, attempts)
+		logger.Info("Transient error during discovery execution; retrying",
+			"attempt", attempts,
+			"maxAttempts", maxAttempts,
+			"error", execErr,
+			"backoff", backoffDuration,
+		)
+
+		attemptMsg := fmt.Sprintf("Running discovery in sandbox (attempt %d of %d failed; retrying)", attempts, maxAttempts)
+		retryMsg := fmt.Sprintf("Discovery attempt %d failed; retrying", attempts)
+		if updateErr := r.updateRunStatus(execCtx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionTypeDiscovered,
+				Status:             metav1.ConditionFalse,
+				Reason:             "Discovering",
+				Message:            attemptMsg,
+				ObservedGeneration: gen,
+			})
+			status.Message = retryMsg
+		}); updateErr != nil {
+			logger.Error(updateErr, "failed to update run status during retry", "attempt", attempts)
+		}
+
+		if err := sleepFn(execCtx, backoffDuration); err != nil {
+			logger.Info("Context done while waiting to retry discovery", "error", err)
+			break
+		}
+	}
+
+	if execErr != nil {
 		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := fmt.Sprintf("Command execution failed: %v", err)
+		var msg string
+		if attempts > 1 || (IsTransientDiscoveryError(execErr, stderr) && attempts >= maxAttempts) {
+			msg = fmt.Sprintf("Command execution failed after %s: %v", formatAttemptCount(attempts), execErr)
+		} else {
+			msg = fmt.Sprintf("Command execution failed: %v", execErr)
+		}
 		if tail != "" {
 			msg += "\n" + tail
 		}

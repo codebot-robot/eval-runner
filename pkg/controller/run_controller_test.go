@@ -19,6 +19,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
@@ -38,12 +39,18 @@ import (
 )
 
 type fakePodExecutor struct {
-	stdout string
-	stderr string
-	err    error
+	stdout    string
+	stderr    string
+	err       error
+	callCount int
+	execFn    func(call int, ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error)
 }
 
 func (f *fakePodExecutor) Exec(ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
+	f.callCount++
+	if f.execFn != nil {
+		return f.execFn(f.callCount, ctx, namespace, podName, containerName, cmd)
+	}
 	return f.stdout, f.stderr, f.err
 }
 
@@ -285,6 +292,12 @@ func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 	}
 	if !strings.Contains(updatedRun.Status.Message, "deadbeef") {
 		t.Errorf("Expected failure message to contain stderr tail, got: %s", updatedRun.Status.Message)
+	}
+	if strings.Contains(updatedRun.Status.Message, "attempts") {
+		t.Errorf("Expected permanent failure to not mention attempts, got: %s", updatedRun.Status.Message)
+	}
+	if executor.callCount != 1 {
+		t.Errorf("Expected permanent failure to not be retried, got %d calls", executor.callCount)
 	}
 
 	// Assert Sandbox was cleaned up
@@ -931,5 +944,392 @@ func TestReconcileStderrOverLimitWithoutExecutorError(t *testing.T) {
 	err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: f.sandboxName}, &checkSb)
 	if err == nil || !apierrors.IsNotFound(err) {
 		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-retry",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run-retry")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	validManifestJSON := `{
+		"tasks": [
+			{"id": "triage/runbook_lookup", "workdir": "evals", "spec": "runbook.py@lookup"},
+			{"id": "triage/summary_quality", "workdir": "evals", "spec": "summary.py@quality"}
+		]
+	}`
+
+	executor := &fakePodExecutor{
+		execFn: func(call int, ctx context.Context, namespace, podName, containerName string, cmd []string) (string, string, error) {
+			if call == 1 {
+				// Simulate transient connection refused
+				return "", "fatal: unable to connect to git-server.eval-runner-sandbox.svc.cluster.local:\ngit-server.eval-runner-sandbox.svc.cluster.local[0: 34.118.239.254]: errno=Connection refused", errors.New("command terminated with exit code 128")
+			}
+			return validManifestJSON, "", nil
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Executor:         executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			return nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-retry"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Did not expect RequeueAfter on success")
+	}
+
+	if executor.callCount != 2 {
+		t.Errorf("Expected 2 discovery attempts (1 transient failure + 1 success), got %d", executor.callCount)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
+	}
+	if updatedRun.Status.Manifest == nil || len(updatedRun.Status.Manifest.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks in manifest, got: %+v", updatedRun.Status.Manifest)
+	}
+
+	var checkSb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted, got err: %v", err)
+	}
+}
+
+func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-exhaust",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run-exhaust")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	executor := &fakePodExecutor{
+		stderr: "fatal: unable to connect to git-server:\ngit-server: errno=Connection refused",
+		err:    errors.New("command terminated with exit code 128"),
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:               client,
+		Scheme:               scheme,
+		Executor:             executor,
+		SandboxNamespace:     "eval-runner-sandbox",
+		MaxDiscoveryAttempts: 5,
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			return nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-exhaust"}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	if executor.callCount != 5 {
+		t.Errorf("Expected 5 discovery attempts, got %d", executor.callCount)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "5 attempts") {
+		t.Errorf("Expected status.message to include number of attempts ('5 attempts'), got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Connection refused") {
+		t.Errorf("Expected status.message to include stderr detail, got: %s", updatedRun.Status.Message)
+	}
+
+	// Assert Sandbox was cleaned up
+	var checkSb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestIsTransientDiscoveryErrorTable(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		stderr      string
+		isTransient bool
+	}{
+		{
+			name:        "nil error",
+			err:         nil,
+			stderr:      "",
+			isTransient: false,
+		},
+		{
+			name:        "context deadline exceeded",
+			err:         context.DeadlineExceeded,
+			stderr:      "errno=Connection refused",
+			isTransient: false,
+		},
+		{
+			name:        "context canceled",
+			err:         context.Canceled,
+			stderr:      "errno=Connection refused",
+			isTransient: false,
+		},
+		{
+			name:        "git daemon connection refused",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to connect to git-server.eval-runner-sandbox.svc.cluster.local:\ngit-server.eval-runner-sandbox.svc.cluster.local[0: 34.118.239.254]: errno=Connection refused",
+			isTransient: true,
+		},
+		{
+			name:        "https connection refused",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to access 'https://github.com/org/repo.git/': Failed to connect to github.com port 443: Connection refused",
+			isTransient: true,
+		},
+		{
+			name:        "connection reset by peer",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: read error: Connection reset by peer",
+			isTransient: true,
+		},
+		{
+			name:        "DNS could not resolve host",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to access 'https://github.com/org/repo.git/': Could not resolve host: github.com",
+			isTransient: true,
+		},
+		{
+			name:        "DNS name does not resolve",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to look up git-server (port 9418) (Name does not resolve)",
+			isTransient: true,
+		},
+		{
+			name:        "DNS temporary failure",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to look up git-server (port 9418) (Temporary failure in name resolution)",
+			isTransient: true,
+		},
+		{
+			name:        "DNS name or service not known",
+			err:         errors.New("exit status 128"),
+			stderr:      "ssh: Could not resolve hostname git-server: Name or service not known",
+			isTransient: true,
+		},
+		{
+			name:        "connection timed out",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to connect to git-server:\ngit-server: errno=Connection timed out",
+			isTransient: true,
+		},
+		{
+			name:        "operation timed out",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to access 'https://github.com/org/repo.git/': Operation timed out after 300000 milliseconds with 0 bytes received",
+			isTransient: true,
+		},
+		{
+			name:        "i/o timeout in error string",
+			err:         errors.New("dial tcp 10.0.0.1:443: i/o timeout"),
+			stderr:      "",
+			isTransient: true,
+		},
+		{
+			name:        "HTTP 500",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 500",
+			isTransient: true,
+		},
+		{
+			name:        "HTTP 502",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 502",
+			isTransient: true,
+		},
+		{
+			name:        "HTTP 503",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 503",
+			isTransient: true,
+		},
+		{
+			name:        "HTTP 504",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to access 'https://git-server/repo.git/': The requested URL returned error: 504",
+			isTransient: true,
+		},
+		{
+			name:        "remote end hung up unexpectedly",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: the remote end hung up unexpectedly",
+			isTransient: true,
+		},
+		{
+			name:        "early EOF",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: early EOF\nfatal: fetch-pack: invalid index-pack output",
+			isTransient: true,
+		},
+		{
+			name:        "network is unreachable",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to connect to git-server: errno=Network is unreachable",
+			isTransient: true,
+		},
+		{
+			name:        "no route to host",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: unable to connect to git-server: errno=No route to host",
+			isTransient: true,
+		},
+		{
+			name:        "permanent: bad commit reference is not a tree",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: reference is not a tree: deadbeef00000000000000000000000000000000",
+			isTransient: false,
+		},
+		{
+			name:        "permanent: pathspec did not match",
+			err:         errors.New("exit status 1"),
+			stderr:      "error: pathspec 'bad-branch' did not match any file(s) known to git",
+			isTransient: false,
+		},
+		{
+			name:        "permanent: missing .evals/list",
+			err:         errors.New("exit status 127"),
+			stderr:      "sh: ./.evals/list: not found",
+			isTransient: false,
+		},
+		{
+			name:        "permanent: non-executable .evals/list",
+			err:         errors.New("exit status 126"),
+			stderr:      "sh: ./.evals/list: Permission denied",
+			isTransient: false,
+		},
+		{
+			name:        "permanent: non-zero exit of .evals/list",
+			err:         errors.New("exit status 1"),
+			stderr:      "Traceback (most recent call last):\n  File './.evals/list', line 12, in <module>\nRuntimeError: missing config",
+			isTransient: false,
+		},
+		{
+			name:        "permanent: repository not found 404",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: repository 'https://github.com/org/repo.git/' not found\nThe requested URL returned error: 404",
+			isTransient: false,
+		},
+		{
+			name:        "permanent: authentication failed 401",
+			err:         errors.New("exit status 128"),
+			stderr:      "fatal: Authentication failed for 'https://github.com/org/repo.git/'\nThe requested URL returned error: 401",
+			isTransient: false,
+		},
+		{
+			name:        "permanent: forbidden 403",
+			err:         errors.New("exit status 128"),
+			stderr:      "The requested URL returned error: 403",
+			isTransient: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsTransientDiscoveryError(tt.err, tt.stderr)
+			if got != tt.isTransient {
+				t.Errorf("IsTransientDiscoveryError() = %v, want %v (err: %v, stderr: %q)", got, tt.isTransient, tt.err, tt.stderr)
+			}
+		})
 	}
 }
