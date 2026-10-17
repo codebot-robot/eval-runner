@@ -80,6 +80,7 @@ status:
 | `message` | `string` | Human-readable explanation or error details (including stderr tail on failure). |
 | `conditions` | `[]metav1.Condition` | Standard Kubernetes condition list. Includes condition `Discovered`. |
 | `manifest` | `*Manifest` | The parsed output of `.evals/list` upon successful discovery. |
+| `discoveryDeadline` | `*metav1.Time` | Overall deadline by which discovery must complete. |
 
 ### Phases
 
@@ -116,4 +117,5 @@ Because `.evals/list` executes within an untrusted sandbox, the controller enfor
 | Failure message length | `MaxMessageBytes` (4,096 B) | Controller default: `4096` | Truncated safely with `\n... [truncated]`. |
 | Stderr tail lines | `MaxStderrLines` (10 lines) | Controller default: `10` | Only the most recent lines of stderr are retained. |
 | Stderr tail bytes | `MaxStderrTailBytes` (3,072 B) | Controller default: `3072` | Stderr tail is capped before inclusion in failure message. |
+| Discovery deadline | `DefaultDiscoveryDeadline` (10m) | `--discovery-deadline` (default: `10m`) | Overall discovery deadline exceeded; Run marked `Failed` and sandbox deleted. |
 
