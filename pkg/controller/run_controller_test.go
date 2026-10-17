@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -4321,5 +4323,724 @@ func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) 
 	}
 	if t1.MeanScore == nil || *t1.MeanScore != 1.0 {
 		t.Errorf("Expected MeanScore=1.0 to survive storage failure, got %v", t1.MeanScore)
+	}
+}
+
+func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-binary", Spec: "eval.py@task1", Workdir: "evals"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-binary", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "task-binary", "scorers": [{"name": "choice"}]},
+		"samples": [
+			{"id": 1, "scores": {"choice": {"value": 1.0}}},
+			{"id": 2, "scores": {"choice": {"value": 1.0}}},
+			{"id": 3, "scores": {"choice": {"value": 1.0}}},
+			{"id": 4, "scores": {"choice": {"value": 0.0}}}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+
+	// Turn 1: create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	taskSB := sbList.Items[0]
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSB.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: execute task
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Fatalf("Expected Completed, got %s", t1.Phase)
+	}
+	if t1.Samples != 4 {
+		t.Errorf("Expected 4 samples, got %d", t1.Samples)
+	}
+	if t1.Successes != 3 {
+		t.Errorf("Expected 3 successes, got %d", t1.Successes)
+	}
+	if t1.SuccessRate == nil || *t1.SuccessRate != 0.75 {
+		t.Errorf("Expected successRate 0.75, got %v", t1.SuccessRate)
+	}
+	if t1.SuccessRateCI == nil {
+		t.Fatalf("Expected non-nil successRateCI")
+	}
+	if t1.SuccessRateCI.Method != "wilson" {
+		t.Errorf("Expected method wilson, got %s", t1.SuccessRateCI.Method)
+	}
+	if t1.SuccessRateCI.Confidence != 0.95 {
+		t.Errorf("Expected confidence 0.95, got %f", t1.SuccessRateCI.Confidence)
+	}
+	expectedEst := stats.Proportion(3, 4, 0.95)
+	if math.Abs(t1.SuccessRateCI.Lower-expectedEst.CI.Lower) > 1e-6 {
+		t.Errorf("Expected CI lower %f, got %f", expectedEst.CI.Lower, t1.SuccessRateCI.Lower)
+	}
+	if math.Abs(t1.SuccessRateCI.Upper-expectedEst.CI.Upper) > 1e-6 {
+		t.Errorf("Expected CI upper %f, got %f", expectedEst.CI.Upper, t1.SuccessRateCI.Upper)
+	}
+
+	// Verify status.summary
+	if updatedRun.Status.Summary == nil {
+		t.Fatalf("Expected non-nil status.Summary")
+	}
+	if updatedRun.Status.Summary.Tasks != "1/1" {
+		t.Errorf("Expected Summary.Tasks 1/1, got %s", updatedRun.Status.Summary.Tasks)
+	}
+	if updatedRun.Status.Summary.TasksCompleted != 1 {
+		t.Errorf("Expected TasksCompleted 1, got %d", updatedRun.Status.Summary.TasksCompleted)
+	}
+	if updatedRun.Status.Summary.TasksFailed != 0 {
+		t.Errorf("Expected TasksFailed 0, got %d", updatedRun.Status.Summary.TasksFailed)
+	}
+	if updatedRun.Status.Summary.TotalSamples != 4 {
+		t.Errorf("Expected TotalSamples 4, got %d", updatedRun.Status.Summary.TotalSamples)
+	}
+	if updatedRun.Status.Summary.MeanSuccessRate == nil || math.Abs(*updatedRun.Status.Summary.MeanSuccessRate-0.75) > 1e-6 {
+		t.Errorf("Expected MeanSuccessRate 0.75, got %v", updatedRun.Status.Summary.MeanSuccessRate)
+	}
+	if updatedRun.Status.Summary.SuccessRateRange == nil || updatedRun.Status.Summary.SuccessRateRange.Min != 0.75 || updatedRun.Status.Summary.SuccessRateRange.Max != 0.75 {
+		t.Errorf("Expected SuccessRateRange [0.75, 0.75], got %+v", updatedRun.Status.Summary.SuccessRateRange)
+	}
+}
+
+func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-partial", Spec: "eval.py@task_partial", Workdir: "evals"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-partial", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "task-partial", "scorers": [{"name": "factuality"}]},
+		"samples": [
+			{"id": 1, "scores": {"factuality": {"value": 0.2}}},
+			{"id": 2, "scores": {"factuality": {"value": 0.4}}},
+			{"id": 3, "scores": {"factuality": {"value": 0.6}}},
+			{"id": 4, "scores": {"factuality": {"value": 0.8}}}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+
+	// Turn 1: create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	taskSB := sbList.Items[0]
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSB.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: execute task
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Fatalf("Expected Completed, got %s", t1.Phase)
+	}
+	if t1.Samples != 4 {
+		t.Errorf("Expected 4 samples, got %d", t1.Samples)
+	}
+	// Successes: only scores >= 1.0; here none >= 1.0
+	if t1.Successes != 0 {
+		t.Errorf("Expected 0 successes, got %d", t1.Successes)
+	}
+	if t1.SuccessRate == nil || math.Abs(*t1.SuccessRate-0.5) > 1e-6 {
+		t.Errorf("Expected successRate 0.5, got %v", t1.SuccessRate)
+	}
+	if t1.SuccessRateCI == nil {
+		t.Fatalf("Expected non-nil successRateCI")
+	}
+	if t1.SuccessRateCI.Method != "t" {
+		t.Errorf("Expected method 't', got %s", t1.SuccessRateCI.Method)
+	}
+	if t1.SuccessRateCI.Confidence != 0.95 {
+		t.Errorf("Expected confidence 0.95, got %f", t1.SuccessRateCI.Confidence)
+	}
+	scores := []float64{0.2, 0.4, 0.6, 0.8}
+	expectedEst := stats.Mean(scores, 0.95)
+	if math.Abs(t1.SuccessRateCI.Lower-expectedEst.CI.Lower) > 1e-6 {
+		t.Errorf("Expected CI lower %f, got %f", expectedEst.CI.Lower, t1.SuccessRateCI.Lower)
+	}
+	if math.Abs(t1.SuccessRateCI.Upper-expectedEst.CI.Upper) > 1e-6 {
+		t.Errorf("Expected CI upper %f, got %f", expectedEst.CI.Upper, t1.SuccessRateCI.Upper)
+	}
+}
+
+func TestReconcileSampleExecution_Wilson20_20(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-perfect", Spec: "eval.py@task_perfect", Workdir: "evals"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-perfect", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	var samplesJSON []string
+	for i := 1; i <= 20; i++ {
+		samplesJSON = append(samplesJSON, fmt.Sprintf(`{"id": %d, "scores": {"choice": {"value": "C"}}}`, i))
+	}
+	inspectLog := fmt.Sprintf(`{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "task-perfect", "scorers": [{"name": "choice"}]},
+		"samples": [%s]
+	}`, strings.Join(samplesJSON, ","))
+
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+
+	// Turn 1: create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	taskSB := sbList.Items[0]
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSB.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: execute task
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Samples != 20 || t1.Successes != 20 {
+		t.Fatalf("Expected 20/20, got %d/%d", t1.Successes, t1.Samples)
+	}
+	if t1.SuccessRate == nil || *t1.SuccessRate != 1.0 {
+		t.Errorf("Expected successRate 1.0, got %v", t1.SuccessRate)
+	}
+	if t1.SuccessRateCI == nil {
+		t.Fatalf("Expected non-nil successRateCI")
+	}
+	if t1.SuccessRateCI.Method != "wilson" {
+		t.Errorf("Expected method wilson, got %s", t1.SuccessRateCI.Method)
+	}
+	// Wilson lower bound for 20/20 must be bounded and < 1.0 (~0.8389)
+	if t1.SuccessRateCI.Lower >= 1.0 || t1.SuccessRateCI.Lower < 0.80 {
+		t.Errorf("Expected Wilson lower bound < 1.0 and >= 0.80, got %f", t1.SuccessRateCI.Lower)
+	}
+	// Wilson upper bound for 20/20 is exactly 1.0
+	if t1.SuccessRateCI.Upper != 1.0 {
+		t.Errorf("Expected Wilson upper bound 1.0, got %f", t1.SuccessRateCI.Upper)
+	}
+}
+
+func TestReconcileSampleExecution_ZeroSamplesFailed(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-fail", Spec: "eval.py@task_fail", Workdir: "evals"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-fail", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	executor := &sandboxclient.FakeClient{
+		InspectExit: 1, // fails inspect eval step with exit code 1
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
+
+	// Turn 1: create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	taskSB := sbList.Items[0]
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSB.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: execute task fails
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Phase != v1alpha1.TaskPhaseFailed {
+		t.Fatalf("Expected Failed phase, got %s", t1.Phase)
+	}
+	if t1.Samples != 0 {
+		t.Errorf("Expected 0 samples, got %d", t1.Samples)
+	}
+	if t1.SuccessRate != nil {
+		t.Errorf("Expected nil SuccessRate on zero samples/failed task, got %v", t1.SuccessRate)
+	}
+	if t1.SuccessRateCI != nil {
+		t.Errorf("Expected nil SuccessRateCI on zero samples/failed task, got %v", t1.SuccessRateCI)
+	}
+
+	if updatedRun.Status.Summary == nil {
+		t.Fatalf("Expected non-nil Summary")
+	}
+	if updatedRun.Status.Summary.Tasks != "0/1" {
+		t.Errorf("Expected Tasks '0/1', got %s", updatedRun.Status.Summary.Tasks)
+	}
+	if updatedRun.Status.Summary.TasksCompleted != 0 {
+		t.Errorf("Expected TasksCompleted 0, got %d", updatedRun.Status.Summary.TasksCompleted)
+	}
+	if updatedRun.Status.Summary.TasksFailed != 1 {
+		t.Errorf("Expected TasksFailed 1, got %d", updatedRun.Status.Summary.TasksFailed)
+	}
+	if updatedRun.Status.Summary.TotalSamples != 0 {
+		t.Errorf("Expected TotalSamples 0, got %d", updatedRun.Status.Summary.TotalSamples)
+	}
+	if updatedRun.Status.Summary.MeanSuccessRate != nil {
+		t.Errorf("Expected nil MeanSuccessRate when no tasks completed, got %v", updatedRun.Status.Summary.MeanSuccessRate)
+	}
+	if updatedRun.Status.Summary.SuccessRateRange != nil {
+		t.Errorf("Expected nil SuccessRateRange when no tasks completed, got %v", updatedRun.Status.Summary.SuccessRateRange)
+	}
+	if updatedRun.Status.Summary.Rates != "task-fail=failed" {
+		t.Errorf("Expected Rates 'task-fail=failed', got %s", updatedRun.Status.Summary.Rates)
+	}
+}
+
+func TestReconcileSampleExecution_ScorelessLogFailsWithNoScoredSamples(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-scoreless",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-scoreless", Spec: "eval.py@task_scoreless", Workdir: "evals"},
+				},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-scoreless", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	// Inspect log where all samples errored without scores
+	inspectLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "task-scoreless", "scorers": [{"name": "choice"}]},
+		"samples": [
+			{"id": 1, "error": "model timeout"},
+			{"id": 2, "error": "connection refused"}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-scoreless"}}
+
+	// Turn 1: create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	taskSB := sbList.Items[0]
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSB.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: execute task
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Phase != v1alpha1.TaskPhaseFailed {
+		t.Fatalf("Expected Failed phase, got %s", t1.Phase)
+	}
+	if t1.Message != "no scored samples" {
+		t.Errorf("Expected message 'no scored samples', got %q", t1.Message)
+	}
+	if t1.Samples != 0 {
+		t.Errorf("Expected 0 samples, got %d", t1.Samples)
+	}
+	if t1.SuccessRate != nil {
+		t.Errorf("Expected nil SuccessRate on scoreless task, got %v", t1.SuccessRate)
+	}
+	if t1.SuccessRateCI != nil {
+		t.Errorf("Expected nil SuccessRateCI on scoreless task, got %v", t1.SuccessRateCI)
+	}
+
+	if updatedRun.Status.Summary == nil {
+		t.Fatalf("Expected non-nil Summary")
+	}
+	if updatedRun.Status.Summary.Tasks != "0/1" {
+		t.Errorf("Expected Tasks '0/1', got %s", updatedRun.Status.Summary.Tasks)
+	}
+	if updatedRun.Status.Summary.TasksCompleted != 0 {
+		t.Errorf("Expected TasksCompleted 0, got %d", updatedRun.Status.Summary.TasksCompleted)
+	}
+	if updatedRun.Status.Summary.TasksFailed != 1 {
+		t.Errorf("Expected TasksFailed 1, got %d", updatedRun.Status.Summary.TasksFailed)
+	}
+	if updatedRun.Status.Summary.TotalSamples != 0 {
+		t.Errorf("Expected TotalSamples 0, got %d", updatedRun.Status.Summary.TotalSamples)
+	}
+}
+
+func TestPrinterColumnFormatting(t *testing.T) {
+	// 1. Empty tasks
+	if s := ComputeRunSummary(nil); s != nil {
+		t.Errorf("Expected nil summary for empty tasks, got %v", s)
+	}
+
+	// 2. Single completed task with Wilson CI
+	rate1 := 0.85
+	tasks := []v1alpha1.TaskStatus{
+		{
+			ID:          "docs/readme_comprehension",
+			Phase:       v1alpha1.TaskPhaseCompleted,
+			Samples:     20,
+			Successes:   17,
+			SuccessRate: &rate1,
+			SuccessRateCI: &v1alpha1.ConfidenceInterval{
+				Lower:      0.64,
+				Upper:      0.95,
+				Confidence: 0.95,
+				Method:     "wilson",
+			},
+		},
+	}
+	s1 := ComputeRunSummary(tasks)
+	if s1.Tasks != "1/1" {
+		t.Errorf("Expected Tasks '1/1', got %s", s1.Tasks)
+	}
+	if s1.TotalSamples != 20 {
+		t.Errorf("Expected TotalSamples 20, got %d", s1.TotalSamples)
+	}
+	if s1.Rates != "docs/readme_comprehension=0.85 [0.64, 0.95]" {
+		t.Errorf("Expected Rates 'docs/readme_comprehension=0.85 [0.64, 0.95]', got %s", s1.Rates)
+	}
+	if s1.MeanSuccessRate == nil || *s1.MeanSuccessRate != 0.85 {
+		t.Errorf("Expected MeanSuccessRate 0.85, got %v", s1.MeanSuccessRate)
+	}
+	if s1.SuccessRateRange == nil || s1.SuccessRateRange.Min != 0.85 || s1.SuccessRateRange.Max != 0.85 {
+		t.Errorf("Expected SuccessRateRange [0.85, 0.85], got %+v", s1.SuccessRateRange)
+	}
+
+	// 3. Two completed tasks
+	rate2 := 0.15
+	tasks = append(tasks, v1alpha1.TaskStatus{
+		ID:          "docs/readme_comprehension_blind",
+		Phase:       v1alpha1.TaskPhaseCompleted,
+		Samples:     20,
+		Successes:   3,
+		SuccessRate: &rate2,
+		SuccessRateCI: &v1alpha1.ConfidenceInterval{
+			Lower:      0.05,
+			Upper:      0.36,
+			Confidence: 0.95,
+			Method:     "wilson",
+		},
+	})
+	s2 := ComputeRunSummary(tasks)
+	if s2.Tasks != "2/2" {
+		t.Errorf("Expected Tasks '2/2', got %s", s2.Tasks)
+	}
+	if s2.TotalSamples != 40 {
+		t.Errorf("Expected TotalSamples 40, got %d", s2.TotalSamples)
+	}
+	expectedRates := "docs/readme_comprehension=0.85 [0.64, 0.95], docs/readme_comprehension_blind=0.15 [0.05, 0.36]"
+	if s2.Rates != expectedRates {
+		t.Errorf("Expected Rates %q, got %q", expectedRates, s2.Rates)
+	}
+	expectedMean := (0.85 + 0.15) / 2.0
+	if s2.MeanSuccessRate == nil || math.Abs(*s2.MeanSuccessRate-expectedMean) > 1e-6 {
+		t.Errorf("Expected MeanSuccessRate %f, got %v", expectedMean, s2.MeanSuccessRate)
+	}
+	if s2.SuccessRateRange == nil || s2.SuccessRateRange.Min != 0.15 || s2.SuccessRateRange.Max != 0.85 {
+		t.Errorf("Expected SuccessRateRange [0.15, 0.85], got %+v", s2.SuccessRateRange)
+	}
+
+	// 4. Length capping / truncation
+	capped := FormatRatesSummary(tasks, 50)
+	if len(capped) > 50 {
+		t.Errorf("Expected capped length <= 50, got %d (%s)", len(capped), capped)
+	}
+	if !strings.HasSuffix(capped, "...") {
+		t.Errorf("Expected capped string to end with '...', got %s", capped)
 	}
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -555,6 +556,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
 				status.Artifacts = prefix
 			}
+			status.Summary = ComputeRunSummary(status.Tasks)
 		})
 		if err != nil {
 			return ctrl.Result{}, err
@@ -1052,6 +1054,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
 			status.Artifacts = prefix
 		}
+		status.Summary = ComputeRunSummary(status.Tasks)
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionTypeDiscovered,
 			Status:             metav1.ConditionTrue,
@@ -1196,6 +1199,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 						status.Artifacts = prefix
 					}
 				}
+				status.Summary = ComputeRunSummary(status.Tasks)
 			})
 			return ctrl.Result{}, err
 		}
@@ -1204,6 +1208,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseFailed
 			status.Message = msg
+			status.Summary = ComputeRunSummary(status.Tasks)
 		})
 		return ctrl.Result{}, err
 	}
@@ -1330,6 +1335,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 							}
 						}
 					}
+					status.Summary = ComputeRunSummary(status.Tasks)
 				})
 				if err != nil {
 					return ctrl.Result{}, err
@@ -1480,6 +1486,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					status.Tasks[i].Message = msg
 				}
 			}
+			status.Summary = ComputeRunSummary(status.Tasks)
 		})
 		if err != nil {
 			return ctrl.Result{}, err
@@ -1533,10 +1540,13 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].Samples = res.samples
 				status.Tasks[i].Successes = res.successes
 				status.Tasks[i].MeanScore = res.meanScore
+				status.Tasks[i].SuccessRate = res.successRate
+				status.Tasks[i].SuccessRateCI = res.successRateCI
 				status.Tasks[i].Message = res.message
 				status.Tasks[i].LogPath = res.logPath
 			}
 		}
+		status.Summary = ComputeRunSummary(status.Tasks)
 	})
 	if err != nil {
 		return ctrl.Result{}, err
@@ -1557,13 +1567,15 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 }
 
 type taskExecutionResult struct {
-	taskID    string
-	phase     v1alpha1.TaskPhase
-	samples   int
-	successes int
-	meanScore *float64
-	message   string
-	logPath   string
+	taskID        string
+	phase         v1alpha1.TaskPhase
+	samples       int
+	successes     int
+	meanScore     *float64
+	successRate   *float64
+	successRateCI *v1alpha1.ConfidenceInterval
+	message       string
+	logPath       string
 }
 
 func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) taskExecutionResult {
@@ -1883,13 +1895,51 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}
 
+	if agg.Samples == 0 {
+		msg := "no scored samples"
+		logger.Error(errors.New(msg), "Task completed without scored samples", "task", taskID)
+		return taskExecutionResult{
+			taskID:  taskID,
+			phase:   v1alpha1.TaskPhaseFailed,
+			message: msg,
+			logPath: logPath,
+		}
+	}
+
+	var successRate *float64
+	var successRateCI *v1alpha1.ConfidenceInterval
+
+	if agg.IsBinary() {
+		est := stats.Proportion(agg.Successes, agg.Samples, 0.95)
+		rate := est.Point
+		successRate = &rate
+		successRateCI = &v1alpha1.ConfidenceInterval{
+			Lower:      est.CI.Lower,
+			Upper:      est.CI.Upper,
+			Confidence: 0.95,
+			Method:     "wilson",
+		}
+	} else {
+		est := stats.Mean(agg.Scores, 0.95)
+		rate := est.Point
+		successRate = &rate
+		successRateCI = &v1alpha1.ConfidenceInterval{
+			Lower:      est.CI.Lower,
+			Upper:      est.CI.Upper,
+			Confidence: 0.95,
+			Method:     "t",
+		}
+	}
+
 	return taskExecutionResult{
-		taskID:    taskID,
-		phase:     v1alpha1.TaskPhaseCompleted,
-		samples:   agg.Samples,
-		successes: agg.Successes,
-		meanScore: agg.MeanScore,
-		logPath:   logPath,
+		taskID:        taskID,
+		phase:         v1alpha1.TaskPhaseCompleted,
+		samples:       agg.Samples,
+		successes:     agg.Successes,
+		meanScore:     agg.MeanScore,
+		successRate:   successRate,
+		successRateCI: successRateCI,
+		logPath:       logPath,
 	}
 }
 
@@ -2059,6 +2109,99 @@ func truncateMessage(msg string, maxBytes int) string {
 		cutoff--
 	}
 	return msg[:cutoff] + suffix
+}
+
+// DefaultMaxRatesSummaryLength is the maximum length of the compact rates printer column string before truncation.
+const DefaultMaxRatesSummaryLength = 120
+
+// ComputeRunSummary calculates aggregate statistics across tasks for status.summary.
+func ComputeRunSummary(tasks []v1alpha1.TaskStatus) *v1alpha1.RunSummary {
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	completed := 0
+	failed := 0
+	totalSamples := 0
+	var rates []float64
+
+	for _, t := range tasks {
+		totalSamples += t.Samples
+		switch t.Phase {
+		case v1alpha1.TaskPhaseCompleted:
+			completed++
+			if t.SuccessRate != nil {
+				rates = append(rates, *t.SuccessRate)
+			}
+		case v1alpha1.TaskPhaseFailed:
+			failed++
+		}
+	}
+
+	summary := &v1alpha1.RunSummary{
+		Tasks:          fmt.Sprintf("%d/%d", completed, len(tasks)),
+		TasksCompleted: completed,
+		TasksFailed:    failed,
+		TasksTotal:     len(tasks),
+		TotalSamples:   totalSamples,
+		Rates:          FormatRatesSummary(tasks, DefaultMaxRatesSummaryLength),
+	}
+
+	if len(rates) > 0 {
+		var sum float64
+		minRate := rates[0]
+		maxRate := rates[0]
+		for _, r := range rates {
+			sum += r
+			if r < minRate {
+				minRate = r
+			}
+			if r > maxRate {
+				maxRate = r
+			}
+		}
+		mean := sum / float64(len(rates))
+		summary.MeanSuccessRate = &mean
+		summary.SuccessRateRange = &v1alpha1.ScoreRange{
+			Min: minRate,
+			Max: maxRate,
+		}
+	}
+
+	return summary
+}
+
+// FormatRatesSummary produces a compact string of per-task rates and confidence intervals
+// in the format "task1=rate [lo,hi], task2=..." capped at maxLen characters.
+func FormatRatesSummary(tasks []v1alpha1.TaskStatus, maxLen int) string {
+	var parts []string
+	for _, t := range tasks {
+		if t.Phase == v1alpha1.TaskPhaseCompleted && t.SuccessRate != nil {
+			if t.SuccessRateCI != nil {
+				parts = append(parts, fmt.Sprintf("%s=%.2f [%.2f, %.2f]", t.ID, *t.SuccessRate, t.SuccessRateCI.Lower, t.SuccessRateCI.Upper))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s=%.2f", t.ID, *t.SuccessRate))
+			}
+		} else if t.Phase == v1alpha1.TaskPhaseFailed {
+			parts = append(parts, fmt.Sprintf("%s=failed", t.ID))
+		} else if t.Phase == v1alpha1.TaskPhaseRunning {
+			parts = append(parts, fmt.Sprintf("%s=running", t.ID))
+		} else if t.Phase == v1alpha1.TaskPhasePending {
+			parts = append(parts, fmt.Sprintf("%s=pending", t.ID))
+		}
+	}
+	res := strings.Join(parts, ", ")
+	if maxLen > 0 && len(res) > maxLen {
+		if maxLen <= 3 {
+			return res[:maxLen]
+		}
+		cutoff := maxLen - 3
+		for cutoff > 0 && !utf8.RuneStart(res[cutoff]) {
+			cutoff--
+		}
+		return res[:cutoff] + "..."
+	}
+	return res
 }
 
 // SetupWithManager sets up the controller with the Manager.
