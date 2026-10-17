@@ -207,10 +207,11 @@ func TestAggregateVerdictWithProbabilities(t *testing.T) {
 }
 
 func TestAggregateVerdictUnchangedAndInconclusive(t *testing.T) {
-	// Acceptance criterion: run-level P for {unchanged, inconclusive} is near 0.5.
+	// Acceptance criterion: run-level P for {unchanged, inconclusive} is capped by min P(not_reg).
 	// Example from GKE docs-eval-same-commit:
-	// docs/readme_comprehension: 20 ties {0 x20} -> unchanged, P = 0.50
-	// docs/readme_comprehension_blind: 19 ties, 1 loss {-1, 0 x19} -> inconclusive, P ≈ 0.25 (Beta(1, 2))
+	// docs/readme_comprehension: 20 ties {0 x20} -> unchanged, P = 0.50 (pNotReg = 0.975)
+	// docs/readme_comprehension_blind: 19 ties, 1 loss {-1, 0 x19} -> inconclusive, P ≈ 0.25 (Beta(1, 2), pNotReg = 0.25)
+	// Headline P: min(mean, min_k P(not_reg_k)) = min(0.375, 0.25) = 0.25
 	diffsComp := make([]float64, 20)
 	diffsBlind := make([]float64, 20)
 	diffsBlind[0] = -1.0
@@ -236,17 +237,52 @@ func TestAggregateVerdictUnchangedAndInconclusive(t *testing.T) {
 	if vSameCommit.Verdict != VerdictInconclusive {
 		t.Errorf("Verdict = %v, want INCONCLUSIVE", vSameCommit.Verdict)
 	}
-	// Expected headline P is arithmetic mean: (0.50 + ~0.25) / 2 = 0.375
-	expectedP := (estComp.PImprovement + estBlind.PImprovement) / 2.0
+	// Expected headline P is arithmetic mean capped by min P(not_reg):
+	// mean = (0.50 + ~0.25) / 2 = 0.375
+	// min P(not_reg) = min(0.975, ~0.25) = ~0.25
+	// P_run = min(0.375, ~0.25) = ~0.25
+	expectedP := math.Min((estComp.PImprovement+estBlind.PImprovement)/2.0, estBlind.PImprovement)
 	if math.Abs(vSameCommit.PImprovement-expectedP) > 1e-6 {
 		t.Errorf("PImprovement for {unchanged, inconclusive} = %v, want %v",
 			vSameCommit.PImprovement, expectedP)
 	}
-	if math.Abs(vSameCommit.PImprovement-0.375) > 0.02 {
-		t.Errorf("PImprovement for same-commit = %v, want ~0.375", vSameCommit.PImprovement)
+	if math.Abs(vSameCommit.PImprovement-0.25) > 0.02 {
+		t.Errorf("PImprovement for same-commit = %v, want ~0.25", vSameCommit.PImprovement)
 	}
 
-	// Multiple unchanged and inconclusive tasks:
+	// Dilution guard: one weak inconclusive task cannot be diluted by many unchanged tasks.
+	// Acceptance criterion: {unchanged 0.5 x3, inconclusive 0.05} -> 0.05
+	tasksDilution := []TaskReport{
+		{
+			ID:           "task-1",
+			Label:        TaskLabelUnchanged,
+			PImprovement: 0.50,
+		},
+		{
+			ID:           "task-2",
+			Label:        TaskLabelUnchanged,
+			PImprovement: 0.50,
+		},
+		{
+			ID:           "task-3",
+			Label:        TaskLabelUnchanged,
+			PImprovement: 0.50,
+		},
+		{
+			ID:           "task-4",
+			Label:        TaskLabelInconclusive,
+			PImprovement: 0.05,
+		},
+	}
+	vDilution := AggregateVerdict(tasksDilution)
+	if vDilution.Verdict != VerdictInconclusive {
+		t.Errorf("Verdict = %v, want INCONCLUSIVE", vDilution.Verdict)
+	}
+	if math.Abs(vDilution.PImprovement-0.05) > 1e-6 {
+		t.Errorf("PImprovement for {unchanged 0.5 x3, inconclusive 0.05} = %v, want 0.05", vDilution.PImprovement)
+	}
+
+	// Multiple unchanged and inconclusive tasks where mean <= min P(not_reg):
 	tasksMultiple := []TaskReport{
 		{
 			ID:           "task-1",
@@ -268,7 +304,10 @@ func TestAggregateVerdictUnchangedAndInconclusive(t *testing.T) {
 	if vMultiple.Verdict != VerdictInconclusive {
 		t.Errorf("Verdict = %v, want INCONCLUSIVE", vMultiple.Verdict)
 	}
-	expectedMultipleP := (0.50 + 0.50 + 0.53) / 3.0
+	// mean = (0.50 + 0.50 + 0.53) / 3 = 0.51
+	// min P(not_reg) = min(0.975, 0.975, 0.53) = 0.53
+	// min(mean, minPNotReg) = 0.51
+	expectedMultipleP := math.Min((0.50+0.50+0.53)/3.0, 0.53)
 	if math.Abs(vMultiple.PImprovement-expectedMultipleP) > 1e-6 {
 		t.Errorf("PImprovement = %v, want %v", vMultiple.PImprovement, expectedMultipleP)
 	}
@@ -290,7 +329,30 @@ func TestAggregateVerdictUnchangedAndInconclusive(t *testing.T) {
 	if vAllInconclusive.Verdict != VerdictInconclusive {
 		t.Errorf("Verdict = %v, want INCONCLUSIVE", vAllInconclusive.Verdict)
 	}
-	if math.Abs(vAllInconclusive.PImprovement-0.50) > 1e-6 {
-		t.Errorf("PImprovement = %v, want 0.50", vAllInconclusive.PImprovement)
+	// mean = 0.50, min P(not_reg) = 0.46 -> capped at 0.46
+	expectedAllInconclusiveP := math.Min((0.46+0.54)/2.0, 0.46)
+	if math.Abs(vAllInconclusive.PImprovement-expectedAllInconclusiveP) > 1e-6 {
+		t.Errorf("PImprovement = %v, want %v", vAllInconclusive.PImprovement, expectedAllInconclusiveP)
+	}
+
+	// All inconclusive tasks at exact parity:
+	tasksParityInconclusive := []TaskReport{
+		{
+			ID:           "task-p1",
+			Label:        TaskLabelInconclusive,
+			PImprovement: 0.50,
+		},
+		{
+			ID:           "task-p2",
+			Label:        TaskLabelInconclusive,
+			PImprovement: 0.50,
+		},
+	}
+	vParity := AggregateVerdict(tasksParityInconclusive)
+	if vParity.Verdict != VerdictInconclusive {
+		t.Errorf("Verdict = %v, want INCONCLUSIVE", vParity.Verdict)
+	}
+	if math.Abs(vParity.PImprovement-0.50) > 1e-6 {
+		t.Errorf("PImprovement = %v, want 0.50", vParity.PImprovement)
 	}
 }
