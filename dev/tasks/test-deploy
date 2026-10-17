@@ -120,4 +120,112 @@ for flag in "--artifact-bucket" "--discovery-deadline" "--execution-deadline" "-
 done
 echo "PASS: k8s/runner-deployment.yaml passes no deployment-specific flags."
 
+echo "=== 5. Testing deploy manifest verification guard ==="
+
+# Test Case 5A: Valid dry run output containing only this repo's k8s/*.yaml manifests
+VALID_DRY_RUN="deploy-eval-runner
+  port-forward-build-images
+    build-images
+      docker-build-eval-runner-ui
+      docker-build-eval-runner
+      docker-build-git-server
+      docker-build-sample-runner
+  deploy-k8s
+    kubectl-apply-00-namespaces.yaml
+    kubectl-apply-evalrunner.gke-labs.dev_comparisons.yaml
+    kubectl-apply-evalrunner.gke-labs.dev_runs.yaml
+    kubectl-apply-rbac.yaml
+    kubectl-apply-runner-deployment.yaml
+    kubectl-apply-sandbox-networkpolicy.yaml
+    kubectl-apply-ui-deployment.yaml"
+
+if ! verify_deploy_manifests_output "${VALID_DRY_RUN}"; then
+  echo "FAIL: Expected valid dry-run output to pass verification." >&2
+  exit 1
+fi
+echo "PASS: Valid dry-run manifest output accepted."
+
+# Test Case 5B: Foreign manifest in dry-run output (e.g. from agent-sandbox fork)
+FOREIGN_DRY_RUN="${VALID_DRY_RUN}
+    kubectl-apply-controller.yaml"
+
+ERR_OUT="$(verify_deploy_manifests_output "${FOREIGN_DRY_RUN}" 2>&1 || true)"
+if echo "${ERR_OUT}" | grep -q "Discovered manifest 'controller.yaml' does not exist"; then
+  echo "PASS: Foreign manifest 'controller.yaml' rejected fast."
+else
+  echo "FAIL: Foreign manifest in dry-run output was not rejected with expected error. Got: ${ERR_OUT}" >&2
+  exit 1
+fi
+
+# Test Case 5C: Path outside k8s/ (e.g. Applying manifest .build/agent-sandbox/k8s/controller.yaml)
+PATH_OUT="Applying manifest .build/agent-sandbox/k8s/controller.yaml"
+ERR_OUT="$(verify_deploy_manifests_output "${PATH_OUT}" 2>&1 || true)"
+if echo "${ERR_OUT}" | grep -q "outside k8s/"; then
+  echo "PASS: Manifest path outside k8s/ rejected fast."
+else
+  echo "FAIL: Path outside k8s/ was not rejected. Got: ${ERR_OUT}" >&2
+  exit 1
+fi
+
+# Test Case 5D: Empty manifests output
+ERR_OUT="$(verify_deploy_manifests_output "" 2>&1 || true)"
+if echo "${ERR_OUT}" | grep -q "ap deploy --dry-run produced no kubectl-apply tasks"; then
+  echo "PASS: Empty manifests output rejected fast."
+else
+  echo "FAIL: Empty manifests output was not rejected. Got: ${ERR_OUT}" >&2
+  exit 1
+fi
+
+# Test Case 5E: dev/tasks/deploy --dry-run fails when foreign k8s directory is present
+mkdir -p "${REPO_ROOT}/.build/agent-sandbox/k8s"
+touch "${REPO_ROOT}/.build/agent-sandbox/k8s/controller.yaml"
+DEPLOY_ERR="$("${REPO_ROOT}/dev/tasks/deploy" --dry-run 2>&1 || true)"
+rm -rf "${REPO_ROOT}/.build/agent-sandbox"
+
+if echo "${DEPLOY_ERR}" | grep -q "ERROR: Found unauthorized k8s directory"; then
+  echo "PASS: dev/tasks/deploy --dry-run rejected foreign k8s directory."
+else
+  echo "FAIL: dev/tasks/deploy --dry-run did not reject foreign k8s directory. Got: ${DEPLOY_ERR}" >&2
+  exit 1
+fi
+
+# Test Case 5F: dev/tasks/deploy --dry-run fails when foreign images directory is present
+mkdir -p "${REPO_ROOT}/.build/agent-sandbox/images/sample"
+touch "${REPO_ROOT}/.build/agent-sandbox/images/sample/Dockerfile"
+DEPLOY_ERR="$("${REPO_ROOT}/dev/tasks/deploy" --dry-run 2>&1 || true)"
+rm -rf "${REPO_ROOT}/.build/agent-sandbox"
+
+if echo "${DEPLOY_ERR}" | grep -q "ERROR: Found unauthorized images directory"; then
+  echo "PASS: dev/tasks/deploy --dry-run rejected foreign images directory."
+else
+  echo "FAIL: dev/tasks/deploy --dry-run did not reject foreign images directory. Got: ${DEPLOY_ERR}" >&2
+  exit 1
+fi
+
+# Test Case 5G: build-sandboxd cleans up legacy .build/agent-sandbox, clones out of tree,
+# and dev/tasks/deploy --dry-run lists only this repo's k8s/ manifests.
+mkdir -p "${REPO_ROOT}/.build/agent-sandbox/k8s"
+touch "${REPO_ROOT}/.build/agent-sandbox/k8s/controller.yaml"
+
+TEST_CLONE_DIR="$(mktemp -d)/test-agent-sandbox"
+AGENT_SANDBOX_DIR="${TEST_CLONE_DIR}" "${REPO_ROOT}/dev/tasks/build-sandboxd" --clone-only
+
+if [[ -d "${REPO_ROOT}/.build/agent-sandbox" ]]; then
+  echo "FAIL: build-sandboxd failed to clean up legacy .build/agent-sandbox directory!" >&2
+  exit 1
+fi
+if [[ ! -d "${TEST_CLONE_DIR}" ]]; then
+  echo "FAIL: build-sandboxd failed to create out-of-tree checkout at ${TEST_CLONE_DIR}!" >&2
+  exit 1
+fi
+rm -rf "$(dirname "${TEST_CLONE_DIR}")"
+
+# Verify actual dev/tasks/deploy --dry-run succeeds and lists only this repo's k8s/*.yaml manifests
+DRY_RUN_OUT="$("${REPO_ROOT}/dev/tasks/deploy" --dry-run)"
+if ! verify_deploy_manifests_output "${DRY_RUN_OUT}"; then
+  echo "FAIL: ap deploy --dry-run failed manifest verification after build-sandboxd!" >&2
+  exit 1
+fi
+echo "PASS: ap deploy --dry-run lists only this repo's k8s/ manifests after build-sandboxd."
+
 echo "=== All test-deploy checks passed successfully ==="

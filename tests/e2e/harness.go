@@ -113,11 +113,24 @@ func (h *Harness) DeployEvalRunner() {
 	h.DockerBuild("sample-runner:e2e", filepath.Join(gitRoot, "images/sample-runner/Dockerfile"), gitRoot)
 	h.KindLoad("sample-runner:e2e")
 
-	// Build and load sandboxd image from fork (clones into .build/agent-sandbox if sibling is absent)
+	// Build and load sandboxd image from fork (clones out of tree if sibling is absent)
 	h.runCmd(filepath.Join(gitRoot, "dev/tasks/build-sandboxd"))
-	agentSandboxDir := filepath.Join(gitRoot, "../agent-sandbox")
-	if _, err := os.Stat(agentSandboxDir); err != nil {
-		agentSandboxDir = filepath.Join(gitRoot, ".build/agent-sandbox")
+	agentSandboxDir := os.Getenv("AGENT_SANDBOX_DIR")
+	if agentSandboxDir == "" {
+		sibling := filepath.Join(gitRoot, "../agent-sandbox")
+		if _, err := os.Stat(sibling); err == nil {
+			agentSandboxDir = sibling
+		} else {
+			cacheDir := os.Getenv("XDG_CACHE_HOME")
+			if cacheDir == "" {
+				home, err := os.UserHomeDir()
+				if err != nil || home == "" {
+					home = os.TempDir()
+				}
+				cacheDir = filepath.Join(home, ".cache")
+			}
+			agentSandboxDir = filepath.Join(cacheDir, "eval-runner", "agent-sandbox")
+		}
 	}
 	h.DockerBuild("sandboxd:e2e", filepath.Join(agentSandboxDir, "packages/sandboxd/Dockerfile"), agentSandboxDir)
 	h.KindLoad("sandboxd:e2e")

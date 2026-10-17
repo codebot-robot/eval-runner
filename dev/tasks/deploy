@@ -61,6 +61,88 @@ verify_pushed_image() {
   verify_index_has_amd64 "${inspect_out}" "${image}"
 }
 
+verify_deploy_manifests_output() {
+  local dry_run_output="$1"
+
+  # 1. Guard against unauthorized in-tree k8s/ or images/ directories
+  local foreign_k8s
+  foreign_k8s="$(find "${REPO_ROOT}" -mindepth 2 -path "${REPO_ROOT}/.git" -prune -o -type d -name "k8s" -print 2>/dev/null || true)"
+  if [[ -n "${foreign_k8s}" ]]; then
+    echo "ERROR: Found unauthorized k8s directory under repository: ${foreign_k8s}" >&2
+    echo "ap automatically discovers any k8s/ directory under the repository root." >&2
+    echo "No directory other than ${REPO_ROOT}/k8s may be named 'k8s'." >&2
+    return 1
+  fi
+
+  local foreign_images
+  foreign_images="$(find "${REPO_ROOT}" -mindepth 2 -path "${REPO_ROOT}/.git" -prune -o -type d -name "images" -print 2>/dev/null || true)"
+  if [[ -n "${foreign_images}" ]]; then
+    echo "ERROR: Found unauthorized images directory under repository: ${foreign_images}" >&2
+    echo "ap automatically discovers any images/ directory under the repository root." >&2
+    echo "No directory other than ${REPO_ROOT}/images may be named 'images'." >&2
+    return 1
+  fi
+
+  # 2. Reject any line mentioning a manifest path outside k8s/
+  while IFS= read -r line; do
+    if [[ "${line}" =~ Applying[[:space:]]+manifest[[:space:]]+([^[:space:]]+) ]]; then
+      local path="${BASH_REMATCH[1]}"
+      if [[ "${path}" != k8s/* && "${path}" != "${REPO_ROOT}/k8s/"* ]]; then
+        echo "ERROR: Manifest path '${path}' is outside k8s/." >&2
+        return 1
+      fi
+    fi
+  done <<< "${dry_run_output}"
+
+  # 3. Extract manifests from dry-run task tree under deploy-k8s
+  local manifest_tasks=()
+  while IFS= read -r line; do
+    if [[ "${line}" =~ kubectl-apply-([^[:space:]]+) ]]; then
+      manifest_tasks+=("${BASH_REMATCH[1]}")
+    fi
+  done <<< "${dry_run_output}"
+
+  if [[ ${#manifest_tasks[@]} -eq 0 ]]; then
+    echo "ERROR: ap deploy --dry-run produced no kubectl-apply tasks." >&2
+    return 1
+  fi
+
+  # 4. Verify that every task corresponds to a manifest directly in this repo's k8s/ directory
+  for m in "${manifest_tasks[@]}"; do
+    if [[ ! -f "${REPO_ROOT}/k8s/${m}" ]]; then
+      echo "ERROR: Discovered manifest '${m}' does not exist in ${REPO_ROOT}/k8s/." >&2
+      echo "ap deploy must only apply manifests from this repo's k8s/ directory." >&2
+      return 1
+    fi
+  done
+
+  # 5. Verify that the number of tasks matches the number of manifests in k8s/
+  local expected_count=0
+  for f in "${REPO_ROOT}/k8s"/*.yaml "${REPO_ROOT}/k8s"/*.yml; do
+    if [[ -f "${f}" ]]; then
+      expected_count=$((expected_count + 1))
+    fi
+  done
+
+  if [[ ${#manifest_tasks[@]} -ne ${expected_count} ]]; then
+    echo "ERROR: ap deploy discovered ${#manifest_tasks[@]} manifests, but ${REPO_ROOT}/k8s/ contains ${expected_count} manifests." >&2
+    echo "Discovered manifests: ${manifest_tasks[*]}" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+verify_deploy_manifests() {
+  local dry_run_out
+  if ! dry_run_out="$("${AP_CMD[@]}" deploy --dry-run 2>&1)"; then
+    echo "ERROR: 'ap deploy --dry-run' failed:" >&2
+    echo "${dry_run_out}" >&2
+    return 1
+  fi
+  verify_deploy_manifests_output "${dry_run_out}"
+}
+
 run_deploy() {
   local image_prefix="${IMAGE_PREFIX:-images.local}"
   local image_repo
@@ -83,8 +165,18 @@ run_deploy() {
     fi
   done
 
+  # Guard: always verify manifests before building, pushing, or applying
+  local dry_run_out
+  if ! dry_run_out="$("${AP_CMD[@]}" deploy --dry-run 2>&1)"; then
+    echo "ERROR: 'ap deploy --dry-run' failed:" >&2
+    echo "${dry_run_out}" >&2
+    return 1
+  fi
+  verify_deploy_manifests_output "${dry_run_out}"
+
   if [[ "${dry_run}" == "true" ]]; then
-    exec "${AP_CMD[@]}" deploy "$@"
+    echo "${dry_run_out}"
+    return 0
   fi
 
   if [[ "${skip_push}" == "true" ]]; then

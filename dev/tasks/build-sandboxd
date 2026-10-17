@@ -21,14 +21,33 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 PINNED_COMMIT="0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7"
 FORK_URL="https://github.com/codebot-robot/agent-sandbox.git"
 
-# Sibling checkout takes precedence if present; otherwise clone pinned commit into .build/agent-sandbox
+export PATH="${REPO_ROOT}/.build/bin:${PATH}"
+
+# Sibling checkout takes precedence if present; otherwise clone pinned commit into out-of-tree cache (~/.cache/eval-runner/agent-sandbox)
 AGENT_SANDBOX_DIR="${AGENT_SANDBOX_DIR:-}"
 if [[ -z "${AGENT_SANDBOX_DIR}" ]]; then
   if [[ -d "${REPO_ROOT}/../agent-sandbox" ]]; then
     AGENT_SANDBOX_DIR="${REPO_ROOT}/../agent-sandbox"
   else
-    AGENT_SANDBOX_DIR="${REPO_ROOT}/.build/agent-sandbox"
+    CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/eval-runner"
+    AGENT_SANDBOX_DIR="${CACHE_DIR}/agent-sandbox"
   fi
+fi
+
+# Clean up any legacy checkout under .build/ so ap never discovers its manifests or images
+if [[ -d "${REPO_ROOT}/.build/agent-sandbox" ]]; then
+  echo "Removing legacy in-tree clone at ${REPO_ROOT}/.build/agent-sandbox..."
+  rm -rf "${REPO_ROOT}/.build/agent-sandbox"
+fi
+
+# Guard: AGENT_SANDBOX_DIR must never be inside the repository tree.
+# ap searches the entire workspace for k8s/ and images/ directories.
+PARENT_DIR="$(cd "$(dirname "${AGENT_SANDBOX_DIR}")" 2>/dev/null && pwd || true)"
+RESOLVED_DIR="${PARENT_DIR}/$(basename "${AGENT_SANDBOX_DIR}")"
+if [[ "${RESOLVED_DIR}" == "${REPO_ROOT}"* ]]; then
+  echo "ERROR: AGENT_SANDBOX_DIR (${RESOLVED_DIR}) is inside REPO_ROOT (${REPO_ROOT})." >&2
+  echo "The agent-sandbox fork must be cloned outside the repository tree so ap deploy does not discover its manifests." >&2
+  exit 1
 fi
 
 if [[ ! -d "${AGENT_SANDBOX_DIR}" ]]; then
@@ -37,6 +56,30 @@ if [[ ! -d "${AGENT_SANDBOX_DIR}" ]]; then
   git clone "${FORK_URL}" "${AGENT_SANDBOX_DIR}"
   git -C "${AGENT_SANDBOX_DIR}" checkout "${PINNED_COMMIT}"
   rm -rf "${AGENT_SANDBOX_DIR}/examples"
+elif [[ -d "${AGENT_SANDBOX_DIR}/.git" && "${AGENT_SANDBOX_DIR}" != "${REPO_ROOT}/../agent-sandbox" ]]; then
+  CURRENT_COMMIT="$(git -C "${AGENT_SANDBOX_DIR}" rev-parse HEAD 2>/dev/null || true)"
+  if [[ "${CURRENT_COMMIT}" != "${PINNED_COMMIT}"* ]]; then
+    echo "Updating agent-sandbox checkout at ${AGENT_SANDBOX_DIR} to ${PINNED_COMMIT}..."
+    if ! git -C "${AGENT_SANDBOX_DIR}" checkout "${PINNED_COMMIT}" 2>/dev/null; then
+      git -C "${AGENT_SANDBOX_DIR}" fetch origin
+      git -C "${AGENT_SANDBOX_DIR}" checkout "${PINNED_COMMIT}"
+    fi
+  fi
+fi
+
+PUSH=false
+CLONE_ONLY=false
+for arg in "$@"; do
+  if [[ "${arg}" == "--push" ]]; then
+    PUSH=true
+  elif [[ "${arg}" == "--clone-only" ]]; then
+    CLONE_ONLY=true
+  fi
+done
+
+if [[ "${CLONE_ONLY}" == "true" ]]; then
+  echo "agent-sandbox checkout ready at ${AGENT_SANDBOX_DIR}; skipping docker build (--clone-only)."
+  exit 0
 fi
 
 IMAGE_PREFIX="${IMAGE_PREFIX:-gcr.io/justinsb-knotai-dev}"
@@ -46,7 +89,7 @@ IMAGE_NAME="${IMAGE_PREFIX}/sandboxd:${IMAGE_TAG}"
 echo "Building sandboxd from ${AGENT_SANDBOX_DIR} as ${IMAGE_NAME}..."
 docker build -t "${IMAGE_NAME}" -f "${AGENT_SANDBOX_DIR}/packages/sandboxd/Dockerfile" "${AGENT_SANDBOX_DIR}"
 
-if [[ "${1:-}" == "--push" ]]; then
+if [[ "${PUSH}" == "true" ]]; then
   echo "Pushing ${IMAGE_NAME}..."
   docker push "${IMAGE_NAME}"
 fi
