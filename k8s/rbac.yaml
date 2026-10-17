@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Least-privilege RBAC for eval-runner controller.
-# No ClusterRole is required: the controller scopes its informers and caches
-# strictly to eval-runner and eval-runner-sandbox namespaces.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: eval-runner-controller
   namespace: eval-runner
 ---
+# Role for managing Run resources and coordinating in the controller's own namespace.
+# Concept §3.3: cluster-scoped RBAC is avoided; permissions are scoped strictly
+# to eval-runner and eval-runner-sandbox namespaces.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -32,11 +32,21 @@ rules:
   resources:
   - runs
   - runs/status
+  - runs/finalizers
   verbs:
   - get
   - list
   - watch
+  - create
   - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
   - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -53,6 +63,9 @@ subjects:
   name: eval-runner-controller
   namespace: eval-runner
 ---
+# Role for managing Sandbox CRs and inspecting pods in the sandbox namespace.
+# Note: pods/exec is dropped because controller drives sandboxes via direct
+# sandboxd RPCs (gRPC ProcessService on :9090, REST FilesystemService on :8080).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -77,12 +90,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/exec
-  verbs:
-  - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
