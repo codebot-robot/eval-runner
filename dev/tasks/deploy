@@ -82,21 +82,12 @@ run_deploy() {
     fi
   done
 
-  template_sample_runner() {
-    sed -i -E "s|--sample-runner-image=.*|--sample-runner-image=${sample_runner_image}|" "${REPO_ROOT}/k8s/runner-deployment.yaml"
-  }
-
   if [[ "${dry_run}" == "true" ]]; then
     exec "${AP_CMD[@]}" deploy "$@"
   fi
 
   if [[ "${skip_push}" == "true" ]]; then
-    local orig_deployment
-    orig_deployment="$(cat "${REPO_ROOT}/k8s/runner-deployment.yaml")"
-    trap 'echo "${orig_deployment}" > "${REPO_ROOT}/k8s/runner-deployment.yaml"' EXIT
-    template_sample_runner
-    "${AP_CMD[@]}" deploy "$@"
-    exit 0
+    exec "${AP_CMD[@]}" deploy "$@"
   fi
 
   # 1. Build and push image index (pinned to linux/amd64 and linux/arm64 in .ap/images.yaml)
@@ -106,13 +97,7 @@ run_deploy() {
   verify_pushed_image "${image}"
   verify_pushed_image "${sample_runner_image}"
 
-  # 3. Apply manifests with templated sample-runner-image
-  local orig_deployment
-  orig_deployment="$(cat "${REPO_ROOT}/k8s/runner-deployment.yaml")"
-  trap 'echo "${orig_deployment}" > "${REPO_ROOT}/k8s/runner-deployment.yaml"' EXIT
-
-  template_sample_runner
-
+  # 3. Apply manifests
   "${AP_CMD[@]}" deploy --skip-push "$@"
 }
 

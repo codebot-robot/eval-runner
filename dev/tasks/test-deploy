@@ -94,4 +94,21 @@ if echo "${DEPLOY_OUT}" | grep -q "Bogus PATH ap binary was executed"; then
 fi
 echo "PASS: dev/tasks/deploy ignored bogus PATH ap binary and invoked ap via go run."
 
+echo "=== 3. Testing that runner-deployment.yaml does not mention sample-runner and deploy performs no rewrites ==="
+if grep -q "sample-runner" "${REPO_ROOT}/k8s/runner-deployment.yaml"; then
+  echo "FAIL: k8s/runner-deployment.yaml mentions sample-runner!" >&2
+  exit 1
+fi
+echo "PASS: k8s/runner-deployment.yaml does not mention sample-runner."
+
+DEPLOY_HASH_BEFORE="$(sha256sum "${REPO_ROOT}/k8s/runner-deployment.yaml" | awk '{print $1}')"
+"${REPO_ROOT}/dev/tasks/deploy" --dry-run >/dev/null 2>&1 || true
+DEPLOY_HASH_AFTER="$(sha256sum "${REPO_ROOT}/k8s/runner-deployment.yaml" | awk '{print $1}')"
+
+if [[ "${DEPLOY_HASH_BEFORE}" != "${DEPLOY_HASH_AFTER}" ]]; then
+  echo "FAIL: dev/tasks/deploy modified k8s/runner-deployment.yaml!" >&2
+  exit 1
+fi
+echo "PASS: dev/tasks/deploy performs no file rewrites on runner-deployment.yaml."
+
 echo "=== All test-deploy checks passed successfully ==="

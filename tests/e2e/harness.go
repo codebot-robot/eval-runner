@@ -137,12 +137,6 @@ func (h *Harness) DeployEvalRunner() {
 		"image: eval-runner:e2e\n        imagePullPolicy: Never",
 		1,
 	)
-	modifiedDeploy = strings.Replace(
-		modifiedDeploy,
-		"sample-runner:latest",
-		"sample-runner:e2e",
-		1,
-	)
 	h.KubectlApplyContent(modifiedDeploy)
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")

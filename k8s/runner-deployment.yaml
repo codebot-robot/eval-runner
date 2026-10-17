@@ -40,9 +40,17 @@ spec:
         args:
         - --namespace=eval-runner
         - --sandbox-namespace=eval-runner-sandbox
-        - --sample-runner-image=sample-runner:latest
         - --health-probe-bind-address=:8081
         - --discovery-deadline=10m
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
