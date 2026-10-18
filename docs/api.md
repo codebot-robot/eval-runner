@@ -259,14 +259,14 @@ spec:
 |---|---|---|
 | `baseline` | `ComparisonRunRef` | **Required.** Reference to the baseline `Run` resource in the same namespace (`spec.baseline.run`). |
 | `candidate` | `ComparisonRunRef` | **Required.** Reference to the candidate (e.g. PR) `Run` resource in the same namespace (`spec.candidate.run`). |
-| `equivalenceMargin` | `float64` | Statistical equivalence margin $\delta$ (default: `0.05` for $\pm 0.05$). |
+| `equivalenceMargin` | `*float64` | Statistical equivalence margin $\delta$ (default: `0.05` for $\pm 0.05$). |
 | `tasks` | `[]string` | Optional allow-list of task IDs to evaluate. When omitted, all tasks present in both runs are compared. |
 
 ## Status (`status`)
 
 | Field | Type | Description |
 |---|---|---|
-| `phase` | `ComparisonPhase` | High-level comparison lifecycle phase: `Pending`, `Running`, `Completed`, `Failed`. |
+| `phase` | `ComparisonPhase` | High-level comparison lifecycle phase: `Running`, `Completed`. |
 | `verdict` | `ComparisonVerdict` | Aggregate run-level verdict: `IMPROVED`, `REGRESSED`, `UNCHANGED`, `INCONCLUSIVE`, `RUNNING`. |
 | `pImprovement` | `*float64` | Posterior probability that the candidate is a net improvement across evaluated tasks (range `[0, 1]`). |
 | `tasks` | `[]ComparisonTaskStatus` | Per-task paired comparison statistics and labels. |
