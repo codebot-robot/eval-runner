@@ -25,6 +25,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -129,17 +130,68 @@ func (r *ComparisonReconciler) findComparisonsForRun(ctx context.Context, obj cl
 	return requests
 }
 
-func (r *ComparisonReconciler) determineTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) []string {
+func (r *ComparisonReconciler) determineTaskIDs(ctx context.Context, comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) []string {
 	if len(comp.Spec.Tasks) > 0 {
 		return comp.Spec.Tasks
 	}
 
 	taskMap := make(map[string]bool)
-	if candRun.Status.Manifest != nil {
-		for _, t := range candRun.Status.Manifest.Tasks {
-			taskMap[t.ID] = true
+
+	// Collect from candidate discovery or manifest
+	if candRun.Status.Discovery != nil {
+		if candRun.Status.Discovery.TaskCount > len(candRun.Status.Discovery.TaskIDs) && candRun.Status.Discovery.ManifestPath != "" {
+			// Needs more than capped IDs: load the manifest by URI
+			manifestBytes, err := r.artifactSink().Load(ctx, candRun.Status.Discovery.ManifestPath)
+			if err != nil {
+				for _, id := range candRun.Status.Discovery.TaskIDs {
+					taskMap[id] = true
+				}
+			} else {
+				m, parseErr := discovery.ParseManifest(manifestBytes)
+				if parseErr != nil || m == nil {
+					for _, id := range candRun.Status.Discovery.TaskIDs {
+						taskMap[id] = true
+					}
+				} else {
+					for _, t := range m.Tasks {
+						taskMap[t.ID] = true
+					}
+				}
+			}
+		} else {
+			for _, id := range candRun.Status.Discovery.TaskIDs {
+				taskMap[id] = true
+			}
 		}
 	}
+
+	// Also check baseline discovery
+	if baseRun.Status.Discovery != nil {
+		if baseRun.Status.Discovery.TaskCount > len(baseRun.Status.Discovery.TaskIDs) && baseRun.Status.Discovery.ManifestPath != "" {
+			manifestBytes, err := r.artifactSink().Load(ctx, baseRun.Status.Discovery.ManifestPath)
+			if err != nil {
+				for _, id := range baseRun.Status.Discovery.TaskIDs {
+					taskMap[id] = true
+				}
+			} else {
+				m, parseErr := discovery.ParseManifest(manifestBytes)
+				if parseErr != nil || m == nil {
+					for _, id := range baseRun.Status.Discovery.TaskIDs {
+						taskMap[id] = true
+					}
+				} else {
+					for _, t := range m.Tasks {
+						taskMap[t.ID] = true
+					}
+				}
+			}
+		} else {
+			for _, id := range baseRun.Status.Discovery.TaskIDs {
+				taskMap[id] = true
+			}
+		}
+	}
+
 	for _, t := range candRun.Status.Tasks {
 		taskMap[t.ID] = true
 	}
@@ -223,7 +275,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	isTerminalCand := isTerminalRunPhase(candidateRun.Status.Phase)
 
 	if !isTerminalBase || !isTerminalCand {
-		taskIDs := r.determineTaskIDs(&comp, &baselineRun, &candidateRun)
+		taskIDs := r.determineTaskIDs(ctx, &comp, &baselineRun, &candidateRun)
 		var tasks []v1alpha1.ComparisonTaskStatus
 		for _, id := range taskIDs {
 			tasks = append(tasks, v1alpha1.ComparisonTaskStatus{
@@ -253,7 +305,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	// Both Runs are terminal; perform pairing and comparison
-	taskIDs := r.determineTaskIDs(&comp, &baselineRun, &candidateRun)
+	taskIDs := r.determineTaskIDs(ctx, &comp, &baselineRun, &candidateRun)
 	margin := stats.DefaultEquivalenceMargin
 	if comp.Spec.EquivalenceMargin != nil {
 		margin = *comp.Spec.EquivalenceMargin

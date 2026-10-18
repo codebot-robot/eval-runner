@@ -15,12 +15,14 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 )
 
@@ -72,11 +74,23 @@ spec:
 			t.Errorf("Expected status.discoveryDeadline to be populated")
 		}
 
-		if run.Status.Manifest == nil {
-			t.Fatalf("Expected status.manifest to be populated")
+		if run.Status.Discovery == nil {
+			t.Fatalf("Expected status.discovery to be populated")
 		}
-		if len(run.Status.Manifest.Tasks) != 3 {
-			t.Fatalf("Expected 3 tasks in manifest, got %d", len(run.Status.Manifest.Tasks))
+		if run.Status.Discovery.TaskCount != 3 {
+			t.Fatalf("Expected 3 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
+		}
+		if run.Status.Discovery.EligibleTaskCount != 3 {
+			t.Fatalf("Expected 3 eligible tasks, got %d", run.Status.Discovery.EligibleTaskCount)
+		}
+		if len(run.Status.Discovery.TaskIDs) != 3 {
+			t.Fatalf("Expected 3 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
+		}
+		if run.Status.Discovery.ManifestPath == "" || run.Status.Discovery.ManifestHash == "" {
+			t.Fatalf("Expected ManifestPath and ManifestHash populated, got: %+v", run.Status.Discovery)
+		}
+		if !strings.HasPrefix(run.Status.Discovery.ManifestHash, "sha256:") {
+			t.Errorf("Expected ManifestHash to start with sha256:, got %s", run.Status.Discovery.ManifestHash)
 		}
 
 		expectedTasks := map[string]bool{
@@ -84,17 +98,38 @@ spec:
 			"triage/escalation_policy": false,
 			"triage/summary_quality":   false,
 		}
-		for _, task := range run.Status.Manifest.Tasks {
-			if _, ok := expectedTasks[task.ID]; !ok {
-				t.Errorf("Unexpected task id: %s", task.ID)
+		for _, id := range run.Status.Discovery.TaskIDs {
+			if _, ok := expectedTasks[id]; !ok {
+				t.Errorf("Unexpected task id: %s", id)
 			} else {
-				expectedTasks[task.ID] = true
+				expectedTasks[id] = true
 			}
 		}
 		for taskID, found := range expectedTasks {
 			if !found {
 				t.Errorf("Expected task %q was not discovered", taskID)
 			}
+		}
+
+		// Assert /tmp/artifacts/runs/<commit>/manifest.json exists in kind
+		manifestPathSuffix := fmt.Sprintf("artifacts/runs/%s/manifest.json", commit)
+		findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -path '*/%s' -type f", manifestPathSuffix)
+		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
+		foundFiles := harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd)
+		if strings.TrimSpace(foundFiles) == "" {
+			t.Fatalf("Expected %s to exist in kind node, but find returned empty", manifestPathSuffix)
+		}
+		firstFile := strings.Split(strings.TrimSpace(foundFiles), "\n")[0]
+		manifestContent := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
+		if strings.TrimSpace(manifestContent) == "" {
+			t.Fatalf("Expected %s to have content in kind node, got empty", firstFile)
+		}
+		var storedManifest v1alpha1.Manifest
+		if err := json.Unmarshal([]byte(manifestContent), &storedManifest); err != nil {
+			t.Fatalf("Failed to parse stored manifest JSON from kind node: %v", err)
+		}
+		if len(storedManifest.Tasks) != 3 {
+			t.Errorf("Expected 3 tasks in stored manifest, got %d", len(storedManifest.Tasks))
 		}
 
 		// Assert sandbox was deleted from eval-runner-sandbox

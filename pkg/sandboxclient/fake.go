@@ -17,6 +17,7 @@ package sandboxclient
 import (
 	"context"
 	"crypto/tls"
+	"strings"
 	"sync"
 
 	"github.com/gke-labs/eval-runner/pkg/discovery"
@@ -49,6 +50,7 @@ type FakeClient struct {
 	InspectStdout string
 	InspectStderr string
 	InspectLog    []byte
+	ManifestBytes []byte
 
 	ReadFileCalls []string
 	ReadFileFn    func(ctx context.Context, path string) ([]byte, error)
@@ -96,11 +98,30 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 	f.ReadFileCalls = append(f.ReadFileCalls, path)
 	fn := f.ReadFileFn
 	inspectLog := f.InspectLog
+	manifestBytes := f.ManifestBytes
+	listStdout := f.ListStdout
 	readFileLimit := f.ReadFileLimit
 	f.mu.Unlock()
 
 	if fn != nil {
 		return fn(ctx, path)
+	}
+	if strings.HasSuffix(path, "manifest.json") {
+		var data []byte
+		if manifestBytes != nil {
+			data = manifestBytes
+		} else if listStdout != "" {
+			data = []byte(listStdout)
+		}
+		if data != nil {
+			if readFileLimit > 0 && int64(len(data)) > readFileLimit {
+				return nil, &discovery.LimitError{
+					Stream: "file",
+					Limit:  readFileLimit,
+				}
+			}
+			return data, nil
+		}
 	}
 	if inspectLog != nil {
 		if readFileLimit > 0 && int64(len(inspectLog)) > readFileLimit {
@@ -186,7 +207,7 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 		return &ExecuteResult{ExitCode: f.CheckoutExit, Stderr: f.CheckoutStderr}, nil
 	}
 
-	if cmd0 == "./.evals/list" {
+	if cmd0 == "./.evals/list" || (len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "./.evals/list")) {
 		if f.ListErr != nil {
 			if isResourceExhausted(f.ListErr) {
 				return nil, &discovery.LimitError{

@@ -16,8 +16,26 @@ package artifacts
 
 import (
 	"context"
+	"errors"
+	"os"
+	"strings"
 	"time"
 )
+
+// ErrNotFound indicates that an artifact was not found in the sink.
+var ErrNotFound = errors.New("artifact not found")
+
+// IsNotFound checks if the error indicates a missing artifact.
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "404") || strings.Contains(msg, "no such file or directory")
+}
 
 // RunMetadata provides metadata about the Run and Task for artifact storage.
 type RunMetadata struct {
@@ -26,6 +44,7 @@ type RunMetadata struct {
 	TaskID       string
 	Model        string
 	Commit       string
+	TaskCount    int
 
 	// Task execution aggregates and timestamps for summary.json
 	Samples    int
@@ -57,9 +76,15 @@ type ArtifactSink interface {
 	// StoreComparison persists comparison summary data as comparisons/<comparisonName>.json and returns the storage path or URI.
 	StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error)
 
+	// StoreManifest persists the discovered manifest JSON as runs/<commit>/manifest.json and returns the storage path or URI.
+	StoreManifest(ctx context.Context, meta RunMetadata, data []byte) (string, error)
+
 	// Load retrieves raw artifact bytes from the given storage path or URI, bounded by the maximum allowed artifact size.
 	Load(ctx context.Context, path string) ([]byte, error)
 
 	// ArtifactPrefix returns the run-level storage prefix/URI for a given commit, or empty string if not applicable.
 	ArtifactPrefix(commit string) string
+
+	// IsDurable reports whether the sink provides durable persistent storage across restarts.
+	IsDurable() bool
 }

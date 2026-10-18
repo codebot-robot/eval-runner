@@ -458,3 +458,75 @@ func TestGCSSink_StoreComparisonAndLoad(t *testing.T) {
 		t.Errorf("Expected error for oversized artifact load, got nil")
 	}
 }
+
+func TestGCSSink_StoreManifest(t *testing.T) {
+	fakeClient := NewFakeStorageClient()
+	sink, err := New(t.Context(), "gs://eval-bucket",
+		WithStorageClient(fakeClient),
+		WithMaxUploadBytes(50),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	if !sink.IsDurable() {
+		t.Errorf("Expected GCSSink to be durable")
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:      "test-run",
+		RunNamespace: "eval-runner",
+		Commit:       "abcdef12",
+		TaskCount:    4,
+	}
+
+	manifestData := []byte(`{"tasks":[{"id":"t1"}]}`)
+
+	// 1. Success store
+	uri, err := sink.StoreManifest(t.Context(), meta, manifestData)
+	if err != nil {
+		t.Fatalf("StoreManifest failed: %v", err)
+	}
+
+	expectedURI := "gs://eval-bucket/runs/abcdef12/manifest.json"
+	if uri != expectedURI {
+		t.Errorf("Expected URI %q, got %q", expectedURI, uri)
+	}
+
+	// Verify object and metadata
+	obj, ok := fakeClient.GetObject("eval-bucket", "runs/abcdef12/manifest.json")
+	if !ok {
+		t.Fatalf("Expected stored object at eval-bucket/runs/abcdef12/manifest.json")
+	}
+	if string(obj.Data) != string(manifestData) {
+		t.Errorf("Content mismatch: got %s, want %s", obj.Data, manifestData)
+	}
+	if obj.Metadata["run"] != "test-run" || obj.Metadata["commit"] != "abcdef12" || obj.Metadata["task-count"] != "4" {
+		t.Errorf("Metadata mismatch: got %+v", obj.Metadata)
+	}
+
+	// 2. Idempotency: second write with same content is a no-op
+	uri2, err := sink.StoreManifest(t.Context(), meta, manifestData)
+	if err != nil {
+		t.Fatalf("Second StoreManifest failed: %v", err)
+	}
+	if uri2 != uri {
+		t.Errorf("Expected identical URI on idempotent write: %q vs %q", uri2, uri)
+	}
+
+	// 3. Error above cap (must error, NOT truncate)
+	oversized := make([]byte, 100)
+	_, err = sink.StoreManifest(t.Context(), meta, oversized)
+	if err == nil {
+		t.Fatalf("Expected error when storing manifest above cap, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum upload size") {
+		t.Errorf("Unexpected error message: %v", err)
+	}
+
+	// 4. Missing manifest load returns ErrNotFound
+	_, err = sink.Load(t.Context(), "gs://eval-bucket/runs/abcdef12/missing.json")
+	if !artifacts.IsNotFound(err) {
+		t.Errorf("Expected artifacts.IsNotFound(err) to be true, got: %v", err)
+	}
+}

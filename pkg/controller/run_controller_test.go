@@ -207,8 +207,11 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
 		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
 	}
-	if updatedRun.Status.Manifest == nil || len(updatedRun.Status.Manifest.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks in manifest, got: %+v", updatedRun.Status.Manifest)
+	if updatedRun.Status.Discovery == nil || updatedRun.Status.Discovery.TaskCount != 2 {
+		t.Fatalf("Expected 2 tasks in discovery, got: %+v", updatedRun.Status.Discovery)
+	}
+	if updatedRun.Status.Discovery.ManifestPath == "" || updatedRun.Status.Discovery.ManifestHash == "" {
+		t.Fatalf("Expected ManifestPath and ManifestHash populated in discovery, got: %+v", updatedRun.Status.Discovery)
 	}
 
 	// Assert Sandbox was cleaned up
@@ -935,11 +938,12 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 				}
 				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 			}
-			if len(cfg.Command) > 0 && cfg.Command[0] == "./.evals/list" {
+			if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || strings.Contains(strings.Join(cfg.Command, " "), "./.evals/list")) {
 				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: validManifestJSON}, nil
 			}
 			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 		},
+		ManifestBytes: []byte(validManifestJSON),
 	}
 
 	client := fake.NewClientBuilder().
@@ -978,8 +982,11 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
 		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
 	}
-	if updatedRun.Status.Manifest == nil || len(updatedRun.Status.Manifest.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks in manifest, got: %+v", updatedRun.Status.Manifest)
+	if updatedRun.Status.Discovery == nil || updatedRun.Status.Discovery.TaskCount != 2 {
+		t.Fatalf("Expected 2 tasks in discovery, got: %+v", updatedRun.Status.Discovery)
+	}
+	if updatedRun.Status.Discovery.ManifestPath == "" || updatedRun.Status.Discovery.ManifestHash == "" {
+		t.Fatalf("Expected ManifestPath and ManifestHash populated in discovery, got: %+v", updatedRun.Status.Discovery)
 	}
 	// Assert attempts are recorded on success
 	if !strings.Contains(updatedRun.Status.Message, "3 attempts") {
@@ -1128,7 +1135,7 @@ func TestStepBasedFailures(t *testing.T) {
 			client: &sandboxclient.FakeClient{
 				ListErr: nil,
 				ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-					if len(cfg.Command) > 0 && cfg.Command[0] == "./.evals/list" {
+					if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || strings.Contains(strings.Join(cfg.Command, " "), "./.evals/list")) {
 						return &sandboxclient.ExecuteResult{
 							ExitCode: 2,
 							Stderr:   "Traceback: invalid arguments",
@@ -2468,6 +2475,12 @@ func TestReconcileDiscoveryToRunningWhenModelSet(t *testing.T) {
 func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-1", Spec: "eval.py@task1", Workdir: "evals"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -2482,10 +2495,10 @@ func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-1", Spec: "eval.py@task1", Workdir: "evals"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
@@ -2519,6 +2532,7 @@ func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 
@@ -2609,6 +2623,13 @@ func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
 func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-fail", Spec: "eval.py@fail"},
+			{ID: "task-ok", Spec: "eval.py@ok"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -2623,11 +2644,10 @@ func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-fail", Spec: "eval.py@fail"},
-					{ID: "task-ok", Spec: "eval.py@ok"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         2,
+				EligibleTaskCount: 2,
+				TaskIDs:           []string{"task-fail", "task-ok"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-fail", Phase: v1alpha1.TaskPhasePending},
@@ -2673,6 +2693,7 @@ func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 
@@ -2744,6 +2765,13 @@ func TestReconcileTaskFailureDoesNotFailOtherTasks(t *testing.T) {
 func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-1", Spec: "eval.py@task1"},
+			{ID: "task-2", Spec: "eval.py@task2"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -2758,11 +2786,10 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-1", Spec: "eval.py@task1"},
-					{ID: "task-2", Spec: "eval.py@task2"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         2,
+				EligibleTaskCount: 2,
+				TaskIDs:           []string{"task-1", "task-2"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
@@ -2811,6 +2838,7 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      DefaultModelSecret,
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 
@@ -2950,6 +2978,12 @@ func TestReconcileExecutionDeadlineExceeded(t *testing.T) {
 func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-gemini", Spec: "eval.py@gemini"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -2960,10 +2994,10 @@ func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-gemini"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
@@ -2990,6 +3024,7 @@ func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      "gemini-api-key-secret",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3012,6 +3047,12 @@ func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-gemini", Spec: "eval.py@gemini"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-absent-secret",
@@ -3022,10 +3063,10 @@ func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-gemini"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
@@ -3045,6 +3086,7 @@ func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      DefaultModelSecret,
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-absent-secret"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3088,6 +3130,12 @@ func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
 func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-mock", Spec: "eval.py@mock"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-mockllm",
@@ -3098,10 +3146,10 @@ func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-mock", Spec: "eval.py@mock"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-mock"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
@@ -3121,6 +3169,7 @@ func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      DefaultModelSecret,
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-mockllm"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3150,6 +3199,12 @@ func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
 func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-mock", Spec: "eval.py@mock"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-mockllm-secret-present",
@@ -3160,10 +3215,10 @@ func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-mock", Spec: "eval.py@mock"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-mock"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
@@ -3190,6 +3245,7 @@ func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      DefaultModelSecret,
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-mockllm-secret-present"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3212,6 +3268,12 @@ func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
 func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-gemini", Spec: "eval.py@gemini"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-disabled-secret",
@@ -3222,10 +3284,10 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-gemini"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
@@ -3253,6 +3315,7 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      "", // explicitly disabled
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-disabled-secret"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3281,6 +3344,12 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
 func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-mock", Spec: "eval.py@mock"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-disabled-mock",
@@ -3291,10 +3360,10 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-mock", Spec: "eval.py@mock"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-mock"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
@@ -3314,6 +3383,7 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      "", // explicitly disabled
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-disabled-mock"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3342,6 +3412,12 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
 func TestReconcileModelSecret_CustomNameAbsentNonMockModel(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-gemini", Spec: "eval.py@gemini"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-custom-absent",
@@ -3352,10 +3428,10 @@ func TestReconcileModelSecret_CustomNameAbsentNonMockModel(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-gemini", Spec: "eval.py@gemini"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-gemini"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
@@ -3375,6 +3451,7 @@ func TestReconcileModelSecret_CustomNameAbsentNonMockModel(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		ModelSecret:      "custom-secret",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-custom-absent"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3448,6 +3525,12 @@ func TestIsMockModel(t *testing.T) {
 func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-missing", Spec: "eval.py@task"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-missing-sb",
@@ -3458,10 +3541,10 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-missing", Spec: "eval.py@task"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-missing"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-missing", Phase: v1alpha1.TaskPhaseRunning},
@@ -3480,6 +3563,7 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-missing-sb"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
@@ -3508,6 +3592,12 @@ func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
 	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	currentTime := startTime
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-lag", Spec: "eval.py@lag"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-cache-lag",
@@ -3518,10 +3608,10 @@ func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-lag", Spec: "eval.py@lag"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-lag"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-lag", Phase: v1alpha1.TaskPhasePending},
@@ -3560,6 +3650,7 @@ func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return currentTime },
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-cache-lag"}}
 
@@ -3628,6 +3719,12 @@ func TestReconcileRunningTaskSandboxCacheLagRecoversBeforeGracePeriod(t *testing
 	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	currentTime := startTime
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-recover", Spec: "eval.py@recover"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-cache-lag-recover",
@@ -3638,10 +3735,10 @@ func TestReconcileRunningTaskSandboxCacheLagRecoversBeforeGracePeriod(t *testing
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-recover", Spec: "eval.py@recover"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-recover"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-recover", Phase: v1alpha1.TaskPhasePending},
@@ -3678,6 +3775,7 @@ func TestReconcileRunningTaskSandboxCacheLagRecoversBeforeGracePeriod(t *testing
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return currentTime },
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-cache-lag-recover"}}
 
@@ -3749,6 +3847,12 @@ func TestReconcileRunningTaskSandboxCacheLagRecoversBeforeGracePeriod(t *testing
 func TestReconcileRunningTaskSandboxCacheLagDirectAPIReader(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-direct", Spec: "eval.py@direct"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-api-reader",
@@ -3759,10 +3863,10 @@ func TestReconcileRunningTaskSandboxCacheLagDirectAPIReader(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-direct", Spec: "eval.py@direct"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-direct"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-direct", Phase: v1alpha1.TaskPhasePending},
@@ -3802,6 +3906,7 @@ func TestReconcileRunningTaskSandboxCacheLagDirectAPIReader(t *testing.T) {
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-api-reader"}}
 
@@ -3853,6 +3958,12 @@ func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T)
 	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	currentTime := startTime
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-del", Spec: "eval.py@del"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-genuine-delete",
@@ -3863,10 +3974,10 @@ func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T)
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-del", Spec: "eval.py@del"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-del"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-del", Phase: v1alpha1.TaskPhasePending},
@@ -3886,6 +3997,7 @@ func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T)
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return currentTime },
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-genuine-delete"}}
 
@@ -3943,6 +4055,12 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	currentTime := startTime
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-secret-time", Spec: "eval.py@test"},
+		},
+	}
+
 	// Task has StartedAt == nil, but token Secret exists with CreationTimestamp
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3954,10 +4072,10 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-secret-time", Spec: "eval.py@test"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-secret-time"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-secret-time", Phase: v1alpha1.TaskPhaseRunning}, // StartedAt is nil
@@ -3987,6 +4105,7 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 		SandboxNamespace: "eval-runner-sandbox",
 		Now:              func() time.Time { return currentTime },
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-secret-time"}}
 
@@ -4022,6 +4141,12 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "docs/readme_comprehension", Spec: "eval.py@task"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-gcs",
@@ -4036,10 +4161,10 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "docs/readme_comprehension", Spec: "eval.py@task"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"docs/readme_comprehension"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "docs/readme_comprehension", Phase: v1alpha1.TaskPhasePending},
@@ -4088,6 +4213,7 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 		SandboxClient:    executor,
 		ArtifactSink:     gcsSink,
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-gcs"}}
 
@@ -4198,6 +4324,12 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-1", Spec: "eval.py@task"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-gcs-err",
@@ -4212,10 +4344,10 @@ func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) 
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-1", Spec: "eval.py@task"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
@@ -4264,6 +4396,7 @@ func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) 
 		SandboxClient:    executor,
 		ArtifactSink:     gcsSink,
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-gcs-err"}}
 
@@ -4325,6 +4458,12 @@ func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) 
 func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-binary", Spec: "eval.py@task1", Workdir: "evals"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -4339,10 +4478,10 @@ func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-binary", Spec: "eval.py@task1", Workdir: "evals"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-binary"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-binary", Phase: v1alpha1.TaskPhasePending},
@@ -4378,6 +4517,7 @@ func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 
@@ -4472,6 +4612,12 @@ func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
 func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-partial", Spec: "eval.py@task_partial", Workdir: "evals"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -4486,10 +4632,10 @@ func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-partial", Spec: "eval.py@task_partial", Workdir: "evals"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-partial"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-partial", Phase: v1alpha1.TaskPhasePending},
@@ -4525,6 +4671,7 @@ func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 
@@ -4598,6 +4745,12 @@ func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
 func TestReconcileSampleExecution_Wilson20_20(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-perfect", Spec: "eval.py@task_perfect", Workdir: "evals"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -4612,10 +4765,10 @@ func TestReconcileSampleExecution_Wilson20_20(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-perfect", Spec: "eval.py@task_perfect", Workdir: "evals"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-perfect"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-perfect", Phase: v1alpha1.TaskPhasePending},
@@ -4650,6 +4803,7 @@ func TestReconcileSampleExecution_Wilson20_20(t *testing.T) {
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 
@@ -4713,6 +4867,12 @@ func TestReconcileSampleExecution_Wilson20_20(t *testing.T) {
 func TestReconcileSampleExecution_ZeroSamplesFailed(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-fail", Spec: "eval.py@task_fail", Workdir: "evals"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -4727,10 +4887,10 @@ func TestReconcileSampleExecution_ZeroSamplesFailed(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-fail", Spec: "eval.py@task_fail", Workdir: "evals"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-fail"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-fail", Phase: v1alpha1.TaskPhasePending},
@@ -4754,6 +4914,7 @@ func TestReconcileSampleExecution_ZeroSamplesFailed(t *testing.T) {
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
 
@@ -4834,6 +4995,12 @@ func TestReconcileSampleExecution_ZeroSamplesFailed(t *testing.T) {
 func TestReconcileSampleExecution_ScorelessLogFailsWithNoScoredSamples(t *testing.T) {
 	scheme := setupScheme(t)
 
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-scoreless", Spec: "eval.py@task_scoreless", Workdir: "evals"},
+		},
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run-scoreless",
@@ -4848,10 +5015,10 @@ func TestReconcileSampleExecution_ScorelessLogFailsWithNoScoredSamples(t *testin
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
-			Manifest: &v1alpha1.Manifest{
-				Tasks: []v1alpha1.ManifestTask{
-					{ID: "task-scoreless", Spec: "eval.py@task_scoreless", Workdir: "evals"},
-				},
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-scoreless"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
 				{ID: "task-scoreless", Phase: v1alpha1.TaskPhasePending},
@@ -4886,6 +5053,7 @@ func TestReconcileSampleExecution_ScorelessLogFailsWithNoScoredSamples(t *testin
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
 	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-scoreless"}}
 

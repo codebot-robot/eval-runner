@@ -216,3 +216,146 @@ func TestLocalDirSink_StoreComparisonAndLoad(t *testing.T) {
 		t.Errorf("Expected error on escaping base directory in Load")
 	}
 }
+
+func TestLocalDirSink_StoreManifest(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "artifacts-manifest-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	sink := &LocalDirSink{BaseDir: tempDir}
+	if !sink.IsDurable() {
+		t.Errorf("Expected LocalDirSink to be durable")
+	}
+
+	meta := RunMetadata{
+		RunName:   "run-1",
+		Commit:    "abcd123",
+		TaskCount: 3,
+	}
+
+	payload := []byte(`{"tasks":[{"id":"t1","spec":"s1"}]}`)
+	uri, err := sink.StoreManifest(t.Context(), meta, payload)
+	if err != nil {
+		t.Fatalf("StoreManifest failed: %v", err)
+	}
+
+	expectedPath := filepath.Join(tempDir, "runs", "abcd123", "manifest.json")
+	if uri != expectedPath {
+		t.Errorf("Expected URI %q, got %q", expectedPath, uri)
+	}
+
+	// Read and verify
+	loaded, err := sink.Load(t.Context(), uri)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if string(loaded) != string(payload) {
+		t.Errorf("Expected %s, got %s", payload, loaded)
+	}
+
+	// Idempotency: second write with same content returns same path
+	uri2, err := sink.StoreManifest(t.Context(), meta, payload)
+	if err != nil {
+		t.Fatalf("Second StoreManifest failed: %v", err)
+	}
+	if uri2 != uri {
+		t.Errorf("Expected matching URI on idempotent write, got %q vs %q", uri2, uri)
+	}
+
+	// Missing file returns ErrNotFound
+	_, err = sink.Load(t.Context(), filepath.Join(tempDir, "runs", "abcd123", "missing.json"))
+	if !IsNotFound(err) {
+		t.Errorf("Expected IsNotFound(err) to be true for missing file, got: %v", err)
+	}
+}
+
+func TestInMemorySink(t *testing.T) {
+	sink := NewInMemorySink()
+	if sink.IsDurable() {
+		t.Errorf("Expected InMemorySink to be non-durable")
+	}
+
+	commit := "abcde123"
+	prefix := sink.ArtifactPrefix(commit)
+	if prefix != "mem://runs/abcde123/" {
+		t.Errorf("Expected prefix mem://runs/abcde123/, got %q", prefix)
+	}
+
+	meta := RunMetadata{
+		RunName:      "run-inmem",
+		RunNamespace: "eval-runner",
+		Commit:       commit,
+		TaskCount:    5,
+		TaskID:       "task-1",
+	}
+
+	manifestData := []byte(`{"tasks":[{"id":"task-1","spec":"spec-1"}]}`)
+	uri, err := sink.StoreManifest(t.Context(), meta, manifestData)
+	if err != nil {
+		t.Fatalf("StoreManifest failed: %v", err)
+	}
+	if uri != "mem://runs/abcde123/manifest.json" {
+		t.Errorf("Expected URI mem://runs/abcde123/manifest.json, got %q", uri)
+	}
+
+	// Load manifest
+	loaded, err := sink.Load(t.Context(), uri)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if string(loaded) != string(manifestData) {
+		t.Errorf("Expected content %s, got %s", manifestData, loaded)
+	}
+
+	// Verify metadata
+	metaMap, ok := sink.GetMetadata(uri)
+	if !ok {
+		t.Fatalf("Expected metadata for %s", uri)
+	}
+	if metaMap["run"] != "run-inmem" || metaMap["commit"] != commit || metaMap["task-count"] != "5" {
+		t.Errorf("Unexpected metadata: %+v", metaMap)
+	}
+
+	// Idempotency: writing again with same data is no-op
+	uri2, err := sink.StoreManifest(t.Context(), meta, manifestData)
+	if err != nil {
+		t.Fatalf("Second StoreManifest failed: %v", err)
+	}
+	if uri2 != uri {
+		t.Errorf("Expected matching URI on idempotent write: %q vs %q", uri2, uri)
+	}
+
+	// Missing object returns ErrNotFound
+	_, err = sink.Load(t.Context(), "mem://runs/abcde123/notfound.json")
+	if !IsNotFound(err) {
+		t.Errorf("Expected IsNotFound(err) to be true for missing object, got: %v", err)
+	}
+
+	// Store and load task artifact
+	artURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte("log data"))
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+	artLoaded, err := sink.Load(t.Context(), artURI)
+	if err != nil {
+		t.Fatalf("Load artifact failed: %v", err)
+	}
+	if string(artLoaded) != "log data" {
+		t.Errorf("Expected 'log data', got %s", artLoaded)
+	}
+
+	// Store and load comparison
+	compURI, err := sink.StoreComparison(t.Context(), "comp-1", []byte("comp data"))
+	if err != nil {
+		t.Fatalf("StoreComparison failed: %v", err)
+	}
+	compLoaded, err := sink.Load(t.Context(), compURI)
+	if err != nil {
+		t.Fatalf("Load comparison failed: %v", err)
+	}
+	if string(compLoaded) != "comp data" {
+		t.Errorf("Expected 'comp data', got %s", compLoaded)
+	}
+}
