@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 )
 
 // FakeStorageClient is an in-memory test double for StorageClient.
@@ -33,6 +35,7 @@ type FakeObject struct {
 	Bucket      string
 	Object      string
 	ContentType string
+	Metadata    map[string]string
 	Data        []byte
 }
 
@@ -44,8 +47,13 @@ func NewFakeStorageClient() *FakeStorageClient {
 	}
 }
 
-// WriteObject records the object write in memory.
+// WriteObject records the object write in memory without metadata.
 func (f *FakeStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
+	return f.WriteObjectWithMetadata(ctx, bucket, object, contentType, nil, data)
+}
+
+// WriteObjectWithMetadata records the object write with custom metadata in memory.
+func (f *FakeStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, metadata map[string]string, data []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -60,10 +68,20 @@ func (f *FakeStorageClient) WriteObject(ctx context.Context, bucket, object, con
 
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
+
+	var metaCopy map[string]string
+	if metadata != nil {
+		metaCopy = make(map[string]string, len(metadata))
+		for k, v := range metadata {
+			metaCopy[k] = v
+		}
+	}
+
 	f.Objects[key] = FakeObject{
 		Bucket:      bucket,
 		Object:      object,
 		ContentType: contentType,
+		Metadata:    metaCopy,
 		Data:        dataCopy,
 	}
 	return nil
@@ -84,7 +102,7 @@ func (f *FakeStorageClient) ReadObject(ctx context.Context, bucket, object strin
 
 	obj, ok := f.Objects[key]
 	if !ok {
-		return nil, fmt.Errorf("object %s not found", key)
+		return nil, fmt.Errorf("%w: object %s not found", artifacts.ErrNotFound, key)
 	}
 	if maxBytes > 0 && int64(len(obj.Data)) > maxBytes {
 		return nil, fmt.Errorf("object gs://%s/%s exceeds maximum size of %d bytes", bucket, object, maxBytes)

@@ -175,6 +175,18 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Delivers the product moment of eval-runner (functionality.md §5: verdict landing on the PR). Using a single in-place updating comment prevents PR clutter and avoids notification spam across incremental status updates. Building the Markdown renderer on top of `pkg/ui` models ensures that formatting, confidence intervals, and summary calculations remain consistent with the web view. Deriving check run conclusions from the five verdicts allows GitHub PR status checks to reflect statistical significance directly (with `neutral` for inconclusive results avoiding merge blockage by default). Storing credentials in the controller namespace preserves the project's zero-trust model.
 
+### ADR-022: CRD = pointers and progress; object store = records
+- **Date**: 2026-10-18
+- **Status**: Accepted
+- **Decision**:
+  1. Remove `status.manifest` from the `Run` CRD. Replace with `status.discovery` containing lightweight progress indicators and pointers: `manifestPath` (URI), `manifestHash` (`sha256:<hex>`), `taskCount`, `eligibleTaskCount`, and `taskIDs` (capped at 50 IDs).
+  2. In the discovery sandbox, `.evals/list` writes its output to `/workspace/out/manifest.json`. The controller pulls the file via sandboxd REST `ReadFile` (`/out/manifest.json` relative to `--root-dir=/workspace`), checks size against the 1 MiB limit, parses and validates the manifest.
+  3. Persist the raw manifest JSON into the artifact store under `runs/<commit>/manifest.json` via `ArtifactSink.StoreManifest(ctx, meta, bytes) (uri, error)` across all sinks (GCS with run/commit/task-count metadata; LocalDir in kind; InMemory as non-durable default). Above the cap, GCS errors rather than truncating. Writing the same object twice for the same commit is a no-op when the hash matches.
+  4. Consumers (RunReconciler during task execution, ComparisonReconciler, evalstats, UI) load the manifest by URI when more than the 50 capped IDs are needed. Loading employs a per-Run in-memory cache keyed by namespace/name with eviction on terminal phase or deletion. Manifest loading enforces commit prefix confinement (`ArtifactPrefix(commit)`) and hash verification against `status.discovery.manifestHash`.
+  5. Load errors are classified: transient errors (timeouts, 5xx) requeue with a message and preserve healthy task sandboxes; not-found errors or non-durable sink restarts reset the Run to `Pending`, clear `status.discoveryDeadline` (so a restart > 10 minutes later re-arms a fresh deadline rather than failing), and re-discover; hash drift keeps the phase and reports.
+- **Rationale**:
+  Kubernetes custom resources (CRDs) in etcd are designed for declarative state, progress reporting, and synchronization pointers, not durable, unbounded storage of data records. A repository with hundreds of evaluation tasks serializes tens or hundreds of kilobytes into `Run.status.manifest`, inflating etcd storage, increasing apiserver watch bandwidth, and risking etcd's 1.5 MiB request limit. Moving the full manifest to the object store (`runs/<commit>/manifest.json`) bounds CRD status size while treating the artifact store as the authoritative source of records. Writing discovery output to `/workspace/out/manifest.json` decouples discovery execution from stdout buffer limits. In-memory caching avoids repetitive object-store reads, while hash verification prevents cache poisoning or silent drift. Robust error classification and deadline clearing ensure restarts—even after the original discovery deadline—seamlessly re-discover without failing Runs or deleting task sandboxes on temporary network blips.
+
 
 
 

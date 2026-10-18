@@ -45,14 +45,24 @@ func (s *NoopSink) StoreComparison(ctx context.Context, comparisonName string, d
 	return "", nil
 }
 
+// StoreManifest implements ArtifactSink for NoopSink.
+func (s *NoopSink) StoreManifest(ctx context.Context, meta RunMetadata, data []byte) (string, error) {
+	return "", nil
+}
+
 // Load implements ArtifactSink for NoopSink.
 func (s *NoopSink) Load(ctx context.Context, path string) ([]byte, error) {
-	return nil, fmt.Errorf("noop sink cannot load artifacts")
+	return nil, fmt.Errorf("noop sink cannot load artifacts: %w", ErrNotFound)
 }
 
 // ArtifactPrefix implements ArtifactSink for NoopSink.
 func (s *NoopSink) ArtifactPrefix(commit string) string {
 	return ""
+}
+
+// IsDurable implements ArtifactSink for NoopSink.
+func (s *NoopSink) IsDurable() bool {
+	return false
 }
 
 // LocalDirSink is an ArtifactSink that writes artifacts to a local directory hierarchy.
@@ -92,6 +102,57 @@ func (s *LocalDirSink) StoreComparison(ctx context.Context, comparisonName strin
 	return targetPath, nil
 }
 
+// StoreManifest implements ArtifactSink for LocalDirSink, writing runs/<commit>/manifest.json.
+// Writing the same object twice for the same commit is a no-op when the content/hash matches.
+func (s *LocalDirSink) StoreManifest(ctx context.Context, meta RunMetadata, data []byte) (string, error) {
+	if strings.TrimSpace(s.BaseDir) == "" {
+		return "", fmt.Errorf("base directory must not be empty")
+	}
+	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+		return "", err
+	}
+
+	limit := DefaultMaxLoadBytes
+	if int64(len(data)) > limit {
+		return "", fmt.Errorf("manifest size %d exceeds maximum allowed size of %d bytes", len(data), limit)
+	}
+
+	targetDir := filepath.Join(s.BaseDir, "runs", meta.Commit)
+	targetPath := filepath.Join(targetDir, "manifest.json")
+
+	cleanBase := filepath.Clean(s.BaseDir)
+	cleanTarget := filepath.Clean(targetPath)
+	rel, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return "", fmt.Errorf("artifact path %q escapes base directory %q", targetPath, s.BaseDir)
+	}
+
+	// Idempotency: if object already exists and content matches, it is a no-op.
+	existing, err := os.ReadFile(cleanTarget)
+	if err == nil {
+		if string(existing) == string(data) {
+			return targetPath, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", err
+	}
+
+	if err := os.WriteFile(targetPath, data, 0644); err != nil {
+		return "", err
+	}
+
+	return targetPath, nil
+}
+
+// IsDurable implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) IsDurable() bool {
+	return true
+}
+
 // Load implements ArtifactSink for LocalDirSink.
 func (s *LocalDirSink) Load(ctx context.Context, path string) ([]byte, error) {
 	if strings.TrimSpace(s.BaseDir) == "" {
@@ -113,6 +174,9 @@ func (s *LocalDirSink) Load(ctx context.Context, path string) ([]byte, error) {
 
 	f, err := os.Open(cleanPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
 		return nil, err
 	}
 

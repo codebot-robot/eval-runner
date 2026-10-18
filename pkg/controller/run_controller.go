@@ -17,9 +17,11 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -70,6 +72,17 @@ const (
 
 	// DefaultTaskGracePeriod is the default grace period before treating absence of a running task's sandbox as a failure.
 	DefaultTaskGracePeriod = 30 * time.Second
+)
+
+var (
+	// ErrHashDrift indicates the loaded manifest hash does not match status.discovery.manifestHash.
+	ErrHashDrift = errors.New("manifest hash drift detected")
+
+	// ErrTransient indicates a transient failure loading manifest (timeout, 5xx).
+	ErrTransient = errors.New("transient error loading manifest")
+
+	// ErrNeedsRediscovery indicates the manifest is missing from storage or non-durable sink lost it.
+	ErrNeedsRediscovery = errors.New("manifest missing or non-durable sink; needs rediscovery")
 )
 
 // DefaultDiscoveryRetryBackoff defines the default backoff intervals between clone retry attempts.
@@ -178,6 +191,9 @@ type RunReconciler struct {
 	SandboxdImage string
 
 	pkiMu sync.Mutex
+
+	manifestCacheLock sync.RWMutex
+	manifestCache     map[string]*v1alpha1.Manifest
 
 	mu     sync.RWMutex
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
@@ -463,7 +479,119 @@ func (r *RunReconciler) artifactSink() artifacts.ArtifactSink {
 	if r.ArtifactSink != nil {
 		return r.ArtifactSink
 	}
-	return &artifacts.NoopSink{}
+	return artifacts.NewInMemorySink()
+}
+
+func (r *RunReconciler) getCachedManifest(key string) *v1alpha1.Manifest {
+	r.manifestCacheLock.RLock()
+	defer r.manifestCacheLock.RUnlock()
+	if r.manifestCache == nil {
+		return nil
+	}
+	return r.manifestCache[key]
+}
+
+func (r *RunReconciler) setCachedManifest(key string, m *v1alpha1.Manifest) {
+	r.manifestCacheLock.Lock()
+	defer r.manifestCacheLock.Unlock()
+	if r.manifestCache == nil {
+		r.manifestCache = make(map[string]*v1alpha1.Manifest)
+	}
+	r.manifestCache[key] = m
+}
+
+func (r *RunReconciler) evictCachedManifest(key string) {
+	r.manifestCacheLock.Lock()
+	defer r.manifestCacheLock.Unlock()
+	if r.manifestCache != nil {
+		delete(r.manifestCache, key)
+	}
+}
+
+// SetCachedManifest pre-seeds the in-memory manifest cache for a Run (e.g. in tests).
+func (r *RunReconciler) SetCachedManifest(namespace, name string, m *v1alpha1.Manifest) {
+	r.setCachedManifest(namespace+"/"+name, m)
+}
+
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "500") ||
+		strings.Contains(msg, "502") ||
+		strings.Contains(msg, "503") ||
+		strings.Contains(msg, "504") ||
+		strings.Contains(msg, "internal server error") ||
+		strings.Contains(msg, "bad gateway") ||
+		strings.Contains(msg, "service unavailable") ||
+		strings.Contains(msg, "gateway timeout")
+}
+
+// getOrLoadManifest retrieves the Run's manifest from the per-Run in-memory cache,
+// or loads it from the artifact sink by URI, verifying prefix confinement and hash.
+func (r *RunReconciler) getOrLoadManifest(ctx context.Context, run *v1alpha1.Run) (*v1alpha1.Manifest, error) {
+	key := run.Namespace + "/" + run.Name
+	if cached := r.getCachedManifest(key); cached != nil {
+		return cached, nil
+	}
+
+	if run.Status.Discovery == nil || run.Status.Discovery.ManifestPath == "" {
+		return nil, fmt.Errorf("%w: discovery status or manifest path missing", ErrNeedsRediscovery)
+	}
+
+	manifestPath := run.Status.Discovery.ManifestPath
+	prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit)
+	if prefix != "" && !strings.HasPrefix(manifestPath, prefix) {
+		return nil, fmt.Errorf("security violation: manifest path %q is not confined to commit prefix %q", manifestPath, prefix)
+	}
+
+	sink := r.artifactSink()
+	data, err := sink.Load(ctx, manifestPath)
+	if err != nil {
+		if !sink.IsDurable() {
+			return nil, fmt.Errorf("%w: non-durable sink lost manifest (%v)", ErrNeedsRediscovery, err)
+		}
+		if artifacts.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: manifest not found at %s: %v", ErrNeedsRediscovery, manifestPath, err)
+		}
+		if isTransientError(err) {
+			return nil, fmt.Errorf("%w: %v", ErrTransient, err)
+		}
+		// Treat unclassified storage read failures on durable sink as transient to avoid deleting task sandboxes prematurely
+		return nil, fmt.Errorf("%w: %v", ErrTransient, err)
+	}
+
+	h := sha256.Sum256(data)
+	actualHash := "sha256:" + hex.EncodeToString(h[:])
+	if run.Status.Discovery.ManifestHash != "" && actualHash != run.Status.Discovery.ManifestHash {
+		return nil, fmt.Errorf("%w: expected %s, got %s", ErrHashDrift, run.Status.Discovery.ManifestHash, actualHash)
+	}
+
+	if int64(len(data)) > discovery.MaxManifestBytes {
+		return nil, fmt.Errorf("manifest size %d exceeds 1 MiB limit", len(data))
+	}
+
+	manifest, parseErr := discovery.ParseManifest(data)
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid manifest JSON: %w", parseErr)
+	}
+	if valErr := discovery.ValidateManifest(manifest); valErr != nil {
+		return nil, fmt.Errorf("manifest validation failed: %w", valErr)
+	}
+
+	r.setCachedManifest(key, manifest)
+	return manifest, nil
 }
 
 func (r *RunReconciler) maxDiscoveryAttempts() int {
@@ -534,6 +662,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// Deletion lifecycle: Run is marked for deletion. Clean up all sandboxes and remove finalizer.
 	if !run.DeletionTimestamp.IsZero() {
+		r.evictCachedManifest(run.Namespace + "/" + run.Name)
 		if controllerutil.ContainsFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox) {
 			logger.Info("Run is being deleted; cleaning up sandboxes", "run", run.Name)
 			if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
@@ -553,6 +682,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		(run.Status.Phase == v1alpha1.RunPhaseDiscovered && run.Spec.Model == "")
 
 	if isTerminal {
+		r.evictCachedManifest(run.Namespace + "/" + run.Name)
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete leftover sandboxes for terminal run", "sandbox", sandboxName)
 		}
@@ -574,7 +704,41 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// If Run is in Discovered phase and Spec.Model is set, transition to Running
 	if run.Status.Phase == v1alpha1.RunPhaseDiscovered && run.Spec.Model != "" {
-		initialTasks := r.initializeTasks(run.Spec, run.Status.Manifest)
+		manifest, loadErr := r.getOrLoadManifest(ctx, &run)
+		if loadErr != nil {
+			if errors.Is(loadErr, ErrTransient) {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			if errors.Is(loadErr, ErrNeedsRediscovery) {
+				updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+					status.Phase = v1alpha1.RunPhasePending
+					status.DiscoveryDeadline = nil
+					status.Discovery = nil
+					status.Tasks = nil
+					status.Summary = nil
+					status.Message = "Manifest missing; re-discovering"
+					meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+						Type:               v1alpha1.ConditionTypeDiscovered,
+						Status:             metav1.ConditionFalse,
+						Reason:             "Rediscovering",
+						Message:            "Manifest missing; re-discovering",
+						ObservedGeneration: gen,
+					})
+				})
+				return ctrl.Result{Requeue: true}, updateErr
+			}
+			if errors.Is(loadErr, ErrHashDrift) {
+				if updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+					status.Message = loadErr.Error()
+				}); updateErr != nil {
+					return ctrl.Result{}, updateErr
+				}
+				return ctrl.Result{}, nil
+			}
+			return r.failRun(ctx, &run, nil, fmt.Sprintf("failed to load manifest: %v", loadErr))
+		}
+
+		initialTasks := r.initializeTasks(run.Spec, manifest)
 		dl := metav1.NewTime(r.now().Add(r.executionDeadline()))
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseRunning
@@ -955,11 +1119,11 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// -------------------------------------------------------------------------
-	// Step 3: ./.evals/list (no retry: missing/non-executable/non-zero/invalid JSON)
+	// Step 3: ./.evals/list (writes /workspace/out/manifest.json)
 	// -------------------------------------------------------------------------
-	logger.Info("Step 2 succeeded; starting step 3: ./.evals/list")
+	logger.Info("Step 2 succeeded; starting step 3: discover evals to file", "command", discovery.DiscoveryCommand)
 	listRes, listErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
-		Command: []string{"./.evals/list"},
+		Command: []string{"sh", "-c", discovery.DiscoveryCommand},
 		Cwd:     "repo",
 	})
 
@@ -1004,8 +1168,25 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.failRun(ctx, &run, &sandbox, msg)
 	}
 
-	// Step 4: Parse & validate manifest
-	manifest, err := discovery.ParseManifest([]byte(listRes.Stdout))
+	// Step 4: Pull manifest via bounded sandboxd ReadFile (resolves under /workspace)
+	manifestBytes, readErr := sbClient.ReadFile(execCtx, discovery.DiscoveryManifestReadPath)
+	if readErr != nil {
+		var limitErr *discovery.LimitError
+		if errors.As(readErr, &limitErr) {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", limitErr))
+		}
+		if status.Code(readErr) == codes.Unauthenticated {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: unauthenticated: %v", readErr))
+		}
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", readErr))
+	}
+
+	// Controller-side 1 MiB check before parse
+	if int64(len(manifestBytes)) > discovery.MaxManifestBytes {
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: manifest size %d exceeds 1 MiB limit", len(manifestBytes)))
+	}
+
+	manifest, err := discovery.ParseManifest(manifestBytes)
 	if err != nil {
 		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
 		msg := fmt.Sprintf("step ./.evals/list failed: invalid JSON: %v", err)
@@ -1019,6 +1200,50 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Manifest validation failed: %v", err))
 	}
 
+	// Store manifest in artifact store
+	manifestURI, storeErr := r.artifactSink().StoreManifest(ctx, artifacts.RunMetadata{
+		RunName:      run.Name,
+		RunNamespace: run.Namespace,
+		Commit:       run.Spec.Repo.Commit,
+		TaskCount:    len(manifest.Tasks),
+	}, manifestBytes)
+	if storeErr != nil {
+		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("failed to store manifest: %v", storeErr))
+	}
+
+	// Compute checksum, counts, and capped task IDs (up to 50)
+	h := sha256.Sum256(manifestBytes)
+	manifestHash := "sha256:" + hex.EncodeToString(h[:])
+
+	taskCount := len(manifest.Tasks)
+	eligibleCount := 0
+	for _, t := range manifest.Tasks {
+		if len(t.Resources) == 0 {
+			eligibleCount++
+		}
+	}
+
+	const maxCappedIDs = 50
+	cappedCount := len(manifest.Tasks)
+	if cappedCount > maxCappedIDs {
+		cappedCount = maxCappedIDs
+	}
+	taskIDs := make([]string, 0, cappedCount)
+	for i := 0; i < cappedCount; i++ {
+		taskIDs = append(taskIDs, manifest.Tasks[i].ID)
+	}
+
+	discoveryStatus := &v1alpha1.RunDiscoveryStatus{
+		ManifestPath:      manifestURI,
+		ManifestHash:      manifestHash,
+		TaskCount:         taskCount,
+		EligibleTaskCount: eligibleCount,
+		TaskIDs:           taskIDs,
+	}
+
+	// Populate in-memory cache
+	r.setCachedManifest(run.Namespace+"/"+run.Name, manifest)
+
 	// Step 5: Success -> update Run to Discovered (or Running if spec.model is set), then cleanup sandbox
 	successMsg := ""
 	condMsg := fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks))
@@ -1027,16 +1252,20 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		condMsg = fmt.Sprintf("Discovered %d tasks after %s", len(manifest.Tasks), formatAttemptCount(cloneAttempts))
 	}
 
-	logger.Info("Discovery successful; recording manifest and cleaning up sandbox",
+	logger.Info("Discovery successful; recording discovery status and cleaning up sandbox",
 		"tasks", len(manifest.Tasks),
 		"cloneAttempts", cloneAttempts,
+		"manifestURI", manifestURI,
 	)
 
 	if run.Spec.Model == "" {
 		err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseDiscovered
 			status.Message = successMsg
-			status.Manifest = manifest
+			status.Discovery = discoveryStatus
+			if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
+				status.Artifacts = prefix
+			}
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeDiscovered,
 				Status:             metav1.ConditionTrue,
@@ -1062,7 +1291,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 		status.Phase = v1alpha1.RunPhaseRunning
 		status.Message = successMsg
-		status.Manifest = manifest
+		status.Discovery = discoveryStatus
 		status.Tasks = initialTasks
 		status.ExecutionDeadline = &dl
 		if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
@@ -1187,8 +1416,30 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Request, run *v1alpha1.Run) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// 1. Check if all tasks have reached a terminal phase
-	allFinished := true
+	// 1. Check execution deadline
+	if run.Status.ExecutionDeadline != nil && !r.now().Before(run.Status.ExecutionDeadline.Time) {
+		r.evictCachedManifest(run.Namespace + "/" + run.Name)
+		msg := "Execution deadline exceeded"
+		logger.Info(msg, "run", run.Name)
+		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
+			logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
+		}
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Phase = v1alpha1.RunPhaseFailed
+			status.Message = msg
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               "Completed",
+				Status:             metav1.ConditionFalse,
+				Reason:             "ExecutionDeadlineExceeded",
+				Message:            msg,
+				ObservedGeneration: gen,
+			})
+		})
+		return ctrl.Result{}, err
+	}
+
+	// 2. Check if all tasks have reached a terminal phase
+	allFinished := len(run.Status.Tasks) > 0
 	completedCount := 0
 	for _, t := range run.Status.Tasks {
 		if t.Phase == v1alpha1.TaskPhaseCompleted {
@@ -1201,6 +1452,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 	}
 	if allFinished {
+		r.evictCachedManifest(run.Namespace + "/" + run.Name)
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete sandboxes on run completion", "run", run.Name)
 		}
@@ -1227,25 +1479,68 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		return ctrl.Result{}, err
 	}
 
-	// 2. Check execution deadline
-	if run.Status.ExecutionDeadline != nil && !r.now().Before(run.Status.ExecutionDeadline.Time) {
-		msg := "Execution deadline exceeded"
-		logger.Info(msg, "run", run.Name)
-		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
-			logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
+	// Load manifest via in-memory cache or sink URI
+	manifest, manifestErr := r.getOrLoadManifest(ctx, run)
+	if manifestErr != nil {
+		if errors.Is(manifestErr, ErrTransient) {
+			logger.Info("Transient error loading manifest; requeuing and keeping task sandboxes", "run", run.Name, "error", manifestErr)
+			if updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Message = fmt.Sprintf("reloading manifest: %v", manifestErr)
+			}); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
-			status.Phase = v1alpha1.RunPhaseFailed
-			status.Message = msg
-			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-				Type:               "Completed",
-				Status:             metav1.ConditionFalse,
-				Reason:             "ExecutionDeadlineExceeded",
-				Message:            msg,
-				ObservedGeneration: gen,
+		if errors.Is(manifestErr, ErrNeedsRediscovery) {
+			logger.Info("Manifest missing or non-durable sink; resetting to Pending to re-discover", "run", run.Name, "error", manifestErr)
+			r.evictCachedManifest(run.Namespace + "/" + run.Name)
+			if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
+				logger.Error(err, "failed to delete sandboxes on rediscovery reset", "run", run.Name)
+			}
+			// Reset deadline and phase to Pending
+			updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Phase = v1alpha1.RunPhasePending
+				status.DiscoveryDeadline = nil
+				status.Discovery = nil
+				status.Tasks = nil
+				status.Summary = nil
+				status.Message = "Manifest missing; re-discovering"
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               v1alpha1.ConditionTypeDiscovered,
+					Status:             metav1.ConditionFalse,
+					Reason:             "Rediscovering",
+					Message:            "Manifest missing; re-discovering",
+					ObservedGeneration: gen,
+				})
 			})
+			if updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+		if errors.Is(manifestErr, ErrHashDrift) {
+			logger.Error(manifestErr, "Manifest hash drift detected; keeping phase", "run", run.Name)
+			if updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Message = manifestErr.Error()
+			}); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			return ctrl.Result{}, nil
+		}
+		return r.failRun(ctx, run, nil, fmt.Sprintf("failed to load manifest: %v", manifestErr))
+	}
+
+	if len(run.Status.Tasks) == 0 && manifest != nil {
+		initialTasks := r.initializeTasks(run.Spec, manifest)
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+			status.Tasks = initialTasks
+			status.Summary = ComputeRunSummary(status.Tasks)
 		})
-		return ctrl.Result{}, err
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		run.Status.Tasks = initialTasks
+		run.Status.Summary = ComputeRunSummary(initialTasks)
 	}
 
 	// List current task sandboxes in sandbox namespace
@@ -1608,10 +1903,13 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 
 	var targetTask *v1alpha1.ManifestTask
-	if run.Status.Manifest != nil {
-		for i := range run.Status.Manifest.Tasks {
-			if run.Status.Manifest.Tasks[i].ID == taskID {
-				targetTask = &run.Status.Manifest.Tasks[i]
+	manifest, manifestErr := r.getOrLoadManifest(ctx, run)
+	if manifestErr != nil {
+		logger.Error(manifestErr, "Failed to load manifest for task execution", "task", taskID)
+	} else if manifest != nil {
+		for i := range manifest.Tasks {
+			if manifest.Tasks[i].ID == taskID {
+				targetTask = &manifest.Tasks[i]
 				break
 			}
 		}
@@ -2003,6 +2301,7 @@ func (r *RunReconciler) updateRunStatus(ctx context.Context, key types.Namespace
 }
 
 func (r *RunReconciler) failRun(ctx context.Context, run *v1alpha1.Run, sandbox *sandboxv1beta1.Sandbox, message string) (ctrl.Result, error) {
+	r.evictCachedManifest(run.Namespace + "/" + run.Name)
 	boundedMessage := truncateMessage(message, r.maxMessageBytes())
 	key := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}
 	err := r.updateRunStatus(ctx, key, func(status *v1alpha1.RunStatus, gen int64) {

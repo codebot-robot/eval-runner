@@ -22,6 +22,8 @@ import (
 	"strconv"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/discovery"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -100,6 +102,7 @@ func buildPageURL(baseURL string, query url.Values, newOffset int, limit int) st
 type Config struct {
 	Client           client.Reader
 	DefaultNamespace string
+	ArtifactSink     artifacts.ArtifactSink
 }
 
 // Server serves read-only web views of Runs and Comparisons.
@@ -214,6 +217,8 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 			}
 			samples = run.Status.Summary.TotalSamples
 			rates = run.Status.Summary.Rates
+		} else if run.Status.Discovery != nil && run.Status.Discovery.TaskCount > 0 {
+			tasks = fmt.Sprintf("0/%d", run.Status.Discovery.TaskCount)
 		}
 
 		items = append(items, RunListItem{
@@ -330,6 +335,35 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if len(run.Status.Tasks) == 0 && run.Status.Discovery != nil {
+		taskIDs := run.Status.Discovery.TaskIDs
+		if s.cfg.ArtifactSink != nil && run.Status.Discovery.TaskCount > len(run.Status.Discovery.TaskIDs) && run.Status.Discovery.ManifestPath != "" {
+			manifestBytes, loadErr := s.cfg.ArtifactSink.Load(r.Context(), run.Status.Discovery.ManifestPath)
+			if loadErr != nil {
+				// Fall back to capped taskIDs
+			} else {
+				m, parseErr := discovery.ParseManifest(manifestBytes)
+				if parseErr != nil || m == nil {
+					// Fall back
+				} else {
+					var allIDs []string
+					for _, t := range m.Tasks {
+						allIDs = append(allIDs, t.ID)
+					}
+					taskIDs = allIDs
+				}
+			}
+		}
+		for _, id := range taskIDs {
+			taskRows = append(taskRows, RunTaskRow{
+				ID:        id,
+				Phase:     "Discovered",
+				PhaseChip: "neutral",
+				RateStr:   "—",
+			})
+		}
+	}
+
 	tasksSummary := ""
 	tasksCompleted := 0
 	tasksFailed := 0
@@ -352,6 +386,9 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			successRateRange = fmt.Sprintf("[%.2f, %.2f]", run.Status.Summary.SuccessRateRange.Min, run.Status.Summary.SuccessRateRange.Max)
 		}
 		compactRates = run.Status.Summary.Rates
+	} else if run.Status.Discovery != nil && run.Status.Discovery.TaskCount > 0 {
+		tasksSummary = fmt.Sprintf("0/%d", run.Status.Discovery.TaskCount)
+		tasksTotal = run.Status.Discovery.TaskCount
 	}
 
 	view := RunDetailView{
