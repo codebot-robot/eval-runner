@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,12 +206,27 @@ func TestRepositoryAllowList(t *testing.T) {
 	if IsRepositoryAllowed("untrusted/repo", allowList) {
 		t.Errorf("expected untrusted/repo to be denied")
 	}
-	// Empty allow-list allows all
-	if !IsRepositoryAllowed("anyone/anyrepo", nil) {
-		t.Errorf("expected empty allow-list to allow all")
+
+	// Fail-closed: empty allow-list denies all
+	if IsRepositoryAllowed("anyone/anyrepo", nil) {
+		t.Errorf("nil allow-list should deny all (fail-closed)")
 	}
-	if !IsRepositoryAllowed("anyone/anyrepo", []string{}) {
-		t.Errorf("expected empty slice allow-list to allow all")
+	if IsRepositoryAllowed("anyone/anyrepo", []string{}) {
+		t.Errorf("empty slice allow-list should deny all (fail-closed)")
+	}
+
+	// Wildcard '*' allows any repository
+	if !IsRepositoryAllowed("anyone/anyrepo", []string{"*"}) {
+		t.Errorf("wildcard allow-list should allow any repository")
+	}
+	if !IsRepositoryAllowed("anyone/anyrepo", []string{" * "}) {
+		t.Errorf("wildcard with spaces should allow any repository")
+	}
+	if !IsRepositoryAllowed("org/repo", []string{"other/repo", "*"}) {
+		t.Errorf("allow-list with wildcard should allow repository")
+	}
+	if IsRepositoryAllowed("", []string{"*"}) {
+		t.Errorf("empty repo string should not be allowed")
 	}
 }
 
@@ -670,6 +686,7 @@ func TestHandler_HTTPEndpointsAndSignature(t *testing.T) {
 		Namespace:           "eval-runner",
 		GitHubWebhookSecret: "github-webhook",
 		DefaultModel:        "mockllm/model",
+		WebhookRepositories: []string{"gke-labs/eval-runner"},
 		Client:              cl,
 	}
 	server := NewServer(cfg)
@@ -765,6 +782,7 @@ func TestHandler_Validation_BadRequest(t *testing.T) {
 	cfg := Config{
 		Namespace:           "eval-runner",
 		StaticWebhookSecret: secretKey,
+		WebhookRepositories: []string{"*"},
 		Client:              cl,
 	}
 	server := NewServer(cfg)
@@ -910,5 +928,83 @@ func TestHandler_AllowListIgnored(t *testing.T) {
 	_ = cl.List(t.Context(), &runList, client.InNamespace("eval-runner"))
 	if len(runList.Items) != 0 {
 		t.Errorf("expected 0 runs created for disallowed repo, got %d", len(runList.Items))
+	}
+}
+
+func TestHandler_FailClosedEmptyAllowList(t *testing.T) {
+	secretKey := []byte("secret")
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// 1. Server configured with empty allow-list (fail-closed)
+	cfgEmpty := Config{
+		Namespace:           "eval-runner",
+		StaticWebhookSecret: secretKey,
+		WebhookRepositories: nil, // empty/nil: fail-closed
+		Client:              cl,
+	}
+	serverEmpty := NewServer(cfgEmpty)
+	serverEmpty.Start()
+	defer serverEmpty.Stop()
+
+	payload := []byte(`{
+		"action": "opened",
+		"number": 1,
+		"pull_request": {
+			"number": 1,
+			"head": {"sha": "1111111111111111111111111111111111111111"},
+			"base": {"sha": "2222222222222222222222222222222222222222"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sig := ComputeSignature(payload, secretKey)
+
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	req.Header.Set(HeaderGitHubEvent, EventPullRequest)
+	req.Header.Set(HeaderHubSignature256, sig)
+	rr := httptest.NewRecorder()
+
+	serverEmpty.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for ignored repository, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "ignored: repository not in allow-list") {
+		t.Errorf("expected response body to contain 'ignored: repository not in allow-list', got: %s", rr.Body.String())
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	var runList v1alpha1.RunList
+	_ = cl.List(t.Context(), &runList, client.InNamespace("eval-runner"))
+	if len(runList.Items) != 0 {
+		t.Errorf("expected 0 runs created when allow-list is empty (fail-closed), got %d", len(runList.Items))
+	}
+
+	// 2. Server configured with wildcard '*' allow-list
+	cfgWildcard := Config{
+		Namespace:           "eval-runner",
+		StaticWebhookSecret: secretKey,
+		WebhookRepositories: []string{"*"},
+		Client:              cl,
+	}
+	serverWildcard := NewServer(cfgWildcard)
+	serverWildcard.Start()
+	defer serverWildcard.Stop()
+
+	reqWildcard := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	reqWildcard.Header.Set(HeaderGitHubEvent, EventPullRequest)
+	reqWildcard.Header.Set(HeaderHubSignature256, sig)
+	rrWildcard := httptest.NewRecorder()
+
+	serverWildcard.ServeHTTP(rrWildcard, reqWildcard)
+	if rrWildcard.Code != http.StatusOK {
+		t.Errorf("expected 200 OK with wildcard allow-list, got %d", rrWildcard.Code)
+	}
+	if !strings.Contains(rrWildcard.Body.String(), "ok: enqueued pull_request") {
+		t.Errorf("expected response body to contain 'ok: enqueued pull_request', got: %s", rrWildcard.Body.String())
 	}
 }

@@ -317,4 +317,8 @@ spec:
 
 		runUISmoke(t, harness, runName)
 	})
+
+	t.Run("WebhookSmoke", func(t *testing.T) {
+		runWebhookSmoke(t, harness)
+	})
 }

@@ -115,7 +115,7 @@ func main() {
 	}
 
 	if len(cfg.WebhookRepositories) == 0 {
-		log.Println("webhookRepositories allow-list is empty; accepting events for all repositories")
+		log.Println("warning: webhookRepositories allow-list is empty; all repositories will be rejected (set to '*' to allow all)")
 	} else {
 		log.Printf("webhookRepositories allow-list configured: %v", cfg.WebhookRepositories)
 	}
