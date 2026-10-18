@@ -212,14 +212,19 @@ func ParseRepositoryList(s string) []string {
 }
 
 // IsRepositoryAllowed checks whether repo (e.g. "gke-labs/eval-runner") is allowed.
-// If allowList is empty, all repositories are allowed.
+// If allowList is empty, all repositories are rejected (fail-closed).
+// An entry of "*" allows all repositories.
 func IsRepositoryAllowed(repo string, allowList []string) bool {
 	if len(allowList) == 0 {
-		return true
+		return false
 	}
 	normalized := strings.ToLower(strings.TrimSpace(repo))
+	if normalized == "" {
+		return false
+	}
 	for _, allowed := range allowList {
-		if strings.ToLower(strings.TrimSpace(allowed)) == normalized {
+		trimmed := strings.TrimSpace(allowed)
+		if trimmed == "*" || strings.ToLower(trimmed) == normalized {
 			return true
 		}
 	}

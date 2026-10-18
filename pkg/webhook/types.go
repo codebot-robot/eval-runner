@@ -231,6 +231,14 @@ func SanitizeLabelValue(val string) string {
 	return s
 }
 
+// ComputeSignature computes the GitHub X-Hub-Signature-256 HMAC-SHA256 header value
+// formatted as "sha256=<hex>".
+func ComputeSignature(payload, secret []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(payload)
+	return fmt.Sprintf("sha256=%s", hex.EncodeToString(mac.Sum(nil)))
+}
+
 // VerifySignature verifies that the payload matches the X-Hub-Signature-256 header
 // using HMAC-SHA256 and constant-time comparison.
 func VerifySignature(payload, secret []byte, signatureHeader string) bool {

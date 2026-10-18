@@ -112,6 +112,8 @@ func (h *Harness) DeployEvalRunner() {
 	h.KindLoad("eval-runner:e2e")
 	h.DockerBuild("eval-runner-ui:e2e", filepath.Join(gitRoot, "images/eval-runner-ui/Dockerfile"), gitRoot)
 	h.KindLoad("eval-runner-ui:e2e")
+	h.DockerBuild("eval-runner-webhook:e2e", filepath.Join(gitRoot, "images/eval-runner-webhook/Dockerfile"), gitRoot)
+	h.KindLoad("eval-runner-webhook:e2e")
 	h.DockerBuild("sample-runner:e2e", filepath.Join(gitRoot, "images/sample-runner/Dockerfile"), gitRoot)
 	h.KindLoad("sample-runner:e2e")
 
@@ -162,8 +164,23 @@ metadata:
   namespace: eval-runner
 data:
   artifactDir: /tmp/artifacts
+  defaultModel: mockllm/model
+  webhookRepositories: "*"
 `
 	h.KubectlApplyContent(cmManifest)
+
+	// Apply Secret for eval-runner-webhook HMAC signature verification
+	secManifest := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-webhook
+  namespace: eval-runner
+type: Opaque
+stringData:
+  secret: e2e-webhook-secret
+`
+	h.KubectlApplyContent(secManifest)
 
 	// Apply Deployment with image rewritten for kind local image
 	deployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/runner-deployment.yaml"))
@@ -200,6 +217,21 @@ data:
 	h.KubectlApplyContent(modifiedUIDeploy)
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-ui", "--timeout=60s")
+
+	// Apply Webhook Deployment with image rewritten for kind local image
+	webhookDeployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/webhook-deployment.yaml"))
+	if err != nil {
+		h.t.Fatalf("Failed to read webhook-deployment.yaml: %v", err)
+	}
+	modifiedWebhookDeploy := strings.Replace(
+		string(webhookDeployContent),
+		"image: eval-runner-webhook",
+		"image: eval-runner-webhook:e2e\n        imagePullPolicy: Never",
+		1,
+	)
+	h.KubectlApplyContent(modifiedWebhookDeploy)
+
+	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-webhook", "--timeout=60s")
 }
 
 func (h *Harness) DeployGitServer(namespace string) {
@@ -388,6 +420,56 @@ func (h *Harness) WaitForSandboxExists(namespace, sandboxName string, timeout ti
 
 		if time.Since(start) > timeout {
 			h.t.Fatalf("Timeout waiting for Sandbox %s/%s to be created in namespace %s", namespace, sandboxName, namespace)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func (h *Harness) WaitForRunExists(namespace, runName string, timeout time.Duration) *v1alpha1.Run {
+	h.t.Logf("Waiting for Run %s/%s to exist (timeout %v)", namespace, runName, timeout)
+	start := time.Now()
+	var lastErr error
+	for {
+		cmd := exec.Command("kubectl", "get", "run", runName, "-n", namespace, "-o", "json")
+		out, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+		} else {
+			var r v1alpha1.Run
+			if err := json.Unmarshal(out, &r); err != nil {
+				lastErr = err
+			} else if r.Name == runName {
+				return &r
+			}
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Run %s/%s to exist (last error: %v)", namespace, runName, lastErr)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func (h *Harness) WaitForComparisonExists(namespace, compName string, timeout time.Duration) *v1alpha1.Comparison {
+	h.t.Logf("Waiting for Comparison %s/%s to exist (timeout %v)", namespace, compName, timeout)
+	start := time.Now()
+	var lastErr error
+	for {
+		cmd := exec.Command("kubectl", "get", "comparison", compName, "-n", namespace, "-o", "json")
+		out, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+		} else {
+			var c v1alpha1.Comparison
+			if err := json.Unmarshal(out, &c); err != nil {
+				lastErr = err
+			} else if c.Name == compName {
+				return &c
+			}
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Comparison %s/%s to exist (last error: %v)", namespace, compName, lastErr)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

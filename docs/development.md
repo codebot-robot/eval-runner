@@ -429,7 +429,7 @@ Supported ConfigMap keys include:
 - `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
 - `uiBaseURL`: Base URL for the eval-runner UI (e.g. `https://eval-runner.example.com`) to generate absolute links in PR comments.
-- `webhookRepositories`: Comma-separated list of allowed repositories (`owner/name`). If unset, all repositories are accepted.
+- `webhookRepositories`: Comma-separated list of allowed repositories (`owner/name`). If unset or empty, all incoming repositories are rejected (fail-closed). Use `*` to explicitly allow all repositories.
 
 Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the ConfigMap is absent, all built-in defaults are used.
 
