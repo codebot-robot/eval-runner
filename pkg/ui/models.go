@@ -158,6 +158,57 @@ type ComparisonTaskRow struct {
 	DroppedBase int
 }
 
+// ComparisonRows maps a Comparison resource into a slice of ComparisonTaskRow
+// suitable for rendering in both HTML sub-templates and Markdown comments.
+func ComparisonRows(comp *v1alpha1.Comparison) []ComparisonTaskRow {
+	if comp == nil {
+		return nil
+	}
+
+	rows := make([]ComparisonTaskRow, 0, len(comp.Status.Tasks))
+	for _, task := range comp.Status.Tasks {
+		leftPx, widthPx, dotPx, hasCI := CalculateComparisonBarGeometry(task.Delta, task.DeltaCI, 340.0)
+
+		baseRate := "—"
+		if task.BaseRate != nil {
+			baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
+		}
+
+		candRate := "—"
+		if task.CandidateRate != nil {
+			candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
+		}
+
+		deltaStr := "—"
+		if task.Delta != nil {
+			deltaStr = fmt.Sprintf("%+.2f", *task.Delta)
+		}
+
+		ciLabel := "—"
+		if task.DeltaCI != nil {
+			ciLabel = fmt.Sprintf("[%+.2f, %+.2f]", task.DeltaCI.Lower, task.DeltaCI.Upper)
+		}
+
+		rows = append(rows, ComparisonTaskRow{
+			ID:          task.ID,
+			BaseRate:    baseRate,
+			CandRate:    candRate,
+			Delta:       deltaStr,
+			HasCI:       hasCI,
+			CILeftPx:    leftPx,
+			CIWidthPx:   widthPx,
+			CIDotPx:     dotPx,
+			CILabel:     ciLabel,
+			StatusClass: labelStatusClass(task.Label),
+			Label:       string(task.Label),
+			Pairs:       task.Pairs,
+			DroppedCand: task.Dropped.Candidate,
+			DroppedBase: task.Dropped.Baseline,
+		})
+	}
+	return rows
+}
+
 // ComparisonDetailView is the view model for the /comparisons/<ns>/<name> detail page.
 type ComparisonDetailView struct {
 	ActiveTab    NavTab

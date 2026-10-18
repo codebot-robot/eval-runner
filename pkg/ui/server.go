@@ -185,9 +185,12 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sort runs by CreationTimestamp descending (newest first)
+	// Sort runs by CreationTimestamp descending (newest first), with name tiebreaker
 	sort.Slice(runList.Items, func(i, j int) bool {
-		return runList.Items[i].CreationTimestamp.After(runList.Items[j].CreationTimestamp.Time)
+		if !runList.Items[i].CreationTimestamp.Equal(&runList.Items[j].CreationTimestamp) {
+			return runList.Items[i].CreationTimestamp.After(runList.Items[j].CreationTimestamp.Time)
+		}
+		return runList.Items[i].Name < runList.Items[j].Name
 	})
 
 	totalCount := len(runList.Items)
@@ -406,8 +409,12 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sort comparisons by CreationTimestamp descending (newest first), with name tiebreaker
 	sort.Slice(compList.Items, func(i, j int) bool {
-		return compList.Items[i].CreationTimestamp.After(compList.Items[j].CreationTimestamp.Time)
+		if !compList.Items[i].CreationTimestamp.Equal(&compList.Items[j].CreationTimestamp) {
+			return compList.Items[i].CreationTimestamp.After(compList.Items[j].CreationTimestamp.Time)
+		}
+		return compList.Items[i].Name < compList.Items[j].Name
 	})
 
 	totalCount := len(compList.Items)
@@ -547,54 +554,15 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Prepare task rows
-	taskRows := make([]ComparisonTaskRow, 0, len(comp.Status.Tasks))
+	taskRows := ComparisonRows(&comp)
 	totalPairs := 0
 	totalDroppedCand := 0
 	totalDroppedBase := 0
 
-	for _, task := range comp.Status.Tasks {
-		leftPx, widthPx, dotPx, hasCI := CalculateComparisonBarGeometry(task.Delta, task.DeltaCI, 340.0)
-
-		baseRate := "—"
-		if task.BaseRate != nil {
-			baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
-		}
-
-		candRate := "—"
-		if task.CandidateRate != nil {
-			candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
-		}
-
-		deltaStr := "—"
-		if task.Delta != nil {
-			deltaStr = fmt.Sprintf("%+.2f", *task.Delta)
-		}
-
-		ciLabel := "—"
-		if task.DeltaCI != nil {
-			ciLabel = fmt.Sprintf("[%+.2f, %+.2f]", task.DeltaCI.Lower, task.DeltaCI.Upper)
-		}
-
-		totalPairs += task.Pairs
-		totalDroppedCand += task.Dropped.Candidate
-		totalDroppedBase += task.Dropped.Baseline
-
-		taskRows = append(taskRows, ComparisonTaskRow{
-			ID:          task.ID,
-			BaseRate:    baseRate,
-			CandRate:    candRate,
-			Delta:       deltaStr,
-			HasCI:       hasCI,
-			CILeftPx:    leftPx,
-			CIWidthPx:   widthPx,
-			CIDotPx:     dotPx,
-			CILabel:     ciLabel,
-			StatusClass: labelStatusClass(task.Label),
-			Label:       string(task.Label),
-			Pairs:       task.Pairs,
-			DroppedCand: task.Dropped.Candidate,
-			DroppedBase: task.Dropped.Baseline,
-		})
+	for _, row := range taskRows {
+		totalPairs += row.Pairs
+		totalDroppedCand += row.DroppedCand
+		totalDroppedBase += row.DroppedBase
 	}
 
 	totalSamples := baseTotalSamples + candTotalSamples

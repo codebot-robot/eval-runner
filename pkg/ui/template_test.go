@@ -17,6 +17,7 @@ package ui
 import (
 	"bytes"
 	"flag"
+	"html"
 	"math"
 	"os"
 	"path/filepath"
@@ -377,7 +378,7 @@ func TestTemplateRenderingComparisonTableGolden(t *testing.T) {
 	tasks := sampleComparisonDetailView().Tasks
 
 	var buf bytes.Buffer
-	if err := RenderComparisonTable(&buf, tasks); err != nil {
+	if err := RenderComparisonTable(&buf, ComparisonTableView{Tasks: tasks}); err != nil {
 		t.Fatalf("failed to execute comparison table sub-template: %v", err)
 	}
 
@@ -519,7 +520,7 @@ func TestEscapingHostileFixtures(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		if err := RenderComparisonTable(&buf, tasks); err != nil {
+		if err := RenderComparisonTable(&buf, ComparisonTableView{Tasks: tasks}); err != nil {
 			t.Fatalf("RenderComparisonTable error: %v", err)
 		}
 		html := buf.String()
@@ -533,4 +534,157 @@ func TestEscapingHostileFixtures(t *testing.T) {
 			t.Errorf("expected escaped &lt;script&gt; in sub-template HTML")
 		}
 	})
+}
+
+func TestComparisonRows(t *testing.T) {
+	t.Run("NilComparison", func(t *testing.T) {
+		rows := ComparisonRows(nil)
+		if rows != nil {
+			t.Errorf("expected nil rows for nil comparison, got %v", rows)
+		}
+	})
+
+	t.Run("EmptyTasks", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{}
+		rows := ComparisonRows(comp)
+		if rows == nil || len(rows) != 0 {
+			t.Errorf("expected empty non-nil slice for empty tasks, got %v", rows)
+		}
+	})
+
+	t.Run("FormattingAndGeometry", func(t *testing.T) {
+		baseRate := 0.612
+		candRate := 0.842
+		delta := 0.230
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:            "task/improved",
+						BaseRate:      &baseRate,
+						CandidateRate: &candRate,
+						Delta:         &delta,
+						DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+							Lower: 0.11,
+							Upper: 0.35,
+						},
+						Dropped: v1alpha1.ComparisonDropped{
+							Candidate: 2,
+							Baseline:  1,
+						},
+						Label: v1alpha1.ComparisonTaskLabelImproved,
+						Pairs: 20,
+					},
+					{
+						ID:      "task/running",
+						Label:   v1alpha1.ComparisonTaskLabelRunning,
+						Pairs:   0,
+						Dropped: v1alpha1.ComparisonDropped{},
+					},
+				},
+			},
+		}
+
+		rows := ComparisonRows(comp)
+		if len(rows) != 2 {
+			t.Fatalf("expected 2 rows, got %d", len(rows))
+		}
+
+		r0 := rows[0]
+		if r0.ID != "task/improved" {
+			t.Errorf("expected ID 'task/improved', got %q", r0.ID)
+		}
+		if r0.BaseRate != "0.61" {
+			t.Errorf("expected BaseRate '0.61', got %q", r0.BaseRate)
+		}
+		if r0.CandRate != "0.84" {
+			t.Errorf("expected CandRate '0.84', got %q", r0.CandRate)
+		}
+		if r0.Delta != "+0.23" {
+			t.Errorf("expected Delta '+0.23', got %q", r0.Delta)
+		}
+		if !r0.HasCI {
+			t.Errorf("expected HasCI to be true")
+		}
+		if r0.CILabel != "[+0.11, +0.35]" {
+			t.Errorf("expected CILabel '[+0.11, +0.35]', got %q", r0.CILabel)
+		}
+		if r0.StatusClass != "good" {
+			t.Errorf("expected StatusClass 'good', got %q", r0.StatusClass)
+		}
+		if r0.Label != "improved" {
+			t.Errorf("expected Label 'improved', got %q", r0.Label)
+		}
+		if r0.Pairs != 20 {
+			t.Errorf("expected Pairs 20, got %d", r0.Pairs)
+		}
+		if r0.DroppedCand != 2 {
+			t.Errorf("expected DroppedCand 2, got %d", r0.DroppedCand)
+		}
+		if r0.DroppedBase != 1 {
+			t.Errorf("expected DroppedBase 1, got %d", r0.DroppedBase)
+		}
+		if r0.CILeftPx <= 0 || r0.CIWidthPx <= 0 || r0.CIDotPx <= 0 {
+			t.Errorf("expected non-zero geometry values, got left=%.1f width=%.1f dot=%.1f", r0.CILeftPx, r0.CIWidthPx, r0.CIDotPx)
+		}
+
+		r1 := rows[1]
+		if r1.BaseRate != "—" || r1.CandRate != "—" || r1.Delta != "—" || r1.CILabel != "—" {
+			t.Errorf("expected dashes for nil rates/delta/CI, got base=%s cand=%s delta=%s ci=%s", r1.BaseRate, r1.CandRate, r1.Delta, r1.CILabel)
+		}
+		if r1.HasCI {
+			t.Errorf("expected HasCI false for nil CI")
+		}
+		if r1.StatusClass != "pending" {
+			t.Errorf("expected StatusClass 'pending' for running, got %q", r1.StatusClass)
+		}
+	})
+}
+
+func TestComparisonRows_SubTemplateConsumes(t *testing.T) {
+	baseRate := 0.50
+	candRate := 0.75
+	delta := 0.25
+	comp := &v1alpha1.Comparison{
+		Status: v1alpha1.ComparisonStatus{
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "eval/test_task",
+					BaseRate:      &baseRate,
+					CandidateRate: &candRate,
+					Delta:         &delta,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: 0.10,
+						Upper: 0.40,
+					},
+					Label: v1alpha1.ComparisonTaskLabelImproved,
+					Pairs: 12,
+				},
+			},
+		},
+	}
+
+	rows := ComparisonRows(comp)
+	var buf bytes.Buffer
+	if err := RenderComparisonTable(&buf, ComparisonTableView{Tasks: rows}); err != nil {
+		t.Fatalf("failed to render comparison table sub-template with ComparisonRows: %v", err)
+	}
+
+	rawHTML := buf.String()
+	unescapedHTML := html.UnescapeString(rawHTML)
+	expectedSubstrings := []string{
+		"eval/test_task",
+		"0.50",
+		"0.75",
+		"+0.25",
+		"[+0.10, +0.40]",
+		"chip good",
+		"improved",
+		"12",
+	}
+	for _, expected := range expectedSubstrings {
+		if !strings.Contains(unescapedHTML, expected) {
+			t.Errorf("expected sub-template HTML to contain %q, but got:\n%s", expected, unescapedHTML)
+		}
+	}
 }

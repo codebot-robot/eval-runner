@@ -657,3 +657,96 @@ func TestServerPagination(t *testing.T) {
 		}
 	})
 }
+
+func TestServerSortTiebreaker(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+
+	t.Run("RunsSortTiebreaker", func(t *testing.T) {
+		names := []string{"run-charlie", "run-alpha", "run-bravo"}
+		runs := make([]client.Object, len(names))
+		for i, name := range names {
+			runs[i] = &v1alpha1.Run{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              name,
+					Namespace:         "eval-runner",
+					CreationTimestamp: metav1.NewTime(now),
+				},
+				Spec: v1alpha1.RunSpec{
+					Repo:  v1alpha1.RepoSpec{Commit: "a81d0c4"},
+					Model: "model",
+				},
+				Status: v1alpha1.RunStatus{
+					Phase: v1alpha1.RunPhaseCompleted,
+				},
+			}
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runs...).Build()
+		server := NewServer(Config{Client: fakeClient})
+
+		req := httptest.NewRequest(http.MethodGet, "/runs", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		idxAlpha := strings.Index(body, "run-alpha")
+		idxBravo := strings.Index(body, "run-bravo")
+		idxCharlie := strings.Index(body, "run-charlie")
+
+		if idxAlpha == -1 || idxBravo == -1 || idxCharlie == -1 {
+			t.Fatalf("expected all runs to appear in response body")
+		}
+		if !(idxAlpha < idxBravo && idxBravo < idxCharlie) {
+			t.Errorf("expected runs to be sorted alphabetically on equal timestamp: alpha=%d bravo=%d charlie=%d", idxAlpha, idxBravo, idxCharlie)
+		}
+	})
+
+	t.Run("ComparisonsSortTiebreaker", func(t *testing.T) {
+		names := []string{"comp-charlie", "comp-alpha", "comp-bravo"}
+		comps := make([]client.Object, len(names))
+		for i, name := range names {
+			comps[i] = &v1alpha1.Comparison{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              name,
+					Namespace:         "eval-runner",
+					CreationTimestamp: metav1.NewTime(now),
+				},
+				Spec: v1alpha1.ComparisonSpec{
+					Baseline:  v1alpha1.ComparisonRunRef{Run: "base"},
+					Candidate: v1alpha1.ComparisonRunRef{Run: "cand"},
+				},
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictImproved,
+				},
+			}
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comps...).Build()
+		server := NewServer(Config{Client: fakeClient})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		idxAlpha := strings.Index(body, "comp-alpha")
+		idxBravo := strings.Index(body, "comp-bravo")
+		idxCharlie := strings.Index(body, "comp-charlie")
+
+		if idxAlpha == -1 || idxBravo == -1 || idxCharlie == -1 {
+			t.Fatalf("expected all comparisons to appear in response body")
+		}
+		if !(idxAlpha < idxBravo && idxBravo < idxCharlie) {
+			t.Errorf("expected comparisons to be sorted alphabetically on equal timestamp: alpha=%d bravo=%d charlie=%d", idxAlpha, idxBravo, idxCharlie)
+		}
+	})
+}
