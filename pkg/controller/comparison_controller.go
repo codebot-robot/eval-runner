@@ -948,9 +948,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	for _, taskID := range taskIDs {
 		var allCandScores []stats.SampleScore
 		var allBaseScores []stats.SampleScore
-		candInputSum, candOutputSum, candTotalSum := 0, 0, 0
+		candInputSum, candOutputSum := 0, 0
+		candReasoningSum, candCacheReadSum, candCacheWriteSum := 0, 0, 0
 		hasCandTokens := false
-		baseInputSum, baseOutputSum, baseTotalSum := 0, 0, 0
+		baseInputSum, baseOutputSum := 0, 0
+		baseReasoningSum, baseCacheReadSum, baseCacheWriteSum := 0, 0, 0
 		hasBaseTokens := false
 		taskExhausted := false
 		taskFailed := false
@@ -1068,13 +1070,17 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			if candTok, err := artifacts.ExtractInspectTokens(candData); err == nil && candTok != nil {
 				candInputSum += candTok.Input
 				candOutputSum += candTok.Output
-				candTotalSum += candTok.Total
+				candReasoningSum += candTok.Reasoning
+				candCacheReadSum += candTok.CacheRead
+				candCacheWriteSum += candTok.CacheWrite
 				hasCandTokens = true
 			}
 			if baseTok, err := artifacts.ExtractInspectTokens(baseData); err == nil && baseTok != nil {
 				baseInputSum += baseTok.Input
 				baseOutputSum += baseTok.Output
-				baseTotalSum += baseTok.Total
+				baseReasoningSum += baseTok.Reasoning
+				baseCacheReadSum += baseTok.CacheRead
+				baseCacheWriteSum += baseTok.CacheWrite
 				hasBaseTokens = true
 			}
 
@@ -1101,25 +1107,34 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		var totalCandTokens *v1alpha1.TaskTokens
 		if hasCandTokens {
 			totalCandTokens = &v1alpha1.TaskTokens{
-				Input:  candInputSum,
-				Output: candOutputSum,
-				Total:  candInputSum + candOutputSum,
+				Input:      candInputSum,
+				Output:     candOutputSum,
+				Total:      candInputSum + candOutputSum,
+				Reasoning:  candReasoningSum,
+				CacheRead:  candCacheReadSum,
+				CacheWrite: candCacheWriteSum,
 			}
 		}
 		var totalBaseTokens *v1alpha1.TaskTokens
 		if hasBaseTokens {
 			totalBaseTokens = &v1alpha1.TaskTokens{
-				Input:  baseInputSum,
-				Output: baseOutputSum,
-				Total:  baseInputSum + baseOutputSum,
+				Input:      baseInputSum,
+				Output:     baseOutputSum,
+				Total:      baseInputSum + baseOutputSum,
+				Reasoning:  baseReasoningSum,
+				CacheRead:  baseCacheReadSum,
+				CacheWrite: baseCacheWriteSum,
 			}
 		}
 		var totalTokens *v1alpha1.TaskTokens
 		if hasCandTokens || hasBaseTokens {
 			totalTokens = &v1alpha1.TaskTokens{
-				Input:  candInputSum + baseInputSum,
-				Output: candOutputSum + baseOutputSum,
-				Total:  (candInputSum + baseInputSum) + (candOutputSum + baseOutputSum),
+				Input:      candInputSum + baseInputSum,
+				Output:     candOutputSum + baseOutputSum,
+				Total:      (candInputSum + baseInputSum) + (candOutputSum + baseOutputSum),
+				Reasoning:  candReasoningSum + baseReasoningSum,
+				CacheRead:  candCacheReadSum + baseCacheReadSum,
+				CacheWrite: candCacheWriteSum + baseCacheWriteSum,
 			}
 		}
 

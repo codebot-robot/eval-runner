@@ -6,7 +6,7 @@ Running batch 2 (1 tasks continuing)
 
 | eval | base | this PR | Δ (95% CI) | label | samples | tokens |
 | --- | --- | --- | --- | --- | --- | --- |
-| docs/readme\_comprehension | 0.60 | 0.90 | +0.30 [+0.10, +0.50] | improved | 16 | 800 |
+| docs/readme\_comprehension | 0.60 | 0.90 | +0.30 [+0.10, +0.50] | improved | 16 | 800 (+R 100) |
 | docs/readme\_comprehension\_blind | 0.20 | 0.15 | -0.05 [-0.15, +0.00] | inconclusive | 16 | — |
 | docs/readme\_summary | — | — | — | running | — | — |
 

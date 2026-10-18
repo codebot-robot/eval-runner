@@ -553,7 +553,7 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
           <span style="font-size:11px;color:var(--muted);display:block">dropped: {{ .DroppedCand }} cand, {{ .DroppedBase }} base</span>
           {{ end }}
         </td>{{ if $.HasTokens }}
-        <td class="num">{{ if .Tokens }}{{ .Tokens.Total }}{{ else }}—{{ end }}</td>{{ end }}
+        <td class="num">{{ if .Tokens }}{{ .Tokens.Total }}{{ if gt .Tokens.Reasoning 0 }} (+R {{ .Tokens.Reasoning }}){{ end }}{{ else }}—{{ end }}</td>{{ end }}
       </tr>
       {{ else }}
       <tr>

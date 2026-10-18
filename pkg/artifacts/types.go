@@ -50,9 +50,12 @@ type RunMetadata struct {
 // TaskTokens records token usage breakdown for an evaluation task.
 // Invariant: Total == Input + Output across all reporting surfaces.
 type TaskTokens struct {
-	Input  int `json:"input,omitempty"`
-	Output int `json:"output,omitempty"`
-	Total  int `json:"total,omitempty"`
+	Input      int `json:"input,omitempty"`
+	Output     int `json:"output,omitempty"`
+	Total      int `json:"total,omitempty"`
+	Reasoning  int `json:"reasoning,omitempty"`
+	CacheRead  int `json:"cacheRead,omitempty"`
+	CacheWrite int `json:"cacheWrite,omitempty"`
 }
 
 // SampleRange specifies a 1-based, inclusive window of samples.

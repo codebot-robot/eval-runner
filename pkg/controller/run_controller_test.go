@@ -4575,6 +4575,15 @@ func TestReconcileArtifactSink_TokenAccountingInvariantWithFixture(t *testing.T)
 	if taskTokens.Total != 141496 {
 		t.Errorf("Expected Run status total=141496 (Inspect total 272146 dropped), got %d", taskTokens.Total)
 	}
+	if taskTokens.Reasoning != 150 {
+		t.Errorf("Expected Run status Reasoning=150, got %d", taskTokens.Reasoning)
+	}
+	if taskTokens.CacheRead != 130000 {
+		t.Errorf("Expected Run status CacheRead=130000, got %d", taskTokens.CacheRead)
+	}
+	if taskTokens.CacheWrite != 650 {
+		t.Errorf("Expected Run status CacheWrite=650, got %d", taskTokens.CacheWrite)
+	}
 
 	// Verify summary.json exists in fake GCS and enforces the invariant
 	summaryObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/summary.json")
@@ -4597,6 +4606,197 @@ func TestReconcileArtifactSink_TokenAccountingInvariantWithFixture(t *testing.T)
 	}
 	if summary.Tokens.Total != 141496 {
 		t.Errorf("Expected summary.json total=141496 (Inspect total 272146 dropped), got %d", summary.Tokens.Total)
+	}
+	if summary.Tokens.Reasoning != 150 {
+		t.Errorf("Expected summary.Tokens Reasoning=150, got %d", summary.Tokens.Reasoning)
+	}
+	if summary.Tokens.CacheRead != 130000 {
+		t.Errorf("Expected summary.Tokens CacheRead=130000, got %d", summary.Tokens.CacheRead)
+	}
+	if summary.Tokens.CacheWrite != 650 {
+		t.Errorf("Expected summary.Tokens CacheWrite=650, got %d", summary.Tokens.CacheWrite)
+	}
+}
+
+func TestReconcileArtifactSink_TokenAccountingFallbackPerSample(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "docs/readme_comprehension", Spec: "eval.py@task"},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-token-fallback",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abcdef123456",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"docs/readme_comprehension"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "docs/readme_comprehension", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	sampleLogJSON := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "docs/readme_comprehension", "model": "mockllm/model"},
+		"samples": [
+			{
+				"id": 1,
+				"model_usage": {
+					"mockllm/model": {
+						"input_tokens": 100,
+						"output_tokens": 20,
+						"total_tokens": 200,
+						"reasoning_tokens": 15,
+						"input_tokens_cache_read": 80,
+						"input_tokens_cache_write": 10
+					}
+				},
+				"scores": {"choice": {"value": "C"}}
+			},
+			{
+				"id": 2,
+				"model_usage": {
+					"mockllm/model": {
+						"input_tokens": 50,
+						"output_tokens": 10,
+						"total_tokens": 100,
+						"reasoning_tokens": 5,
+						"input_tokens_cache_read": 40,
+						"input_tokens_cache_write": 5
+					}
+				},
+				"scores": {"choice": {"value": "C"}}
+			}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "2026-10-18_readme_eval.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return []byte(sampleLogJSON), nil
+		},
+	}
+
+	fakeGCSClient := fakes.NewFakeStorageClient()
+	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		ArtifactSink:     gcsSink,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-token-fallback"}}
+
+	// Turn 1: Creates pod
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 1 error: %v", err)
+	}
+
+	// Create ready pod
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun("test-run-token-fallback", "docs/readme_comprehension"),
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.50",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Turn 2: Executes task and writes artifacts to GCS
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue to check completion")
+	}
+
+	// Turn 3: Run marked Completed
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 3 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	taskTokens := updatedRun.Status.Tasks[0].Tokens
+	if taskTokens == nil {
+		t.Fatalf("Expected non-nil task Tokens in Run status")
+	}
+	if taskTokens.Input != 150 || taskTokens.Output != 30 || taskTokens.Total != 180 {
+		t.Errorf("Expected {Input: 150, Output: 30, Total: 180}, got %+v", taskTokens)
+	}
+	if taskTokens.Reasoning != 20 || taskTokens.CacheRead != 120 || taskTokens.CacheWrite != 15 {
+		t.Errorf("Expected {Reasoning: 20, CacheRead: 120, CacheWrite: 15}, got %+v", taskTokens)
+	}
+
+	summaryObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/summary.json")
+	if !exists {
+		t.Fatalf("summary.json was not uploaded to GCS")
+	}
+	var summary artifacts.TaskSummary
+	if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
+		t.Fatalf("Failed to parse summary.json: %v", err)
+	}
+	if summary.Tokens == nil {
+		t.Fatalf("Expected non-nil Tokens in summary.json")
+	}
+	if summary.Tokens.Input != 150 || summary.Tokens.Output != 30 || summary.Tokens.Total != 180 {
+		t.Errorf("Expected summary.Tokens {150, 30, 180}, got %+v", summary.Tokens)
+	}
+	if summary.Tokens.Reasoning != 20 || summary.Tokens.CacheRead != 120 || summary.Tokens.CacheWrite != 15 {
+		t.Errorf("Expected summary.Tokens {Reasoning: 20, CacheRead: 120, CacheWrite: 15}, got %+v", summary.Tokens)
 	}
 }
 
