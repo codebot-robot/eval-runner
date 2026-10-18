@@ -190,6 +190,10 @@ type ComparisonSummary struct {
 	// Tasks is a compact string representing completed vs total tasks (e.g. "2/2").
 	// +optional
 	Tasks string `json:"tasks,omitempty"`
+
+	// Skipped is the count of tasks discovered in the manifest but not planned by either Run.
+	// +optional
+	Skipped int `json:"skipped,omitempty"`
 }
 
 // ComparisonReportingStatus records GitHub comment and check run reporting state.
