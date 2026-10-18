@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -5464,5 +5465,221 @@ func TestReconcile_MTLSLifecycleAndSANVerification(t *testing.T) {
 		if strings.Contains(cond.Message, "PRIVATE KEY") {
 			t.Errorf("Private key leaked into Condition message: %s", cond.Message)
 		}
+	}
+}
+
+func TestValidateRunSpec(t *testing.T) {
+	intPtr := func(i int) *int { return &i }
+
+	tests := []struct {
+		name        string
+		spec        v1alpha1.RunSpec
+		expectError bool
+		errContains string
+	}{
+		{
+			name: "neither limit nor sampleRange",
+			spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc1234"},
+			},
+			expectError: false,
+		},
+		{
+			name: "valid limit",
+			spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc1234"},
+				Limit: intPtr(10),
+			},
+			expectError: false,
+		},
+		{
+			name: "valid sampleRange",
+			spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc1234"},
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 10},
+			},
+			expectError: false,
+		},
+		{
+			name: "both limit and sampleRange set - rejected",
+			spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc1234"},
+				Limit:       intPtr(10),
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 10},
+			},
+			expectError: true,
+			errContains: "limit and sampleRange are mutually exclusive",
+		},
+		{
+			name: "sampleRange start < 1 - rejected",
+			spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc1234"},
+				SampleRange: &v1alpha1.SampleRange{Start: 0, End: 10},
+			},
+			expectError: true,
+			errContains: "start must be >= 1",
+		},
+		{
+			name: "sampleRange end < start - rejected",
+			spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc1234"},
+				SampleRange: &v1alpha1.SampleRange{Start: 10, End: 5},
+			},
+			expectError: true,
+			errContains: "end (5) must be >= start (10)",
+		},
+		{
+			name: "limit < 1 - rejected",
+			spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc1234"},
+				Limit: intPtr(0),
+			},
+			expectError: true,
+			errContains: "limit must be >= 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRunSpec(tt.spec)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestInspectEvalArgs(t *testing.T) {
+	intPtr := func(i int) *int { return &i }
+	task := v1alpha1.ManifestTask{
+		ID:   "docs/readme_comprehension",
+		Spec: "docs_comprehension.py@readme_comprehension",
+	}
+
+	t.Run("neither", func(t *testing.T) {
+		spec := v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		}
+		args := InspectEvalArgs(task, spec)
+		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json"}
+		if !slices.Equal(args, expected) {
+			t.Errorf("expected %v, got %v", expected, args)
+		}
+	})
+
+	t.Run("limit", func(t *testing.T) {
+		spec := v1alpha1.RunSpec{
+			Model: "mockllm/model",
+			Limit: intPtr(10),
+		}
+		args := InspectEvalArgs(task, spec)
+		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json", "--limit", "10"}
+		if !slices.Equal(args, expected) {
+			t.Errorf("expected %v, got %v", expected, args)
+		}
+	})
+
+	t.Run("sampleRange", func(t *testing.T) {
+		spec := v1alpha1.RunSpec{
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+		}
+		args := InspectEvalArgs(task, spec)
+		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json", "--limit", "9-16"}
+		if !slices.Equal(args, expected) {
+			t.Errorf("expected %v, got %v", expected, args)
+		}
+	})
+}
+
+func TestEffectiveSampleRange(t *testing.T) {
+	intPtr := func(i int) *int { return &i }
+
+	t.Run("neither", func(t *testing.T) {
+		spec := v1alpha1.RunSpec{}
+		eff := EffectiveSampleRange(spec)
+		if eff != nil {
+			t.Errorf("expected nil, got %+v", eff)
+		}
+	})
+
+	t.Run("limit", func(t *testing.T) {
+		spec := v1alpha1.RunSpec{
+			Limit: intPtr(15),
+		}
+		eff := EffectiveSampleRange(spec)
+		if eff == nil || eff.Start != 1 || eff.End != 15 {
+			t.Errorf("expected {1, 15}, got %+v", eff)
+		}
+	})
+
+	t.Run("sampleRange", func(t *testing.T) {
+		spec := v1alpha1.RunSpec{
+			SampleRange: &v1alpha1.SampleRange{Start: 11, End: 20},
+		}
+		eff := EffectiveSampleRange(spec)
+		if eff == nil || eff.Start != 11 || eff.End != 20 {
+			t.Errorf("expected {11, 20}, got %+v", eff)
+		}
+	})
+}
+
+func TestReconcileInvalidRunSpecFails(t *testing.T) {
+	scheme := setupScheme(t)
+	intPtr := func(i int) *int { return &i }
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "invalid-spec-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Limit:       intPtr(5),
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 5},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(&v1alpha1.Run{}).
+		Build()
+
+	r := &RunReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "invalid-spec-run"}}
+	res, err := r.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue for failed invalid run, got %+v", res)
+	}
+
+	var updated v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "limit and sampleRange are mutually exclusive") {
+		t.Errorf("Expected message to contain exclusivity error, got: %s", updated.Status.Message)
 	}
 }
