@@ -61,6 +61,26 @@ type ComparisonRunRef struct {
 	Run string `json:"run"`
 }
 
+// PullRequestSpec references a pull request target for reporting.
+type PullRequestSpec struct {
+	// Repository is the GitHub repository in "owner/name" format.
+	// +kubebuilder:validation:Required
+	Repository string `json:"repository"`
+
+	// Number is the pull request number.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	Number int `json:"number"`
+
+	// HeadSHA is the SHA of the head commit of the pull request.
+	// +optional
+	HeadSHA string `json:"headSHA,omitempty"`
+
+	// BaseSHA is the SHA of the base commit of the pull request.
+	// +optional
+	BaseSHA string `json:"baseSHA,omitempty"`
+}
+
 // ComparisonSpec defines the desired state of Comparison.
 type ComparisonSpec struct {
 	// Baseline specifies the baseline Run to compare against.
@@ -82,6 +102,10 @@ type ComparisonSpec struct {
 	// If empty, all tasks present in both candidate and baseline runs are compared.
 	// +optional
 	Tasks []string `json:"tasks,omitempty"`
+
+	// PullRequest references an optional GitHub pull request to report results to.
+	// +optional
+	PullRequest *PullRequestSpec `json:"pullRequest,omitempty"`
 }
 
 // DeltaConfidenceInterval represents a confidence interval on a difference/delta in [-1, 1].
@@ -168,6 +192,25 @@ type ComparisonSummary struct {
 	Tasks string `json:"tasks,omitempty"`
 }
 
+// ComparisonReportingStatus records GitHub comment and check run reporting state.
+type ComparisonReportingStatus struct {
+	// CommentID is the GitHub issue comment ID created or updated for this comparison.
+	// +optional
+	CommentID int64 `json:"commentID,omitempty"`
+
+	// CheckRunID is the GitHub check run ID created or updated for this comparison.
+	// +optional
+	CheckRunID int64 `json:"checkRunID,omitempty"`
+
+	// LastPostedHash is the hash of the last successfully posted content and state.
+	// +optional
+	LastPostedHash string `json:"lastPostedHash,omitempty"`
+
+	// Message records error or status details (e.g. "disabled" or permanent error message).
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
 // ComparisonStatus defines the observed state of Comparison.
 type ComparisonStatus struct {
 	// Phase is the lifecycle phase of the comparison (Running, Completed, Failed).
@@ -199,6 +242,10 @@ type ComparisonStatus struct {
 	// Message is human-readable detail on failure or current status.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// Reporting records the status of GitHub PR comment and check run reporting.
+	// +optional
+	Reporting *ComparisonReportingStatus `json:"reporting,omitempty"`
 }
 
 // +kubebuilder:object:root=true
