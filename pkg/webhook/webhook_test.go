@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -45,6 +46,20 @@ func computeSignature(payload, secret []byte) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write(payload)
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func pollUntil(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatalf("condition not met within %v", timeout)
+	}
 }
 
 func TestSignatureVerification(t *testing.T) {
@@ -148,6 +163,30 @@ func TestSanitizeLabelValue(t *testing.T) {
 				t.Errorf("SanitizeLabelValue(%q) = %q, expected %q", tc.input, actual, tc.expected)
 			}
 		})
+	}
+}
+
+func TestValidationHelpers(t *testing.T) {
+	// 1. Repo component validation
+	if err := ValidateRepoComponent("gke-labs"); err != nil {
+		t.Errorf("expected gke-labs to be valid: %v", err)
+	}
+	if err := ValidateRepoComponent("eval-runner.git?x=../../evil#"); err == nil {
+		t.Errorf("expected evil component to be rejected")
+	}
+
+	// 2. Commit SHA validation
+	if err := ValidateCommitSHA("1234567"); err != nil {
+		t.Errorf("expected 7-char sha to be valid: %v", err)
+	}
+	if err := ValidateCommitSHA("1234567890abcdef1234567890abcdef12345678"); err != nil {
+		t.Errorf("expected 40-char sha to be valid: %v", err)
+	}
+	if err := ValidateCommitSHA("not-a-hex-sha;"); err == nil {
+		t.Errorf("expected non-hex sha to be rejected")
+	}
+	if err := ValidateCommitSHA("123456"); err == nil {
+		t.Errorf("expected <7 char sha to be rejected")
 	}
 }
 
@@ -257,39 +296,35 @@ func TestProcessPullRequest_CreateAndIdempotency(t *testing.T) {
 	}
 	worker := NewWorkerPool(cfg)
 
-	event := &GitHubPullRequestEvent{
-		Action: ActionOpened,
-		Number: 105,
-		PullRequest: GitHubPullRequestData{
-			Number: 105,
-			Head: GitHubCommitRef{
-				SHA: "1234567890abcdef1234567890abcdef12345678",
-			},
-			Base: GitHubCommitRef{
-				SHA: "abcdef1234567890abcdef1234567890abcdef12",
-			},
-		},
-		Repository: GitHubRepository{
-			FullName: "gke-labs/eval-runner",
-			Name:     "eval-runner",
-		},
+	item := &PullRequestWorkItem{
+		PRNumber:          105,
+		HeadSHA:           "1234567890abcdef1234567890abcdef12345678",
+		BaseSHA:           "abcdef1234567890abcdef1234567890abcdef12",
+		CandidateCloneURL: "https://github.com/contributor-fork/eval-runner.git",
+		CandidateRepo:     "contributor-fork/eval-runner",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+		BaselineRepo:      "gke-labs/eval-runner",
+		TargetRepo:        "gke-labs/eval-runner",
 	}
 
 	ctx := t.Context()
 
-	// 1. Process pull_request opened
-	if err := worker.ProcessPullRequest(ctx, event); err != nil {
+	// 1. Process pull_request
+	if err := worker.ProcessPullRequest(ctx, item); err != nil {
 		t.Fatalf("ProcessPullRequest failed: %v", err)
 	}
 
-	// Verify Candidate Run
+	// Verify Candidate Run has fork clone URL (Blocking 1)
 	candRunName := "pr-105-1234567"
 	var candRun v1alpha1.Run
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: candRunName}, &candRun); err != nil {
 		t.Fatalf("candidate Run %s not found: %v", candRunName, err)
 	}
-	if candRun.Spec.Repo.Commit != event.PullRequest.Head.SHA {
-		t.Errorf("expected commit %s, got %s", event.PullRequest.Head.SHA, candRun.Spec.Repo.Commit)
+	if candRun.Spec.Repo.URL != "https://github.com/contributor-fork/eval-runner.git" {
+		t.Errorf("expected fork candidate clone URL, got %s", candRun.Spec.Repo.URL)
+	}
+	if candRun.Spec.Repo.Commit != item.HeadSHA {
+		t.Errorf("expected commit %s, got %s", item.HeadSHA, candRun.Spec.Repo.Commit)
 	}
 	if candRun.Spec.Model != "mockllm/model" {
 		t.Errorf("expected model mockllm/model, got %s", candRun.Spec.Model)
@@ -300,21 +335,24 @@ func TestProcessPullRequest_CreateAndIdempotency(t *testing.T) {
 	if candRun.Labels[LabelPR] != "105" {
 		t.Errorf("expected label pr=105, got %s", candRun.Labels[LabelPR])
 	}
-	if candRun.Labels[LabelRepo] != "gke-labs_eval-runner" {
+	if candRun.Labels[LabelRepo] != "contributor-fork_eval-runner" {
 		t.Errorf("expected sanitized repo label, got %s", candRun.Labels[LabelRepo])
 	}
-	if candRun.Labels[LabelHeadSHA] != event.PullRequest.Head.SHA {
+	if candRun.Labels[LabelHeadSHA] != item.HeadSHA {
 		t.Errorf("expected head-sha label, got %s", candRun.Labels[LabelHeadSHA])
 	}
 
-	// Verify Baseline Run
+	// Verify Baseline Run has base clone URL
 	baseRunName := "base-abcdef1"
 	var baseRun v1alpha1.Run
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: baseRunName}, &baseRun); err != nil {
 		t.Fatalf("baseline Run %s not found: %v", baseRunName, err)
 	}
-	if baseRun.Spec.Repo.Commit != event.PullRequest.Base.SHA {
-		t.Errorf("expected commit %s, got %s", event.PullRequest.Base.SHA, baseRun.Spec.Repo.Commit)
+	if baseRun.Spec.Repo.URL != "https://github.com/gke-labs/eval-runner.git" {
+		t.Errorf("expected base clone URL, got %s", baseRun.Spec.Repo.URL)
+	}
+	if baseRun.Spec.Repo.Commit != item.BaseSHA {
+		t.Errorf("expected commit %s, got %s", item.BaseSHA, baseRun.Spec.Repo.Commit)
 	}
 
 	// Verify Comparison
@@ -332,15 +370,18 @@ func TestProcessPullRequest_CreateAndIdempotency(t *testing.T) {
 	if comp.Spec.PullRequest == nil || comp.Spec.PullRequest.Number != 105 {
 		t.Errorf("expected PullRequest.Number 105, got %v", comp.Spec.PullRequest)
 	}
-	if comp.Spec.PullRequest.HeadSHA != event.PullRequest.Head.SHA {
-		t.Errorf("expected HeadSHA %s, got %s", event.PullRequest.Head.SHA, comp.Spec.PullRequest.HeadSHA)
+	if comp.Spec.PullRequest.Repository != "gke-labs/eval-runner" {
+		t.Errorf("expected TargetRepo gke-labs/eval-runner, got %s", comp.Spec.PullRequest.Repository)
+	}
+	if comp.Spec.PullRequest.HeadSHA != item.HeadSHA {
+		t.Errorf("expected HeadSHA %s, got %s", item.HeadSHA, comp.Spec.PullRequest.HeadSHA)
 	}
 	if comp.Labels[LabelPR] != "105" {
 		t.Errorf("expected label pr=105, got %s", comp.Labels[LabelPR])
 	}
 
 	// 2. Redelivery of the exact same event: must be idempotent and succeed
-	if err := worker.ProcessPullRequest(ctx, event); err != nil {
+	if err := worker.ProcessPullRequest(ctx, item); err != nil {
 		t.Fatalf("Redelivery ProcessPullRequest failed: %v", err)
 	}
 
@@ -366,32 +407,32 @@ func TestProcessPullRequest_Synchronize(t *testing.T) {
 	ctx := t.Context()
 
 	// Initial opened event
-	initialEvent := &GitHubPullRequestEvent{
-		Action: ActionOpened,
-		Number: 105,
-		PullRequest: GitHubPullRequestData{
-			Number: 105,
-			Head:   GitHubCommitRef{SHA: "1111111111111111111111111111111111111111"},
-			Base:   GitHubCommitRef{SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-		},
-		Repository: GitHubRepository{FullName: "gke-labs/eval-runner"},
+	initialItem := &PullRequestWorkItem{
+		PRNumber:          105,
+		HeadSHA:           "1111111111111111111111111111111111111111",
+		BaseSHA:           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		CandidateCloneURL: "https://github.com/codebot-robot/eval-runner.git",
+		CandidateRepo:     "codebot-robot/eval-runner",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+		BaselineRepo:      "gke-labs/eval-runner",
+		TargetRepo:        "gke-labs/eval-runner",
 	}
-	if err := worker.ProcessPullRequest(ctx, initialEvent); err != nil {
+	if err := worker.ProcessPullRequest(ctx, initialItem); err != nil {
 		t.Fatalf("initial event failed: %v", err)
 	}
 
 	// New synchronize event with new head commit
-	syncEvent := &GitHubPullRequestEvent{
-		Action: ActionSynchronize,
-		Number: 105,
-		PullRequest: GitHubPullRequestData{
-			Number: 105,
-			Head:   GitHubCommitRef{SHA: "2222222222222222222222222222222222222222"},
-			Base:   GitHubCommitRef{SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-		},
-		Repository: GitHubRepository{FullName: "gke-labs/eval-runner"},
+	syncItem := &PullRequestWorkItem{
+		PRNumber:          105,
+		HeadSHA:           "2222222222222222222222222222222222222222",
+		BaseSHA:           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		CandidateCloneURL: "https://github.com/codebot-robot/eval-runner.git",
+		CandidateRepo:     "codebot-robot/eval-runner",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+		BaselineRepo:      "gke-labs/eval-runner",
+		TargetRepo:        "gke-labs/eval-runner",
 	}
-	if err := worker.ProcessPullRequest(ctx, syncEvent); err != nil {
+	if err := worker.ProcessPullRequest(ctx, syncItem); err != nil {
 		t.Fatalf("synchronize event failed: %v", err)
 	}
 
@@ -400,6 +441,12 @@ func TestProcessPullRequest_Synchronize(t *testing.T) {
 	newCandName := "pr-105-2222222"
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: newCandName}, &newCandRun); err != nil {
 		t.Fatalf("new candidate Run %s not found: %v", newCandName, err)
+	}
+
+	// Verify old candidate Run is kept (F6)
+	var oldCandRun v1alpha1.Run
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-105-1111111"}, &oldCandRun); err != nil {
+		t.Fatalf("expected old candidate Run to be kept: %v", err)
 	}
 
 	// Verify Comparison updated to point to new candidate Run
@@ -421,16 +468,21 @@ func TestProcessPullRequest_Synchronize(t *testing.T) {
 func TestProcessPullRequest_BaselineCacheReuse(t *testing.T) {
 	scheme := newTestScheme()
 
-	baseSHA := "basecommit1234567890abcdef1234567890abcdef"
-	// Pre-create an already Completed Run for basecommit
+	baseSHA := "abcdef1234567890abcdef1234567890abcdef12"
+	baseCloneURL := "https://github.com/gke-labs/eval-runner.git"
+
+	// Pre-create an already Completed Run for basecommit with matching repo URL and model
 	preExistingCompletedRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "base-basecom",
+			Name:      "base-abcdef1",
 			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelHeadSHA: baseSHA,
+			},
 		},
 		Spec: v1alpha1.RunSpec{
 			Repo: v1alpha1.RepoSpec{
-				URL:    "https://github.com/gke-labs/eval-runner.git",
+				URL:    baseCloneURL,
 				Commit: baseSHA,
 			},
 			Model: "mockllm/model",
@@ -450,18 +502,18 @@ func TestProcessPullRequest_BaselineCacheReuse(t *testing.T) {
 	worker := NewWorkerPool(cfg)
 	ctx := t.Context()
 
-	event := &GitHubPullRequestEvent{
-		Action: ActionOpened,
-		Number: 200,
-		PullRequest: GitHubPullRequestData{
-			Number: 200,
-			Head:   GitHubCommitRef{SHA: "headcommit1234567890abcdef1234567890abcdef"},
-			Base:   GitHubCommitRef{SHA: baseSHA},
-		},
-		Repository: GitHubRepository{FullName: "gke-labs/eval-runner"},
+	item := &PullRequestWorkItem{
+		PRNumber:          200,
+		HeadSHA:           "1111111111111111111111111111111111111111",
+		BaseSHA:           baseSHA,
+		CandidateCloneURL: "https://github.com/contributor/eval-runner.git",
+		CandidateRepo:     "contributor/eval-runner",
+		BaselineCloneURL:  baseCloneURL,
+		BaselineRepo:      "gke-labs/eval-runner",
+		TargetRepo:        "gke-labs/eval-runner",
 	}
 
-	if err := worker.ProcessPullRequest(ctx, event); err != nil {
+	if err := worker.ProcessPullRequest(ctx, item); err != nil {
 		t.Fatalf("ProcessPullRequest failed: %v", err)
 	}
 
@@ -470,8 +522,92 @@ func TestProcessPullRequest_BaselineCacheReuse(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-200"}, &comp); err != nil {
 		t.Fatalf("Comparison pr-200 not found: %v", err)
 	}
-	if comp.Spec.Baseline.Run != "base-basecom" {
-		t.Errorf("expected Baseline.Run to reuse 'base-basecom', got %s", comp.Spec.Baseline.Run)
+	if comp.Spec.Baseline.Run != "base-abcdef1" {
+		t.Errorf("expected Baseline.Run to reuse 'base-abcdef1', got %s", comp.Spec.Baseline.Run)
+	}
+
+	// Verify different URL is NOT reused (F1)
+	differentURLItem := &PullRequestWorkItem{
+		PRNumber:          201,
+		HeadSHA:           "3333333333333333333333333333333333333333",
+		BaseSHA:           baseSHA,
+		CandidateCloneURL: "https://github.com/other/other-repo.git",
+		CandidateRepo:     "other/other-repo",
+		BaselineCloneURL:  "https://github.com/other/other-repo.git",
+		BaselineRepo:      "other/other-repo",
+		TargetRepo:        "other/other-repo",
+	}
+	found, err := worker.findCompletedBaselineRun(ctx, "eval-runner", baseSHA, "https://github.com/other/other-repo.git", "mockllm/model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if found != "" {
+		t.Errorf("expected different URL to NOT match baseline cache, got %q", found)
+	}
+	_ = differentURLItem
+}
+
+func TestProcessPullRequest_ExistingRunSpecNotRewritten(t *testing.T) {
+	scheme := newTestScheme()
+
+	// Pre-create a candidate Run with custom model
+	existingRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-105-1234567",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR: "105",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/contributor/eval-runner.git",
+				Commit: "1234567890abcdef1234567890abcdef12345678",
+			},
+			Model: "original-model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingRun).Build()
+
+	// New webhook config with different defaultModel
+	cfg := Config{
+		Namespace:    "eval-runner",
+		DefaultModel: "different-default-model",
+		Client:       cl,
+	}
+	worker := NewWorkerPool(cfg)
+	ctx := t.Context()
+
+	item := &PullRequestWorkItem{
+		PRNumber:          105,
+		HeadSHA:           "1234567890abcdef1234567890abcdef12345678",
+		BaseSHA:           "abcdef1234567890abcdef1234567890abcdef12",
+		CandidateCloneURL: "https://github.com/contributor/eval-runner.git",
+		CandidateRepo:     "contributor/eval-runner",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+		BaselineRepo:      "gke-labs/eval-runner",
+		TargetRepo:        "gke-labs/eval-runner",
+	}
+
+	if err := worker.ProcessPullRequest(ctx, item); err != nil {
+		t.Fatalf("ProcessPullRequest failed: %v", err)
+	}
+
+	// Verify existing Run spec was NOT rewritten (F2)
+	var candRun v1alpha1.Run
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-105-1234567"}, &candRun); err != nil {
+		t.Fatalf("failed to get run: %v", err)
+	}
+	if candRun.Spec.Model != "original-model" {
+		t.Errorf("expected spec.model to remain 'original-model', got %q", candRun.Spec.Model)
+	}
+	// Verify labels were reconciled
+	if candRun.Labels[LabelHeadSHA] != item.HeadSHA {
+		t.Errorf("expected label head-sha to be reconciled")
 	}
 }
 
@@ -487,16 +623,13 @@ func TestProcessPush_DefaultBranch(t *testing.T) {
 	worker := NewWorkerPool(cfg)
 	ctx := t.Context()
 
-	pushEvent := &GitHubPushEvent{
-		Ref:   "refs/heads/main",
-		After: "9876543210abcdef9876543210abcdef98765432",
-		Repository: GitHubRepository{
-			FullName:      "gke-labs/eval-runner",
-			DefaultBranch: "main",
-		},
+	item := &PushWorkItem{
+		CommitSHA: "9876543210abcdef9876543210abcdef98765432",
+		CloneURL:  "https://github.com/gke-labs/eval-runner.git",
+		Repo:      "gke-labs/eval-runner",
 	}
 
-	if err := worker.ProcessPush(ctx, pushEvent); err != nil {
+	if err := worker.ProcessPush(ctx, item); err != nil {
 		t.Fatalf("ProcessPush failed: %v", err)
 	}
 
@@ -505,15 +638,15 @@ func TestProcessPush_DefaultBranch(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: baseRunName}, &baseRun); err != nil {
 		t.Fatalf("base Run %s not found: %v", baseRunName, err)
 	}
-	if baseRun.Spec.Repo.Commit != pushEvent.After {
-		t.Errorf("expected commit %s, got %s", pushEvent.After, baseRun.Spec.Repo.Commit)
+	if baseRun.Spec.Repo.Commit != item.CommitSHA {
+		t.Errorf("expected commit %s, got %s", item.CommitSHA, baseRun.Spec.Repo.Commit)
 	}
 	if baseRun.Spec.Model != "google/gemini-flash" {
 		t.Errorf("expected model google/gemini-flash, got %s", baseRun.Spec.Model)
 	}
 
 	// Redelivery should be idempotent
-	if err := worker.ProcessPush(ctx, pushEvent); err != nil {
+	if err := worker.ProcessPush(ctx, item); err != nil {
 		t.Fatalf("ProcessPush redelivery failed: %v", err)
 	}
 }
@@ -540,7 +673,7 @@ func TestHandler_HTTPEndpointsAndSignature(t *testing.T) {
 		Client:              cl,
 	}
 	server := NewServer(cfg)
-	server.Start(t.Context())
+	server.Start()
 	defer server.Stop()
 
 	// 1. Healthz probe
@@ -579,25 +712,11 @@ func TestHandler_HTTPEndpointsAndSignature(t *testing.T) {
 		t.Errorf("expected bad signature 401, got %d", rrBadSig.Code)
 	}
 
-	// 5. Valid signature with recorded pull_request event payload
-	recordedPRPayload := []byte(`{
-		"action": "opened",
-		"number": 305,
-		"pull_request": {
-			"number": 305,
-			"head": {
-				"sha": "aaaaaaa111111111111111111111111111111111"
-			},
-			"base": {
-				"sha": "bbbbbbb222222222222222222222222222222222"
-			}
-		},
-		"repository": {
-			"full_name": "gke-labs/eval-runner",
-			"name": "eval-runner",
-			"default_branch": "main"
-		}
-	}`)
+	// 5. Valid signature with real recorded pull_request fixture from testdata/
+	recordedPRPayload, err := os.ReadFile("testdata/pull_request.json")
+	if err != nil {
+		t.Fatalf("failed to read testdata/pull_request.json: %v", err)
+	}
 	validSig := computeSignature(recordedPRPayload, secretKey)
 
 	reqValid := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(recordedPRPayload))
@@ -610,20 +729,136 @@ func TestHandler_HTTPEndpointsAndSignature(t *testing.T) {
 		t.Fatalf("expected valid signed PR request 200, got %d: %s", rrValid.Code, rrValid.Body.String())
 	}
 
-	// Wait briefly for worker queue to process the item
-	time.Sleep(100 * time.Millisecond)
-
+	// Poll until worker queue creates candidate Run
 	var candRun v1alpha1.Run
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-305-aaaaaaa"}, &candRun); err != nil {
-		t.Fatalf("expected candidate Run pr-305-aaaaaaa to be created: %v", err)
+	pollUntil(t, 2*time.Second, func() bool {
+		return cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-305-aaaaaaa"}, &candRun) == nil
+	})
+
+	// Verify candidate clone URL points to the contributor fork (Blocking 1)
+	if candRun.Spec.Repo.URL != "https://github.com/contributor-fork/eval-runner.git" {
+		t.Errorf("expected fork clone URL on candidate Run, got %s", candRun.Spec.Repo.URL)
 	}
+
 	var baseRun v1alpha1.Run
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "base-bbbbbbb"}, &baseRun); err != nil {
-		t.Fatalf("expected baseline Run base-bbbbbbb to be created: %v", err)
+	pollUntil(t, 2*time.Second, func() bool {
+		return cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "base-bbbbbbb"}, &baseRun) == nil
+	})
+	if baseRun.Spec.Repo.URL != "https://github.com/gke-labs/eval-runner.git" {
+		t.Errorf("expected base clone URL on baseline Run, got %s", baseRun.Spec.Repo.URL)
 	}
+
 	var comp v1alpha1.Comparison
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-305"}, &comp); err != nil {
-		t.Fatalf("expected Comparison pr-305 to be created: %v", err)
+	pollUntil(t, 2*time.Second, func() bool {
+		return cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-305"}, &comp) == nil
+	})
+	if comp.Spec.PullRequest.Repository != "gke-labs/eval-runner" {
+		t.Errorf("expected PullRequest.Repository gke-labs/eval-runner, got %s", comp.Spec.PullRequest.Repository)
+	}
+}
+
+func TestHandler_Validation_BadRequest(t *testing.T) {
+	secretKey := []byte("secret")
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := Config{
+		Namespace:           "eval-runner",
+		StaticWebhookSecret: secretKey,
+		Client:              cl,
+	}
+	server := NewServer(cfg)
+	server.Start()
+	defer server.Stop()
+
+	tests := []struct {
+		name    string
+		event   string
+		payload []byte
+	}{
+		{
+			name:  "malicious repo name injection (Blocking 2)",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {"sha": "1111111111111111111111111111111111111111"},
+					"base": {"sha": "2222222222222222222222222222222222222222"}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner.git?x=../../evil#",
+					"name": "eval-runner.git?x=../../evil#",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "invalid head commit sha",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {"sha": "not-a-valid-hex-sha;rm -rf /"},
+					"base": {"sha": "2222222222222222222222222222222222222222"}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "invalid pull request number 0",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 0,
+				"pull_request": {
+					"number": 0,
+					"head": {"sha": "1111111111111111111111111111111111111111"},
+					"base": {"sha": "2222222222222222222222222222222222222222"}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "push invalid commit sha",
+			event: EventPush,
+			payload: []byte(`{
+				"ref": "refs/heads/main",
+				"after": "not-valid-sha",
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"default_branch": "main",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sig := computeSignature(tc.payload, secretKey)
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.payload))
+			req.Header.Set(HeaderGitHubEvent, tc.event)
+			req.Header.Set(HeaderHubSignature256, sig)
+			rr := httptest.NewRecorder()
+
+			server.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 Bad Request, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }
 
@@ -639,7 +874,7 @@ func TestHandler_AllowListIgnored(t *testing.T) {
 		Client:              cl,
 	}
 	server := NewServer(cfg)
-	server.Start(t.Context())
+	server.Start()
 	defer server.Stop()
 
 	// PR for a repo not in the allow-list
@@ -652,7 +887,9 @@ func TestHandler_AllowListIgnored(t *testing.T) {
 			"base": {"sha": "2222222222222222222222222222222222222222"}
 		},
 		"repository": {
-			"full_name": "other-org/other-repo"
+			"full_name": "other-org/other-repo",
+			"name": "other-repo",
+			"owner": {"login": "other-org"}
 		}
 	}`)
 	sig := computeSignature(payload, secretKey)

@@ -18,6 +18,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -60,6 +63,11 @@ const (
 	ActionReopened = "reopened"
 )
 
+var (
+	repoPartRegex  = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	commitSHARegex = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+)
+
 // GitHubRepository represents repository metadata in GitHub webhook payloads.
 type GitHubRepository struct {
 	Name          string `json:"name"`
@@ -73,12 +81,9 @@ type GitHubRepository struct {
 
 // GitHubCommitRef represents a git commit reference (head or base) in a pull request.
 type GitHubCommitRef struct {
-	SHA  string `json:"sha"`
-	Ref  string `json:"ref"`
-	Repo struct {
-		CloneURL string `json:"clone_url"`
-		FullName string `json:"full_name"`
-	} `json:"repo"`
+	SHA  string            `json:"sha"`
+	Ref  string            `json:"ref"`
+	Repo *GitHubRepository `json:"repo"`
 }
 
 // GitHubPullRequestData represents pull request details in GitHub webhook payloads.
@@ -107,6 +112,75 @@ type GitHubPushEvent struct {
 	HeadCommit *struct {
 		ID string `json:"id"`
 	} `json:"head_commit"`
+}
+
+// PullRequestWorkItem contains pre-validated fields for PR reconciliation in the worker.
+type PullRequestWorkItem struct {
+	PRNumber          int
+	HeadSHA           string
+	BaseSHA           string
+	CandidateCloneURL string
+	CandidateRepo     string // "owner/name"
+	BaselineCloneURL  string
+	BaselineRepo      string // "owner/name"
+	TargetRepo        string // "owner/name" for pullRequest spec
+}
+
+// PushWorkItem contains pre-validated fields for push reconciliation in the worker.
+type PushWorkItem struct {
+	CommitSHA string
+	CloneURL  string
+	Repo      string // "owner/name"
+}
+
+// ValidateRepoComponent validates that an owner or repo name matches ^[A-Za-z0-9_.-]+$.
+func ValidateRepoComponent(s string) error {
+	if !repoPartRegex.MatchString(s) {
+		return fmt.Errorf("invalid repository component %q: must match %s", s, repoPartRegex.String())
+	}
+	return nil
+}
+
+// ValidateCommitSHA validates that a commit SHA matches ^[0-9a-f]{7,64}$.
+func ValidateCommitSHA(sha string) error {
+	trimmed := strings.ToLower(strings.TrimSpace(sha))
+	if !commitSHARegex.MatchString(trimmed) {
+		return fmt.Errorf("invalid commit SHA %q: must match %s", sha, commitSHARegex.String())
+	}
+	return nil
+}
+
+// BuildCloneURL returns the HTTPS git clone URL for a given owner and repository name.
+func BuildCloneURL(owner, name string) string {
+	return fmt.Sprintf("https://github.com/%s/%s.git", owner, name)
+}
+
+// ParseOwnerAndName extracts and validates the repository owner and name from a GitHubRepository.
+func ParseOwnerAndName(repo *GitHubRepository) (string, string, error) {
+	if repo == nil {
+		return "", "", errors.New("repository object is nil")
+	}
+	owner := strings.TrimSpace(repo.Owner.Login)
+	name := strings.TrimSpace(repo.Name)
+	if (owner == "" || name == "") && strings.Contains(repo.FullName, "/") {
+		parts := strings.SplitN(repo.FullName, "/", 2)
+		if owner == "" {
+			owner = strings.TrimSpace(parts[0])
+		}
+		if name == "" {
+			name = strings.TrimSpace(parts[1])
+		}
+	}
+	if owner == "" || name == "" {
+		return "", "", fmt.Errorf("missing repository owner or name (owner=%q, name=%q, full_name=%q)", owner, name, repo.FullName)
+	}
+	if err := ValidateRepoComponent(owner); err != nil {
+		return "", "", fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := ValidateRepoComponent(name); err != nil {
+		return "", "", fmt.Errorf("invalid repository name: %w", err)
+	}
+	return owner, name, nil
 }
 
 // ShortSHA returns the first 7 characters of a git commit SHA in lowercase.

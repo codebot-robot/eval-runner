@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,9 +62,9 @@ func (s *Server) Worker() *WorkerPool {
 	return s.worker
 }
 
-// Start launches the worker pool and any background tasks.
-func (s *Server) Start(ctx context.Context) {
-	s.worker.Start(ctx)
+// Start launches the worker pool.
+func (s *Server) Start() {
+	s.worker.Start()
 }
 
 // Stop stops the worker pool and waits for queued items to complete.
@@ -205,14 +206,26 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		repoName := event.Repository.FullName
-		if repoName == "" {
-			repoName = fmt.Sprintf("%s/%s", event.Repository.Owner.Login, event.Repository.Name)
+		prNum := event.Number
+		if prNum == 0 && event.PullRequest.Number != 0 {
+			prNum = event.PullRequest.Number
+		}
+		if prNum <= 0 {
+			http.Error(w, fmt.Sprintf("Invalid pull request number: %d", prNum), http.StatusBadRequest)
+			return
 		}
 
-		// Check allow-list
-		if !IsRepositoryAllowed(repoName, s.cfg.WebhookRepositories) {
-			log.Printf("ignoring event for repository %s: not in allow-list", repoName)
+		// Parse and validate target base repository (hosting the PR)
+		targetOwner, targetName, err := ParseOwnerAndName(&event.Repository)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid repository in payload: %v", err), http.StatusBadRequest)
+			return
+		}
+		targetRepoFullName := fmt.Sprintf("%s/%s", targetOwner, targetName)
+
+		// Check allow-list against target repository hosting the PR
+		if !IsRepositoryAllowed(targetRepoFullName, s.cfg.WebhookRepositories) {
+			log.Printf("ignoring event for repository %s: not in allow-list", targetRepoFullName)
 			writeResponse(w, http.StatusOK, "ignored: repository not in allow-list\n")
 			return
 		}
@@ -220,15 +233,62 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// Filter actions: opened, synchronize, reopened
 		action := event.Action
 		if action != ActionOpened && action != ActionSynchronize && action != ActionReopened {
-			log.Printf("ignoring pull_request action %q for %s #%d", action, repoName, event.Number)
+			log.Printf("ignoring pull_request action %q for %s #%d", action, targetRepoFullName, prNum)
 			writeResponse(w, http.StatusOK, "ignored: action not actionable\n")
 			return
 		}
 
-		// Enqueue for async worker
+		// Validate head and base commit SHAs (Blocking 2)
+		headSHA := strings.ToLower(strings.TrimSpace(event.PullRequest.Head.SHA))
+		baseSHA := strings.ToLower(strings.TrimSpace(event.PullRequest.Base.SHA))
+		if err := ValidateCommitSHA(headSHA); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid head commit SHA: %v", err), http.StatusBadRequest)
+			return
+		}
+		if err := ValidateCommitSHA(baseSHA); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid base commit SHA: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Candidate repo from pull_request.head.repo (for forks) or fallback to event.Repository (Blocking 1)
+		candRepoObj := event.PullRequest.Head.Repo
+		if candRepoObj == nil {
+			candRepoObj = &event.Repository
+		}
+		candOwner, candName, err := ParseOwnerAndName(candRepoObj)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid head repository in payload: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Baseline repo from pull_request.base.repo or fallback to event.Repository
+		baseRepoObj := event.PullRequest.Base.Repo
+		if baseRepoObj == nil {
+			baseRepoObj = &event.Repository
+		}
+		baseOwner, baseName, err := ParseOwnerAndName(baseRepoObj)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid base repository in payload: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		candCloneURL := BuildCloneURL(candOwner, candName)
+		baseCloneURL := BuildCloneURL(baseOwner, baseName)
+		candRepoFullName := fmt.Sprintf("%s/%s", candOwner, candName)
+		baseRepoFullName := fmt.Sprintf("%s/%s", baseOwner, baseName)
+
 		item := WorkItem{
-			Event:            EventPullRequest,
-			PullRequestEvent: &event,
+			Event: EventPullRequest,
+			PullRequest: &PullRequestWorkItem{
+				PRNumber:          prNum,
+				HeadSHA:           headSHA,
+				BaseSHA:           baseSHA,
+				CandidateCloneURL: candCloneURL,
+				CandidateRepo:     candRepoFullName,
+				BaselineCloneURL:  baseCloneURL,
+				BaselineRepo:      baseRepoFullName,
+				TargetRepo:        targetRepoFullName,
+			},
 		}
 		if !s.worker.Enqueue(item) {
 			log.Printf("warning: worker queue full, dropping pull_request event delivery %s", deliveryID)
@@ -245,14 +305,16 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		repoName := event.Repository.FullName
-		if repoName == "" {
-			repoName = fmt.Sprintf("%s/%s", event.Repository.Owner.Login, event.Repository.Name)
+		repoOwner, repoName, err := ParseOwnerAndName(&event.Repository)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid repository in payload: %v", err), http.StatusBadRequest)
+			return
 		}
+		repoFullName := fmt.Sprintf("%s/%s", repoOwner, repoName)
 
 		// Check allow-list
-		if !IsRepositoryAllowed(repoName, s.cfg.WebhookRepositories) {
-			log.Printf("ignoring event for repository %s: not in allow-list", repoName)
+		if !IsRepositoryAllowed(repoFullName, s.cfg.WebhookRepositories) {
+			log.Printf("ignoring event for repository %s: not in allow-list", repoFullName)
 			writeResponse(w, http.StatusOK, "ignored: repository not in allow-list\n")
 			return
 		}
@@ -275,10 +337,24 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Enqueue for async worker
+		commitSHA := strings.ToLower(strings.TrimSpace(event.After))
+		if commitSHA == "" && event.HeadCommit != nil {
+			commitSHA = strings.ToLower(strings.TrimSpace(event.HeadCommit.ID))
+		}
+		if err := ValidateCommitSHA(commitSHA); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid commit SHA in push payload: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		cloneURL := BuildCloneURL(repoOwner, repoName)
+
 		item := WorkItem{
-			Event:     EventPush,
-			PushEvent: &event,
+			Event: EventPush,
+			Push: &PushWorkItem{
+				CommitSHA: commitSHA,
+				CloneURL:  cloneURL,
+				Repo:      repoFullName,
+			},
 		}
 		if !s.worker.Enqueue(item) {
 			log.Printf("warning: worker queue full, dropping push event delivery %s", deliveryID)

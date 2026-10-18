@@ -114,8 +114,14 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
+	if len(cfg.WebhookRepositories) == 0 {
+		log.Println("webhookRepositories allow-list is empty; accepting events for all repositories")
+	} else {
+		log.Printf("webhookRepositories allow-list configured: %v", cfg.WebhookRepositories)
+	}
+
 	server := webhook.NewServer(cfg)
-	server.Start(ctx)
+	server.Start()
 	defer server.Stop()
 
 	httpServer := &http.Server{

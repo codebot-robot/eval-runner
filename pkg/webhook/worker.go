@@ -29,11 +29,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// WorkItem represents an event enqueued for asynchronous background processing.
+// WorkItem represents a pre-validated event enqueued for asynchronous background processing.
 type WorkItem struct {
-	Event            string                  // EventPullRequest or EventPush
-	PullRequestEvent *GitHubPullRequestEvent // populated if Event == EventPullRequest
-	PushEvent        *GitHubPushEvent        // populated if Event == EventPush
+	Event       string               // EventPullRequest or EventPush
+	PullRequest *PullRequestWorkItem // populated if Event == EventPullRequest
+	Push        *PushWorkItem        // populated if Event == EventPush
 }
 
 // WorkerPool manages bounded background workers that execute Kubernetes API operations.
@@ -59,14 +59,14 @@ func NewWorkerPool(cfg Config) *WorkerPool {
 	}
 }
 
-// Start launches worker goroutines.
-func (wp *WorkerPool) Start(ctx context.Context) {
+// Start launches worker goroutines with their own background context.
+func (wp *WorkerPool) Start() {
 	wp.mu.Lock()
 	defer wp.mu.Unlock()
 	if wp.running {
 		return
 	}
-	wp.ctx, wp.cancel = context.WithCancel(ctx)
+	wp.ctx, wp.cancel = context.WithCancel(context.Background())
 	wp.running = true
 
 	workerCount := wp.cfg.Workers
@@ -80,7 +80,7 @@ func (wp *WorkerPool) Start(ctx context.Context) {
 	}
 }
 
-// Stop gracefully shuts down workers, waiting for the queue to drain.
+// Stop gracefully shuts down workers, draining the queue before cancelling context (F5).
 func (wp *WorkerPool) Stop() {
 	wp.mu.Lock()
 	if !wp.running {
@@ -121,12 +121,12 @@ func (wp *WorkerPool) workerLoop(id int) {
 func (wp *WorkerPool) ProcessItem(ctx context.Context, item WorkItem) error {
 	switch item.Event {
 	case EventPullRequest:
-		if item.PullRequestEvent != nil {
-			return wp.ProcessPullRequest(ctx, item.PullRequestEvent)
+		if item.PullRequest != nil {
+			return wp.ProcessPullRequest(ctx, item.PullRequest)
 		}
 	case EventPush:
-		if item.PushEvent != nil {
-			return wp.ProcessPush(ctx, item.PushEvent)
+		if item.Push != nil {
+			return wp.ProcessPush(ctx, item.Push)
 		}
 	default:
 		log.Printf("worker: unsupported work item event %q", item.Event)
@@ -135,54 +135,39 @@ func (wp *WorkerPool) ProcessItem(ctx context.Context, item WorkItem) error {
 }
 
 // ProcessPullRequest reconciles candidate Run, baseline Run (with cache reuse), and Comparison for a PR.
-func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, event *GitHubPullRequestEvent) error {
-	if event == nil || wp.cfg.Client == nil {
+func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestWorkItem) error {
+	if item == nil || wp.cfg.Client == nil {
 		return nil
 	}
 
-	prNum := event.Number
-	if prNum == 0 && event.PullRequest.Number != 0 {
-		prNum = event.PullRequest.Number
-	}
-	if prNum <= 0 {
-		return fmt.Errorf("invalid pull request number %d", prNum)
-	}
+	prNum := item.PRNumber
+	headSHA := item.HeadSHA
+	baseSHA := item.BaseSHA
 
-	headSHA := strings.TrimSpace(event.PullRequest.Head.SHA)
-	baseSHA := strings.TrimSpace(event.PullRequest.Base.SHA)
-	if headSHA == "" || baseSHA == "" {
-		return fmt.Errorf("missing head (%s) or base (%s) commit SHA in pull request #%d", headSHA, baseSHA, prNum)
-	}
-
-	repoFullName := strings.TrimSpace(event.Repository.FullName)
-	if repoFullName == "" {
-		repoFullName = fmt.Sprintf("%s/%s", event.Repository.Owner.Login, event.Repository.Name)
-	}
-	cloneURL := fmt.Sprintf("https://github.com/%s.git", repoFullName)
-
-	headShort := ShortSHA(headSHA)
-	baseShort := ShortSHA(baseSHA)
-	candRunName := fmt.Sprintf("pr-%d-%s", prNum, headShort)
-	defaultBaseRunName := fmt.Sprintf("base-%s", baseShort)
+	candRunName := fmt.Sprintf("pr-%d-%s", prNum, ShortSHA(headSHA))
+	defaultBaseRunName := fmt.Sprintf("base-%s", ShortSHA(baseSHA))
 	compName := fmt.Sprintf("pr-%d", prNum)
 
 	ns := wp.cfg.Namespace
-	sanitizedRepo := SanitizeLabelValue(repoFullName)
+	sanitizedCandRepo := SanitizeLabelValue(item.CandidateRepo)
+	sanitizedBaseRepo := SanitizeLabelValue(item.BaselineRepo)
+	sanitizedTargetRepo := SanitizeLabelValue(item.TargetRepo)
 
 	// 1. Create or update Candidate Run: pr-<number>-<headSHA7>
+	// Use CandidateCloneURL (head repo for fork PRs) so checkout succeeds (Blocking 1)
 	candRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      candRunName,
 			Namespace: ns,
 			Labels: map[string]string{
 				LabelPR:      strconv.Itoa(prNum),
-				LabelRepo:    sanitizedRepo,
+				LabelRepo:    sanitizedCandRepo,
 				LabelHeadSHA: headSHA,
 			},
 		},
 		Spec: v1alpha1.RunSpec{
 			Repo: v1alpha1.RepoSpec{
-				URL:    cloneURL,
+				URL:    item.CandidateCloneURL,
 				Commit: headSHA,
 			},
 			Model: wp.cfg.DefaultModel,
@@ -194,8 +179,8 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, event *GitHubPullR
 	}
 
 	// 2. Reconcile Baseline Run with Baseline Cache (§4.1):
-	// Reuse if a Completed Run for that commit and model already exists.
-	baselineRunName, err := wp.findCompletedBaselineRun(ctx, ns, baseSHA, wp.cfg.DefaultModel)
+	// Reuse if a Completed Run for that exact commit, repo URL, and model already exists (F1).
+	baselineRunName, err := wp.findCompletedBaselineRun(ctx, ns, baseSHA, item.BaselineCloneURL, wp.cfg.DefaultModel)
 	if err != nil {
 		log.Printf("warning: error checking baseline cache for commit %s: %v", baseSHA, err)
 	}
@@ -210,13 +195,13 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, event *GitHubPullR
 				Name:      baselineRunName,
 				Namespace: ns,
 				Labels: map[string]string{
-					LabelRepo:    sanitizedRepo,
+					LabelRepo:    sanitizedBaseRepo,
 					LabelHeadSHA: baseSHA,
 				},
 			},
 			Spec: v1alpha1.RunSpec{
 				Repo: v1alpha1.RepoSpec{
-					URL:    cloneURL,
+					URL:    item.BaselineCloneURL,
 					Commit: baseSHA,
 				},
 				Model: wp.cfg.DefaultModel,
@@ -235,7 +220,7 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, event *GitHubPullR
 			Namespace: ns,
 			Labels: map[string]string{
 				LabelPR:      strconv.Itoa(prNum),
-				LabelRepo:    sanitizedRepo,
+				LabelRepo:    sanitizedTargetRepo,
 				LabelHeadSHA: headSHA,
 			},
 		},
@@ -247,7 +232,7 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, event *GitHubPullR
 				Run: candRunName,
 			},
 			PullRequest: &v1alpha1.PullRequestSpec{
-				Repository: repoFullName,
+				Repository: item.TargetRepo,
 				Number:     prNum,
 				HeadSHA:    headSHA,
 				BaseSHA:    baseSHA,
@@ -263,29 +248,15 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, event *GitHubPullR
 }
 
 // ProcessPush reconciles base-<sha7> on pushes to the default branch to warm the baseline cache.
-func (wp *WorkerPool) ProcessPush(ctx context.Context, event *GitHubPushEvent) error {
-	if event == nil || wp.cfg.Client == nil {
+func (wp *WorkerPool) ProcessPush(ctx context.Context, item *PushWorkItem) error {
+	if item == nil || wp.cfg.Client == nil {
 		return nil
 	}
 
-	commitSHA := strings.TrimSpace(event.After)
-	if commitSHA == "" && event.HeadCommit != nil {
-		commitSHA = strings.TrimSpace(event.HeadCommit.ID)
-	}
-	if commitSHA == "" || commitSHA == "0000000000000000000000000000000000000000" {
-		log.Printf("push event with empty/null commit SHA, ignoring")
-		return nil
-	}
-
-	repoFullName := strings.TrimSpace(event.Repository.FullName)
-	if repoFullName == "" {
-		repoFullName = fmt.Sprintf("%s/%s", event.Repository.Owner.Login, event.Repository.Name)
-	}
-	cloneURL := fmt.Sprintf("https://github.com/%s.git", repoFullName)
-
+	commitSHA := item.CommitSHA
 	ns := wp.cfg.Namespace
 	baseRunName := fmt.Sprintf("base-%s", ShortSHA(commitSHA))
-	sanitizedRepo := SanitizeLabelValue(repoFullName)
+	sanitizedRepo := SanitizeLabelValue(item.Repo)
 
 	baseRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -298,7 +269,7 @@ func (wp *WorkerPool) ProcessPush(ctx context.Context, event *GitHubPushEvent) e
 		},
 		Spec: v1alpha1.RunSpec{
 			Repo: v1alpha1.RepoSpec{
-				URL:    cloneURL,
+				URL:    item.CloneURL,
 				Commit: commitSHA,
 			},
 			Model: wp.cfg.DefaultModel,
@@ -314,36 +285,33 @@ func (wp *WorkerPool) ProcessPush(ctx context.Context, event *GitHubPushEvent) e
 	return nil
 }
 
-// findCompletedBaselineRun checks if any Run in the namespace targeting commit and model has completed.
-func (wp *WorkerPool) findCompletedBaselineRun(ctx context.Context, namespace, commit, model string) (string, error) {
-	// First check direct candidate base-<sha7>
+// findCompletedBaselineRun checks if any Run in the namespace targeting commit, URL, and model has completed (F1).
+func (wp *WorkerPool) findCompletedBaselineRun(ctx context.Context, namespace, commit, expectedURL, model string) (string, error) {
+	// 1. Direct candidate base-<sha7>
 	directName := fmt.Sprintf("base-%s", ShortSHA(commit))
 	var directRun v1alpha1.Run
 	if err := wp.cfg.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: directName}, &directRun); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return "", err
 		}
-	} else if directRun.Status.Phase == v1alpha1.RunPhaseCompleted && directRun.Spec.Model == model {
+	} else if directRun.Status.Phase == v1alpha1.RunPhaseCompleted &&
+		directRun.Spec.Model == model &&
+		strings.EqualFold(directRun.Spec.Repo.Commit, commit) &&
+		directRun.Spec.Repo.URL == expectedURL {
 		return directRun.Name, nil
 	}
 
-	// Next search all runs in the namespace
+	// 2. Query runs matching label head-sha in the namespace (F1: exact commit and repo URL match)
 	var runList v1alpha1.RunList
-	if err := wp.cfg.Client.List(ctx, &runList, client.InNamespace(namespace)); err != nil {
+	if err := wp.cfg.Client.List(ctx, &runList, client.InNamespace(namespace), client.MatchingLabels{LabelHeadSHA: commit}); err != nil {
 		return "", err
 	}
 
 	for _, r := range runList.Items {
-		if r.Status.Phase != v1alpha1.RunPhaseCompleted {
-			continue
-		}
-		if r.Spec.Model != model {
-			continue
-		}
-		// Match exact commit or prefix match
-		c := strings.ToLower(strings.TrimSpace(r.Spec.Repo.Commit))
-		target := strings.ToLower(strings.TrimSpace(commit))
-		if c == target || strings.HasPrefix(c, target) || strings.HasPrefix(target, c) {
+		if r.Status.Phase == v1alpha1.RunPhaseCompleted &&
+			r.Spec.Model == model &&
+			strings.EqualFold(r.Spec.Repo.Commit, commit) &&
+			r.Spec.Repo.URL == expectedURL {
 			return r.Name, nil
 		}
 	}
@@ -359,29 +327,25 @@ func (wp *WorkerPool) createOrUpdateRun(ctx context.Context, run *v1alpha1.Run) 
 
 	if err := wp.cfg.Client.Get(ctx, key, &existing); err != nil {
 		if apierrors.IsNotFound(err) {
-			return wp.cfg.Client.Create(ctx, run)
+			if err := wp.cfg.Client.Create(ctx, run); err != nil {
+				// Handle concurrency race where another worker created it (F4)
+				if apierrors.IsAlreadyExists(err) {
+					if getErr := wp.cfg.Client.Get(ctx, key, &existing); getErr != nil {
+						return getErr
+					}
+				} else {
+					return err
+				}
+			} else {
+				return nil
+			}
+		} else {
+			return err
 		}
-		return err
 	}
 
-	// Run already exists. Update spec and labels idempotently.
+	// Run already exists. Only reconcile labels (F2). Do not rewrite spec.
 	needsUpdate := false
-
-	if existing.Spec.Repo.URL != run.Spec.Repo.URL ||
-		existing.Spec.Repo.Commit != run.Spec.Repo.Commit ||
-		existing.Spec.Model != run.Spec.Model {
-		existing.Spec.Repo = run.Spec.Repo
-		existing.Spec.Model = run.Spec.Model
-		needsUpdate = true
-	}
-
-	if (existing.Spec.Limit == nil && run.Spec.Limit != nil) ||
-		(existing.Spec.Limit != nil && run.Spec.Limit == nil) ||
-		(existing.Spec.Limit != nil && run.Spec.Limit != nil && *existing.Spec.Limit != *run.Spec.Limit) {
-		existing.Spec.Limit = run.Spec.Limit
-		needsUpdate = true
-	}
-
 	if existing.Labels == nil {
 		existing.Labels = make(map[string]string)
 	}
@@ -407,9 +371,21 @@ func (wp *WorkerPool) createOrUpdateComparison(ctx context.Context, comp *v1alph
 
 	if err := wp.cfg.Client.Get(ctx, key, &existing); err != nil {
 		if apierrors.IsNotFound(err) {
-			return wp.cfg.Client.Create(ctx, comp)
+			if err := wp.cfg.Client.Create(ctx, comp); err != nil {
+				// Handle concurrency race where another worker created it (F4)
+				if apierrors.IsAlreadyExists(err) {
+					if getErr := wp.cfg.Client.Get(ctx, key, &existing); getErr != nil {
+						return getErr
+					}
+				} else {
+					return err
+				}
+			} else {
+				return nil
+			}
+		} else {
+			return err
 		}
-		return err
 	}
 
 	// Comparison exists. Update baseline/candidate refs, pullRequest spec, and labels (for synchronize re-pointing).
