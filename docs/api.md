@@ -239,6 +239,9 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Execution deadline | `--execution-deadline` / ConfigMap `executionDeadline` | `30m` | Overall sample execution deadline exceeded; Run marked `Failed` and sandboxes deleted. |
 | Max parallel tasks | `--max-parallel-tasks` / ConfigMap `maxParallelTasks` | `4` | Caps concurrent task sandboxes executing at one time. |
 | Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` or `"none"` to disable). |
+| Default batch size | `--default-batch-size` / ConfigMap `defaultBatchSize` | `8` | Default batch size for paired adaptive sampling in webhook-created Comparisons and seed Run sampleRange. |
+| Default max samples | `--default-max-samples-per-task` / ConfigMap `defaultMaxSamplesPerTask` | `64` | Maximum total samples per task across batches in webhook-created Comparisons; bounds `/eval more <n>`. |
+| Command users | `--command-users` / ConfigMap `commandUsers` | `""` | Comma-separated list of GitHub logins allowed to execute `/eval more <n>` PR comment commands without checking GitHub permissions. |
 | Strict configuration | `--strict-config` | `false` | When true, fails controller startup immediately if `eval-runner-config` contains unrecognised keys. |
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
 | Artifact bucket | `--artifact-bucket` / ConfigMap `artifactBucket` | `""` (in-memory sink) | GCS bucket URI (`gs://<bucket>`) or name where manifests, Inspect logs, and `summary.json` are stored. |
@@ -281,7 +284,7 @@ spec:
 | `sampling` | `*ComparisonSamplingSpec` | Optional. Configures adaptive paired batch sampling driven by the stopping rule. When omitted, only the single pair of referenced runs is compared. |
 | `sampling.batchSize` | `int` | Number of samples to evaluate in each subsequent batch (default: `8`). |
 | `sampling.maxSamplesPerTask` | `int` | Maximum total number of samples evaluated per task across all batches (default: `64`). |
-| `extraSamples` | `int` | Optional. Additional samples requested beyond the stopping rule per undecided task (or all tasks if decided) (default: `0`). Evaluates beyond `sampling.maxSamplesPerTask`; bumping triggers more. |
+| `extraSamples` | `int` | Optional. Additional samples requested beyond the stopping rule per undecided task (or all tasks if decided) (default: `0`). Evaluates beyond `sampling.maxSamplesPerTask`; bumping triggers more. In PR workflows, review comments of the form `/eval more <n>` increment this value. |
 | `tasks` | `[]string` | Optional allow-list of task IDs to evaluate. When omitted, all tasks present in both runs are compared. |
 
 ## Status (`status`)

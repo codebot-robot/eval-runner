@@ -249,6 +249,19 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Fulfills Concept §4.2 and §4.5 ("bound the confidence interval, not the budget"). Identical runs (or large regressions/improvements) reach statistical certainty quickly within a few batches and terminate early, saving significant evaluation tokens and compute, while noisy or close comparisons gather additional evidence up to the task sample cap. Baseline reuse prevents redundant execution across PRs sharing merge-base commits. Tracking token usage directly couples statistical stopping decisions to monetary and compute costs.
 
+### Amendment to ADR-026: Webhook Adaptive Sampling and /eval more <n> PR Comments (#151)
+- **Date**: 2026-10-18
+- **Status**: Accepted
+- **Decision**:
+  1. **Webhook Default Adaptive Sampling**: Webhook-created Comparisons configure `spec.sampling {batchSize: defaultBatchSize, maxSamplesPerTask: defaultMaxSamplesPerTask}` from ConfigMap keys `defaultBatchSize` (default 8) and `defaultMaxSamplesPerTask` (default 64). Seed candidate, baseline, and warm push Runs receive `sampleRange {1, defaultBatchSize}` instead of `limit`.
+  2. **Reviewer Trigger via PR Comments (`/eval more <n>`)**: Reviewers trigger additional samples directly from GitHub PRs by posting a comment of the form `/eval more <n>`.
+  3. **Event Handling & Zero-Trust Authorization**: The webhook handles `issue_comment` events behind HMAC signature verification and repository allow-lists. The author must have write or admin access per GitHub's collaborator permission API (`GET /repos/{owner}/{repo}/collaborators/{user}/permission`) or be listed in the ConfigMap allow-list `commandUsers`. The webhook Role is granted scoped `get` access on `github-token` and `github-app` secrets by `resourceNames` strictly to query collaborator permissions and post comment acknowledgements (`eyes` / `+1` reactions or fallback comments).
+  4. **Bounding & Idempotency**: The requested count $n$ is bounded by `defaultMaxSamplesPerTask`. The webhook atomically increments `spec.extraSamples` by $n$ on the PR Comparison and records the comment ID in the annotation `evalrunner.gke-labs.dev/handled-comments` (bounded to the last 100 entries). Redeliveries are strictly idempotent.
+  5. **PR Comment Action Hint**: When tasks are inconclusive, the PR comment renders `- comment `/eval more <n>` to run <n> more samples` where $n$ is suggested by `suggestedNext`. The webhook acknowledges comments via GitHub reaction (`eyes` or `+1`) or acknowledgement comment.
+- **Rationale**:
+  Connects Concept §4.2 and §4.5 to the PR review lifecycle. Allows reviewers to interactively purchase additional statistical certainty directly in GitHub PR review discussions without requiring direct kubectl or Kubernetes API access.
+
+
 
 
 
