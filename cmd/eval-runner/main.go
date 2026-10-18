@@ -84,6 +84,7 @@ func main() {
 	var sandboxdImage string
 	var artifactBucket string
 	var artifactDir string
+	var gitHubTokenSecret string
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -96,6 +97,7 @@ func main() {
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
 	flag.IntVar(&maxParallelTasks, "max-parallel-tasks", controller.DefaultMaxParallelTasks, "Maximum number of task sandboxes to run concurrently")
 	flag.StringVar(&modelSecret, "model-secret", controller.DefaultModelSecret, "Name of Secret in sandbox namespace containing model credentials")
+	flag.StringVar(&gitHubTokenSecret, "github-token-secret", controller.DefaultGitHubTokenSecret, "Name of Secret in controller namespace containing GitHub token")
 	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
 	flag.StringVar(&sandboxdImage, "sandboxd-image", "", "Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset)")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
@@ -115,6 +117,7 @@ func main() {
 		artifactDir,
 		modelSecret,
 		sandboxdImage,
+		gitHubTokenSecret,
 		discoveryDeadline,
 		executionDeadline,
 		taskGracePeriod,
@@ -302,9 +305,11 @@ func main() {
 	}
 
 	comparisonReconciler := &controller.ComparisonReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		ArtifactSink: sink,
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		ArtifactSink:        sink,
+		ControllerNamespace: evalRunnerNamespace,
+		GitHubTokenSecret:   clusterConfig.GitHubTokenSecret,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {

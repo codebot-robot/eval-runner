@@ -52,6 +52,11 @@ const (
 	ConfigMapKeySandboxdImage = "sandboxdImage"
 	// ConfigMapKeyTaskGracePeriod is the ConfigMap key for task sandbox cache grace period.
 	ConfigMapKeyTaskGracePeriod = "taskGracePeriod"
+	// ConfigMapKeyGitHubTokenSecret is the ConfigMap key for GitHub token Secret name.
+	ConfigMapKeyGitHubTokenSecret = "githubTokenSecret"
+
+	// DefaultGitHubTokenSecret is the default Secret name for GitHub credentials in controller namespace.
+	DefaultGitHubTokenSecret = "github-token"
 )
 
 // ClusterConfig holds the effective cluster-wide settings resolved with precedence:
@@ -61,6 +66,7 @@ type ClusterConfig struct {
 	ArtifactDir       string
 	DiscoveryDeadline time.Duration
 	ExecutionDeadline time.Duration
+	GitHubTokenSecret string
 	MaxParallelTasks  int
 	ModelSecret       string
 	SandboxdImage     string
@@ -73,6 +79,7 @@ type RawFlags struct {
 	ArtifactDir       string
 	DiscoveryDeadline time.Duration
 	ExecutionDeadline time.Duration
+	GitHubTokenSecret string
 	MaxParallelTasks  int
 	ModelSecret       string
 	SandboxdImage     string
@@ -95,6 +102,7 @@ func DefaultClusterConfig() ClusterConfig {
 		ArtifactDir:       "",
 		DiscoveryDeadline: DefaultDiscoveryDeadline,
 		ExecutionDeadline: DefaultExecutionDeadline,
+		GitHubTokenSecret: DefaultGitHubTokenSecret,
 		MaxParallelTasks:  DefaultMaxParallelTasks,
 		ModelSecret:       DefaultModelSecret,
 		SandboxdImage:     discovery.SandboxdImage,
@@ -105,7 +113,7 @@ func DefaultClusterConfig() ClusterConfig {
 // FlagsFromFlagSet extracts RawFlags from a parsed flag.FlagSet.
 func FlagsFromFlagSet(
 	fs *flag.FlagSet,
-	artifactBucket, artifactDir, modelSecret, sandboxdImage string,
+	artifactBucket, artifactDir, modelSecret, sandboxdImage, gitHubTokenSecret string,
 	discoveryDeadline, executionDeadline, taskGracePeriod time.Duration,
 	maxParallelTasks int,
 ) RawFlags {
@@ -118,6 +126,7 @@ func FlagsFromFlagSet(
 		ArtifactDir:       artifactDir,
 		DiscoveryDeadline: discoveryDeadline,
 		ExecutionDeadline: executionDeadline,
+		GitHubTokenSecret: gitHubTokenSecret,
 		MaxParallelTasks:  maxParallelTasks,
 		ModelSecret:       modelSecret,
 		SandboxdImage:     sandboxdImage,
@@ -239,6 +248,19 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.SandboxdImage = trimmed
 			}
 		}
+
+		// 8. githubTokenSecret
+		if val, ok := cm.Data[ConfigMapKeyGitHubTokenSecret]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubTokenSecret, val, ns, name, strings.Join(errs, ", "))
+				}
+				cfg.GitHubTokenSecret = trimmed
+			} else {
+				cfg.GitHubTokenSecret = ""
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -253,6 +275,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 	if flags.IsExplicit("execution-deadline") {
 		cfg.ExecutionDeadline = flags.ExecutionDeadline
+	}
+	if flags.IsExplicit("github-token-secret") {
+		cfg.GitHubTokenSecret = flags.GitHubTokenSecret
 	}
 	if flags.IsExplicit("max-parallel-tasks") {
 		cfg.MaxParallelTasks = flags.MaxParallelTasks
@@ -323,6 +348,7 @@ func LoadAndResolveClusterConfig(
 		"artifactBucket", resolved.ArtifactBucket,
 		"discoveryDeadline", resolved.DiscoveryDeadline,
 		"executionDeadline", resolved.ExecutionDeadline,
+		"githubTokenSecret", resolved.GitHubTokenSecret,
 		"maxParallelTasks", resolved.MaxParallelTasks,
 		"modelSecret", resolved.ModelSecret,
 		"sandboxdImage", resolved.SandboxdImage,

@@ -483,14 +483,15 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	secret := fs.String("model-secret", "model-credentials", "model secret")
 	sandboxd := fs.String("sandboxd-image", "", "sandboxd image")
 	grace := fs.Duration("task-grace-period", 30*time.Second, "task grace period")
+	githubToken := fs.String("github-token-secret", "github-token", "github token secret")
 
 	// Parse with only artifact-bucket and max-parallel-tasks set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *discovery, *execution, *grace, *parallel)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *discovery, *execution, *grace, *parallel)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -500,11 +501,68 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	if !rawFlags.IsExplicit("sandboxd-image") {
 		t.Errorf("expected sandboxd-image to be explicit")
 	}
+	if !rawFlags.IsExplicit("github-token-secret") {
+		t.Errorf("expected github-token-secret to be explicit")
+	}
 	if rawFlags.IsExplicit("discovery-deadline") {
 		t.Errorf("expected discovery-deadline NOT to be explicit")
 	}
 	if rawFlags.IsExplicit("model-secret") {
 		t.Errorf("expected model-secret NOT to be explicit")
+	}
+}
+
+func TestResolveConfig_GitHubTokenSecret(t *testing.T) {
+	// 1. Built-in default
+	defCfg := DefaultClusterConfig()
+	if defCfg.GitHubTokenSecret != DefaultGitHubTokenSecret {
+		t.Errorf("expected default GitHubTokenSecret %q, got %q", DefaultGitHubTokenSecret, defCfg.GitHubTokenSecret)
+	}
+
+	// 2. ConfigMap override
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyGitHubTokenSecret: "custom-token-secret",
+		},
+	}
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GitHubTokenSecret != "custom-token-secret" {
+		t.Errorf("expected GitHubTokenSecret %q, got %q", "custom-token-secret", cfg.GitHubTokenSecret)
+	}
+
+	// 3. Explicit flag override takes precedence over ConfigMap
+	flags := RawFlags{
+		GitHubTokenSecret: "flag-token-secret",
+		Explicit:          map[string]bool{"github-token-secret": true},
+	}
+	cfgWithFlag, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgWithFlag.GitHubTokenSecret != "flag-token-secret" {
+		t.Errorf("expected GitHubTokenSecret %q, got %q", "flag-token-secret", cfgWithFlag.GitHubTokenSecret)
+	}
+
+	// 4. Invalid secret name in ConfigMap returns error
+	invalidCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyGitHubTokenSecret: "INVALID_SECRET_NAME!",
+		},
+	}
+	_, err = ResolveConfig(invalidCM, RawFlags{})
+	if err == nil {
+		t.Fatalf("expected error for invalid secret name, got nil")
 	}
 }
 
