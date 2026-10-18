@@ -89,16 +89,20 @@ type ComparisonTaskArtifact struct {
 
 // ComparisonArtifact is the schema stored as comparisons/<name>.json in the artifact sink.
 type ComparisonArtifact struct {
-	Comparison   string                           `json:"comparison"`
-	Namespace    string                           `json:"namespace"`
-	Baseline     string                           `json:"baseline"`
-	Candidate    string                           `json:"candidate"`
-	Verdict      string                           `json:"verdict"`
-	PImprovement float64                          `json:"pImprovement"`
-	Summary      string                           `json:"summary,omitempty"`
-	Tasks        []ComparisonTaskArtifact         `json:"tasks"`
-	Batches      []v1alpha1.ComparisonBatchStatus `json:"batches,omitempty"`
-	CreatedAt    time.Time                        `json:"createdAt"`
+	Comparison            string                           `json:"comparison"`
+	Namespace             string                           `json:"namespace"`
+	Baseline              string                           `json:"baseline"`
+	Candidate             string                           `json:"candidate"`
+	Verdict               string                           `json:"verdict"`
+	PImprovement          float64                          `json:"pImprovement"`
+	Summary               string                           `json:"summary,omitempty"`
+	Tasks                 []ComparisonTaskArtifact         `json:"tasks"`
+	Batches               []v1alpha1.ComparisonBatchStatus `json:"batches,omitempty"`
+	CreatedAt             time.Time                        `json:"createdAt"`
+	SkippedNotPlanned     []string                         `json:"skippedNotPlanned,omitempty"`
+	NotExecuted           []string                         `json:"notExecuted,omitempty"`
+	NotExecutedByBothRuns []string                         `json:"notExecutedByBothRuns,omitempty"`
+	CandidateFailed       []string                         `json:"candidateFailed,omitempty"`
 }
 
 // GitHubCredentials holds credentials extracted from a Secret for factory injection.
@@ -1672,9 +1676,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, github.FormatIDList(candFailed, github.MaxIDList)))
 	}
+	var neitherExecuted []string
+	var notBothExecuted []string
 	if len(unexecuted) > 0 {
-		var neitherExecuted []string
-		var notBothExecuted []string
 		for _, id := range unexecuted {
 			if containsTask(candFailed, id) {
 				continue
@@ -1689,6 +1693,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				notBothExecuted = append(notBothExecuted, id)
 			}
 		}
+		sort.Strings(neitherExecuted)
+		sort.Strings(notBothExecuted)
 		if len(neitherExecuted) > 0 {
 			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed: %s", github.FormatIDList(neitherExecuted, github.MaxIDList)))
 		}
@@ -1696,6 +1702,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed by both runs: %s", github.FormatIDList(notBothExecuted, github.MaxIDList)))
 		}
 	}
+	sort.Strings(skippedNotPlanned)
 	if len(skippedNotPlanned) > 0 {
 		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("skipped (not planned): %s", github.FormatIDList(skippedNotPlanned, github.MaxIDList)))
 	}
@@ -1712,16 +1719,20 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	// Store paired table as comparisons/<name>.json in the artifact sink
 	artifact := ComparisonArtifact{
-		Comparison:   comp.Name,
-		Namespace:    comp.Namespace,
-		Baseline:     comp.Spec.Baseline.Run,
-		Candidate:    comp.Spec.Candidate.Run,
-		Verdict:      string(runVerdict.Verdict),
-		PImprovement: runVerdict.PImprovement,
-		Summary:      message,
-		Tasks:        taskArtifacts,
-		Batches:      batches,
-		CreatedAt:    time.Now().UTC(),
+		Comparison:            comp.Name,
+		Namespace:             comp.Namespace,
+		Baseline:              comp.Spec.Baseline.Run,
+		Candidate:             comp.Spec.Candidate.Run,
+		Verdict:               string(runVerdict.Verdict),
+		PImprovement:          runVerdict.PImprovement,
+		Summary:               message,
+		Tasks:                 taskArtifacts,
+		Batches:               batches,
+		CreatedAt:             time.Now().UTC(),
+		SkippedNotPlanned:     skippedNotPlanned,
+		NotExecuted:           neitherExecuted,
+		NotExecutedByBothRuns: notBothExecuted,
+		CandidateFailed:       candFailed,
 	}
 
 	var summaryPath string

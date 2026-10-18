@@ -6164,4 +6164,152 @@ func TestComparisonReconciler_StatusMessageBoundedWithMarker(t *testing.T) {
 	if len(tokens) != 21 { // 20 tasks + "... and 5 more"
 		t.Errorf("Expected 21 tokens in skipped list (20 items + marker), got %d: %q", len(tokens), skippedPart)
 	}
+
+	// Verify that the comparison artifact in GCS contains all 25 skipped task IDs
+	artObj, ok := fakeGCS.Objects["test-bucket/comparisons/cmp-bound.json"]
+	if !ok {
+		t.Fatalf("Expected comparison artifact at test-bucket/comparisons/cmp-bound.json")
+	}
+	var artifact ComparisonArtifact
+	if err := json.Unmarshal(artObj.Data, &artifact); err != nil {
+		t.Fatalf("Failed to unmarshal comparison artifact: %v", err)
+	}
+	if len(artifact.SkippedNotPlanned) != skippedCount {
+		t.Fatalf("Expected artifact.SkippedNotPlanned to have %d items, got %d: %v", skippedCount, len(artifact.SkippedNotPlanned), artifact.SkippedNotPlanned)
+	}
+	for i := 0; i < skippedCount; i++ {
+		expectedID := fmt.Sprintf("evals/task_skipped_%02d", i)
+		if artifact.SkippedNotPlanned[i] != expectedID {
+			t.Errorf("Expected artifact.SkippedNotPlanned[%d] to be %q, got %q", i, expectedID, artifact.SkippedNotPlanned[i])
+		}
+	}
+
+	// Verify omitempty: empty lists should not appear in artifact JSON
+	artJSONStr := string(artObj.Data)
+	if strings.Contains(artJSONStr, "notExecuted") {
+		t.Errorf("Expected artifact JSON to omit 'notExecuted', got: %s", artJSONStr)
+	}
+	if strings.Contains(artJSONStr, "notExecutedByBothRuns") {
+		t.Errorf("Expected artifact JSON to omit 'notExecutedByBothRuns', got: %s", artJSONStr)
+	}
+	if strings.Contains(artJSONStr, "candidateFailed") {
+		t.Errorf("Expected artifact JSON to omit 'candidateFailed', got: %s", artJSONStr)
+	}
+}
+
+func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	execTaskID := "evals/task_executed"
+	scores := make([]stats.SampleScore, 8)
+	for i := 0; i < 8; i++ {
+		scores[i] = stats.SampleScore{ID: fmt.Sprintf("sample-%d", i+1), Score: 1.0}
+	}
+	fakeGCS.Objects["test-bucket/runs/cand-commit/"+execTaskID+"/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(execTaskID, scores),
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit/"+execTaskID+"/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(execTaskID, scores),
+	}
+
+	candFailedTask := "evals/task_cand_failed"
+	notBothTask := "evals/task_not_both"
+	neitherTask := "evals/task_neither"
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-lists", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+			Tasks: []string{execTaskID, candFailedTask, notBothTask, neitherTask},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: execTaskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/" + execTaskID + "/log.json"},
+				{ID: candFailedTask, Phase: v1alpha1.TaskPhaseFailed},
+				{ID: notBothTask, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/" + notBothTask + "/log.json"},
+				{ID: neitherTask, Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-lists", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+			Tasks: []string{execTaskID, candFailedTask, notBothTask, neitherTask},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: execTaskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/" + execTaskID + "/log.json"},
+				{ID: candFailedTask, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/" + candFailedTask + "/log.json"},
+				{ID: notBothTask, Phase: v1alpha1.TaskPhasePending},
+				{ID: neitherTask, Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "cmp-lists", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-lists"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-lists"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "cmp-lists"}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	artObj, ok := fakeGCS.Objects["test-bucket/comparisons/cmp-lists.json"]
+	if !ok {
+		t.Fatalf("Expected comparison artifact at test-bucket/comparisons/cmp-lists.json")
+	}
+	var artifact ComparisonArtifact
+	if err := json.Unmarshal(artObj.Data, &artifact); err != nil {
+		t.Fatalf("Failed to unmarshal comparison artifact: %v", err)
+	}
+
+	if len(artifact.CandidateFailed) != 1 || artifact.CandidateFailed[0] != candFailedTask {
+		t.Errorf("Expected CandidateFailed [%s], got %v", candFailedTask, artifact.CandidateFailed)
+	}
+	if len(artifact.NotExecuted) != 1 || artifact.NotExecuted[0] != neitherTask {
+		t.Errorf("Expected NotExecuted [%s], got %v", neitherTask, artifact.NotExecuted)
+	}
+	if len(artifact.NotExecutedByBothRuns) != 1 || artifact.NotExecutedByBothRuns[0] != notBothTask {
+		t.Errorf("Expected NotExecutedByBothRuns [%s], got %v", notBothTask, artifact.NotExecutedByBothRuns)
+	}
+	if len(artifact.SkippedNotPlanned) != 0 {
+		t.Errorf("Expected SkippedNotPlanned to be empty, got %v", artifact.SkippedNotPlanned)
+	}
+
+	// Verify omitempty for skippedNotPlanned
+	if strings.Contains(string(artObj.Data), "skippedNotPlanned") {
+		t.Errorf("Expected artifact JSON to omit 'skippedNotPlanned', got: %s", string(artObj.Data))
+	}
 }
