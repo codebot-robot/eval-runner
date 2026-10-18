@@ -548,7 +548,7 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
         </td>
         <td><span class="chip {{ .StatusClass }}"><span class="dot"></span>{{ .Label }}</span></td>
         <td class="num">
-          {{ if gt .SamplesRun 0 }}{{ .SamplesRun }}{{ else }}{{ .Pairs }}{{ end }}
+          {{ if gt .SamplesRun 0 }}{{ .SamplesRun }}{{ else if gt .Pairs 0 }}{{ .Pairs }}{{ else }}—{{ end }}
           {{ if or (gt .DroppedCand 0) (gt .DroppedBase 0) }}
           <span style="font-size:11px;color:var(--muted);display:block">dropped: {{ .DroppedCand }} cand, {{ .DroppedBase }} base</span>
           {{ end }}
@@ -606,11 +606,11 @@ const comparisonDetailTemplate = `
 
         {{ template "comparison_table" . }}
         {{- if .Actions }}
-        <div style="margin-top:16px">
+        <ul style="margin:16px 0 0;padding-left:20px;font-size:14px;color:var(--ink-2)">
           {{ range .Actions }}
-          <div style="font-size:14px;color:var(--ink-2);margin-top:4px">{{ . }}</div>
+          <li>run {{ .SuggestedNext }} more samples{{ if and .ShowTaskID .TaskID }} ({{ .TaskID }}){{ end }}</li>
           {{ end }}
-        </div>
+        </ul>
         {{- end }}
         {{- if .Batches }}
         <h2 style="font-size:17px;font-weight:600;margin:24px 0 12px">Batches</h2>

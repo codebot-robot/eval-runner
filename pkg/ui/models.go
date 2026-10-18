@@ -388,6 +388,55 @@ type ComparisonBatchRow struct {
 	BaselineRun  string
 }
 
+// ComparisonBatches extracts structured batch rows from a Comparison status.
+func ComparisonBatches(comp *v1alpha1.Comparison) []ComparisonBatchRow {
+	if comp == nil {
+		return nil
+	}
+	var batchRows []ComparisonBatchRow
+	for _, b := range comp.Status.Batches {
+		sr := "—"
+		if b.SampleRange != nil {
+			sr = fmt.Sprintf("%d-%d", b.SampleRange.Start, b.SampleRange.End)
+		}
+		batchRows = append(batchRows, ComparisonBatchRow{
+			Index:        b.Index,
+			Phase:        b.Phase,
+			PhaseChip:    comparisonPhaseChipClass(b.Phase),
+			SampleRange:  sr,
+			CandidateRun: b.CandidateRun,
+			BaselineRun:  b.BaselineRun,
+		})
+	}
+	return batchRows
+}
+
+// ComparisonActionRow represents an actionable recommendation for a comparison task.
+type ComparisonActionRow struct {
+	TaskID        string
+	SuggestedNext int
+	ShowTaskID    bool
+}
+
+// ComparisonActions returns structured action hints for inconclusive tasks in a Comparison.
+func ComparisonActions(comp *v1alpha1.Comparison) []ComparisonActionRow {
+	if comp == nil {
+		return nil
+	}
+	showTaskID := len(comp.Status.Tasks) > 1
+	var actions []ComparisonActionRow
+	for _, task := range comp.Status.Tasks {
+		if task.Label == v1alpha1.ComparisonTaskLabelInconclusive && task.SuggestedNext > 0 {
+			actions = append(actions, ComparisonActionRow{
+				TaskID:        task.ID,
+				SuggestedNext: task.SuggestedNext,
+				ShowTaskID:    showTaskID,
+			})
+		}
+	}
+	return actions
+}
+
 // ComparisonDetailView is the view model for the /comparisons/<ns>/<name> detail page.
 type ComparisonDetailView struct {
 	ActiveTab    NavTab
@@ -404,7 +453,7 @@ type ComparisonDetailView struct {
 	HasTokens bool
 
 	Batches []ComparisonBatchRow
-	Actions []string
+	Actions []ComparisonActionRow
 
 	// Summary contains aggregate comparison headline and footer data.
 	Summary ComparisonSummaryData
@@ -421,6 +470,51 @@ type ComparisonDetailView struct {
 	TotalDroppedCand int
 	TotalDroppedBase int
 	SamplesSummary   string
+}
+
+// NewComparisonDetailView constructs a ComparisonDetailView from a Comparison and optional Runs.
+func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) ComparisonDetailView {
+	if comp == nil {
+		return ComparisonDetailView{}
+	}
+	summary := ComparisonSummary(comp, baseRun, candRun)
+	taskRows := ComparisonRows(comp)
+
+	hasTokens := false
+	for _, tr := range taskRows {
+		if tr.Tokens != nil {
+			hasTokens = true
+			break
+		}
+	}
+
+	return ComparisonDetailView{
+		ActiveTab:        NavTabComparisons,
+		Name:             comp.Name,
+		Namespace:        comp.Namespace,
+		Verdict:          comp.Status.Verdict,
+		VerdictChip:      verdictChipClass(comp.Status.Verdict),
+		Headline:         summary.Headline,
+		PImprovement:     summary.PImprovement,
+		SummaryPath:      comp.Status.SummaryPath,
+		Message:          comp.Status.Message,
+		Tasks:            taskRows,
+		HasTokens:        hasTokens,
+		Batches:          ComparisonBatches(comp),
+		Actions:          ComparisonActions(comp),
+		Summary:          summary,
+		BaseRun:          summary.BaseRun,
+		BaseCommit:       summary.BaseCommit,
+		BaseCommitShort:  summary.BaseCommitShort,
+		CandRun:          summary.CandRun,
+		CandCommit:       summary.CandCommit,
+		CandCommitShort:  summary.CandCommitShort,
+		TotalSamples:     summary.TotalSamples,
+		TotalPairs:       summary.TotalPairs,
+		TotalDroppedCand: summary.TotalDroppedCand,
+		TotalDroppedBase: summary.TotalDroppedBase,
+		SamplesSummary:   summary.SamplesSummary,
+	}
 }
 
 // Helpers for CSS status classes

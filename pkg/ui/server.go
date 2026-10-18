@@ -613,71 +613,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	summary := ComparisonSummary(&comp, baseRunPtr, candRunPtr)
-	taskRows := ComparisonRows(&comp)
-
-	hasTokens := false
-	for _, tr := range taskRows {
-		if tr.Tokens != nil {
-			hasTokens = true
-			break
-		}
-	}
-
-	var batchRows []ComparisonBatchRow
-	for _, b := range comp.Status.Batches {
-		sr := "—"
-		if b.SampleRange != nil {
-			sr = fmt.Sprintf("%d-%d", b.SampleRange.Start, b.SampleRange.End)
-		}
-		batchRows = append(batchRows, ComparisonBatchRow{
-			Index:        b.Index,
-			Phase:        b.Phase,
-			PhaseChip:    comparisonPhaseChipClass(b.Phase),
-			SampleRange:  sr,
-			CandidateRun: b.CandidateRun,
-			BaselineRun:  b.BaselineRun,
-		})
-	}
-
-	var actions []string
-	for _, task := range comp.Status.Tasks {
-		if task.Label == v1alpha1.ComparisonTaskLabelInconclusive && task.SuggestedNext > 0 {
-			if len(comp.Status.Tasks) > 1 {
-				actions = append(actions, fmt.Sprintf("- run %d more samples (%s)", task.SuggestedNext, task.ID))
-			} else {
-				actions = append(actions, fmt.Sprintf("- run %d more samples", task.SuggestedNext))
-			}
-		}
-	}
-
-	view := ComparisonDetailView{
-		ActiveTab:        NavTabComparisons,
-		Name:             comp.Name,
-		Namespace:        comp.Namespace,
-		Verdict:          comp.Status.Verdict,
-		VerdictChip:      verdictChipClass(comp.Status.Verdict),
-		Headline:         summary.Headline,
-		PImprovement:     summary.PImprovement,
-		SummaryPath:      comp.Status.SummaryPath,
-		Message:          comp.Status.Message,
-		Tasks:            taskRows,
-		HasTokens:        hasTokens,
-		Batches:          batchRows,
-		Actions:          actions,
-		Summary:          summary,
-		BaseRun:          summary.BaseRun,
-		BaseCommit:       summary.BaseCommit,
-		BaseCommitShort:  summary.BaseCommitShort,
-		CandRun:          summary.CandRun,
-		CandCommit:       summary.CandCommit,
-		CandCommitShort:  summary.CandCommitShort,
-		TotalSamples:     summary.TotalSamples,
-		TotalPairs:       summary.TotalPairs,
-		TotalDroppedCand: summary.TotalDroppedCand,
-		TotalDroppedBase: summary.TotalDroppedBase,
-		SamplesSummary:   summary.SamplesSummary,
-	}
+	view := NewComparisonDetailView(&comp, baseRunPtr, candRunPtr)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplComparisonDetail.Execute(w, view); err != nil {

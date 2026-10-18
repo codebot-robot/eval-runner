@@ -390,6 +390,158 @@ func TestRenderComparisonMarkdown_Golden_RunMoreSamples(t *testing.T) {
 	}
 }
 
+func batchesTokensComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
+	rateImprovedBase := 0.60
+	rateImprovedCand := 0.90
+	deltaImproved := 0.30
+
+	rateInconclusiveBase := 0.20
+	rateInconclusiveCand := 0.15
+	deltaInconclusive := -0.05
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-batches-tokens",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "docs-eval-base-05ce4d8",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "docs-eval-cand-05ce4d8",
+			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     98,
+				HeadSHA:    "05ce4d8222222222222222222222222222222222",
+				BaseSHA:    "a81d0c4111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:       v1alpha1.ComparisonPhaseRunning,
+			Verdict:     v1alpha1.ComparisonVerdictRunning,
+			Message:     "Running batch 2 (1 tasks continuing)",
+			SummaryPath: "gs://eval-bucket/comparisons/docs-eval-batches-tokens.json",
+			Summary: &v1alpha1.ComparisonSummary{
+				Tasks: "1/3",
+			},
+			Batches: []v1alpha1.ComparisonBatchStatus{
+				{
+					Index:        1,
+					Phase:        v1alpha1.ComparisonPhaseCompleted,
+					SampleRange:  &v1alpha1.SampleRange{Start: 1, End: 8},
+					CandidateRun: "docs-eval-cand-05ce4d8-b1",
+					BaselineRun:  "docs-eval-base-05ce4d8-b1",
+				},
+				{
+					Index:        2,
+					Phase:        v1alpha1.ComparisonPhaseRunning,
+					SampleRange:  &v1alpha1.SampleRange{Start: 9, End: 16},
+					CandidateRun: "docs-eval-cand-05ce4d8-b2",
+					BaselineRun:  "docs-eval-base-05ce4d8-b2",
+				},
+			},
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "docs/readme_comprehension",
+					BaseRate:      &rateImprovedBase,
+					CandidateRate: &rateImprovedCand,
+					Delta:         &deltaImproved,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: 0.10,
+						Upper: 0.50,
+					},
+					Label:    v1alpha1.ComparisonTaskLabelImproved,
+					Decision: v1alpha1.ComparisonTaskLabelImproved,
+					Pairs:    16,
+					Wins:     8,
+					Losses:   2,
+					Ties:     6,
+					Tokens: &v1alpha1.TaskTokens{
+						Input:  600,
+						Output: 200,
+						Total:  800,
+					},
+				},
+				{
+					ID:            "docs/readme_comprehension_blind",
+					BaseRate:      &rateInconclusiveBase,
+					CandidateRate: &rateInconclusiveCand,
+					Delta:         &deltaInconclusive,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: -0.15,
+						Upper: 0.00,
+					},
+					Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+					Decision:      v1alpha1.ComparisonTaskLabelContinue,
+					Pairs:         16,
+					Wins:          1,
+					Losses:        2,
+					Ties:          13,
+					SuggestedNext: 16,
+				},
+				{
+					ID:    "docs/readme_summary",
+					Label: v1alpha1.ComparisonTaskLabelRunning,
+				},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-base-05ce4d8",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "a81d0c4111111111111111111111111111111111",
+			},
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-cand-05ce4d8",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "05ce4d8222222222222222222222222222222222",
+			},
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+		},
+	}
+
+	return comp, baseRun, candRun
+}
+
+func TestRenderComparisonMarkdown_Golden_BatchesAndTokens(t *testing.T) {
+	comp, baseRun, candRun := batchesTokensComparisonFixture()
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+
+	goldenPath := "testdata/batches_tokens_comparison.golden.md"
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden file: %v", err)
+	}
+	want := string(wantBytes)
+
+	if got != want {
+		t.Errorf("RenderComparisonMarkdown mismatch (-got +want):\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
 func TestComparisonNotes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1175,6 +1327,25 @@ func TestRenderComparisonMarkdown_RunMoreSamples(t *testing.T) {
 	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
 	if !strings.Contains(got, "- run 32 more samples (docs/readme\\_comprehension\\_blind)") {
 		t.Errorf("expected markdown to contain action for inconclusive task, got:\n%s", got)
+	}
+}
+
+func TestRenderComparisonMarkdown_SingleTaskAction(t *testing.T) {
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	comp.Status.Tasks = []v1alpha1.ComparisonTaskStatus{
+		{
+			ID:            "single_task",
+			Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+			SuggestedNext: 20,
+			Pairs:         10,
+		},
+	}
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(got, "- run 20 more samples\n") {
+		t.Errorf("expected markdown to contain '- run 20 more samples', got:\n%s", got)
+	}
+	if strings.Contains(got, "(single_task)") {
+		t.Errorf("expected single-task action to omit task ID, got:\n%s", got)
 	}
 }
 

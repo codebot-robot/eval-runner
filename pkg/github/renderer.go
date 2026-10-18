@@ -125,9 +125,11 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 			deltaStr = row.Delta
 		}
 
-		samplesCount := row.Pairs
+		samplesStr := "—"
 		if row.SamplesRun > 0 {
-			samplesCount = row.SamplesRun
+			samplesStr = fmt.Sprintf("%d", row.SamplesRun)
+		} else if row.Pairs > 0 {
+			samplesStr = fmt.Sprintf("%d", row.Pairs)
 		}
 
 		if hasTokens {
@@ -135,23 +137,23 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 			if row.Tokens != nil {
 				tokensStr = fmt.Sprintf("%d", row.Tokens.Total)
 			}
-			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %d | %s |\n",
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
 				escapedID,
 				row.BaseRate,
 				row.CandRate,
 				deltaStr,
 				row.Label,
-				samplesCount,
+				samplesStr,
 				tokensStr,
 			))
 		} else {
-			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %d |\n",
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s |\n",
 				escapedID,
 				row.BaseRate,
 				row.CandRate,
 				deltaStr,
 				row.Label,
-				samplesCount,
+				samplesStr,
 			))
 		}
 	}
@@ -190,19 +192,18 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 
 	// 5. Actions (e.g. run N more samples for inconclusive tasks)
 	if comp != nil {
-		var actions []string
-		for _, task := range comp.Status.Tasks {
-			if task.Label == v1alpha1.ComparisonTaskLabelInconclusive && task.SuggestedNext > 0 {
-				if len(comp.Status.Tasks) > 1 {
-					actions = append(actions, fmt.Sprintf("- run %d more samples (%s)", task.SuggestedNext, EscapeCell(task.ID)))
+		actions := ui.ComparisonActions(comp)
+		if len(actions) > 0 {
+			var lines []string
+			for _, action := range actions {
+				if action.ShowTaskID && action.TaskID != "" {
+					lines = append(lines, fmt.Sprintf("- run %d more samples (%s)", action.SuggestedNext, EscapeCell(action.TaskID)))
 				} else {
-					actions = append(actions, fmt.Sprintf("- run %d more samples", task.SuggestedNext))
+					lines = append(lines, fmt.Sprintf("- run %d more samples", action.SuggestedNext))
 				}
 			}
-		}
-		if len(actions) > 0 {
 			sb.WriteString("\n")
-			sb.WriteString(strings.Join(actions, "\n"))
+			sb.WriteString(strings.Join(lines, "\n"))
 			sb.WriteString("\n")
 		}
 	}
