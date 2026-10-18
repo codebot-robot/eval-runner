@@ -62,6 +62,12 @@ const (
 	ConfigMapKeyGitHubAppSecret = configkeys.ConfigMapKeyGitHubAppSecret
 	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
 	ConfigMapKeyUIBaseURL = configkeys.ConfigMapKeyUIBaseURL
+	// ConfigMapKeyDefaultBatchSize is the ConfigMap key for default batch size.
+	ConfigMapKeyDefaultBatchSize = configkeys.ConfigMapKeyDefaultBatchSize
+	// ConfigMapKeyDefaultMaxSamplesPerTask is the ConfigMap key for default maximum samples per task.
+	ConfigMapKeyDefaultMaxSamplesPerTask = configkeys.ConfigMapKeyDefaultMaxSamplesPerTask
+	// ConfigMapKeyCommandUsers is the ConfigMap key for allowed comment command users.
+	ConfigMapKeyCommandUsers = configkeys.ConfigMapKeyCommandUsers
 
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
 	// a credential or feature that otherwise has a non-empty built-in default.
@@ -74,22 +80,25 @@ const (
 // KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
 // covering both eval-runner controller and eval-runner-webhook keys.
 var KnownConfigMapKeys = map[string]struct{}{
-	configkeys.ConfigMapKeyArtifactBucket:         {},
-	configkeys.ConfigMapKeyArtifactDir:            {},
-	configkeys.ConfigMapKeyArtifactMaxUploadBytes: {},
-	configkeys.ConfigMapKeyDiscoveryDeadline:      {},
-	configkeys.ConfigMapKeyExecutionDeadline:      {},
-	configkeys.ConfigMapKeyMaxParallelTasks:       {},
-	configkeys.ConfigMapKeyModelSecret:            {},
-	configkeys.ConfigMapKeySandboxdImage:          {},
-	configkeys.ConfigMapKeyTaskGracePeriod:        {},
-	configkeys.ConfigMapKeyGitHubTokenSecret:      {},
-	configkeys.ConfigMapKeyGitHubAppSecret:        {},
-	configkeys.ConfigMapKeyUIBaseURL:              {},
-	configkeys.ConfigMapKeyGitHubWebhookSecret:    {},
-	configkeys.ConfigMapKeyWebhookRepositories:    {},
-	configkeys.ConfigMapKeyDefaultModel:           {},
-	configkeys.ConfigMapKeyDefaultLimit:           {},
+	configkeys.ConfigMapKeyArtifactBucket:           {},
+	configkeys.ConfigMapKeyArtifactDir:              {},
+	configkeys.ConfigMapKeyArtifactMaxUploadBytes:   {},
+	configkeys.ConfigMapKeyDiscoveryDeadline:        {},
+	configkeys.ConfigMapKeyExecutionDeadline:        {},
+	configkeys.ConfigMapKeyMaxParallelTasks:         {},
+	configkeys.ConfigMapKeyModelSecret:              {},
+	configkeys.ConfigMapKeySandboxdImage:            {},
+	configkeys.ConfigMapKeyTaskGracePeriod:          {},
+	configkeys.ConfigMapKeyGitHubTokenSecret:        {},
+	configkeys.ConfigMapKeyGitHubAppSecret:          {},
+	configkeys.ConfigMapKeyUIBaseURL:                {},
+	configkeys.ConfigMapKeyGitHubWebhookSecret:      {},
+	configkeys.ConfigMapKeyWebhookRepositories:      {},
+	configkeys.ConfigMapKeyDefaultModel:             {},
+	configkeys.ConfigMapKeyDefaultLimit:             {},
+	configkeys.ConfigMapKeyDefaultBatchSize:         {},
+	configkeys.ConfigMapKeyDefaultMaxSamplesPerTask: {},
+	configkeys.ConfigMapKeyCommandUsers:             {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
