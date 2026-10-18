@@ -18,13 +18,16 @@ ARG TARGETARCH
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY api/ api/
 COPY cmd/ cmd/
 COPY pkg/ pkg/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -a -o eval-runner-ui cmd/eval-runner-ui/main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o eval-runner-ui cmd/eval-runner-ui/main.go
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /

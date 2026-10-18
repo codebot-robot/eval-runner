@@ -202,27 +202,6 @@ data:
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-ui", "--timeout=60s")
 }
 
-func (h *Harness) DeployEvalRunnerUI() {
-	h.t.Log("Building and deploying eval-runner-ui from k8s manifests")
-	gitRoot := h.GetGitRoot()
-
-	h.DockerBuild("eval-runner-ui:e2e", filepath.Join(gitRoot, "images/eval-runner-ui/Dockerfile"), gitRoot)
-	h.KindLoad("eval-runner-ui:e2e")
-
-	deployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/ui-deployment.yaml"))
-	if err != nil {
-		h.t.Fatalf("Failed to read ui-deployment.yaml: %v", err)
-	}
-	modifiedDeploy := strings.Replace(
-		string(deployContent),
-		"image: eval-runner-ui",
-		"image: eval-runner-ui:e2e\n        imagePullPolicy: Never",
-		1,
-	)
-	h.KubectlApplyContent(modifiedDeploy)
-	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-ui", "--timeout=60s")
-}
-
 func (h *Harness) DeployGitServer(namespace string) {
 	h.t.Logf("Building and deploying git server in namespace %s", namespace)
 	gitRoot := h.GetGitRoot()

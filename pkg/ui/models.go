@@ -17,6 +17,7 @@ package ui
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -209,6 +210,172 @@ func ComparisonRows(comp *v1alpha1.Comparison) []ComparisonTaskRow {
 	return rows
 }
 
+// ComparisonSummaryData holds aggregate summary, headline, and footer data for a Comparison.
+type ComparisonSummaryData struct {
+	Headline         string // e.g. "05ce4d8 vs a81d0c4 · P(improvement) = 0.98" or "cand vs base · P(improvement) = 0.26"
+	PImprovement     string // e.g. "0.98" or "—"
+	BaseRun          string // e.g. "docs-eval-base-05ce4d8"
+	BaseCommit       string // full commit SHA or empty
+	BaseCommitShort  string // e.g. "a81d0c4" or ""
+	CandRun          string // e.g. "docs-eval-cand-05ce4d8"
+	CandCommit       string // full commit SHA or empty
+	CandCommitShort  string // e.g. "05ce4d8" or ""
+	TotalSamples     int
+	TotalPairs       int
+	TotalDroppedCand int
+	TotalDroppedBase int
+	SamplesSummary   string // e.g. "96 run · 48 paired" or "96 run · 48 paired · dropped: 2 cand, 1 base"
+	BaseSummary      string // e.g. "commit a81d0c4 (docs-eval-base-05ce4d8)"
+	CandSummary      string // e.g. "commit 05ce4d8 (docs-eval-cand-05ce4d8)"
+}
+
+// ComparisonSummary computes aggregate headline and footer strings for a Comparison.
+// Optional Run resources (baseRun, candRun in any order or positional) can be passed
+// to provide commit hashes and total sample counts. If omitted or nil, the summary
+// falls back to the Run names and task counts in the Comparison spec and status.
+func ComparisonSummary(comp *v1alpha1.Comparison, runs ...*v1alpha1.Run) ComparisonSummaryData {
+	if comp == nil {
+		return ComparisonSummaryData{
+			PImprovement: "—",
+		}
+	}
+
+	var baseRun, candRun *v1alpha1.Run
+	for _, r := range runs {
+		if r == nil {
+			continue
+		}
+		if comp.Spec.Baseline.Run != "" && r.Name == comp.Spec.Baseline.Run {
+			baseRun = r
+		} else if comp.Spec.Candidate.Run != "" && r.Name == comp.Spec.Candidate.Run {
+			candRun = r
+		}
+	}
+	// Fallback to positional mapping if names were not matched
+	if baseRun == nil && len(runs) > 0 && runs[0] != nil && candRun != runs[0] {
+		baseRun = runs[0]
+	}
+	if candRun == nil && len(runs) > 1 && runs[1] != nil && baseRun != runs[1] {
+		candRun = runs[1]
+	}
+
+	baseCommit := ""
+	candCommit := ""
+	baseTotalSamples := 0
+	candTotalSamples := 0
+
+	if baseRun != nil {
+		baseCommit = baseRun.Spec.Repo.Commit
+		if baseRun.Status.Summary != nil {
+			baseTotalSamples = baseRun.Status.Summary.TotalSamples
+		}
+	}
+
+	if candRun != nil {
+		candCommit = candRun.Spec.Repo.Commit
+		if candRun.Status.Summary != nil {
+			candTotalSamples = candRun.Status.Summary.TotalSamples
+		}
+	}
+
+	totalPairs := 0
+	totalDroppedCand := 0
+	totalDroppedBase := 0
+	for _, task := range comp.Status.Tasks {
+		totalPairs += task.Pairs
+		totalDroppedCand += task.Dropped.Candidate
+		totalDroppedBase += task.Dropped.Baseline
+	}
+
+	totalSamples := baseTotalSamples + candTotalSamples
+	if totalSamples == 0 {
+		totalSamples = (totalPairs + totalDroppedCand) + (totalPairs + totalDroppedBase)
+	}
+
+	pImpStr := "—"
+	if comp.Status.PImprovement != nil {
+		pImpStr = fmt.Sprintf("%.2f", *comp.Status.PImprovement)
+	}
+
+	candCommitShort := ShortCommit(candCommit)
+	baseCommitShort := ShortCommit(baseCommit)
+
+	candRef := candCommitShort
+	if candRef == "" && candRun != nil && candRun.Name != "" {
+		candRef = candRun.Name
+	}
+	if candRef == "" {
+		candRef = comp.Spec.Candidate.Run
+	}
+
+	baseRef := baseCommitShort
+	if baseRef == "" && baseRun != nil && baseRun.Name != "" {
+		baseRef = baseRun.Name
+	}
+	if baseRef == "" {
+		baseRef = comp.Spec.Baseline.Run
+	}
+
+	headlineParts := make([]string, 0, 2)
+	if candRef != "" || baseRef != "" {
+		headlineParts = append(headlineParts, fmt.Sprintf("%s vs %s", candRef, baseRef))
+	}
+	if comp.Status.PImprovement != nil {
+		headlineParts = append(headlineParts, fmt.Sprintf("P(improvement) = %.2f", *comp.Status.PImprovement))
+	}
+	headline := strings.Join(headlineParts, " · ")
+
+	samplesSummary := fmt.Sprintf("%d run · %d paired", totalSamples, totalPairs)
+	if totalDroppedCand > 0 || totalDroppedBase > 0 {
+		samplesSummary += fmt.Sprintf(" · dropped: %d cand, %d base", totalDroppedCand, totalDroppedBase)
+	}
+
+	baseRunName := comp.Spec.Baseline.Run
+	if baseRunName == "" && baseRun != nil {
+		baseRunName = baseRun.Name
+	}
+	candRunName := comp.Spec.Candidate.Run
+	if candRunName == "" && candRun != nil {
+		candRunName = candRun.Name
+	}
+
+	baseSummary := baseRunName
+	if baseCommitShort != "" {
+		if baseSummary != "" {
+			baseSummary = fmt.Sprintf("commit %s (%s)", baseCommitShort, baseSummary)
+		} else {
+			baseSummary = fmt.Sprintf("commit %s", baseCommitShort)
+		}
+	}
+
+	candSummary := candRunName
+	if candCommitShort != "" {
+		if candSummary != "" {
+			candSummary = fmt.Sprintf("commit %s (%s)", candCommitShort, candSummary)
+		} else {
+			candSummary = fmt.Sprintf("commit %s", candCommitShort)
+		}
+	}
+
+	return ComparisonSummaryData{
+		Headline:         headline,
+		PImprovement:     pImpStr,
+		BaseRun:          baseRunName,
+		BaseCommit:       baseCommit,
+		BaseCommitShort:  baseCommitShort,
+		CandRun:          candRunName,
+		CandCommit:       candCommit,
+		CandCommitShort:  candCommitShort,
+		TotalSamples:     totalSamples,
+		TotalPairs:       totalPairs,
+		TotalDroppedCand: totalDroppedCand,
+		TotalDroppedBase: totalDroppedBase,
+		SamplesSummary:   samplesSummary,
+		BaseSummary:      baseSummary,
+		CandSummary:      candSummary,
+	}
+}
+
 // ComparisonDetailView is the view model for the /comparisons/<ns>/<name> detail page.
 type ComparisonDetailView struct {
 	ActiveTab    NavTab
@@ -223,6 +390,9 @@ type ComparisonDetailView struct {
 
 	Tasks []ComparisonTaskRow
 
+	// Summary contains aggregate comparison headline and footer data.
+	Summary ComparisonSummaryData
+
 	// Footer data
 	BaseRun          string
 	BaseCommit       string
@@ -234,6 +404,7 @@ type ComparisonDetailView struct {
 	TotalPairs       int
 	TotalDroppedCand int
 	TotalDroppedBase int
+	SamplesSummary   string
 }
 
 // Helpers for CSS status classes

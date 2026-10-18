@@ -26,6 +26,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/pmezard/go-difflib/difflib"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var update = flag.Bool("update", false, "update golden files")
@@ -687,4 +688,210 @@ func TestComparisonRows_SubTemplateConsumes(t *testing.T) {
 			t.Errorf("expected sub-template HTML to contain %q, but got:\n%s", expected, unescapedHTML)
 		}
 	}
+}
+
+func TestComparisonSummary(t *testing.T) {
+	t.Run("NilComparison", func(t *testing.T) {
+		sum := ComparisonSummary(nil)
+		if sum.Headline != "" {
+			t.Errorf("expected empty headline for nil comp, got %q", sum.Headline)
+		}
+		if sum.PImprovement != "—" {
+			t.Errorf("expected PImprovement '—' for nil comp, got %q", sum.PImprovement)
+		}
+	})
+
+	t.Run("ComparisonOnlyWithoutRuns", func(t *testing.T) {
+		pImp := 0.26
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-comp",
+				Namespace: "default",
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PImprovement: &pImp,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:    "task-1",
+						Pairs: 10,
+						Dropped: v1alpha1.ComparisonDropped{
+							Candidate: 1,
+							Baseline:  2,
+						},
+					},
+				},
+			},
+		}
+
+		sum := ComparisonSummary(comp)
+		expectedHeadline := "cand-run vs base-run · P(improvement) = 0.26"
+		if sum.Headline != expectedHeadline {
+			t.Errorf("expected headline %q, got %q", expectedHeadline, sum.Headline)
+		}
+		if sum.PImprovement != "0.26" {
+			t.Errorf("expected PImprovement '0.26', got %q", sum.PImprovement)
+		}
+		if sum.BaseRun != "base-run" || sum.CandRun != "cand-run" {
+			t.Errorf("expected runs base-run/cand-run, got %s/%s", sum.BaseRun, sum.CandRun)
+		}
+		if sum.BaseCommitShort != "" || sum.CandCommitShort != "" {
+			t.Errorf("expected empty commit shorts, got base=%q cand=%q", sum.BaseCommitShort, sum.CandCommitShort)
+		}
+		if sum.TotalPairs != 10 {
+			t.Errorf("expected TotalPairs 10, got %d", sum.TotalPairs)
+		}
+		if sum.TotalDroppedCand != 1 || sum.TotalDroppedBase != 2 {
+			t.Errorf("expected dropped 1/2, got %d/%d", sum.TotalDroppedCand, sum.TotalDroppedBase)
+		}
+		// totalSamples = (10+1) + (10+2) = 23
+		if sum.TotalSamples != 23 {
+			t.Errorf("expected TotalSamples 23, got %d", sum.TotalSamples)
+		}
+		expectedSamples := "23 run · 10 paired · dropped: 1 cand, 2 base"
+		if sum.SamplesSummary != expectedSamples {
+			t.Errorf("expected SamplesSummary %q, got %q", expectedSamples, sum.SamplesSummary)
+		}
+		if sum.BaseSummary != "base-run" {
+			t.Errorf("expected BaseSummary 'base-run', got %q", sum.BaseSummary)
+		}
+		if sum.CandSummary != "cand-run" {
+			t.Errorf("expected CandSummary 'cand-run', got %q", sum.CandSummary)
+		}
+	})
+
+	t.Run("WithRunsAndCommits", func(t *testing.T) {
+		pImp := 0.98
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-comp-runs",
+				Namespace: "default",
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "run-base"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "run-cand"},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PImprovement: &pImp,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:    "task-1",
+						Pairs: 48,
+					},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "run-base",
+				Namespace: "default",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					Commit: "a81d0c4111111111111111111111111111111111",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{
+					TotalSamples: 48,
+				},
+			},
+		}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "run-cand",
+				Namespace: "default",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					Commit: "05ce4d8222222222222222222222222222222222",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{
+					TotalSamples: 48,
+				},
+			},
+		}
+
+		sum := ComparisonSummary(comp, baseRun, candRun)
+		expectedHeadline := "05ce4d8 vs a81d0c4 · P(improvement) = 0.98"
+		if sum.Headline != expectedHeadline {
+			t.Errorf("expected headline %q, got %q", expectedHeadline, sum.Headline)
+		}
+		if sum.BaseCommitShort != "a81d0c4" {
+			t.Errorf("expected BaseCommitShort 'a81d0c4', got %q", sum.BaseCommitShort)
+		}
+		if sum.CandCommitShort != "05ce4d8" {
+			t.Errorf("expected CandCommitShort '05ce4d8', got %q", sum.CandCommitShort)
+		}
+		if sum.TotalSamples != 96 {
+			t.Errorf("expected TotalSamples 96, got %d", sum.TotalSamples)
+		}
+		if sum.TotalPairs != 48 {
+			t.Errorf("expected TotalPairs 48, got %d", sum.TotalPairs)
+		}
+		if sum.SamplesSummary != "96 run · 48 paired" {
+			t.Errorf("expected SamplesSummary '96 run · 48 paired', got %q", sum.SamplesSummary)
+		}
+		expectedBaseSummary := "commit a81d0c4 (run-base)"
+		if sum.BaseSummary != expectedBaseSummary {
+			t.Errorf("expected BaseSummary %q, got %q", expectedBaseSummary, sum.BaseSummary)
+		}
+		expectedCandSummary := "commit 05ce4d8 (run-cand)"
+		if sum.CandSummary != expectedCandSummary {
+			t.Errorf("expected CandSummary %q, got %q", expectedCandSummary, sum.CandSummary)
+		}
+
+		// Also verify reversed order in args is resolved correctly by name
+		sumReversed := ComparisonSummary(comp, candRun, baseRun)
+		if sumReversed.Headline != expectedHeadline {
+			t.Errorf("expected headline %q with reversed runs, got %q", expectedHeadline, sumReversed.Headline)
+		}
+	})
+
+	t.Run("NilPImprovement", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "run-b"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "run-c"},
+			},
+		}
+		sum := ComparisonSummary(comp)
+		if sum.PImprovement != "—" {
+			t.Errorf("expected PImprovement '—', got %q", sum.PImprovement)
+		}
+		if sum.Headline != "run-c vs run-b" {
+			t.Errorf("expected headline 'run-c vs run-b', got %q", sum.Headline)
+		}
+	})
+
+	t.Run("PositionalFallbackWhenRunsHaveNoName", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{}
+		r1 := &v1alpha1.Run{
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{Commit: "111111111111"},
+			},
+		}
+		r2 := &v1alpha1.Run{
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{Commit: "222222222222"},
+			},
+		}
+		sum := ComparisonSummary(comp, r1, r2)
+		if sum.BaseCommitShort != "1111111" {
+			t.Errorf("expected BaseCommitShort '1111111', got %q", sum.BaseCommitShort)
+		}
+		if sum.CandCommitShort != "2222222" {
+			t.Errorf("expected CandCommitShort '2222222', got %q", sum.CandCommitShort)
+		}
+		if sum.Headline != "2222222 vs 1111111" {
+			t.Errorf("expected headline '2222222 vs 1111111', got %q", sum.Headline)
+		}
+	})
 }
