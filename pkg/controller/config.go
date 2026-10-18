@@ -25,6 +25,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/webhook"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -62,15 +63,6 @@ const (
 	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
 	ConfigMapKeyUIBaseURL = "uiBaseURL"
 
-	// ConfigMapKeyGitHubWebhookSecret is the ConfigMap key for the webhook secret name (used by eval-runner-webhook).
-	ConfigMapKeyGitHubWebhookSecret = "githubWebhookSecret"
-	// ConfigMapKeyWebhookRepositories is the ConfigMap key for repository allow-list (used by eval-runner-webhook).
-	ConfigMapKeyWebhookRepositories = "webhookRepositories"
-	// ConfigMapKeyDefaultModel is the ConfigMap key for the default model (used by eval-runner-webhook).
-	ConfigMapKeyDefaultModel = "defaultModel"
-	// ConfigMapKeyDefaultLimit is the ConfigMap key for the default sample limit (used by eval-runner-webhook).
-	ConfigMapKeyDefaultLimit = "defaultLimit"
-
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
 	// a credential or feature that otherwise has a non-empty built-in default.
 	ConfigSentinelDisabled = "none"
@@ -82,22 +74,22 @@ const (
 // KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
 // covering both eval-runner controller and eval-runner-webhook keys.
 var KnownConfigMapKeys = map[string]struct{}{
-	ConfigMapKeyArtifactBucket:         {},
-	ConfigMapKeyArtifactDir:            {},
-	ConfigMapKeyArtifactMaxUploadBytes: {},
-	ConfigMapKeyDiscoveryDeadline:      {},
-	ConfigMapKeyExecutionDeadline:      {},
-	ConfigMapKeyMaxParallelTasks:       {},
-	ConfigMapKeyModelSecret:            {},
-	ConfigMapKeySandboxdImage:          {},
-	ConfigMapKeyTaskGracePeriod:        {},
-	ConfigMapKeyGitHubTokenSecret:      {},
-	ConfigMapKeyGitHubAppSecret:        {},
-	ConfigMapKeyUIBaseURL:              {},
-	ConfigMapKeyGitHubWebhookSecret:    {},
-	ConfigMapKeyWebhookRepositories:    {},
-	ConfigMapKeyDefaultModel:           {},
-	ConfigMapKeyDefaultLimit:           {},
+	ConfigMapKeyArtifactBucket:              {},
+	ConfigMapKeyArtifactDir:                 {},
+	ConfigMapKeyArtifactMaxUploadBytes:      {},
+	ConfigMapKeyDiscoveryDeadline:           {},
+	ConfigMapKeyExecutionDeadline:           {},
+	ConfigMapKeyMaxParallelTasks:            {},
+	ConfigMapKeyModelSecret:                 {},
+	ConfigMapKeySandboxdImage:               {},
+	ConfigMapKeyTaskGracePeriod:             {},
+	ConfigMapKeyGitHubTokenSecret:           {},
+	ConfigMapKeyGitHubAppSecret:             {},
+	ConfigMapKeyUIBaseURL:                   {},
+	webhook.ConfigMapKeyGitHubWebhookSecret: {},
+	webhook.ConfigMapKeyWebhookRepositories: {},
+	webhook.ConfigMapKeyDefaultModel:        {},
+	webhook.ConfigMapKeyDefaultLimit:        {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -339,6 +331,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[ConfigMapKeySandboxdImage]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s cannot be disabled", ConfigMapKeySandboxdImage, val, ns, name, ConfigMapKeySandboxdImage)
+				}
 				cfg.SandboxdImage = trimmed
 			}
 		}
@@ -459,6 +454,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		}
 	}
 	if flags.IsExplicit("sandboxd-image") {
+		if strings.EqualFold(flags.SandboxdImage, ConfigSentinelDisabled) {
+			return cfg, fmt.Errorf("invalid sandboxd-image %q: sandboxd-image cannot be disabled", flags.SandboxdImage)
+		}
 		cfg.SandboxdImage = flags.SandboxdImage
 	}
 	if flags.IsExplicit("task-grace-period") {

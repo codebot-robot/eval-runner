@@ -299,6 +299,148 @@ func TestConfigPrecedence(t *testing.T) {
 	_ = limit10
 }
 
+func TestResolveWebhookConfig_EmptyAndSentinelSemantics(t *testing.T) {
+	defaults := DefaultConfig()
+
+	t.Run("empty string in ConfigMap retains default model", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "eval-runner-config",
+				Namespace: "eval-runner",
+			},
+			Data: map[string]string{
+				ConfigMapKeyDefaultModel:        "",
+				ConfigMapKeyGitHubWebhookSecret: "",
+				ConfigMapKeyDefaultLimit:        "",
+			},
+		}
+		cfg, err := ResolveWebhookConfig(cm, RawWebhookFlags{}, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.DefaultModel != defaults.DefaultModel {
+			t.Errorf("expected DefaultModel to retain default %q, got %q", defaults.DefaultModel, cfg.DefaultModel)
+		}
+		if cfg.GitHubWebhookSecret != defaults.GitHubWebhookSecret {
+			t.Errorf("expected GitHubWebhookSecret to retain default %q, got %q", defaults.GitHubWebhookSecret, cfg.GitHubWebhookSecret)
+		}
+		if cfg.DefaultLimit != defaults.DefaultLimit {
+			t.Errorf("expected DefaultLimit to retain default %v, got %v", defaults.DefaultLimit, cfg.DefaultLimit)
+		}
+	})
+
+	t.Run("whitespace string in ConfigMap retains default model", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "eval-runner-config",
+				Namespace: "eval-runner",
+			},
+			Data: map[string]string{
+				ConfigMapKeyDefaultModel:        "   ",
+				ConfigMapKeyGitHubWebhookSecret: "\t ",
+				ConfigMapKeyDefaultLimit:        "  ",
+			},
+		}
+		cfg, err := ResolveWebhookConfig(cm, RawWebhookFlags{}, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.DefaultModel != defaults.DefaultModel {
+			t.Errorf("expected whitespace to retain default DefaultModel %q, got %q", defaults.DefaultModel, cfg.DefaultModel)
+		}
+		if cfg.GitHubWebhookSecret != defaults.GitHubWebhookSecret {
+			t.Errorf("expected whitespace to retain default GitHubWebhookSecret %q, got %q", defaults.GitHubWebhookSecret, cfg.GitHubWebhookSecret)
+		}
+	})
+
+	t.Run("sentinel none in ConfigMap disables default model", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "eval-runner-config",
+				Namespace: "eval-runner",
+			},
+			Data: map[string]string{
+				ConfigMapKeyDefaultModel: "none",
+			},
+		}
+		cfg, err := ResolveWebhookConfig(cm, RawWebhookFlags{}, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.DefaultModel != "" {
+			t.Errorf("expected DefaultModel disabled (empty), got %q", cfg.DefaultModel)
+		}
+
+		// Case-insensitive NONE
+		cmUpper := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "eval-runner-config",
+				Namespace: "eval-runner",
+			},
+			Data: map[string]string{
+				ConfigMapKeyDefaultModel: "NONE",
+			},
+		}
+		cfgUpper, err := ResolveWebhookConfig(cmUpper, RawWebhookFlags{}, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfgUpper.DefaultModel != "" {
+			t.Errorf("expected DefaultModel disabled (empty) with NONE, got %q", cfgUpper.DefaultModel)
+		}
+	})
+
+	t.Run("explicit empty flag disables default model even when ConfigMap is set", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "eval-runner-config",
+				Namespace: "eval-runner",
+			},
+			Data: map[string]string{
+				ConfigMapKeyDefaultModel: "custom-model",
+			},
+		}
+		flags := RawWebhookFlags{
+			DefaultModel: "",
+			Explicit: map[string]bool{
+				"default-model": true,
+			},
+		}
+		cfg, err := ResolveWebhookConfig(cm, flags, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.DefaultModel != "" {
+			t.Errorf("expected explicit empty flag to override ConfigMap, got %q", cfg.DefaultModel)
+		}
+	})
+
+	t.Run("explicit none flag disables default model even when ConfigMap is set", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "eval-runner-config",
+				Namespace: "eval-runner",
+			},
+			Data: map[string]string{
+				ConfigMapKeyDefaultModel: "custom-model",
+			},
+		}
+		flags := RawWebhookFlags{
+			DefaultModel: "none",
+			Explicit: map[string]bool{
+				"default-model": true,
+			},
+		}
+		cfg, err := ResolveWebhookConfig(cm, flags, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.DefaultModel != "" {
+			t.Errorf("expected explicit none flag to override ConfigMap, got %q", cfg.DefaultModel)
+		}
+	})
+}
+
 func TestProcessPullRequest_CreateAndIdempotency(t *testing.T) {
 	scheme := newTestScheme()
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
