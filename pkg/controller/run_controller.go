@@ -127,8 +127,6 @@ type RunReconciler struct {
 	// SandboxClient can be set directly to override ClientFactory (e.g. for unit testing).
 	SandboxClient    sandboxclient.Client
 	SandboxNamespace string
-	MaxStdoutBytes   int64
-	MaxStderrBytes   int64
 	MaxMessageBytes  int
 
 	// DiscoveryDeadline is the overall deadline duration for discovery to complete.
@@ -490,20 +488,6 @@ func (r *RunReconciler) requeueDelay(deadline *metav1.Time) time.Duration {
 	return defaultDelay
 }
 
-func (r *RunReconciler) maxStdoutBytes() int64 {
-	if r.MaxStdoutBytes > 0 {
-		return r.MaxStdoutBytes
-	}
-	return discovery.MaxStdoutBytes
-}
-
-func (r *RunReconciler) maxStderrBytes() int64 {
-	if r.MaxStderrBytes > 0 {
-		return r.MaxStderrBytes
-	}
-	return discovery.MaxStderrBytes
-}
-
 func (r *RunReconciler) maxMessageBytes() int {
 	if r.MaxMessageBytes > 0 {
 		return r.MaxMessageBytes
@@ -769,10 +753,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		factory := r.ClientFactory
 		if factory == nil {
-			factory = sandboxclient.DefaultFactory(
-				sandboxclient.WithStdoutLimit(r.maxStdoutBytes()),
-				sandboxclient.WithStderrLimit(r.maxStderrBytes()),
-			)
+			factory = sandboxclient.DefaultFactory()
 		}
 		authToken, tokenErr := r.ensureAuthToken(ctx, &run, sandboxKey)
 		if tokenErr != nil {
@@ -1019,28 +1000,6 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			msg = fmt.Sprintf("step ./.evals/list failed with exit code %d: %s", listRes.ExitCode, tail)
 		} else {
 			msg = fmt.Sprintf("step ./.evals/list failed with exit code %d", listRes.ExitCode)
-		}
-		return r.failRun(ctx, &run, &sandbox, msg)
-	}
-
-	// Defense-in-depth: validate stdout and stderr sizes even if executor did not report limit error
-	stdoutLimit := r.maxStdoutBytes()
-	stderrLimit := r.maxStderrBytes()
-
-	if int64(len(listRes.Stdout)) > stdoutLimit {
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", &discovery.LimitError{
-			Stream: "stdout",
-			Limit:  stdoutLimit,
-		}))
-	}
-	if int64(len(listRes.Stderr)) > stderrLimit {
-		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := fmt.Sprintf("step ./.evals/list failed: %v", &discovery.LimitError{
-			Stream: "stderr",
-			Limit:  stderrLimit,
-		})
-		if tail != "" {
-			msg += "\n" + tail
 		}
 		return r.failRun(ctx, &run, &sandbox, msg)
 	}
@@ -1696,10 +1655,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 		factory := r.ClientFactory
 		if factory == nil {
-			factory = sandboxclient.DefaultFactory(
-				sandboxclient.WithStdoutLimit(r.maxStdoutBytes()),
-				sandboxclient.WithStderrLimit(r.maxStderrBytes()),
-			)
+			factory = sandboxclient.DefaultFactory()
 		}
 		sbClient, err = factory.NewClient(pod.Status.PodIP, opts...)
 	}
