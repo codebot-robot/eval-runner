@@ -22,7 +22,9 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
+	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -980,6 +982,443 @@ func TestComparisonReconciler_ExplicitMarginZero(t *testing.T) {
 		}
 		if updated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
 			t.Errorf("Verdict = %v, want INCONCLUSIVE with explicit margin 0.0", updated.Status.Verdict)
+		}
+	})
+}
+
+func TestComparisonReconciler_GitHubReporting(t *testing.T) {
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	fakeGCS := gcs.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("failed to create GCS sink: %v", err)
+	}
+
+	candLogPath := "gs://eval-bucket/runs/cand-commit/" + taskID + "/inspect.json"
+	baseLogPath := "gs://eval-bucket/runs/base-commit/" + taskID + "/inspect.json"
+
+	candInspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{
+		{ID: "1", Score: 1.0},
+		{ID: "2", Score: 1.0},
+	})
+	baseInspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{
+		{ID: "1", Score: 0.0},
+		{ID: "2", Score: 0.0},
+	})
+	fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspect}
+	fakeGCS.Objects["eval-bucket/runs/base-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: baseInspect}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: candLogPath, Samples: 2},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 2},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: baseLogPath, Samples: 2},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 2},
+		},
+	}
+
+	makeComp := func(name string) *v1alpha1.Comparison {
+		return &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     98,
+					HeadSHA:    "cand-commit",
+					BaseSHA:    "base-commit",
+				},
+			},
+		}
+	}
+
+	t.Run("token absent -> disabled", func(t *testing.T) {
+		comp := makeComp("comp-no-token")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token", // Secret does not exist
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-no-token"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile returned error: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("unexpected requeue")
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Reporting == nil || updated.Status.Reporting.Message != "disabled" {
+			t.Errorf("expected reporting.message = 'disabled', got %+v", updated.Status.Reporting)
+		}
+		if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Errorf("expected phase Completed, got %v", updated.Status.Phase)
+		}
+	})
+
+	t.Run("first post creates and second updates", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-post")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(token string) github.Client {
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-post"}}
+
+		// 1. First post creates comment and check run
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("first Reconcile error: %v", err)
+		}
+
+		var updated1 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated1); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated1.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if updated1.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected non-zero CommentID")
+		}
+		if updated1.Status.Reporting.CheckRunID == 0 {
+			t.Errorf("expected non-zero CheckRunID")
+		}
+		if updated1.Status.Reporting.LastPostedHash == "" {
+			t.Errorf("expected non-empty LastPostedHash")
+		}
+		if len(server.Comments()) != 1 {
+			t.Fatalf("expected 1 comment created, got %d", len(server.Comments()))
+		}
+		if len(server.CheckRuns()) != 1 {
+			t.Fatalf("expected 1 check run created, got %d", len(server.CheckRuns()))
+		}
+
+		// 2. Idempotency: second reconcile with same status makes no new HTTP requests
+		reqCountBefore := len(server.RequestLog())
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("idempotent Reconcile error: %v", err)
+		}
+		if len(server.RequestLog()) != reqCountBefore {
+			t.Errorf("expected 0 new requests on idempotent reconcile, got %d", len(server.RequestLog())-reqCountBefore)
+		}
+
+		// 3. Second reconcile with changed status updates comment and check run in place
+		candInspectUpdated := makeSyntheticInspectLog(taskID, []stats.SampleScore{
+			{ID: "1", Score: 0.0},
+			{ID: "2", Score: 0.0},
+		})
+		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspectUpdated}
+
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("second Reconcile error: %v", err)
+		}
+
+		var updated2 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated2); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated2.Status.Reporting.CommentID != updated1.Status.Reporting.CommentID {
+			t.Errorf("expected same CommentID %d, got %d", updated1.Status.Reporting.CommentID, updated2.Status.Reporting.CommentID)
+		}
+		if updated2.Status.Reporting.CheckRunID != updated1.Status.Reporting.CheckRunID {
+			t.Errorf("expected same CheckRunID %d, got %d", updated1.Status.Reporting.CheckRunID, updated2.Status.Reporting.CheckRunID)
+		}
+		if len(server.Comments()) != 1 {
+			t.Errorf("expected still 1 comment, got %d", len(server.Comments()))
+		}
+		if len(server.CheckRuns()) != 1 {
+			t.Errorf("expected still 1 check run, got %d", len(server.CheckRuns()))
+		}
+	})
+
+	t.Run("marker search avoids duplicate comment", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-marker")
+		// Simulate existing comment with marker already on PR
+		marker := github.ComparisonMarker("eval-runner", "comp-marker")
+		_, err := server.Client("test-gh-token").CreateIssueComment(t.Context(), "gke-labs", "eval-runner", 98, marker+"\nold comment")
+		if err != nil {
+			t.Fatalf("failed to create existing marker comment: %v", err)
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(token string) github.Client {
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-marker"}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		if len(server.Comments()) != 1 {
+			t.Errorf("expected marker search to update existing comment without creating duplicate, got %d comments", len(server.Comments()))
+		}
+	})
+
+	t.Run("403/404 -> recorded not retried", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.InjectError(404, `{"message":"Not Found"}`)
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-404")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(token string) github.Client {
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-404"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("expected nil error for permanent 404, got %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("expected no requeue for permanent 404")
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Reporting == nil || !strings.Contains(updated.Status.Reporting.Message, "404") {
+			t.Errorf("expected reporting.message to contain '404', got %+v", updated.Status.Reporting)
+		}
+		if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Errorf("expected phase Completed, got %v", updated.Status.Phase)
+		}
+	})
+
+	t.Run("5xx -> requeue", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.InjectError(500, `{"message":"Internal Server Error"}`)
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-500")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(token string) github.Client {
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-500"}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err == nil {
+			t.Fatalf("expected error on 500 for controller-runtime requeue, got nil")
+		}
+		if !strings.Contains(err.Error(), "500") {
+			t.Errorf("expected error to mention 500, got %v", err)
+		}
+	})
+
+	t.Run("check run 403 on PAT -> comment posted, partial status recorded", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.InjectPathError("POST", "/repos/gke-labs/eval-runner/check-runs", 403, `{"message":"Resource not accessible by personal access token"}`)
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-pat-token")},
+		}
+
+		comp := makeComp("comp-pat-403")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(token string) github.Client {
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-pat-403"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("expected nil error on check run 403, got: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("expected no requeue on check run 403")
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Reporting == nil {
+			t.Fatalf("expected non-nil status.reporting")
+		}
+		if updated.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected commentID to be saved in status")
+		}
+		if updated.Status.Reporting.LastPostedHash == "" {
+			t.Errorf("expected lastPostedHash to be saved in status")
+		}
+		if updated.Status.Reporting.CheckRunID != 0 {
+			t.Errorf("expected checkRunID 0, got %d", updated.Status.Reporting.CheckRunID)
+		}
+		if updated.Status.Reporting.Message != "check runs unavailable with token auth; comment posted" {
+			t.Errorf("expected message 'check runs unavailable with token auth; comment posted', got %q", updated.Status.Reporting.Message)
+		}
+		if len(server.Comments()) != 1 {
+			t.Errorf("expected 1 comment created, got %d", len(server.Comments()))
+		}
+
+		// Verify idempotency on second reconcile (gated on hash, no new requests)
+		reqCountBefore := len(server.RequestLog())
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("second Reconcile error: %v", err)
+		}
+		if len(server.RequestLog()) != reqCountBefore {
+			t.Errorf("expected 0 new requests on second reconcile, got %d", len(server.RequestLog())-reqCountBefore)
+		}
+	})
+
+	t.Run("explicitly disabled githubTokenSecret in ConfigMap", func(t *testing.T) {
+		comp := makeComp("comp-disabled")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "", // Explicitly disabled
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-disabled"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("unexpected requeue")
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Reporting == nil || updated.Status.Reporting.Message != "disabled" {
+			t.Errorf("expected reporting.message = 'disabled', got %+v", updated.Status.Reporting)
 		}
 	})
 }

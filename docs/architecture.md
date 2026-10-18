@@ -251,12 +251,13 @@ The trust model establishes strict boundaries around untrusted repository code:
 
 | Component | ServiceAccount Token | Cloud / Git Secrets | Filesystem Access |
 |---|---|---|---|
-| **Controller Pod** | Mounted (`eval-runner-controller` in `eval-runner`) | None mounted; uses Workload Identity (`roles/storage.objectAdmin`) when `--artifact-bucket` configured | Read-only root filesystem (`readOnlyRootFilesystem: true`) |
-| **Sandbox Pod** | **None** (`automountServiceAccountToken: false`) | **None** (zero cloud credentials; cannot access GCS or bucket) | Ephemeral container writable layer only |
+| **Controller Pod** | Mounted (`eval-runner-controller` in `eval-runner`) | None mounted; uses Workload Identity (`roles/storage.objectAdmin`) when `--artifact-bucket` configured; reads GitHub token Secret in `eval-runner` when `pullRequest` reporting configured | Read-only root filesystem (`readOnlyRootFilesystem: true`) |
+| **Sandbox Pod** | **None** (`automountServiceAccountToken: false`) | **None** (zero cloud credentials; cannot access GCS, bucket, or GitHub) | Ephemeral container writable layer only |
 
 ### Reachability and Containment
 
 - **Zero-trust artifact storage**: Eval logs and artifacts are pulled out of the sandbox by the controller via sandboxd REST `ReadFile`, and written to Google Cloud Storage by the controller only. The untrusted sandbox pod never possesses bucket credentials, ServiceAccount tokens, or cloud secrets.
+- **GitHub credentials containment**: GitHub token authentication lives exclusively within Secret `eval-runner/github-token` (or configured via `githubTokenSecret`) in the controller namespace. Only the controller accesses the GitHub API; sandboxes never hold, mount, or possess GitHub credentials (zero-trust architecture).
 - **The Sandbox has no credentials for the Kubernetes API**: Because `automountServiceAccountToken: false` is set and no kubeconfig is injected, untrusted code running inside the sandbox has no cluster identity or credentials (no SA token, no kubeconfig).
 - **Mutual TLS (mTLS) with SAN pinning**: The controller communicates with sandbox pods using mutual TLS (mTLS) across both gRPC (`:9090`) and REST (`:8080`) interfaces. The controller owns a CA persisted in `eval-runner/sandbox-ca` and publishes the public CA cert in `eval-runner-sandbox/sandbox-ca`. At sandbox creation, the controller mints a short-lived server keypair bound to that specific sandbox (`<name>.<namespace>.sandbox.evalrunner.local`), delivered via a per-sandbox Secret (`eval-runner-sandbox/sb-tls-<name>`), which is deleted by the controller's finalizer path (ADR-006) when the sandbox is cleaned up. The controller presents a client certificate signed by the CA, and sandboxd enforces `RequireAndVerifyClientCert`. When dialing, the controller pins the expected sandbox SAN, cryptographically preventing sandbox impersonation even if another sandbox is compromised.
 - **Dedicated plaintext health port**: sandboxd serves unauthenticated HTTP `GET /v1/health` on dedicated plaintext port `:8081` (`--health-port=8081`), ensuring kubelet readiness probes function reliably without requiring the kubelet to participate in controller mTLS.
@@ -346,7 +347,7 @@ The following table maps sections of the target product concept ([docs/concept/f
 | **§3.2** | Empty resources (`[]` = zero privilege) | **Done** | Implemented in `pkg/discovery/sandbox.go` |
 | **§3.2** | Declared resources (`docker`, `kind`, `kubernetes-namespace`, cloud projects) | **Not started** | — |
 | **§4.1–§4.6** | Statistics (paired sampling, Wilson CI, stopping rule, verdicts, P(improvement)) | **In progress** | Issue [#25](https://github.com/gke-labs/eval-runner/issues/25), PR [#29](https://github.com/gke-labs/eval-runner/pull/29) |
-| **§5.1–§5.4** | GitHub integration (check runs, updating PR comment, bot PRs) | **Not started** | — |
+| **§5.1–§5.4** | GitHub integration (check runs, updating PR comment, bot PRs) | **In progress** | Single updating PR comment and check run implemented in [#98](https://github.com/gke-labs/eval-runner/issues/98) |
 | **§6** | Trajectory storage (Inspect log format to user bucket) & viewer UI | **Not started** | Artifact sink interface planned in [#26](https://github.com/gke-labs/eval-runner/issues/26) |
 | **§7** | Trajectory mining (automated skill fix generation) | **Not started** | — |
 | **§8** | Fine-tunes (OpenRL training loop, continuum measurement, activation PRs) | **Not started** | — |

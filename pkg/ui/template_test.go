@@ -692,7 +692,7 @@ func TestComparisonRows_SubTemplateConsumes(t *testing.T) {
 
 func TestComparisonSummary(t *testing.T) {
 	t.Run("NilComparison", func(t *testing.T) {
-		sum := ComparisonSummary(nil)
+		sum := ComparisonSummary(nil, nil, nil)
 		if sum.Headline != "" {
 			t.Errorf("expected empty headline for nil comp, got %q", sum.Headline)
 		}
@@ -727,7 +727,7 @@ func TestComparisonSummary(t *testing.T) {
 			},
 		}
 
-		sum := ComparisonSummary(comp)
+		sum := ComparisonSummary(comp, nil, nil)
 		expectedHeadline := "cand-run vs base-run · P(improvement) = 0.26"
 		if sum.Headline != expectedHeadline {
 			t.Errorf("expected headline %q, got %q", expectedHeadline, sum.Headline)
@@ -862,7 +862,7 @@ func TestComparisonSummary(t *testing.T) {
 				Candidate: v1alpha1.ComparisonRunRef{Run: "run-c"},
 			},
 		}
-		sum := ComparisonSummary(comp)
+		sum := ComparisonSummary(comp, nil, nil)
 		if sum.PImprovement != "—" {
 			t.Errorf("expected PImprovement '—', got %q", sum.PImprovement)
 		}

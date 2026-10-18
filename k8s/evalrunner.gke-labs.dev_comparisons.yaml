@@ -100,6 +100,30 @@ spec:
                 maximum: 0.5
                 minimum: 0
                 type: number
+              pullRequest:
+                description: PullRequest references an optional GitHub pull request
+                  to report results to.
+                properties:
+                  baseSHA:
+                    description: BaseSHA is the SHA of the base commit of the pull
+                      request.
+                    type: string
+                  headSHA:
+                    description: HeadSHA is the SHA of the head commit of the pull
+                      request.
+                    type: string
+                  number:
+                    description: Number is the pull request number.
+                    minimum: 1
+                    type: integer
+                  repository:
+                    description: Repository is the GitHub repository in "owner/name"
+                      format.
+                    type: string
+                required:
+                - number
+                - repository
+                type: object
               tasks:
                 description: |-
                   Tasks is an optional allow-list of task IDs to compare.
@@ -131,6 +155,29 @@ spec:
                 - Running
                 - Completed
                 type: string
+              reporting:
+                description: Reporting records the status of GitHub PR comment and
+                  check run reporting.
+                properties:
+                  checkRunID:
+                    description: CheckRunID is the GitHub check run ID created or
+                      updated for this comparison.
+                    format: int64
+                    type: integer
+                  commentID:
+                    description: CommentID is the GitHub issue comment ID created
+                      or updated for this comparison.
+                    format: int64
+                    type: integer
+                  lastPostedHash:
+                    description: LastPostedHash is the hash of the last successfully
+                      posted content and state.
+                    type: string
+                  message:
+                    description: Message records error or status details (e.g. "disabled"
+                      or permanent error message).
+                    type: string
+                type: object
               summary:
                 description: Summary provides aggregate statistics across tasks in
                   the Comparison.

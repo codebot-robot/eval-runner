@@ -25,7 +25,10 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -78,8 +81,11 @@ type ComparisonArtifact struct {
 // ComparisonReconciler reconciles a Comparison object.
 type ComparisonReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	ArtifactSink artifacts.ArtifactSink
+	Scheme              *runtime.Scheme
+	ArtifactSink        artifacts.ArtifactSink
+	ControllerNamespace string
+	GitHubTokenSecret   string
+	GitHubClientFactory func(token string) github.Client
 }
 
 func (r *ComparisonReconciler) artifactSink() artifacts.ArtifactSink {
@@ -87,6 +93,86 @@ func (r *ComparisonReconciler) artifactSink() artifacts.ArtifactSink {
 		return r.ArtifactSink
 	}
 	return &artifacts.NoopSink{}
+}
+
+func (r *ComparisonReconciler) controllerNamespace() string {
+	if r.ControllerNamespace != "" {
+		return r.ControllerNamespace
+	}
+	return discovery.DefaultControllerNamespace
+}
+
+func (r *ComparisonReconciler) gitHubTokenSecret() string {
+	return r.GitHubTokenSecret
+}
+
+func (r *ComparisonReconciler) reportToGitHub(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	baseRun, candRun *v1alpha1.Run,
+) error {
+	if comp == nil || comp.Spec.PullRequest == nil {
+		return nil
+	}
+
+	secretName := r.gitHubTokenSecret()
+	if secretName == "" {
+		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
+			Message: "disabled",
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var secret corev1.Secret
+	key := types.NamespacedName{
+		Namespace: r.controllerNamespace(),
+		Name:      secretName,
+	}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
+				Message: "disabled",
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to get github token secret: %w", err)
+	}
+
+	token := strings.TrimSpace(string(secret.Data["token"]))
+	if token == "" {
+		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
+			Message: "disabled",
+		}
+		return nil
+	}
+
+	var ghClient github.Client
+	if r.GitHubClientFactory != nil {
+		ghClient = r.GitHubClientFactory(token)
+	} else {
+		ghClient = github.NewHTTPClient(github.HTTPClientConfig{Token: token})
+	}
+
+	reporter := github.NewReporter(ghClient)
+	repStatus, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if repStatus != nil {
+		comp.Status.Reporting = repStatus
+	}
+	if err != nil {
+		if github.IsPermanent(err) {
+			if comp.Status.Reporting == nil {
+				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+			}
+			comp.Status.Reporting.Message = err.Error()
+			return nil
+		}
+		return err
+	}
+
+	return nil
 }
 
 func isTerminalRunPhase(phase v1alpha1.RunPhase) bool {
@@ -204,7 +290,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			missing = append(missing, fmt.Sprintf("candidate run %q", comp.Spec.Candidate.Run))
 		}
 		msg := fmt.Sprintf("Waiting for %s to be created", strings.Join(missing, " and "))
-		return r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+		return r.updateComparisonStatus(ctx, &comp, nil, nil, func(status *v1alpha1.ComparisonStatus) {
 			status.Phase = v1alpha1.ComparisonPhaseRunning
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
 			status.Summary = &v1alpha1.ComparisonSummary{Tasks: "0/0"}
@@ -241,7 +327,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			msg = fmt.Sprintf("Candidate run %q (%s) is executing", candidateRun.Name, candidateRun.Status.Phase)
 		}
 
-		return r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+		return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 			status.Phase = v1alpha1.ComparisonPhaseRunning
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
 			status.Tasks = tasks
@@ -295,7 +381,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			msg := fmt.Sprintf("candidate log path %q does not match commit prefix %q", candTask.LogPath, candPrefix)
 			logger.Error(nil, msg, "task", taskID)
 			err := fmt.Errorf("%s", msg)
-			if _, statusErr := r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+			if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Message = msg
 			}); statusErr != nil {
 				return ctrl.Result{}, errors.Join(err, statusErr)
@@ -308,7 +394,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			msg := fmt.Sprintf("baseline log path %q does not match commit prefix %q", baseTask.LogPath, basePrefix)
 			logger.Error(nil, msg, "task", taskID)
 			err := fmt.Errorf("%s", msg)
-			if _, statusErr := r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+			if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Message = msg
 			}); statusErr != nil {
 				return ctrl.Result{}, errors.Join(err, statusErr)
@@ -321,7 +407,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		if err != nil {
 			msg := fmt.Sprintf("failed to load candidate log for task %q (%s): %v", taskID, candTask.LogPath, err)
 			logger.Error(err, "failed to load candidate log", "task", taskID, "path", candTask.LogPath)
-			if _, statusErr := r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+			if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Message = msg
 			}); statusErr != nil {
 				return ctrl.Result{}, errors.Join(err, statusErr)
@@ -334,7 +420,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		if err != nil {
 			msg := fmt.Sprintf("failed to load baseline log for task %q (%s): %v", taskID, baseTask.LogPath, err)
 			logger.Error(err, "failed to load baseline log", "task", taskID, "path", baseTask.LogPath)
-			if _, statusErr := r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+			if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Message = msg
 			}); statusErr != nil {
 				return ctrl.Result{}, errors.Join(err, statusErr)
@@ -346,7 +432,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		if err != nil {
 			msg := fmt.Sprintf("failed to parse candidate sample scores for task %q: %v", taskID, err)
 			logger.Error(err, "failed to parse candidate sample scores", "task", taskID)
-			if _, statusErr := r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+			if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Message = msg
 			}); statusErr != nil {
 				return ctrl.Result{}, errors.Join(err, statusErr)
@@ -357,7 +443,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		if err != nil {
 			msg := fmt.Sprintf("failed to parse baseline sample scores for task %q: %v", taskID, err)
 			logger.Error(err, "failed to parse baseline sample scores", "task", taskID)
-			if _, statusErr := r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+			if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Message = msg
 			}); statusErr != nil {
 				return ctrl.Result{}, errors.Join(err, statusErr)
@@ -502,7 +588,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		phase = v1alpha1.ComparisonPhaseRunning
 	}
 
-	return r.updateComparisonStatus(ctx, &comp, func(status *v1alpha1.ComparisonStatus) {
+	return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 		status.Phase = phase
 		status.Verdict = v1alpha1.ComparisonVerdict(runVerdict.Verdict)
 		status.PImprovement = &pImp
@@ -515,18 +601,47 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	})
 }
 
-func (r *ComparisonReconciler) updateComparisonStatus(ctx context.Context, comp *v1alpha1.Comparison, mutate func(*v1alpha1.ComparisonStatus)) (ctrl.Result, error) {
+func (r *ComparisonReconciler) updateComparisonStatus(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	baseRun, candRun *v1alpha1.Run,
+	mutate func(*v1alpha1.ComparisonStatus),
+) (ctrl.Result, error) {
 	key := types.NamespacedName{Namespace: comp.Namespace, Name: comp.Name}
+
+	// 1. Fetch latest object and apply in-memory status mutations
+	var latest v1alpha1.Comparison
+	if err := r.Get(ctx, key, &latest); err != nil {
+		return ctrl.Result{}, err
+	}
+	mutate(&latest.Status)
+
+	// 2. Perform GitHub reporting ONCE outside the RetryOnConflict loop
+	var reportErr error
+	if latest.Spec.PullRequest != nil {
+		if err := r.reportToGitHub(ctx, &latest, baseRun, candRun); err != nil {
+			reportErr = err
+		}
+	}
+	reportingStatus := latest.Status.Reporting.DeepCopy()
+
+	// 3. Persist status with conflict retry
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var latest v1alpha1.Comparison
-		if err := r.Get(ctx, key, &latest); err != nil {
+		var current v1alpha1.Comparison
+		if err := r.Get(ctx, key, &current); err != nil {
 			return err
 		}
-		mutate(&latest.Status)
-		return r.Status().Update(ctx, &latest)
+		mutate(&current.Status)
+		if latest.Spec.PullRequest != nil {
+			current.Status.Reporting = reportingStatus.DeepCopy()
+		}
+		return r.Status().Update(ctx, &current)
 	})
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update Comparison status: %w", err)
+	}
+	if reportErr != nil {
+		return ctrl.Result{}, reportErr
 	}
 	return ctrl.Result{}, nil
 }

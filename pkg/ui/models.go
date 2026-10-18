@@ -230,33 +230,23 @@ type ComparisonSummaryData struct {
 }
 
 // ComparisonSummary computes aggregate headline and footer strings for a Comparison.
-// Optional Run resources (baseRun, candRun in any order or positional) can be passed
-// to provide commit hashes and total sample counts. If omitted or nil, the summary
-// falls back to the Run names and task counts in the Comparison spec and status.
-func ComparisonSummary(comp *v1alpha1.Comparison, runs ...*v1alpha1.Run) ComparisonSummaryData {
+// Optional Run resources (baseRun, candRun) can be passed to provide commit hashes
+// and total sample counts. If omitted or nil, the summary falls back to the Run names
+// and task counts in the Comparison spec and status.
+func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) ComparisonSummaryData {
 	if comp == nil {
 		return ComparisonSummaryData{
 			PImprovement: "—",
 		}
 	}
 
-	var baseRun, candRun *v1alpha1.Run
-	for _, r := range runs {
-		if r == nil {
-			continue
+	// Match by name if possible in case caller passed them in reverse order
+	if baseRun != nil && candRun != nil {
+		if comp.Spec.Baseline.Run != "" && comp.Spec.Candidate.Run != "" {
+			if baseRun.Name == comp.Spec.Candidate.Run && candRun.Name == comp.Spec.Baseline.Run {
+				baseRun, candRun = candRun, baseRun
+			}
 		}
-		if comp.Spec.Baseline.Run != "" && r.Name == comp.Spec.Baseline.Run {
-			baseRun = r
-		} else if comp.Spec.Candidate.Run != "" && r.Name == comp.Spec.Candidate.Run {
-			candRun = r
-		}
-	}
-	// Fallback to positional mapping if names were not matched
-	if baseRun == nil && len(runs) > 0 && runs[0] != nil && candRun != runs[0] {
-		baseRun = runs[0]
-	}
-	if candRun == nil && len(runs) > 1 && runs[1] != nil && baseRun != runs[1] {
-		candRun = runs[1]
 	}
 
 	baseCommit := ""
