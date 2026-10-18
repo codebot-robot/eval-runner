@@ -54,6 +54,10 @@ const (
 	ConfigMapKeyTaskGracePeriod = "taskGracePeriod"
 	// ConfigMapKeyGitHubTokenSecret is the ConfigMap key for GitHub token Secret name.
 	ConfigMapKeyGitHubTokenSecret = "githubTokenSecret"
+	// ConfigMapKeyGitHubAppSecret is the ConfigMap key for GitHub App credentials Secret name.
+	ConfigMapKeyGitHubAppSecret = "githubAppSecret"
+	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
+	ConfigMapKeyUIBaseURL = "uiBaseURL"
 
 	// DefaultGitHubTokenSecret is the default Secret name for GitHub credentials in controller namespace.
 	DefaultGitHubTokenSecret = "github-token"
@@ -67,10 +71,12 @@ type ClusterConfig struct {
 	DiscoveryDeadline time.Duration
 	ExecutionDeadline time.Duration
 	GitHubTokenSecret string
+	GitHubAppSecret   string
 	MaxParallelTasks  int
 	ModelSecret       string
 	SandboxdImage     string
 	TaskGracePeriod   time.Duration
+	UIBaseURL         string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -80,10 +86,12 @@ type RawFlags struct {
 	DiscoveryDeadline time.Duration
 	ExecutionDeadline time.Duration
 	GitHubTokenSecret string
+	GitHubAppSecret   string
 	MaxParallelTasks  int
 	ModelSecret       string
 	SandboxdImage     string
 	TaskGracePeriod   time.Duration
+	UIBaseURL         string
 	Explicit          map[string]bool
 }
 
@@ -103,17 +111,19 @@ func DefaultClusterConfig() ClusterConfig {
 		DiscoveryDeadline: DefaultDiscoveryDeadline,
 		ExecutionDeadline: DefaultExecutionDeadline,
 		GitHubTokenSecret: DefaultGitHubTokenSecret,
+		GitHubAppSecret:   "",
 		MaxParallelTasks:  DefaultMaxParallelTasks,
 		ModelSecret:       DefaultModelSecret,
 		SandboxdImage:     discovery.SandboxdImage,
 		TaskGracePeriod:   DefaultTaskGracePeriod,
+		UIBaseURL:         "",
 	}
 }
 
 // FlagsFromFlagSet extracts RawFlags from a parsed flag.FlagSet.
 func FlagsFromFlagSet(
 	fs *flag.FlagSet,
-	artifactBucket, artifactDir, modelSecret, sandboxdImage, gitHubTokenSecret string,
+	artifactBucket, artifactDir, modelSecret, sandboxdImage, gitHubTokenSecret, gitHubAppSecret, uiBaseURL string,
 	discoveryDeadline, executionDeadline, taskGracePeriod time.Duration,
 	maxParallelTasks int,
 ) RawFlags {
@@ -127,10 +137,12 @@ func FlagsFromFlagSet(
 		DiscoveryDeadline: discoveryDeadline,
 		ExecutionDeadline: executionDeadline,
 		GitHubTokenSecret: gitHubTokenSecret,
+		GitHubAppSecret:   gitHubAppSecret,
 		MaxParallelTasks:  maxParallelTasks,
 		ModelSecret:       modelSecret,
 		SandboxdImage:     sandboxdImage,
 		TaskGracePeriod:   taskGracePeriod,
+		UIBaseURL:         uiBaseURL,
 		Explicit:          explicit,
 	}
 }
@@ -261,6 +273,33 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.GitHubTokenSecret = ""
 			}
 		}
+
+		// 9. githubAppSecret
+		if val, ok := cm.Data[ConfigMapKeyGitHubAppSecret]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubAppSecret, val, ns, name, strings.Join(errs, ", "))
+				}
+				cfg.GitHubAppSecret = trimmed
+			} else {
+				cfg.GitHubAppSecret = ""
+			}
+		}
+
+		// 10. uiBaseURL
+		if val, ok := cm.Data[ConfigMapKeyUIBaseURL]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				trimmed = strings.TrimRight(trimmed, "/")
+				if !strings.HasPrefix(trimmed, "http://") && !strings.HasPrefix(trimmed, "https://") {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must begin with http:// or https://", ConfigMapKeyUIBaseURL, val, ns, name)
+				}
+				cfg.UIBaseURL = trimmed
+			} else {
+				cfg.UIBaseURL = ""
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -278,6 +317,13 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 	if flags.IsExplicit("github-token-secret") {
 		cfg.GitHubTokenSecret = flags.GitHubTokenSecret
+	}
+	if flags.IsExplicit("github-app-secret") {
+		cfg.GitHubAppSecret = flags.GitHubAppSecret
+	}
+	if flags.IsExplicit("ui-base-url") {
+		trimmed := strings.TrimRight(strings.TrimSpace(flags.UIBaseURL), "/")
+		cfg.UIBaseURL = trimmed
 	}
 	if flags.IsExplicit("max-parallel-tasks") {
 		cfg.MaxParallelTasks = flags.MaxParallelTasks

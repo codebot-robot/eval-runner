@@ -1421,4 +1421,188 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			t.Errorf("expected reporting.message = 'disabled', got %+v", updated.Status.Reporting)
 		}
 	})
+
+	t.Run("app auth in secret preferred over token and creates check run", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		appSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data: map[string][]byte{
+				"app-id":          []byte("12345"),
+				"installation-id": []byte("67890"),
+				"private-key":     []byte("fake-key"),
+				"token":           []byte("fallback-pat-token"),
+			},
+		}
+
+		comp := makeComp("comp-app-auth")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, appSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		appFactoryCalled := false
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubAppClientFactory: func(appID, instID string, privKey []byte) github.Client {
+				appFactoryCalled = true
+				if appID != "12345" || instID != "67890" {
+					t.Errorf("unexpected App credentials: %s, %s", appID, instID)
+				}
+				return server.Client("app-inst-token")
+			},
+			GitHubClientFactory: func(token string) github.Client {
+				t.Errorf("GitHubClientFactory called when App auth should have been preferred")
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-app-auth"}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		if !appFactoryCalled {
+			t.Errorf("expected GitHubAppClientFactory to be called")
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if updated.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected non-zero CommentID")
+		}
+		if updated.Status.Reporting.CheckRunID == 0 {
+			t.Errorf("expected non-zero CheckRunID with App auth")
+		}
+	})
+
+	t.Run("uiBaseURL produces absolute link in PR comment", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-ui-url")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			UIBaseURL:           "https://eval-ui.example.com",
+			GitHubClientFactory: func(token string) github.Client {
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-ui-url"}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		comments := server.Comments()
+		if len(comments) != 1 {
+			t.Fatalf("expected 1 comment, got %d", len(comments))
+		}
+		expectedURL := "[web view](https://eval-ui.example.com/comparisons/eval-runner/comp-ui-url)"
+		if !strings.Contains(comments[0].Body, expectedURL) {
+			t.Errorf("expected comment body to contain absolute link %q, got:\n%s", expectedURL, comments[0].Body)
+		}
+	})
+
+	t.Run("retryable 502 on check run persists comment ID with empty hash and retries on second reconcile", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		// Inject 502 Bad Gateway on check runs
+		server.InjectPathError("POST", "/repos/gke-labs/eval-runner/check-runs", 502, `{"message":"Bad Gateway"}`)
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-retry-checkrun")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(token string) github.Client {
+				return server.Client(token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-retry-checkrun"}}
+
+		// 1. First reconcile fails on check run with 502 (retryable error returned)
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err == nil {
+			t.Fatalf("expected error on 502 check-run creation")
+		}
+
+		var updated1 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated1); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated1.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if updated1.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected CommentID to be preserved despite check run failure")
+		}
+		if updated1.Status.Reporting.LastPostedHash != "" {
+			t.Errorf("expected LastPostedHash to be empty so requeue is not swallowed by hash gate, got %q", updated1.Status.Reporting.LastPostedHash)
+		}
+		if updated1.Status.Reporting.CheckRunID != 0 {
+			t.Errorf("expected CheckRunID 0, got %d", updated1.Status.Reporting.CheckRunID)
+		}
+
+		// 2. Second reconcile (check run error is cleared)
+		// Hash gate does not swallow because LastPostedHash is empty; check run is created!
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("second Reconcile error: %v", err)
+		}
+
+		var updated2 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated2); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated2.Status.Reporting.CheckRunID == 0 {
+			t.Errorf("expected non-zero CheckRunID after second reconcile")
+		}
+		if updated2.Status.Reporting.LastPostedHash == "" {
+			t.Errorf("expected LastPostedHash to be set after check run succeeds")
+		}
+		if len(server.CheckRuns()) != 1 {
+			t.Errorf("expected 1 check run on server, got %d", len(server.CheckRuns()))
+		}
+	})
 }

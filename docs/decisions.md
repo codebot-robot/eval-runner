@@ -206,6 +206,20 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Closes the automated evaluation loop described in concept §5.1, transitioning eval-runner from manual CR creation to fully automated PR-driven execution. Running the webhook in its own container with least-privilege RBAC isolates public HTTP exposure from the controller core and enforces defense-in-depth: compromising the webhook reveals only the webhook HMAC secret, not repository tokens or model keys. Bounded asynchronous workers prevent request timeouts and shield the Kubernetes apiserver from webhook bursts. Baseline cache reuse significantly optimizes compute budget and turnaround time by running merge target evaluations only once per base commit.
 
+### ADR-024: GitHub App Authentication for Check Runs, Comment Pagination, and Author Verification
+- **Date**: 2026-10-18
+- **Status**: Accepted
+- **Decision**:
+  1. **Dual GitHub Authentication (App Preferred, Token Fallback)**: Support GitHub App authentication via `app-id`, `installation-id`, and `private-key` stored in the controller Secret (`eval-runner/github-token` or configured via `githubAppSecret`/`githubTokenSecret`). The controller mints RS256 JWTs using standard Go crypto, exchanges them for 1-hour installation access tokens via `POST /app/installations/{id}/access_tokens`, and caches tokens until near expiration (5 minutes buffer). PAT authentication (`token` key) remains fully supported for comment-only installations. When both App credentials and a token are provided, App auth is preferred.
+  2. **Check Run Permissions**: GitHub Apps provide official read/write permissions for both `checks` and `pull_requests`. Check run creation and updates (`eval-runner / evals`) succeed under App auth, resolving the 403 limitation of fine-grained personal access tokens.
+  3. **Comment Pagination & Link Header Traversal**: `ListIssueComments` follows RFC 5988 `Link` headers (`rel="next"`) to traverse all pages of issue comments (with an upper safety bound of 100 pages), eliminating duplicate comments on busy PRs with >100 comments.
+  4. **Marker Matching Author Verification**: When searching for existing comparison marker comments (`<!-- eval-runner:comparison:<ns>/<name> -->`), the reporter requires `comment.user.login` to match the authenticated identity (the user login for PAT auth, or `<slug>[bot]` for GitHub App auth). This prevents malicious commenters from hijacking the bot's reporting by posting the marker.
+  5. **Absolute Web UI Links**: Support `uiBaseURL` in cluster configuration. When set, web-view links in comments are rendered as absolute Markdown links `[web view](<uiBaseURL>/comparisons/<ns>/<name>)` rather than code-text paths.
+  6. **Planned Sample Counting**: In check run status during execution (`running · N of M samples`), calculate M using planned samples (`limit x tasks` across candidate and baseline runs) rather than scored counts, providing an accurate progress denominator.
+  7. **Hash-Gate Retry On Check Run Failures**: Clear `LastPostedHash` when check run creation or update fails with a retryable error (while retaining `CommentID`), ensuring the subsequent reconcile requeue is not swallowed by the idempotency hash gate.
+- **Rationale**:
+  Check runs provide high-visibility PR check status directly integrated into GitHub's merge-blocking policies. Enabling native GitHub App authentication unlocks check runs while preserving zero-trust containment within the controller namespace. Author verification and Link-header pagination harden comment upserting against hijacking and duplicate comment creation on high-activity repositories.
+
 
 
 

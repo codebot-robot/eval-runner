@@ -23,17 +23,25 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
+// IssueCommentUser represents the author of a GitHub issue comment.
+type IssueCommentUser struct {
+	Login string `json:"login"`
+}
+
 // IssueComment represents a GitHub pull request / issue comment.
 type IssueComment struct {
-	ID   int64  `json:"id"`
-	Body string `json:"body"`
+	ID   int64            `json:"id"`
+	Body string           `json:"body"`
+	User IssueCommentUser `json:"user"`
 }
 
 // Client defines the interface for interacting with GitHub's PR comments and Check Runs.
 type Client interface {
+	CurrentUser(ctx context.Context) (string, error)
 	ListIssueComments(ctx context.Context, owner, repo string, number int) ([]IssueComment, error)
 	CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) (int64, error)
 	UpdateIssueComment(ctx context.Context, owner, repo string, commentID int64, body string) error
@@ -90,6 +98,7 @@ func IsRetryable(err error) bool {
 // HTTPClientConfig holds configuration for HTTPClient.
 type HTTPClientConfig struct {
 	Token      string
+	AppAuth    *AppTokenProvider
 	BaseURL    string
 	HTTPClient *http.Client
 }
@@ -97,8 +106,12 @@ type HTTPClientConfig struct {
 // HTTPClient implements Client using the GitHub REST API.
 type HTTPClient struct {
 	token      string
+	appAuth    *AppTokenProvider
 	baseURL    string
 	httpClient *http.Client
+
+	userMu     sync.Mutex
+	cachedUser string
 }
 
 // NewHTTPClient returns a new HTTPClient.
@@ -113,28 +126,49 @@ func NewHTTPClient(cfg HTTPClientConfig) *HTTPClient {
 	}
 	return &HTTPClient{
 		token:      cfg.Token,
+		appAuth:    cfg.AppAuth,
 		baseURL:    baseURL,
 		httpClient: httpClient,
 	}
 }
 
 func (c *HTTPClient) doRequest(ctx context.Context, method, path string, body any, out any) error {
+	_, err := c.doRequestHeader(ctx, method, path, body, out)
+	return err
+}
+
+func (c *HTTPClient) doRequestHeader(ctx context.Context, method, path string, body any, out any) (http.Header, error) {
 	var reqBody io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("failed to marshal request body: %w", err)
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 		reqBody = bytes.NewReader(data)
 	}
 
-	url := fmt.Sprintf("%s%s", c.baseURL, path)
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to create http request: %w", err)
+	url := path
+	if !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") {
+		url = fmt.Sprintf("%s%s", c.baseURL, path)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create http request: %w", err)
+	}
+
+	token := c.token
+	if c.appAuth != nil {
+		tok, err := c.appAuth.Token(ctx)
+		if err != nil {
+			return nil, err
+		}
+		token = tok
+	}
+
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if body != nil {
@@ -143,7 +177,7 @@ func (c *HTTPClient) doRequest(ctx context.Context, method, path string, body an
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return &ServerError{StatusCode: 0, Message: fmt.Sprintf("github request failed: %v", err)}
+		return nil, &ServerError{StatusCode: 0, Message: fmt.Sprintf("github request failed: %v", err)}
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -153,20 +187,20 @@ func (c *HTTPClient) doRequest(ctx context.Context, method, path string, body an
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+		return resp.Header, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.classifyError(resp.StatusCode, resp.Header, string(respBytes))
+		return resp.Header, c.classifyError(resp.StatusCode, resp.Header, string(respBytes))
 	}
 
 	if out != nil && len(respBytes) > 0 {
 		if err := json.Unmarshal(respBytes, out); err != nil {
-			return fmt.Errorf("failed to unmarshal response: %w", err)
+			return resp.Header, fmt.Errorf("failed to unmarshal response: %w", err)
 		}
 	}
 
-	return nil
+	return resp.Header, nil
 }
 
 func (c *HTTPClient) classifyError(status int, headers http.Header, body string) error {
@@ -201,13 +235,68 @@ func (c *HTTPClient) classifyError(status int, headers http.Header, body string)
 	return &PermanentError{StatusCode: status, Message: fmt.Sprintf("github error (%d): %s", status, cleanBody)}
 }
 
+type userResponse struct {
+	Login string `json:"login"`
+}
+
+// CurrentUser returns the authenticated login (for token auth) or bot login (for App auth).
+func (c *HTTPClient) CurrentUser(ctx context.Context) (string, error) {
+	if c.appAuth != nil {
+		return c.appAuth.Identity(ctx)
+	}
+
+	c.userMu.Lock()
+	defer c.userMu.Unlock()
+	if c.cachedUser != "" {
+		return c.cachedUser, nil
+	}
+
+	var resp userResponse
+	if err := c.doRequest(ctx, http.MethodGet, "/user", nil, &resp); err != nil {
+		return "", err
+	}
+	c.cachedUser = resp.Login
+	return c.cachedUser, nil
+}
+
+func parseNextLink(linkHeader string) string {
+	for _, part := range strings.Split(linkHeader, ",") {
+		section := strings.Split(part, ";")
+		if len(section) < 2 {
+			continue
+		}
+		isNext := false
+		for _, param := range section[1:] {
+			param = strings.TrimSpace(param)
+			if param == `rel="next"` || param == `rel=next` {
+				isNext = true
+				break
+			}
+		}
+		if isNext {
+			urlPart := strings.TrimSpace(section[0])
+			if strings.HasPrefix(urlPart, "<") && strings.HasSuffix(urlPart, ">") {
+				return strings.Trim(urlPart, "<>")
+			}
+		}
+	}
+	return ""
+}
+
 func (c *HTTPClient) ListIssueComments(ctx context.Context, owner, repo string, number int) ([]IssueComment, error) {
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, repo, number)
-	var comments []IssueComment
-	if err := c.doRequest(ctx, http.MethodGet, path, nil, &comments); err != nil {
-		return nil, err
+	var allComments []IssueComment
+	const maxPages = 100
+	for page := 0; page < maxPages && path != ""; page++ {
+		var pageComments []IssueComment
+		headers, err := c.doRequestHeader(ctx, http.MethodGet, path, nil, &pageComments)
+		if err != nil {
+			return nil, err
+		}
+		allComments = append(allComments, pageComments...)
+		path = parseNextLink(headers.Get("Link"))
 	}
-	return comments, nil
+	return allComments, nil
 }
 
 type commentPayload struct {

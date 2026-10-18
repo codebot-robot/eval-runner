@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // FakeCheckRun records check run details in the fake server.
@@ -44,6 +45,8 @@ type FakeGitHubServer struct {
 	checkRuns      map[int64]*FakeCheckRun
 	nextCommentID  int64
 	nextCheckRunID int64
+	currentUser    string
+	appSlug        string
 
 	// Injected errors: if non-empty, the next request(s) return this status and message
 	injectedErrors []injectedError
@@ -66,6 +69,8 @@ func NewFakeGitHubServer() *FakeGitHubServer {
 		checkRuns:      make(map[int64]*FakeCheckRun),
 		nextCommentID:  1000,
 		nextCheckRunID: 5000,
+		currentUser:    "test-user",
+		appSlug:        "eval-runner",
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handleHTTP))
 	return f
@@ -81,6 +86,20 @@ func (f *FakeGitHubServer) Close() {
 	f.server.Close()
 }
 
+// SetCurrentUser sets the login returned by GET /user.
+func (f *FakeGitHubServer) SetCurrentUser(login string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.currentUser = login
+}
+
+// SetAppSlug sets the slug returned by GET /app.
+func (f *FakeGitHubServer) SetAppSlug(slug string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appSlug = slug
+}
+
 // Client returns an HTTPClient configured to use this fake server.
 func (f *FakeGitHubServer) Client(token string) *HTTPClient {
 	return NewHTTPClient(HTTPClientConfig{
@@ -88,6 +107,25 @@ func (f *FakeGitHubServer) Client(token string) *HTTPClient {
 		BaseURL:    f.server.URL,
 		HTTPClient: f.server.Client(),
 	})
+}
+
+// AppClient returns an HTTPClient configured with AppAuth pointing to this fake server.
+func (f *FakeGitHubServer) AppClient(appID, instID string, privKey []byte) (*HTTPClient, error) {
+	appAuth, err := NewAppTokenProvider(AppConfig{
+		AppID:          appID,
+		InstallationID: instID,
+		PrivateKeyPEM:  privKey,
+		BaseURL:        f.server.URL,
+		HTTPClient:     f.server.Client(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return NewHTTPClient(HTTPClientConfig{
+		AppAuth:    appAuth,
+		BaseURL:    f.server.URL,
+		HTTPClient: f.server.Client(),
+	}), nil
 }
 
 // InjectError configures the next HTTP request to return the given status code and body.
@@ -120,6 +158,22 @@ func (f *FakeGitHubServer) InjectPathError(method, pathPrefix string, statusCode
 		body:       body,
 		headers:    h,
 	})
+}
+
+// AddCommentWithAuthor creates a comment directly in the fake server under the given author.
+func (f *FakeGitHubServer) AddCommentWithAuthor(owner, repo string, number int, body string, author string) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextCommentID++
+	c := &IssueComment{
+		ID:   f.nextCommentID,
+		Body: body,
+		User: IssueCommentUser{Login: author},
+	}
+	f.comments[c.ID] = c
+	issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	f.issueComments[issueKey] = append(f.issueComments[issueKey], c.ID)
+	return c.ID
 }
 
 // Comments returns all stored comments.
@@ -176,6 +230,43 @@ func (f *FakeGitHubServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 
+	// 0a. Current user: /user
+	if path == "/user" && r.Method == http.MethodGet {
+		f.mu.Lock()
+		login := f.currentUser
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"login": login}); err != nil {
+			_ = err
+		}
+		return
+	}
+
+	// 0b. App info: /app
+	if path == "/app" && r.Method == http.MethodGet {
+		f.mu.Lock()
+		slug := f.appSlug
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"id": 1, "slug": slug}); err != nil {
+			_ = err
+		}
+		return
+	}
+
+	// 0c. App installation access tokens: /app/installations/{id}/access_tokens
+	if strings.HasPrefix(path, "/app/installations/") && strings.HasSuffix(path, "/access_tokens") && r.Method == http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		if err := json.NewEncoder(w).Encode(installationTokenResponse{
+			Token:     "ghs_fake_installation_token",
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		}); err != nil {
+			_ = err
+		}
+		return
+	}
+
 	// 1. List or create issue comments: /repos/{owner}/{repo}/issues/{number}/comments
 	if strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/issues/") && strings.HasSuffix(path, "/comments") {
 		f.handleIssueComments(w, r)
@@ -225,8 +316,37 @@ func (f *FakeGitHubServer) handleIssueComments(w http.ResponseWriter, r *http.Re
 				result = append(result, c)
 			}
 		}
+
+		q := r.URL.Query()
+		perPage := 100
+		if p := q.Get("per_page"); p != "" {
+			if val, err := strconv.Atoi(p); err == nil && val > 0 {
+				perPage = val
+			}
+		}
+		page := 1
+		if p := q.Get("page"); p != "" {
+			if val, err := strconv.Atoi(p); err == nil && val > 0 {
+				page = val
+			}
+		}
+
+		start := (page - 1) * perPage
+		if start > len(result) {
+			start = len(result)
+		}
+		end := start + perPage
+		if end > len(result) {
+			end = len(result)
+		}
+
+		if end < len(result) {
+			nextURL := fmt.Sprintf("%s%s?page=%d&per_page=%d", f.server.URL, r.URL.Path, page+1, perPage)
+			w.Header().Set("Link", fmt.Sprintf("<%s>; rel=\"next\"", nextURL))
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(result); err != nil {
+		if err := json.NewEncoder(w).Encode(result[start:end]); err != nil {
 			_ = err
 		}
 
@@ -237,9 +357,14 @@ func (f *FakeGitHubServer) handleIssueComments(w http.ResponseWriter, r *http.Re
 			return
 		}
 		f.nextCommentID++
+		login := f.currentUser
+		if login == "" {
+			login = "test-user"
+		}
 		c := &IssueComment{
 			ID:   f.nextCommentID,
 			Body: payload.Body,
+			User: IssueCommentUser{Login: login},
 		}
 		f.comments[c.ID] = c
 		f.issueComments[issueKey] = append(f.issueComments[issueKey], c.ID)
