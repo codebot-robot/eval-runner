@@ -589,7 +589,7 @@ When an event arrives:
    - **Candidate Run**: `pr-<number>-<headSHA7>` (evaluates PR head commit with `defaultModel` and `defaultLimit`).
    - **Baseline Run**: `base-<baseSHA7>` (evaluates merge target commit). If an already `Completed` Run with that commit and model exists, it is reused immediately (baseline cache from concept §4.1).
    - **Comparison**: `pr-<number>` linking candidate and baseline runs with `spec.pullRequest` configured.
-   - **Redelivery & Synchronize**: Redelivery of the same event is idempotent and makes no duplicate objects. A `synchronize` event creates the new candidate Run `pr-<number>-<newHead7>` and updates `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing Comparison.
+   - **Redelivery & Synchronize**: Redelivery of the same event is idempotent and makes no duplicate objects. A `synchronize` event creates the new candidate Run `pr-<number>-<newHead7>`, keeps previous candidate Runs in place (they are not deleted, preserving execution history), and updates `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing Comparison.
 2. **On `push` to the default branch**:
    - **Warm Baseline Run**: `base-<sha7>` is created so the baseline run is pre-warmed before PRs arrive.
 3. **Labels**:
@@ -597,6 +597,14 @@ When an event arrives:
    - `evalrunner.gke-labs.dev/pr`: PR number (for PR runs and comparisons)
    - `evalrunner.gke-labs.dev/repo`: Sanitized repository identifier (e.g. `owner_name`)
    - `evalrunner.gke-labs.dev/head-sha`: Commit SHA
+
+### Operational Notes
+
+- **Queue Saturation & 503 Responses**: If event volume fills the bounded in-memory worker queue, the webhook responds with HTTP 503 (`worker queue full`). Note that GitHub does not automatically retry failed deliveries on 5xx responses; operators can trigger manual redeliveries from the repository's Webhooks settings under **Recent Deliveries**.
+- **ConfigMap Startup Loading**: The `eval-runner-config` ConfigMap is read at process startup. After modifying settings such as `defaultModel`, `defaultLimit`, or `webhookRepositories`, restart the webhook deployment to pick up changes:
+  ```bash
+  kubectl rollout restart deployment/eval-runner-webhook -n eval-runner
+  ```
 
 ## Running Unit Tests
 
