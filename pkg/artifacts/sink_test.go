@@ -15,6 +15,7 @@
 package artifacts
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -53,6 +54,8 @@ func TestLocalDirSink(t *testing.T) {
 		TaskID:       "docs/readme_comprehension",
 		Model:        "mockllm/model",
 		Commit:       "abc1234",
+		Samples:      11,
+		SampleRange:  &SampleRange{Start: 5, End: 15},
 	}
 
 	payload := []byte(`{"version": 2}`)
@@ -72,6 +75,20 @@ func TestLocalDirSink(t *testing.T) {
 	}
 	if string(readBytes) != string(payload) {
 		t.Errorf("Expected content %s, got %s", payload, readBytes)
+	}
+
+	// Verify summary.json was written with SampleRange
+	summaryPath := filepath.Join(tempDir, "runs", "abc1234", "docs%2Freadme_comprehension", "summary.json")
+	summaryBytes, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("Failed to read summary.json: %v", err)
+	}
+	var summary TaskSummary
+	if err := json.Unmarshal(summaryBytes, &summary); err != nil {
+		t.Fatalf("Failed to unmarshal summary.json: %v", err)
+	}
+	if summary.SampleRange == nil || summary.SampleRange.Start != 5 || summary.SampleRange.End != 15 {
+		t.Errorf("Expected summary.SampleRange {5, 15}, got %+v", summary.SampleRange)
 	}
 }
 

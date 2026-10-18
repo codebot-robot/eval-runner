@@ -38,25 +38,33 @@ type RunMetadata struct {
 	TaskCount    int
 
 	// Task execution aggregates and timestamps for summary.json
-	Samples    int
-	Successes  int
-	MeanScore  *float64
-	StartedAt  *time.Time
-	FinishedAt *time.Time
+	Samples     int
+	Successes   int
+	MeanScore   *float64
+	StartedAt   *time.Time
+	FinishedAt  *time.Time
+	SampleRange *SampleRange
+}
+
+// SampleRange specifies a 1-based, inclusive window of samples.
+type SampleRange struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 // TaskSummary records per-task aggregates and execution metadata written alongside the Inspect log.
 type TaskSummary struct {
-	TaskID     string     `json:"taskId"`
-	Model      string     `json:"model"`
-	Commit     string     `json:"commit"`
-	Samples    int        `json:"samples"`
-	Successes  int        `json:"successes"`
-	MeanScore  *float64   `json:"meanScore"`
-	StartedAt  *time.Time `json:"startedAt,omitempty"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
-	Capped     bool       `json:"capped"`
-	CapBytes   int64      `json:"capBytes,omitempty"`
+	TaskID      string       `json:"taskId"`
+	Model       string       `json:"model"`
+	Commit      string       `json:"commit"`
+	Samples     int          `json:"samples"`
+	Successes   int          `json:"successes"`
+	MeanScore   *float64     `json:"meanScore"`
+	StartedAt   *time.Time   `json:"startedAt,omitempty"`
+	FinishedAt  *time.Time   `json:"finishedAt,omitempty"`
+	Capped      bool         `json:"capped"`
+	CapBytes    int64        `json:"capBytes,omitempty"`
+	SampleRange *SampleRange `json:"sampleRange,omitempty"`
 }
 
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.
