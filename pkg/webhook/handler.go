@@ -21,13 +21,17 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/github"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -44,6 +48,9 @@ type Server struct {
 	mu              sync.RWMutex
 	cachedSecret    []byte
 	lastSecretFetch time.Time
+
+	ghClientMu     sync.Mutex
+	cachedGHClient github.Client
 }
 
 // NewServer creates a new webhook Server and initializes endpoints.
@@ -364,8 +371,300 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 		writeResponse(w, http.StatusOK, "ok: enqueued push\n")
 
+	case EventIssueComment:
+		s.handleIssueCommentEvent(w, r, payload, deliveryID)
+
 	default:
 		log.Printf("ignoring unhandled event type %q", eventType)
 		writeResponse(w, http.StatusOK, "ignored: event type not handled\n")
 	}
+}
+
+func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request, payload []byte, deliveryID string) {
+	var event GitHubIssueCommentEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		http.Error(w, fmt.Sprintf("Malformed JSON payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if event.Action != ActionCreated {
+		log.Printf("ignoring issue_comment action %q for delivery %s", event.Action, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: action not actionable\n")
+		return
+	}
+
+	if event.Issue.PullRequest == nil {
+		log.Printf("ignoring issue_comment on issue #%d for delivery %s: not a pull request", event.Issue.Number, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: not a pull request\n")
+		return
+	}
+
+	repoOwner, repoName, err := ParseOwnerAndName(&event.Repository)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid repository metadata: %v", err), http.StatusBadRequest)
+		return
+	}
+	repoFullName := fmt.Sprintf("%s/%s", repoOwner, repoName)
+	if !IsRepositoryAllowed(repoFullName, s.cfg.WebhookRepositories) {
+		log.Printf("ignoring issue_comment event for repository %s (delivery %s): not in allow-list", repoFullName, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: repository not in allow-list\n")
+		return
+	}
+
+	n, ok := ParseEvalMoreCommand(event.Comment.Body, s.cfg.DefaultMaxSamplesPerTask)
+	if !ok {
+		log.Printf("ignoring issue_comment on PR #%d (delivery %s): no supported command", event.Issue.Number, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: no supported command\n")
+		return
+	}
+
+	author := event.Comment.User.Login
+	if author == "" {
+		author = event.Sender.Login
+	}
+
+	if strings.EqualFold(event.Comment.User.Type, "Bot") || strings.EqualFold(event.Sender.Type, "Bot") {
+		log.Printf("ignoring issue_comment from bot %q on PR #%d (delivery %s)", author, event.Issue.Number, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: bot comment\n")
+		return
+	}
+
+	authorized, err := s.isAuthorAuthorized(r.Context(), repoOwner, repoName, author)
+	if err != nil {
+		log.Printf("error checking authorization for user %q on %s: %v", author, repoFullName, err)
+		http.Error(w, fmt.Sprintf("Authorization check failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !authorized {
+		log.Printf("unauthorized user %q attempted /eval more command on %s#%d", author, repoFullName, event.Issue.Number)
+		http.Error(w, "Forbidden: user not authorized to execute command", http.StatusForbidden)
+		return
+	}
+
+	if s.cfg.Client == nil {
+		writeResponse(w, http.StatusOK, "ok: no kubernetes client\n")
+		return
+	}
+
+	prNum := event.Issue.Number
+	compName := fmt.Sprintf("pr-%d", prNum)
+	key := types.NamespacedName{
+		Namespace: s.cfg.Namespace,
+		Name:      compName,
+	}
+
+	var comp v1alpha1.Comparison
+	alreadyHandled := false
+	repoMismatch := false
+	err = retry.OnError(retry.DefaultBackoff, apierrors.IsConflict, func() error {
+		if getErr := s.cfg.Client.Get(r.Context(), key, &comp); getErr != nil {
+			return getErr
+		}
+
+		if comp.Spec.PullRequest == nil || !strings.EqualFold(comp.Spec.PullRequest.Repository, repoFullName) {
+			repoMismatch = true
+			return nil
+		}
+
+		if isCommentHandled(comp.Annotations, event.Comment.ID) {
+			alreadyHandled = true
+			return nil
+		}
+
+		samplesToBump := n
+		if comp.Spec.Sampling != nil {
+			maxPerTask := comp.Spec.Sampling.EffectiveMaxSamplesPerTask()
+			if maxPerTask > 0 && samplesToBump > maxPerTask {
+				samplesToBump = maxPerTask
+			}
+		}
+
+		comp.Spec.ExtraSamples += samplesToBump
+		recordHandledComment(&comp, event.Comment.ID)
+
+		return s.cfg.Client.Update(r.Context(), &comp)
+	})
+
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Printf("comparison %s/%s not found for PR #%d", s.cfg.Namespace, compName, prNum)
+			writeResponse(w, http.StatusOK, "ignored: comparison not found\n")
+			return
+		}
+		log.Printf("error updating comparison %s/%s: %v", s.cfg.Namespace, compName, err)
+		http.Error(w, fmt.Sprintf("Failed to update comparison: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if repoMismatch {
+		log.Printf("comparison %s/%s repository does not match %s for PR #%d (delivery %s)", s.cfg.Namespace, compName, repoFullName, prNum, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: comparison not found\n")
+		return
+	}
+
+	if alreadyHandled {
+		log.Printf("comment %d on PR #%d already handled (delivery %s)", event.Comment.ID, prNum, deliveryID)
+		writeResponse(w, http.StatusOK, "ok: comment already handled\n")
+		return
+	}
+
+	// React to the comment (eyes or +1) or reply with an acknowledgement
+	ghClient, err := s.getGitHubClient(r.Context())
+	if err != nil {
+		log.Printf("warning: error obtaining github client for reaction: %v", err)
+	}
+	if ghClient != nil {
+		if reactErr := ghClient.CreateCommentReaction(r.Context(), repoOwner, repoName, event.Comment.ID, "eyes"); reactErr != nil {
+			log.Printf("warning: failed to react to comment %d: %v; falling back to acknowledgement comment", event.Comment.ID, reactErr)
+			msg := fmt.Sprintf("Evaluating %d more sample(s) for PR #%d (extraSamples=%d).", n, prNum, comp.Spec.ExtraSamples)
+			if _, replyErr := ghClient.CreateIssueComment(r.Context(), repoOwner, repoName, prNum, msg); replyErr != nil {
+				log.Printf("warning: failed to reply to PR #%d: %v", prNum, replyErr)
+			}
+		}
+	}
+
+	log.Printf("successfully processed /eval more %d on PR #%d for delivery %s", n, prNum, deliveryID)
+	writeResponse(w, http.StatusOK, "ok: extraSamples updated\n")
+}
+
+func (s *Server) isAuthorAuthorized(ctx context.Context, owner, repo, username string) (bool, error) {
+	if username == "" {
+		return false, nil
+	}
+	// 1. Allow-list key commandUsers
+	if IsUserAllowed(username, s.cfg.CommandUsers) {
+		return true, nil
+	}
+
+	// 2. GitHub collaborator permission API
+	ghClient, err := s.getGitHubClient(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to get GitHub client: %w", err)
+	}
+	if ghClient == nil {
+		return false, nil
+	}
+
+	perm, err := ghClient.GetRepoPermission(ctx, owner, repo, username)
+	if err != nil {
+		return false, fmt.Errorf("failed to get repository permission: %w", err)
+	}
+
+	return github.HasWriteAccess(perm), nil
+}
+
+func (s *Server) getGitHubClient(ctx context.Context) (github.Client, error) {
+	if s.cfg.GitHubClient != nil {
+		return s.cfg.GitHubClient, nil
+	}
+
+	s.ghClientMu.Lock()
+	defer s.ghClientMu.Unlock()
+	if s.cachedGHClient != nil {
+		return s.cachedGHClient, nil
+	}
+
+	if s.cfg.Client == nil {
+		return nil, nil
+	}
+
+	var secretNames []string
+	if s.cfg.GitHubAppSecret != "" {
+		secretNames = append(secretNames, s.cfg.GitHubAppSecret)
+	}
+	if s.cfg.GitHubTokenSecret != "" {
+		secretNames = append(secretNames, s.cfg.GitHubTokenSecret)
+	}
+
+	for _, secretName := range secretNames {
+		var secret corev1.Secret
+		key := types.NamespacedName{
+			Namespace: s.cfg.Namespace,
+			Name:      secretName,
+		}
+		if err := s.cfg.Client.Get(ctx, key, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to get github credentials secret %q: %w", secretName, err)
+		}
+
+		appID := strings.TrimSpace(string(secret.Data["app-id"]))
+		if appID == "" {
+			appID = strings.TrimSpace(string(secret.Data["app_id"]))
+		}
+		installationID := strings.TrimSpace(string(secret.Data["installation-id"]))
+		if installationID == "" {
+			installationID = strings.TrimSpace(string(secret.Data["installation_id"]))
+		}
+		privKey := secret.Data["private-key"]
+		if len(privKey) == 0 {
+			privKey = secret.Data["private_key"]
+		}
+		token := strings.TrimSpace(string(secret.Data["token"]))
+
+		if appID != "" && installationID != "" && len(privKey) > 0 {
+			appAuth, err := github.NewAppTokenProvider(github.AppConfig{
+				AppID:          appID,
+				InstallationID: installationID,
+				PrivateKeyPEM:  privKey,
+				BaseURL:        s.cfg.GitHubBaseURL,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("invalid app credentials in %s: %w", secretName, err)
+			}
+			s.cachedGHClient = github.NewHTTPClient(github.HTTPClientConfig{
+				AppAuth: appAuth,
+				BaseURL: s.cfg.GitHubBaseURL,
+			})
+			return s.cachedGHClient, nil
+		} else if token != "" {
+			s.cachedGHClient = github.NewHTTPClient(github.HTTPClientConfig{
+				Token:   token,
+				BaseURL: s.cfg.GitHubBaseURL,
+			})
+			return s.cachedGHClient, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func isCommentHandled(annotations map[string]string, commentID int64) bool {
+	if annotations == nil {
+		return false
+	}
+	raw, ok := annotations[AnnotationHandledComments]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	idStr := strconv.FormatInt(commentID, 10)
+	for _, part := range strings.Split(raw, ",") {
+		if strings.TrimSpace(part) == idStr {
+			return true
+		}
+	}
+	return false
+}
+
+func recordHandledComment(comp *v1alpha1.Comparison, commentID int64) {
+	if comp.Annotations == nil {
+		comp.Annotations = make(map[string]string)
+	}
+	idStr := strconv.FormatInt(commentID, 10)
+	raw := comp.Annotations[AnnotationHandledComments]
+	var ids []string
+	if strings.TrimSpace(raw) != "" {
+		for _, part := range strings.Split(raw, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" && trimmed != idStr {
+				ids = append(ids, trimmed)
+			}
+		}
+	}
+	ids = append(ids, idStr)
+	if len(ids) > 100 {
+		ids = ids[len(ids)-100:]
+	}
+	comp.Annotations[AnnotationHandledComments] = strings.Join(ids, ",")
 }

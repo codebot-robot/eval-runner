@@ -218,6 +218,8 @@ rules:
   - secrets
   resourceNames:
   - github-webhook
+  - github-token
+  - github-app
   verbs:
   - get
 - apiGroups:

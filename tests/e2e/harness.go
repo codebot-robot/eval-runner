@@ -165,6 +165,9 @@ metadata:
 data:
   artifactDir: /tmp/artifacts
   defaultModel: mockllm/model
+  defaultBatchSize: "8"
+  defaultMaxSamplesPerTask: "64"
+  commandUsers: "reviewer"
   webhookRepositories: "*"
 `
 	h.KubectlApplyContent(cmManifest)

@@ -420,7 +420,10 @@ Supported ConfigMap keys include:
 - `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
 - `artifactDir`: Local filesystem directory for storing evaluation artifacts.
 - `artifactMaxUploadBytes`: Maximum size in bytes of an uploaded Inspect log before truncation (default `10485760`, 10 MiB).
-- `defaultLimit`: Default sample limit for webhook-created Runs (e.g. `10`).
+- `commandUsers`: Comma-separated allow-list of specific GitHub usernames permitted to execute comment commands (e.g. `/eval more <n>`) without checking the GitHub collaborator permission API (exact case-insensitive match; wildcards are not supported).
+- `defaultBatchSize`: Default batch size for paired adaptive sampling in webhook-created Comparisons and initial sample window on seed Runs (default `8`).
+- `defaultLimit`: Deprecated: previously set sample limit for webhook-created Runs; seed Runs now evaluate paired sample windows (`defaultBatchSize`).
+- `defaultMaxSamplesPerTask`: Maximum total samples evaluated per task across all batches in webhook-created Comparisons (default `64`).
 - `defaultModel`: Default model identifier for webhook-created Runs (e.g. `mockllm/model`).
 - `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).
 - `executionDeadline`: Overall deadline for sample execution to complete (default `30m`).
@@ -645,13 +648,19 @@ In your GitHub repository settings under **Settings -> Webhooks -> Add webhook**
 
 When an event arrives:
 1. **On `pull_request` (`opened`, `synchronize`, `reopened`)**:
-   - **Candidate Run**: `pr-<number>-<headSHA7>` (evaluates PR head commit with `defaultModel` and `defaultLimit`).
-   - **Baseline Run**: `base-<baseSHA7>` (evaluates merge target commit). If an already `Completed` Run with that commit and model exists, it is reused immediately (baseline cache from concept §4.1).
-   - **Comparison**: `pr-<number>` linking candidate and baseline runs with `spec.pullRequest` configured.
+   - **Candidate Run**: `pr-<number>-<headSHA7>` (evaluates PR head commit with `defaultModel` and initial `sampleRange {1, defaultBatchSize}`).
+   - **Baseline Run**: `base-<baseSHA7>` (evaluates merge target commit with initial `sampleRange {1, defaultBatchSize}`). If an already `Completed` Run with that commit, repo URL, and model exists, it is reused immediately (baseline cache from concept §4.1).
+   - **Comparison**: `pr-<number>` linking candidate and baseline runs with `spec.pullRequest` and `spec.sampling {batchSize: defaultBatchSize, maxSamplesPerTask: defaultMaxSamplesPerTask}` configured.
    - **Redelivery & Synchronize**: Redelivery of the same event is idempotent and makes no duplicate objects. A `synchronize` event creates the new candidate Run `pr-<number>-<newHead7>`, keeps previous candidate Runs in place (they are not deleted, preserving execution history), and updates `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing Comparison.
 2. **On `push` to the default branch**:
-   - **Warm Baseline Run**: `base-<sha7>` is created so the baseline run is pre-warmed before PRs arrive.
-3. **Labels**:
+   - **Warm Baseline Run**: `base-<sha7>` is created with initial `sampleRange {1, defaultBatchSize}` so the baseline run is pre-warmed before PRs arrive.
+3. **On `issue_comment` (`created`)**:
+   - **More Samples Command**: Comments of the form `/eval more <n>` on a pull request trigger evaluation of additional samples.
+   - **Authorization**: The author must have write or admin access per the GitHub collaborator permission API, or be listed in the `commandUsers` ConfigMap allow-list. Unauthorized authors receive HTTP 403 Forbidden.
+   - **Bounding**: The requested sample count $n$ is bounded by `defaultMaxSamplesPerTask`.
+   - **Action**: Increments `spec.extraSamples` on the existing PR Comparison by $n$, scheduling additional adaptive paired batches.
+   - **Acknowledgment & Idempotency**: Acknowledges the comment with a GitHub reaction (`eyes` or `+1`) or short comment. Comment IDs are stored in the Comparison annotation `evalrunner.gke-labs.dev/handled-comments`, ensuring redeliveries are strictly idempotent.
+4. **Labels**:
    All created resources are labeled with:
    - `evalrunner.gke-labs.dev/pr`: PR number (for PR runs and comparisons)
    - `evalrunner.gke-labs.dev/repo`: Sanitized repository identifier (e.g. `owner_name`)

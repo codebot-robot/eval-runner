@@ -246,7 +246,7 @@ net improvement (e.g. `P(improvement) = 0.98`).
 An `INCONCLUSIVE` result offers an action that purchases exactly the samples still needed, with a
 cost estimate: `▶ run 32 more samples (~$1.40)`.
 
-*(Decided in implementation: In the concept mockup, triggering the action "extends the same run". In the implementation, "more samples extends the same run" is implemented as batches that are new immutable Runs owned by a Comparison (ADR-025, ADR-026). A Run is commit × sample window (`sampleRange`); terminal Runs remain strictly immutable. When more samples are needed—either automatically via adaptive batch sampling (`spec.sampling`) or requested via `spec.extraSamples`—the `Comparison` controller schedules new immutable Run pairs evaluating subsequent sample windows (`[highestPosition + 1, nextEnd]`) for undecided tasks, concatenates sample scores, and evaluates the stopping rule. PR comments display `- run N more samples` for inconclusive tasks with remaining dataset samples using `suggestedNext` from `stats.Decide`).*
+*(Decided in implementation: In the concept mockup, triggering the action "extends the same run". In the implementation, "more samples extends the same run" is implemented as batches that are new immutable Runs owned by a Comparison (ADR-025, ADR-026). A Run is commit × sample window (`sampleRange`); terminal Runs remain strictly immutable. When more samples are needed—either automatically via adaptive batch sampling (`spec.sampling`) or requested via `spec.extraSamples`—the `Comparison` controller schedules new immutable Run pairs evaluating subsequent sample windows (`[highestPosition + 1, nextEnd]`) for undecided tasks, concatenates sample scores, and evaluates the stopping rule. PR comments display `- comment `/eval more <n>` to run <n> more samples` for inconclusive tasks with remaining dataset samples using `suggestedNext` from `stats.Decide`. Reviewers can comment `/eval more <n>` directly on the PR, which increments `spec.extraSamples` on the Comparison and triggers further batches; see ADR-026 amendment, #151).*
 
 ### 4.6 Cost and latency accounting
 
@@ -266,7 +266,7 @@ This is the product moment: the verdict lands on the PR, next to the merge butto
 
 A run starts on every pull request (open / push). The PR head is compared with the merge target.
 
-*(Decided in implementation: The `eval-runner-webhook` service handles GitHub `pull_request` (opened, synchronize) and `push` events, creates candidate/baseline Runs and a Comparison with baseline cache reuse; see ADR-023).*
+*(Decided in implementation: The `eval-runner-webhook` service handles GitHub `pull_request` (opened, synchronize, reopened), `push`, and `issue_comment` (`/eval more <n>`) events, creates candidate/baseline Runs and Comparisons configured for adaptive paired sampling (`defaultBatchSize`, `defaultMaxSamplesPerTask`) with baseline cache reuse, and increments `spec.extraSamples` upon reviewer comment command; see ADR-023, ADR-026 amendment).*
 
 ### 5.2 Check run
 
