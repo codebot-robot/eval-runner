@@ -470,7 +470,7 @@ func TestServerComparisonDetail_BatchesAndTokens(t *testing.T) {
 	}
 
 	// Check action hint
-	if !strings.Contains(body, "- run 16 more samples") {
+	if !strings.Contains(body, "<li>run 16 more samples") {
 		t.Errorf("expected extraSamples hint in detail view")
 	}
 }
