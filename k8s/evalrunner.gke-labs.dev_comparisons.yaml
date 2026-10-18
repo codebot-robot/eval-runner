@@ -381,6 +381,14 @@ spec:
                       description: Tokens is the token usage breakdown consumed for
                         this task across evaluated runs, when present in Inspect logs.
                       properties:
+                        cacheRead:
+                          description: CacheRead is the number of cached input tokens
+                            read.
+                          type: integer
+                        cacheWrite:
+                          description: CacheWrite is the number of tokens written
+                            to the cache.
+                          type: integer
                         input:
                           description: Input is the number of input/prompt tokens
                             consumed.
@@ -388,6 +396,10 @@ spec:
                         output:
                           description: Output is the number of output/completion tokens
                             consumed.
+                          type: integer
+                        reasoning:
+                          description: Reasoning is the number of reasoning/thinking
+                            tokens consumed.
                           type: integer
                         total:
                           description: Total is the total number of tokens consumed
