@@ -450,6 +450,8 @@ data:
   githubTokenSecret: "none"
 ```
 
+Note that `sandboxdImage` is required for sandbox initialization and cannot be disabled with `none`. Attempts to set `sandboxdImage: none` will fail configuration validation.
+
 ### Unrecognised Keys and Strict Configuration
 
 At startup, the controller inspects `eval-runner-config` and logs an informational warning listing any unrecognised keys (such as typos like `artifactBuckets`).

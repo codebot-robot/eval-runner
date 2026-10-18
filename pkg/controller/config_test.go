@@ -19,13 +19,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/webhook"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -723,6 +730,57 @@ func TestResolveConfig_SandboxdImage(t *testing.T) {
 	if cfgOverride.SandboxdImage != "gcr.io/test/sandboxd:flag-tag" {
 		t.Errorf("expected SandboxdImage gcr.io/test/sandboxd:flag-tag, got %q", cfgOverride.SandboxdImage)
 	}
+
+	// ConfigMap with "none" is rejected with clear error
+	cmNone := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeySandboxdImage: "none",
+		},
+	}
+	_, err = ResolveConfig(cmNone, RawFlags{})
+	if err == nil {
+		t.Fatal("expected error for sandboxdImage: none, got nil")
+	}
+	if !strings.Contains(err.Error(), "sandboxdImage cannot be disabled") {
+		t.Errorf("expected error message to mention sandboxdImage cannot be disabled, got %v", err)
+	}
+
+	// Case-insensitive "NONE" also rejected
+	cmNoneUpper := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeySandboxdImage: "NONE",
+		},
+	}
+	_, err = ResolveConfig(cmNoneUpper, RawFlags{})
+	if err == nil {
+		t.Fatal("expected error for sandboxdImage: NONE, got nil")
+	}
+	if !strings.Contains(err.Error(), "sandboxdImage cannot be disabled") {
+		t.Errorf("expected error message to mention sandboxdImage cannot be disabled, got %v", err)
+	}
+
+	// Explicit flag with "none" is rejected with clear error
+	flagsNone := RawFlags{
+		SandboxdImage: "none",
+		Explicit: map[string]bool{
+			"sandboxd-image": true,
+		},
+	}
+	_, err = ResolveConfig(nil, flagsNone)
+	if err == nil {
+		t.Fatal("expected error for --sandboxd-image=none, got nil")
+	}
+	if !strings.Contains(err.Error(), "sandboxd-image cannot be disabled") {
+		t.Errorf("expected error message to mention sandboxd-image cannot be disabled, got %v", err)
+	}
 }
 
 func TestResolveConfig_ArtifactDir(t *testing.T) {
@@ -791,22 +849,22 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 	// 3. all recognized keys
 	cmRecognized := &corev1.ConfigMap{
 		Data: map[string]string{
-			ConfigMapKeyArtifactBucket:         "gs://b",
-			ConfigMapKeyArtifactDir:            "/tmp",
-			ConfigMapKeyDiscoveryDeadline:      "10m",
-			ConfigMapKeyExecutionDeadline:      "30m",
-			ConfigMapKeyMaxParallelTasks:       "4",
-			ConfigMapKeyModelSecret:            "sec",
-			ConfigMapKeySandboxdImage:          "img:tag",
-			ConfigMapKeyTaskGracePeriod:        "30s",
-			ConfigMapKeyGitHubTokenSecret:      "gh-token",
-			ConfigMapKeyGitHubAppSecret:        "gh-app",
-			ConfigMapKeyUIBaseURL:              "https://ui",
-			ConfigMapKeyArtifactMaxUploadBytes: "10485760",
-			ConfigMapKeyGitHubWebhookSecret:    "gh-wh",
-			ConfigMapKeyWebhookRepositories:    "org/repo",
-			ConfigMapKeyDefaultModel:           "model",
-			ConfigMapKeyDefaultLimit:           "5",
+			ConfigMapKeyArtifactBucket:              "gs://b",
+			ConfigMapKeyArtifactDir:                 "/tmp",
+			ConfigMapKeyArtifactMaxUploadBytes:      "10485760",
+			ConfigMapKeyDiscoveryDeadline:           "10m",
+			ConfigMapKeyExecutionDeadline:           "30m",
+			ConfigMapKeyMaxParallelTasks:            "4",
+			ConfigMapKeyModelSecret:                 "sec",
+			ConfigMapKeySandboxdImage:               "img:tag",
+			ConfigMapKeyTaskGracePeriod:             "30s",
+			ConfigMapKeyGitHubTokenSecret:           "gh-token",
+			ConfigMapKeyGitHubAppSecret:             "gh-app",
+			ConfigMapKeyUIBaseURL:                   "https://ui",
+			webhook.ConfigMapKeyGitHubWebhookSecret: "gh-wh",
+			webhook.ConfigMapKeyWebhookRepositories: "org/repo",
+			webhook.ConfigMapKeyDefaultModel:        "model",
+			webhook.ConfigMapKeyDefaultLimit:        "5",
 		},
 	}
 	if unknown := UnknownConfigMapKeys(cmRecognized); unknown != nil {
@@ -1169,5 +1227,108 @@ func TestResolveConfig_ArtifactMaxUploadBytes(t *testing.T) {
 	}
 	if _, err := ResolveConfig(invalidCM, RawFlags{}); err == nil {
 		t.Errorf("expected error for negative artifactMaxUploadBytes, got nil")
+	}
+}
+
+// TestKnownConfigMapKeys_AllConstantsRegistered ensures that every constant whose identifier
+// starts with "ConfigMapKey" in any package in the repository appears in KnownConfigMapKeys.
+// This prevents adding a new ConfigMapKey constant without registering it in KnownConfigMapKeys.
+func TestKnownConfigMapKeys_AllConstantsRegistered(t *testing.T) {
+	// Find repository root
+	repoRoot := ""
+	dir := "."
+	for i := 0; i < 5; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			repoRoot = dir
+			break
+		}
+		dir = filepath.Join("..", dir)
+	}
+	if repoRoot == "" {
+		t.Fatal("could not find repository root containing go.mod")
+	}
+
+	fset := token.NewFileSet()
+	foundConstants := make(map[string]string) // constName -> constValue
+
+	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if path == repoRoot {
+				return nil
+			}
+			name := info.Name()
+			if strings.HasPrefix(name, ".") || name == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		node, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return fmt.Errorf("failed to parse %s: %w", path, err)
+		}
+
+		for _, decl := range node.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range genDecl.Specs {
+				valSpec, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range valSpec.Names {
+					if strings.HasPrefix(name.Name, "ConfigMapKey") {
+						if i < len(valSpec.Values) {
+							if lit, ok := valSpec.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+								val, err := strconv.Unquote(lit.Value)
+								if err != nil {
+									t.Errorf("failed to unquote value for %s in %s: %v", name.Name, path, err)
+									continue
+								}
+								foundConstants[name.Name] = val
+							}
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed walking repository files: %v", err)
+	}
+
+	if len(foundConstants) == 0 {
+		t.Fatal("expected to find ConfigMapKey constants, found none")
+	}
+	if len(foundConstants) != len(KnownConfigMapKeys) {
+		t.Errorf("expected %d ConfigMapKey constants matching KnownConfigMapKeys, found %d", len(KnownConfigMapKeys), len(foundConstants))
+	}
+	t.Logf("verified %d ConfigMapKey constants across packages", len(foundConstants))
+
+	// Verify that every found constant value is present in KnownConfigMapKeys
+	for constName, val := range foundConstants {
+		if _, ok := KnownConfigMapKeys[val]; !ok {
+			t.Errorf("constant %s with value %q is not registered in KnownConfigMapKeys", constName, val)
+		}
+	}
+
+	// Verify that KnownConfigMapKeys does not have extra untracked keys
+	knownValues := make(map[string]bool)
+	for _, val := range foundConstants {
+		knownValues[val] = true
+	}
+	for key := range KnownConfigMapKeys {
+		if !knownValues[key] {
+			t.Errorf("KnownConfigMapKeys contains key %q which has no corresponding ConfigMapKey* constant", key)
+		}
 	}
 }

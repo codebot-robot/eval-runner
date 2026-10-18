@@ -56,6 +56,10 @@ const (
 
 	// ConfigMapKeyWebhookRepositories is the ConfigMap key for repository allow-list.
 	ConfigMapKeyWebhookRepositories = "webhookRepositories"
+
+	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
+	// a credential or feature that otherwise has a non-empty built-in default.
+	ConfigSentinelDisabled = "none"
 )
 
 // Config holds settings for the eval-runner-webhook service.
@@ -164,7 +168,14 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 			}
 		}
 		if val, ok := cm.Data[ConfigMapKeyDefaultModel]; ok {
-			cfg.DefaultModel = strings.TrimSpace(val)
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.DefaultModel = ""
+				} else {
+					cfg.DefaultModel = trimmed
+				}
+			}
 		}
 		if val, ok := cm.Data[ConfigMapKeyDefaultLimit]; ok {
 			trimmed := strings.TrimSpace(val)
@@ -187,7 +198,11 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 		cfg.GitHubWebhookSecret = flags.GitHubWebhookSecret
 	}
 	if flags.IsExplicit("default-model") {
-		cfg.DefaultModel = flags.DefaultModel
+		if strings.EqualFold(flags.DefaultModel, ConfigSentinelDisabled) {
+			cfg.DefaultModel = ""
+		} else {
+			cfg.DefaultModel = flags.DefaultModel
+		}
 	}
 	if flags.IsExplicit("default-limit") && flags.DefaultLimit != nil {
 		cfg.DefaultLimit = flags.DefaultLimit
