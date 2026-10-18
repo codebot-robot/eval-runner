@@ -608,7 +608,7 @@ const comparisonDetailTemplate = `
       <div class="card-footer">
         <span><b>Base:</b> commit <span class="mono">{{ if .BaseCommitShort }}{{ .BaseCommitShort }}{{ else }}—{{ end }}</span> (<a href="/runs/{{ .Namespace }}/{{ .BaseRun }}">{{ .BaseRun }}</a>)</span>
         <span><b>Candidate:</b> commit <span class="mono">{{ if .CandCommitShort }}{{ .CandCommitShort }}{{ else }}—{{ end }}</span> (<a href="/runs/{{ .Namespace }}/{{ .CandRun }}">{{ .CandRun }}</a>)</span>
-        <span><b>Samples:</b> {{ .TotalSamples }} run · {{ .TotalPairs }} paired{{ if or (gt .TotalDroppedCand 0) (gt .TotalDroppedBase 0) }} · dropped: {{ .TotalDroppedCand }} cand, {{ .TotalDroppedBase }} base{{ end }}</span>
+        <span><b>Samples:</b> {{ if .SamplesSummary }}{{ .SamplesSummary }}{{ else }}{{ .TotalSamples }} run · {{ .TotalPairs }} paired{{ if or (gt .TotalDroppedCand 0) (gt .TotalDroppedBase 0) }} · dropped: {{ .TotalDroppedCand }} cand, {{ .TotalDroppedBase }} base{{ end }}{{ end }}</span>
         {{ if .SummaryPath }}
         <span style="font-size:12px" class="mono" title="{{ .SummaryPath }}">{{ .SummaryPath }}</span>
         {{ end }}

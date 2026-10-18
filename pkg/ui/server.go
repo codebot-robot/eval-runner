@@ -20,7 +20,6 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -518,79 +517,33 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Fetch baseline and candidate Run resources to discover commits and sample counts
-	baseCommit := ""
-	candCommit := ""
-	baseTotalSamples := 0
-	candTotalSamples := 0
-
-	var baseRun v1alpha1.Run
+	var baseRunPtr, candRunPtr *v1alpha1.Run
 	if comp.Spec.Baseline.Run != "" {
+		var baseRun v1alpha1.Run
 		if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: comp.Spec.Baseline.Run}, &baseRun); err != nil {
 			if !apierrors.IsNotFound(err) {
 				// Non-fatal lookup error, continue with run name reference
 				_ = err
 			}
 		} else {
-			baseCommit = baseRun.Spec.Repo.Commit
-			if baseRun.Status.Summary != nil {
-				baseTotalSamples = baseRun.Status.Summary.TotalSamples
-			}
+			baseRunPtr = &baseRun
 		}
 	}
 
-	var candRun v1alpha1.Run
 	if comp.Spec.Candidate.Run != "" {
+		var candRun v1alpha1.Run
 		if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: comp.Spec.Candidate.Run}, &candRun); err != nil {
 			if !apierrors.IsNotFound(err) {
 				// Non-fatal lookup error, continue with run name reference
 				_ = err
 			}
 		} else {
-			candCommit = candRun.Spec.Repo.Commit
-			if candRun.Status.Summary != nil {
-				candTotalSamples = candRun.Status.Summary.TotalSamples
-			}
+			candRunPtr = &candRun
 		}
 	}
 
-	// Prepare task rows
+	summary := ComparisonSummary(&comp, baseRunPtr, candRunPtr)
 	taskRows := ComparisonRows(&comp)
-	totalPairs := 0
-	totalDroppedCand := 0
-	totalDroppedBase := 0
-
-	for _, row := range taskRows {
-		totalPairs += row.Pairs
-		totalDroppedCand += row.DroppedCand
-		totalDroppedBase += row.DroppedBase
-	}
-
-	totalSamples := baseTotalSamples + candTotalSamples
-	if totalSamples == 0 {
-		// Fallback to sum of paired + dropped from comparison tasks
-		totalSamples = (totalPairs + totalDroppedCand) + (totalPairs + totalDroppedBase)
-	}
-
-	pImpStr := "—"
-	if comp.Status.PImprovement != nil {
-		pImpStr = fmt.Sprintf("%.2f", *comp.Status.PImprovement)
-	}
-
-	// Build headline
-	headlineParts := make([]string, 0, 2)
-	candRef := ShortCommit(candCommit)
-	if candRef == "" {
-		candRef = comp.Spec.Candidate.Run
-	}
-	baseRef := ShortCommit(baseCommit)
-	if baseRef == "" {
-		baseRef = comp.Spec.Baseline.Run
-	}
-	headlineParts = append(headlineParts, fmt.Sprintf("%s vs %s", candRef, baseRef))
-	if comp.Status.PImprovement != nil {
-		headlineParts = append(headlineParts, fmt.Sprintf("P(improvement) = %.2f", *comp.Status.PImprovement))
-	}
-	headline := strings.Join(headlineParts, " · ")
 
 	view := ComparisonDetailView{
 		ActiveTab:        NavTabComparisons,
@@ -598,21 +551,23 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 		Namespace:        comp.Namespace,
 		Verdict:          comp.Status.Verdict,
 		VerdictChip:      verdictChipClass(comp.Status.Verdict),
-		Headline:         headline,
-		PImprovement:     pImpStr,
+		Headline:         summary.Headline,
+		PImprovement:     summary.PImprovement,
 		SummaryPath:      comp.Status.SummaryPath,
 		Message:          comp.Status.Message,
 		Tasks:            taskRows,
-		BaseRun:          comp.Spec.Baseline.Run,
-		BaseCommit:       baseCommit,
-		BaseCommitShort:  ShortCommit(baseCommit),
-		CandRun:          comp.Spec.Candidate.Run,
-		CandCommit:       candCommit,
-		CandCommitShort:  ShortCommit(candCommit),
-		TotalSamples:     totalSamples,
-		TotalPairs:       totalPairs,
-		TotalDroppedCand: totalDroppedCand,
-		TotalDroppedBase: totalDroppedBase,
+		Summary:          summary,
+		BaseRun:          summary.BaseRun,
+		BaseCommit:       summary.BaseCommit,
+		BaseCommitShort:  summary.BaseCommitShort,
+		CandRun:          summary.CandRun,
+		CandCommit:       summary.CandCommit,
+		CandCommitShort:  summary.CandCommitShort,
+		TotalSamples:     summary.TotalSamples,
+		TotalPairs:       summary.TotalPairs,
+		TotalDroppedCand: summary.TotalDroppedCand,
+		TotalDroppedBase: summary.TotalDroppedBase,
+		SamplesSummary:   summary.SamplesSummary,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
