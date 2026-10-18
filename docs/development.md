@@ -487,7 +487,7 @@ If you do not have permission to install a GitHub App, a personal access token (
    ```
 
 3. **Custom Secret Name (Optional):**
-   To use a secret other than `github-token`, configure `githubTokenSecret` (or `githubAppSecret`) in the `eval-runner-config` ConfigMap or pass `--github-token-secret=<secret-name>`.
+   To use a secret other than `github-token`, configure `githubTokenSecret` (or `githubAppSecret`) in the `eval-runner-config` ConfigMap or pass `--github-token-secret=<secret-name>` (or `--github-app-secret=<secret-name>`). Note that `k8s/rbac.yaml` restricts the controller Role's `secrets get` permission to specific `resourceNames: [sandbox-ca, github-token, github-webhook]`; if you use a custom secret name, add your secret to that list in `k8s/rbac.yaml`.
 
 ### Web UI Links in Comments
 
