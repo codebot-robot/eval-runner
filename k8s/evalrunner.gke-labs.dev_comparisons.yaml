@@ -182,6 +182,10 @@ spec:
                 description: Summary provides aggregate statistics across tasks in
                   the Comparison.
                 properties:
+                  skipped:
+                    description: Skipped is the count of tasks discovered in the manifest
+                      but not planned by either Run.
+                    type: integer
                   tasks:
                     description: Tasks is a compact string representing completed
                       vs total tasks (e.g. "2/2").
