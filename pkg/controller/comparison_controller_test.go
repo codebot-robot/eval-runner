@@ -2382,6 +2382,9 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 		if artifact.Summary != updated.Status.Message {
 			t.Errorf("Expected artifact.Summary (%q) to match status.Message (%q)", artifact.Summary, updated.Status.Message)
 		}
+		if len(artifact.NotExecutedByBothRuns) != 1 || artifact.NotExecutedByBothRuns[0] != taskB {
+			t.Errorf("Expected artifact.NotExecutedByBothRuns [%s], got %v", taskB, artifact.NotExecutedByBothRuns)
+		}
 	})
 
 	t.Run("no common completed tasks yields INCONCLUSIVE and no tasks evaluated message", func(t *testing.T) {
@@ -2398,6 +2401,10 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 						ID:      "task-cand-only",
 						Phase:   v1alpha1.TaskPhaseCompleted,
 						LogPath: "gs://test-bucket/runs/cand-commit/task-cand-only/log.json",
+					},
+					{
+						ID:    "task-neither",
+						Phase: v1alpha1.TaskPhaseFailed,
 					},
 				},
 			},
@@ -2416,6 +2423,10 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 						ID:      "task-base-only",
 						Phase:   v1alpha1.TaskPhaseCompleted,
 						LogPath: "gs://test-bucket/runs/base-commit/task-base-only/log.json",
+					},
+					{
+						ID:    "task-neither",
+						Phase: v1alpha1.TaskPhaseFailed,
 					},
 				},
 			},
@@ -2463,6 +2474,24 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 		}
 		if !strings.Contains(updated.Status.Message, "no tasks evaluated") {
 			t.Errorf("Expected status.message to mention 'no tasks evaluated', got %q", updated.Status.Message)
+		}
+
+		artObj, ok := fakeGCS.Objects["test-bucket/comparisons/cmp-no-common-tasks.json"]
+		if !ok {
+			t.Fatalf("Expected comparison artifact at test-bucket/comparisons/cmp-no-common-tasks.json")
+		}
+		var artifact ComparisonArtifact
+		if err := json.Unmarshal(artObj.Data, &artifact); err != nil {
+			t.Fatalf("Failed to unmarshal stored comparison artifact: %v", err)
+		}
+		if len(artifact.NotExecuted) != 1 || artifact.NotExecuted[0] != "task-neither" {
+			t.Errorf("Expected artifact.NotExecuted [task-neither], got %v", artifact.NotExecuted)
+		}
+		expectedNotBoth := []string{"task-base-only", "task-cand-only"}
+		if len(artifact.NotExecutedByBothRuns) != 2 ||
+			artifact.NotExecutedByBothRuns[0] != expectedNotBoth[0] ||
+			artifact.NotExecutedByBothRuns[1] != expectedNotBoth[1] {
+			t.Errorf("Expected artifact.NotExecutedByBothRuns %v, got %v", expectedNotBoth, artifact.NotExecutedByBothRuns)
 		}
 	})
 }
@@ -6186,13 +6215,13 @@ func TestComparisonReconciler_StatusMessageBoundedWithMarker(t *testing.T) {
 
 	// Verify omitempty: empty lists should not appear in artifact JSON
 	artJSONStr := string(artObj.Data)
-	if strings.Contains(artJSONStr, "notExecuted") {
+	if strings.Contains(artJSONStr, `"notExecuted":`) {
 		t.Errorf("Expected artifact JSON to omit 'notExecuted', got: %s", artJSONStr)
 	}
-	if strings.Contains(artJSONStr, "notExecutedByBothRuns") {
+	if strings.Contains(artJSONStr, `"notExecutedByBothRuns":`) {
 		t.Errorf("Expected artifact JSON to omit 'notExecutedByBothRuns', got: %s", artJSONStr)
 	}
-	if strings.Contains(artJSONStr, "candidateFailed") {
+	if strings.Contains(artJSONStr, `"candidateFailed":`) {
 		t.Errorf("Expected artifact JSON to omit 'candidateFailed', got: %s", artJSONStr)
 	}
 }
@@ -6309,7 +6338,7 @@ func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *test
 	}
 
 	// Verify omitempty for skippedNotPlanned
-	if strings.Contains(string(artObj.Data), "skippedNotPlanned") {
+	if strings.Contains(string(artObj.Data), `"skippedNotPlanned":`) {
 		t.Errorf("Expected artifact JSON to omit 'skippedNotPlanned', got: %s", string(artObj.Data))
 	}
 }
