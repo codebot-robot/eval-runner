@@ -6035,3 +6035,133 @@ func findComparisonTaskStatus(tasks []v1alpha1.ComparisonTaskStatus, id string) 
 	}
 	return nil
 }
+
+func TestComparisonReconciler_StatusMessageBoundedWithMarker(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	execTaskID := "evals/task_executed"
+	scores := make([]stats.SampleScore, 8)
+	for i := 0; i < 8; i++ {
+		scores[i] = stats.SampleScore{ID: fmt.Sprintf("sample-%d", i+1), Score: 1.0}
+	}
+	fakeGCS.Objects["test-bucket/runs/cand-commit/"+execTaskID+"/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(execTaskID, scores),
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit/"+execTaskID+"/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(execTaskID, scores),
+	}
+
+	const skippedCount = 25
+	allTaskIDs := []string{execTaskID}
+	manifestTasks := []map[string]string{{"id": execTaskID}}
+	for i := 0; i < skippedCount; i++ {
+		id := fmt.Sprintf("evals/task_skipped_%02d", i)
+		allTaskIDs = append(allTaskIDs, id)
+		manifestTasks = append(manifestTasks, map[string]string{"id": id})
+	}
+	manifestBytes, _ := json.Marshal(map[string]any{"tasks": manifestTasks})
+	fakeGCS.Objects["test-bucket/runs/cand-commit/manifest.json"] = fakes.FakeObject{Data: manifestBytes}
+	fakeGCS.Objects["test-bucket/runs/base-commit/manifest.json"] = fakes.FakeObject{Data: manifestBytes}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-bound", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+			Tasks: []string{execTaskID},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         len(allTaskIDs),
+				EligibleTaskCount: len(allTaskIDs),
+				TaskIDs:           allTaskIDs,
+				ManifestPath:      "gs://test-bucket/runs/cand-commit/manifest.json",
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: execTaskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/" + execTaskID + "/log.json"},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-bound", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+			Tasks: []string{execTaskID},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         len(allTaskIDs),
+				EligibleTaskCount: len(allTaskIDs),
+				TaskIDs:           allTaskIDs,
+				ManifestPath:      "gs://test-bucket/runs/base-commit/manifest.json",
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: execTaskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/" + execTaskID + "/log.json"},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "cmp-bound", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-bound"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-bound"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "cmp-bound"}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("Failed to get updated comparison: %v", err)
+	}
+
+	// Verify that status.message has the truncated skipped list with the marker
+	expectedMarker := fmt.Sprintf("... and %d more", skippedCount-20)
+	if !strings.Contains(updated.Status.Message, expectedMarker) {
+		t.Errorf("Expected status.message to contain marker %q, got: %s", expectedMarker, updated.Status.Message)
+	}
+	if !strings.HasSuffix(updated.Status.Message, expectedMarker) {
+		t.Errorf("Expected status.message to end with marker %q, got: %s", expectedMarker, updated.Status.Message)
+	}
+
+	// Verify that exactly 20 task IDs are in the comma-separated skipped list + marker
+	skippedPrefix := "skipped (not planned): "
+	idx := strings.Index(updated.Status.Message, skippedPrefix)
+	if idx == -1 {
+		t.Fatalf("Expected status.message to contain %q", skippedPrefix)
+	}
+	skippedPart := updated.Status.Message[idx+len(skippedPrefix):]
+	tokens := strings.Split(skippedPart, ", ")
+	if len(tokens) != 21 { // 20 tasks + "... and 5 more"
+		t.Errorf("Expected 21 tokens in skipped list (20 items + marker), got %d: %q", len(tokens), skippedPart)
+	}
+}

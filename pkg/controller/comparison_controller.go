@@ -1645,6 +1645,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	runVerdict := stats.AggregateVerdict(reports)
 	pImp := runVerdict.PImprovement
 
+	sort.Strings(candFailed)
+
 	capped := false
 	if len(candFailed) > 0 {
 		if runVerdict.Verdict == stats.VerdictUnchanged || runVerdict.Verdict == stats.VerdictImproved {
@@ -1654,7 +1656,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			if len(candFailed) > 1 {
 				taskWord = "tasks"
 			}
-			runVerdict.Summary = fmt.Sprintf("INCONCLUSIVE: candidate %s failed: %s; otherwise %s", taskWord, strings.Join(candFailed, ", "), runVerdict.Summary)
+			runVerdict.Summary = fmt.Sprintf("INCONCLUSIVE: candidate %s failed: %s; otherwise %s", taskWord, github.FormatIDList(candFailed, github.MaxIDList), runVerdict.Summary)
 			if pImp > 0.50 {
 				pImp = 0.50
 				runVerdict.PImprovement = 0.50
@@ -1668,7 +1670,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		if len(candFailed) > 1 {
 			taskWord = "tasks"
 		}
-		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, strings.Join(candFailed, ", ")))
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, github.FormatIDList(candFailed, github.MaxIDList)))
 	}
 	if len(unexecuted) > 0 {
 		var neitherExecuted []string
@@ -1688,14 +1690,14 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 		}
 		if len(neitherExecuted) > 0 {
-			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed: %s", strings.Join(neitherExecuted, ", ")))
+			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed: %s", github.FormatIDList(neitherExecuted, github.MaxIDList)))
 		}
 		if len(notBothExecuted) > 0 {
-			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed by both runs: %s", strings.Join(notBothExecuted, ", ")))
+			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed by both runs: %s", github.FormatIDList(notBothExecuted, github.MaxIDList)))
 		}
 	}
 	if len(skippedNotPlanned) > 0 {
-		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("skipped (not planned): %s", strings.Join(skippedNotPlanned, ", ")))
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("skipped (not planned): %s", github.FormatIDList(skippedNotPlanned, github.MaxIDList)))
 	}
 
 	message := runVerdict.Summary
