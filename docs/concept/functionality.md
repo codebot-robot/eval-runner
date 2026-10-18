@@ -36,7 +36,7 @@ Running example used throughout the concept: repo `acme/support-agent`, PR `#418
 | **Eval / task** | A repeatable test of agent behaviour: a dataset of inputs, an environment to act in, and a scorer. Identified by an id like `triage/runbook_lookup`. |
 | **Sample** | One execution of one task input against one configuration of the agent. Produces a score and a trajectory. |
 | **Trajectory** | The full log of a sample: prompts, tool calls, responses, errors, tokens, cost, latency. Stored in Inspect log format. |
-| **Run** | All the work eval-runner does for one commit under test (PR head vs base). |
+| **Run** | All the work eval-runner does for one commit under test (PR head vs base). *(In implementation, a `Run` represents commit × sample window; batches are new immutable Runs owned by a `Comparison` custom resource, ADR-025, ADR-026).* |
 | **Base / baseline** | The merge target commit (e.g. `main @ a81d0c4`) the PR is compared against. |
 | **Paired sample** | A PR sample and a base sample on the *same input*, so input difficulty cancels out of the delta. |
 | **Verdict** | Run-level outcome: `IMPROVED`, `REGRESSED`, `UNCHANGED`, `INCONCLUSIVE` (plus transient `RUNNING`). |
@@ -91,9 +91,7 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 | `tasks[].resources[]` | Declarative resource needs (see §3.2). Empty list means zero privilege. |
 | `tasks[].images[]` | Which built images the task needs available (e.g. pre-loaded into a kind cluster). |
 
-**[open]** Fields not shown but almost certainly needed: per-task dataset size / list of sample
-ids (needed for pairing and for "N of M possible samples"), a `cohort` or `tags` field (§8), and a
-manifest version field.
+**[open]** Fields not shown in the original concept mockup: manifest `version`, `cohort` / `tags` (§8), and per-task `dataset-size` (for planned "N of M possible samples" progress display up front) remain explicitly open. Sample pairing does not require sample IDs or dataset sizes to be declared in the manifest because pairing is performed dynamically by Inspect sample id (`sample.id`) from Inspect evaluation logs (#131, ADR-018), and sample windows are specified via `spec.sampleRange` (ADR-025). Explicit dataset size remains open for calculating total dataset size up front before execution.
 
 ### 2.3 Fallback when `.evals/list` is absent
 
@@ -138,13 +136,11 @@ runners: users stopped running their own CI fleet, and they should not run their
 
 ### 3.1 Kubernetes-native execution
 
-- eval-runner runs in a Kubernetes cluster (namespace shown as `eval-ci`).
-- **One sandbox pod per sample.** Each sample gets its own pod with exactly the resources the task
-  declared, and the pod is reclaimed when the sample completes.
-- Isolation level is configurable: standard containers, **gVisor**, or **micro-VM**.
-- Images listed in the manifest are built before the tasks that need them run.
-- A controller watches runs, schedules sample pods, collects results, and drives the GitHub
-  integration. Users "watch runs, not pods".
+- eval-runner runs in a Kubernetes cluster across two namespaces: `eval-runner` (controller, webhook, UI, and `Run`/`Comparison` custom resources) and `eval-runner-sandbox` (untrusted sandboxes and pods) (ADR-004). *(The concept mockup showed `eval-ci`.)*
+- **One sandbox per task running `inspect eval --limit a-b`**, not one pod per sample. Each task runs inside its own sandbox bounded by a sample range window (`spec.sampleRange` mapping to `inspect eval --limit start-end`), and the sandbox is reclaimed when the task completes (ADR-025).
+- Isolation today is PSA-restricted containers plus mTLS to `sandboxd` (ADR-004, ADR-013, ADR-014, ADR-020): non-root UID 1000, drop ALL capabilities, RuntimeDefault seccomp, no ServiceAccount token, and ingress NetworkPolicy; gVisor and micro-VM isolation remain target future options.
+- Images listed in the manifest: declarative resources and image building before tasks run are not started yet (§3.2).
+- The controller watches `Run` and `Comparison` resources, schedules task sandboxes, collects results into the artifact sink, and drives GitHub reporting (ADR-018, ADR-021). Users "watch runs and comparisons, not pods".
 
 ### 3.2 Declarative resources
 
@@ -162,7 +158,7 @@ standard environment contract into the sandbox, and tears it down afterwards.
 *(Decided in implementation: empty `resources: []` is implemented as zero-privilege sandboxes: `automountServiceAccountToken: false`, non-root user UID 1000, drop ALL capabilities, RuntimeDefault seccomp, and Pod Security Admission restricted.)*
 
 **[open]** The exact resource type name for a leased cloud project is not given (only the env var
-is shown). Resource types should be an extensible set; the four above are the launch set.
+is shown). Resource types should be an extensible set; the four above are the launch set; declared resources and image builds are not started yet.
 
 ### 3.3 Zero-trust sandboxes
 
@@ -180,6 +176,8 @@ Per task, as shown in the Runs view: `queued` → `provisioning namespace` / `pr
 `running` → `done`. Per sample pod: `queued`, `running`, `done`. A completed run reports
 "N of N samples complete · all sandboxes reclaimed".
 
+*(Decided in implementation: In the Kubernetes API, `Run.status.phase` progresses through `Pending` → `Discovering` → `Discovered` (or `Running` when a model is configured) → `Completed` or `Failed`. Because a Run evaluates a specific sample window and is immutable once terminal (ADR-025), multi-batch adaptive sampling and verdicts are tracked by the `Comparison` resource (`Running` → `Completed`, ADR-018, ADR-026). Sandboxes run per task rather than per sample pod).*
+
 ---
 
 ## 4. Statistics: adaptive, paired sampling
@@ -190,22 +188,24 @@ eval-runner's `$4.10 · 96 samples · 14 min · same verdict`. Treat the problem
 
 ### 4.1 Paired baseline comparison
 
-- Every PR sample is paired with a baseline sample **on the same input**.
+- Every PR sample is paired with a baseline sample **on the same input** (paired by Inspect sample id, ADR-018, #131).
 - The estimand per task is the **delta in success rate** (PR minus base), with a 95% confidence
-  interval computed on the paired differences, so per-input difficulty variance cancels.
+  interval computed on the paired differences (bootstrap percentile CI by default, normal approximation as fallback; P(improvement) via Rubin's Bayesian Bootstrap, ADR-018, ADR-019, [docs/statistics.md](../statistics.md)), so per-input difficulty variance cancels.
 - Baseline samples are cached and reused across PRs sharing the same base commit
-  ("paired against base commit a81d0c4"). **[open]** Cache invalidation policy when the base moves.
+  ("paired against base commit a81d0c4"). Cache invalidation policy when the base moves or batches extend is decided in ADR-023 and ADR-026: baseline Runs and batches are identified by a deterministic batch key covering repo URL, commit SHA, model, task set, and sample window (`sampleRange`). When the merge base moves or configuration changes, a fresh commit SHA or batch key is evaluated, automatically invalidating and replacing the baseline without mutating historical Runs.
 
 ### 4.2 Stopping rule
 
 Sampling for a task continues in batches until one of:
 
-1. The 95% CI on Δ **excludes zero** → `improved` (CI entirely above 0) or `regressed` (entirely below).
-2. The CI is **entirely within the equivalence margin** (shown as ±0.05) → `unchanged`.
+1. The 95% CI on Δ **excludes zero** (with minimum $n \ge 8$ pairs) → `improved` (CI entirely above 0) or `regressed` (entirely below).
+2. The CI is **entirely within the equivalence margin** (default $\pm 0.05$) → `unchanged`.
 3. The per-run budget or sample cap is reached before either → `inconclusive`.
 
 The budget mockup shows the CI narrowing as paired samples accumulate
 (n=4: [−0.42, +0.78] … n=24: [0.00, +0.43] … n=96: [+0.15, +0.31] → "CI clear of zero: IMPROVED, stop").
+
+*(Decided in implementation: `pkg/stats.Decide` implements this stopping rule, requiring `MinPairsToDecide = 8` before CI stopping rules can fire; see ADR-018, ADR-026, and [docs/statistics.md](../statistics.md) §3).*
 
 ### 4.3 Task selection (ROI-driven)
 
@@ -213,41 +213,48 @@ eval-runner chooses *which* evals to run and in what order, prioritising:
 
 - **Changed-file affinity**: evals that touch what the PR changed (e.g. a change under
   `skills/triage/` prioritises `triage/*`). **[open]** How affinity is declared or inferred
-  (manifest field, path conventions, historical sensitivity).
+  (manifest field, path conventions, historical sensitivity) remains explicitly open; today all discovered tasks or explicitly listed `spec.tasks` are evaluated.
 - **Remaining uncertainty**: evals whose current CI on Δ is still wide get more samples;
-  evals already conclusive get none.
+  evals already conclusive get none. (Implemented via adaptive batch sampling in ADR-026, where decided tasks stop sampling and are excluded from subsequent batches).
 
 Sample counts therefore differ per task within a run (e.g. 48 / 32 / 16).
 
 ### 4.4 Verdict semantics
 
-Per-task label: `improved`, `regressed`, `unchanged`, `inconclusive` (plus `running`, `queued`).
+Per-task label: `improved`, `regressed`, `unchanged`, `inconclusive` (plus `running`, `continue`).
 
 Run-level verdict, posted on the PR:
 
 | Verdict | Meaning |
 |---|---|
-| `IMPROVED` | At least one task improved, none regressed. |
-| `REGRESSED` | At least one task regressed. |
-| `UNCHANGED` | All tasks unchanged. |
-| `INCONCLUSIVE` | No regressions found but at least one task is still inconclusive; more samples recommended. |
+| `IMPROVED` | At least one task improved, all other tasks unchanged. |
+| `REGRESSED` | At least one task regressed (and none running). |
+| `UNCHANGED` | All tasks unchanged (statistically equivalent within margin). |
+| `INCONCLUSIVE` | No regressions found but at least one task is still inconclusive (or mixed `improved` + `inconclusive`); more samples recommended. |
 | `RUNNING` | Sampling in progress. |
 
 Every verdict is accompanied by **P(improvement)**, a single posterior probability that the PR is a
-net improvement (e.g. `P(improvement) = 0.98`). **[open]** Exact aggregation rule across tasks
-(the mockups show per-task labels and one run-level P; the combination rule is an implementation
-decision and should be documented).
+net improvement (e.g. `P(improvement) = 0.98`).
+
+*(Decided in implementation: ADR-018, ADR-019, ADR-026, issue #141, and [docs/statistics.md](../statistics.md) §4):*
+- **Verdict Aggregation Rule**: `RUNNING` while any task is running/queued/continue; `REGRESSED` if any task regressed; `INCONCLUSIVE` if any task is inconclusive (or mixed `improved` + `inconclusive`); `IMPROVED` if at least one task improved and all other tasks unchanged; `UNCHANGED` if all tasks unchanged. Headline $P(\text{improvement}) = \min(\max_k P(\text{imp}_k), \min_k P(\text{not\_reg}_k))$ with label floors ($0.999$ for `improved`, $0.975$ for `unchanged`).
+- **Tie Handling (ADR-019)**: Per-task $P(\text{improvement}) = P(\Delta > 0) + 0.5 \cdot P(\Delta = 0)$ (ties split evenly). Computed via Rubin's Bayesian Bootstrap regularised with a uniform prior ($+1, -1$ pseudo-observations). When all tasks are `unchanged`, headline $P = 0.50$. When a comparison contains only `unchanged` and `inconclusive` tasks, headline $P$ is the arithmetic mean across tasks capped by $\min_k P(\text{not\_reg}_k)$, avoiding bias while preventing risk dilution.
+- **Candidate-Failure Cap (Issue #141)**: If a task fails on the candidate side while the baseline succeeded (or was not planned), the candidate task failure caps any `UNCHANGED` or `IMPROVED` verdict to `INCONCLUSIVE` with $P(\text{improvement})$ capped at $0.50$ and the failure explanation recorded in `status.message`.
 
 ### 4.5 Buying more samples
 
 An `INCONCLUSIVE` result offers an action that purchases exactly the samples still needed, with a
-cost estimate: `▶ run 32 more samples (~$1.40)`. Triggering it extends the same run.
+cost estimate: `▶ run 32 more samples (~$1.40)`.
+
+*(Decided in implementation: In the concept mockup, triggering the action "extends the same run". In the implementation, "more samples extends the same run" is implemented as batches that are new immutable Runs owned by a Comparison (ADR-025, ADR-026). A Run is commit × sample window (`sampleRange`); terminal Runs remain strictly immutable. When more samples are needed—either automatically via adaptive batch sampling (`spec.sampling`) or requested via `spec.extraSamples`—the `Comparison` controller schedules new immutable Run pairs evaluating subsequent sample windows (`[highestPosition + 1, nextEnd]`) for undecided tasks, concatenates sample scores, and evaluates the stopping rule. PR comments display `- run N more samples` for inconclusive tasks with remaining dataset samples using `suggestedNext` from `stats.Decide`).*
 
 ### 4.6 Cost and latency accounting
 
 Each sample records tokens, inference cost and latency. Runs report total samples and spend
 (`96 of 3,200 possible samples run · $4.10`), and comparisons report **cost per sample** and
 **p50 latency** deltas (`cost per sample −61% · p50 latency −38%`). These feed the continuum view (§9).
+
+*(Decided in implementation: Model token usage (`input`, `output`, `total`) is parsed from Inspect evaluation logs via `ExtractInspectTokens`, accumulated per task across evaluated runs, and recorded in `Run.status.tasks[].tokens`, `Comparison.status.tasks[].tokens`, and written to `summary.json`; see ADR-026).*
 
 ---
 
@@ -259,14 +266,20 @@ This is the product moment: the verdict lands on the PR, next to the merge butto
 
 A run starts on every pull request (open / push). The PR head is compared with the merge target.
 
+*(Decided in implementation: The `eval-runner-webhook` service handles GitHub `pull_request` (opened, synchronize) and `push` events, creates candidate/baseline Runs and a Comparison with baseline cache reuse; see ADR-023).*
+
 ### 5.2 Check run
 
-A GitHub check named `eval-runner / evals` whose description carries the state:
+A GitHub check named `eval-runner / evals` on `headSHA` whose description carries the state.
 
-- pending: `running`, `running · 24 of 96 samples`, `INCONCLUSIVE · waiting for more samples`
-- success: `IMPROVED · 1 up, 2 unchanged`, `IMPROVED · 2 up, 1 unchanged · cheaper`
-- **[open]** failure mapping: presumably `REGRESSED` fails the check; whether `INCONCLUSIVE`
-  blocks merge should be configurable.
+*(Decided in implementation: ADR-021, ADR-024):*
+- State and conclusion mapping:
+  - `RUNNING`: status `in_progress`, conclusion `""`, description `running · N of M samples` (where M is planned samples across runs)
+  - `IMPROVED`: status `completed`, conclusion `success`, description `IMPROVED · P(improvement) = 0.98`
+  - `UNCHANGED`: status `completed`, conclusion `success`, description `UNCHANGED`
+  - `INCONCLUSIVE`: status `completed`, conclusion `neutral`, description `INCONCLUSIVE · more samples recommended` (neutral avoids blocking PR merges by default)
+  - `REGRESSED`: status `completed`, conclusion `failure`, description `REGRESSED`
+- Check run descriptions differ slightly from the mockup as listed above. Authentication supports GitHub App (preferred) and PAT fallback stored in the controller namespace.
 
 ### 5.3 PR comment (mockup: `ui/pr_comment.html`)
 
@@ -279,6 +292,8 @@ A single bot comment, updated in place as the run progresses, containing:
 3. **Footer**: samples run vs possible and spend; `paired against base commit <sha>`;
    link `trajectories ↗`; optional extra lines such as cost/latency deltas, the
    "run N more samples" action, or provenance (`authored by trajectory-miner · reviewed by you`).
+
+*(Decided in implementation: Single bot comment updated in place using a hidden HTML marker `<!-- eval-runner:comparison:<ns>/<name> -->` and rendered via `pkg/github.RenderComparisonMarkdown`; see ADR-021).*
 
 ### 5.4 PRs eval-runner opens itself
 
@@ -301,10 +316,16 @@ eval-runner (or agents it hosts) author PRs in the same repo, which are then jud
 - Every sample's full trajectory (every prompt, tool call, error, token) is stored in the
   **Inspect log format**, as JSON, in the **user's own bucket**. Nothing proprietary; anything that
   can read JSON can read it.
-- Path layout shown: `gs://acme-evals/runs/<commit>/<task-id>/sample-NNN.json`.
-- Artifacts are written by the controller, not the sandbox (§3.3).
+- Artifacts are written by the controller to the configured `ArtifactSink` (GCS, local directory in Kind, or in-memory), never by untrusted sandboxes (§3.3, ADR-018, ADR-022).
+- **Implemented artifact layout**:
+  - `runs/<commit>/manifest.json`: raw discovered task manifest from `.evals/list` (ADR-022)
+  - `runs/<commit>/<task>/<inspect-log>.json`: full Inspect evaluation log with sample trajectories
+  - `runs/<commit>/<task>/summary.json`: task aggregates, sample range, and token usage (ADR-025, ADR-026)
+  - `comparisons/<name>.json`: paired sample comparisons, deltas, confidence intervals, and aggregate verdict (ADR-018)
 
 ### Trajectory viewer (mockup: `ui/trajectory.html`)
+
+*(Status: Not started. Mockup exists under `docs/concept/ui/trajectory.html`.)*
 
 - Left: sample list for `<task> · base <sha> · N samples`, each row with pass/fail dot, sample id,
   turn count; selectable.
@@ -328,8 +349,8 @@ Because trajectories are open, a coding agent can read them.
    attached" (`P(improvement) = 0.99`).
 
 **[open]** Trigger (on demand from the UI, on a schedule, or after every regressed run) and which
-coding agent runs the miner. The concept treats the miner as a pluggable agent that only needs read
-access to the bucket and permission to open PRs.
+coding agent runs the miner remain explicitly open. (Trajectory mining is not started yet; the concept treats the miner as a pluggable agent that only needs read
+access to the bucket and permission to open PRs).
 
 ---
 
@@ -352,7 +373,7 @@ Every scored trajectory is a labelled training example.
 
 **[open]** Scheduling policy (nightly, on N new trajectories, manual), which trajectories are
 selected (all scored, only base-branch, filtered by score), and the fine-tune registry naming
-(`ft/<name>`). The **Fine-tunes** nav entry in the web app lists trained candidates and their
+(`ft/<name>`) remain explicitly open. (Fine-tunes training loop and continuum measurement are not started yet). The **Fine-tunes** nav entry in the web app lists trained candidates and their
 measurements.
 
 ---
@@ -382,7 +403,7 @@ exactly like a regression. eval-runner tracks **cohorts** so suite expansion and
 separate numbers:
 
 - Each eval belongs to a cohort (default: the original suite). **[open]** Declared in the manifest
-  or by path convention.
+  or by path convention remains explicitly open. (Cohorts tracking is not started yet).
 - The **Cohorts** view charts, for the main branch, **mean score per cohort over time** (weekly,
   95% CI shaded): original suite, each added cohort, and all evals combined, with an annotation at
   the point a cohort was added ("11 customer-reported evals added").
@@ -413,6 +434,8 @@ sample, latency), produced by the same run machinery.
 Mockup `ui/runs.html` shows the app shell. Left nav: **Pull requests · Runs · Trajectories ·
 Cohorts · Fine-tunes**.
 
+*(Decided in implementation: A lightweight dashboard web UI (`cmd/eval-runner-ui`, deployed as `eval-runner-ui`) is implemented and serves HTML views for `Runs` and `Comparisons`. The trajectory viewer, budget/sampling detail chart, cohorts, fine-tunes, and PR surface in the web UI remain target future surfaces; mockups exist under `docs/concept/ui/`).*
+
 | Surface | Mockup | Content |
 |---|---|---|
 | Pull requests | (via `pr_comment.html` / `pr_diff.html`) | List of PRs with their current verdict; links to the run. |
@@ -430,23 +453,19 @@ presentation chrome for the video series and carry no product functionality beyo
 
 ---
 
-## 12. Components (implied architecture)
+## 12. Components (architecture and status)
 
-1. **Controller** (Kubernetes): watches PR events, creates runs, executes `.evals/list` in a
-   discovery sandbox, builds images, provisions declared resources, schedules one pod per sample,
-   pulls artifacts out, tears everything down.
-2. **Sampler / statistician**: owns pairing, batch sizing, task prioritisation, stopping rule,
-   CI and P(improvement) computation, verdict aggregation, cost estimation for "N more samples".
-3. **GitHub app**: check run + single updating PR comment; opens PRs on behalf of the miner and
-   fine-tune flows; receives the "run more samples" action.
-4. **Artifact store**: user-owned bucket, Inspect log format, deterministic path layout; index for
-   the trajectory viewer.
-5. **Web app / API**: the five nav surfaces above.
-6. **Trajectory miner**: pluggable coding agent with bucket read access and PR-opening rights.
-7. **Fine-tune pipeline**: OpenRL integration, candidate registry (`ft/<name>`), pre-measurement on
-   paired samples, notification, activation PR.
-8. **Eval-from-the-wild submitter**: client-side anonymisation, environment capture, scorer
-   synthesis, cohort tagging, PR submission.
+The system is composed of the following components:
+
+1. **Controller (`cmd/eval-runner`)**: Reconciles `Run` (discovery in zero-privilege sandboxes and task sample execution) and `Comparison` (sample pairing by Inspect sample id, adaptive batch extension, stopping rule evaluation, and GitHub PR reporting via in-place comments and check runs). *(Implemented; image `eval-runner`).*
+2. **Webhook Service (`cmd/eval-runner-webhook`)**: Ingress receiver for GitHub `pull_request` and `push` webhooks; validates HMAC signatures, enforces allow-lists, and creates candidate/baseline Runs and Comparisons with baseline cache reuse. *(Implemented; image `eval-runner-webhook`).*
+3. **Web UI (`cmd/eval-runner-ui`)**: Web dashboard serving HTML views of `Runs` and `Comparisons`. *(Implemented; image `eval-runner-ui`).*
+4. **CLI Tool (`cmd/evalstats`)**: Terminal inspection of cluster Runs and Comparisons matching PR-comment table layouts. *(Implemented).*
+5. **Sandboxes & Runtime (`eval-runner-sandbox`)**: Isolated pods running `sandboxd` with mutual TLS (mTLS) and PSA-restricted profile, executing discovery (`.evals/list`) and task sample batches (`inspect eval --limit a-b`). *(Implemented).*
+6. **Artifact Store (`ArtifactSink`)**: Cloud (GCS via Workload Identity) or local/in-memory sink holding `runs/<commit>/manifest.json`, `runs/<commit>/<task>/<inspect-log>.json`, `runs/<commit>/<task>/summary.json`, and `comparisons/<name>.json`. *(Implemented).*
+7. **Trajectory Miner**: Pluggable coding agent that clusters failures and authors skill-fix PRs. *(Target future; not started).*
+8. **Fine-Tune Pipeline**: OpenRL training loop, candidate registry (`ft/<name>`), continuum measurement, activation PRs. *(Target future; not started).*
+9. **Eval-from-the-Wild Submitter**: Client-side anonymisation and PR submission of production failures. *(Target future; not started).*
 
 ---
 
