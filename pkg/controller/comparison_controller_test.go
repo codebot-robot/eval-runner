@@ -31,6 +31,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -1784,6 +1785,254 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		}
 		if !strings.Contains(updated.Status.Reporting.Message, "did not contain an app slug") {
 			t.Errorf("expected reporting.message to contain 'did not contain an app slug', got: %q", updated.Status.Reporting.Message)
+		}
+	})
+}
+
+func TestComparisonReconcile_SampleRangePairing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	taskID := "docs/readme_comprehension"
+
+	t.Run("same range yields full pairs", func(t *testing.T) {
+		fakeGCS := gcs.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		// Both Runs evaluated range 1-10 -> sample IDs "1" to "10"
+		var candScores, baseScores []stats.SampleScore
+		for i := 1; i <= 10; i++ {
+			candScores = append(candScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+			baseScores = append(baseScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		}
+
+		fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+			Data: makeSyntheticInspectLog(taskID, candScores),
+		}
+		fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+			Data: makeSyntheticInspectLog(taskID, baseScores),
+		}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cand-run",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model:       "mockllm/model",
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 10},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:          taskID,
+						Phase:       v1alpha1.TaskPhaseCompleted,
+						LogPath:     "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json",
+						Samples:     10,
+						SampleRange: &v1alpha1.SampleRange{Start: 1, End: 10},
+					},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-run",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model:       "mockllm/model",
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 10},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:          taskID,
+						Phase:       v1alpha1.TaskPhaseCompleted,
+						LogPath:     "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json",
+						Samples:     10,
+						SampleRange: &v1alpha1.SampleRange{Start: 1, End: 10},
+					},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-comp",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-comp"}}
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Failed to get updated comparison: %v", err)
+		}
+
+		if len(updated.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task in comparison, got %d", len(updated.Status.Tasks))
+		}
+		task := updated.Status.Tasks[0]
+		if task.Pairs != 10 {
+			t.Errorf("Expected 10 pairs for identical ranges, got %d", task.Pairs)
+		}
+		if task.Dropped.Candidate != 0 || task.Dropped.Baseline != 0 {
+			t.Errorf("Expected 0 dropped samples, got cand=%d, base=%d", task.Dropped.Candidate, task.Dropped.Baseline)
+		}
+		if task.Label != v1alpha1.ComparisonTaskLabelUnchanged {
+			t.Errorf("Expected label unchanged, got %s", task.Label)
+		}
+	})
+
+	t.Run("disjoint ranges yield zero pairs", func(t *testing.T) {
+		fakeGCS := gcs.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		// Candidate evaluated range 1-5 -> sample IDs "1" to "5"
+		var candScores []stats.SampleScore
+		for i := 1; i <= 5; i++ {
+			candScores = append(candScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		}
+		// Baseline evaluated disjoint range 6-10 -> sample IDs "6" to "10"
+		var baseScores []stats.SampleScore
+		for i := 6; i <= 10; i++ {
+			baseScores = append(baseScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		}
+
+		fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+			Data: makeSyntheticInspectLog(taskID, candScores),
+		}
+		fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+			Data: makeSyntheticInspectLog(taskID, baseScores),
+		}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cand-run",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model:       "mockllm/model",
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 5},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:          taskID,
+						Phase:       v1alpha1.TaskPhaseCompleted,
+						LogPath:     "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json",
+						Samples:     5,
+						SampleRange: &v1alpha1.SampleRange{Start: 1, End: 5},
+					},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-run",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model:       "mockllm/model",
+				SampleRange: &v1alpha1.SampleRange{Start: 6, End: 10},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:          taskID,
+						Phase:       v1alpha1.TaskPhaseCompleted,
+						LogPath:     "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json",
+						Samples:     5,
+						SampleRange: &v1alpha1.SampleRange{Start: 6, End: 10},
+					},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-comp-disjoint",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-comp-disjoint"}}
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Failed to get updated comparison: %v", err)
+		}
+
+		if len(updated.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task in comparison, got %d", len(updated.Status.Tasks))
+		}
+		task := updated.Status.Tasks[0]
+		if task.Pairs != 0 {
+			t.Errorf("Expected 0 pairs for disjoint ranges, got %d", task.Pairs)
+		}
+		if task.Dropped.Candidate != 5 || task.Dropped.Baseline != 5 {
+			t.Errorf("Expected 5 dropped cand and 5 dropped base, got cand=%d, base=%d", task.Dropped.Candidate, task.Dropped.Baseline)
+		}
+		if task.Label != v1alpha1.ComparisonTaskLabelInconclusive {
+			t.Errorf("Expected label inconclusive for disjoint ranges, got %s", task.Label)
 		}
 	})
 }

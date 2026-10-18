@@ -895,3 +895,70 @@ func TestComparisonSummary(t *testing.T) {
 		}
 	})
 }
+
+func TestTemplateRendering_SampleRange(t *testing.T) {
+	t.Run("RunsList_SampleRange", func(t *testing.T) {
+		view := RunsListView{
+			ActiveTab: NavTabRuns,
+			Namespace: "eval-runner",
+			Runs: []RunListItem{
+				{
+					Name:        "test-range-run",
+					Namespace:   "eval-runner",
+					Phase:       v1alpha1.RunPhaseCompleted,
+					PhaseChip:   "good",
+					Tasks:       "1/1",
+					Samples:     8,
+					SampleRange: "samples 9-16",
+					Rates:       "task=0.80",
+					Commit:      "abc1234",
+					Age:         "5m",
+					Link:        "/runs/eval-runner/test-range-run",
+				},
+			},
+		}
+
+		var buf bytes.Buffer
+		if err := tmplRunsList.Execute(&buf, view); err != nil {
+			t.Fatalf("Template execution failed: %v", err)
+		}
+		output := buf.String()
+		if !strings.Contains(output, `<td class="num">samples 9-16</td>`) {
+			t.Errorf("Expected output to contain '<td class=\"num\">samples 9-16</td>', got:\n%s", output)
+		}
+	})
+
+	t.Run("RunDetail_SampleRange", func(t *testing.T) {
+		view := RunDetailView{
+			ActiveTab:    NavTabRuns,
+			Name:         "test-range-run",
+			Namespace:    "eval-runner",
+			Phase:        v1alpha1.RunPhaseCompleted,
+			PhaseChip:    "good",
+			TotalSamples: 8,
+			SampleRange:  "samples 9-16",
+			Tasks: []RunTaskRow{
+				{
+					ID:          "task-1",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					PhaseChip:   "good",
+					Samples:     8,
+					Successes:   7,
+					SampleRange: "samples 9-16",
+				},
+			},
+		}
+
+		var buf bytes.Buffer
+		if err := tmplRunDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("Template execution failed: %v", err)
+		}
+		output := buf.String()
+		if !strings.Contains(output, "8 <span style=\"font-size:13px;font-weight:normal;color:var(--muted)\">(samples 9-16)</span>") {
+			t.Errorf("Expected output to contain '8 (samples 9-16)' in tile, got:\n%s", output)
+		}
+		if !strings.Contains(output, "7/8 <span style=\"font-size:11px;color:var(--muted)\">(samples 9-16)</span>") {
+			t.Errorf("Expected output to contain '7/8 (samples 9-16)' in table, got:\n%s", output)
+		}
+	})
+}

@@ -265,7 +265,7 @@ const runsListTemplate = `
               <td><span class="mono" style="font-size:13px">{{ .Namespace }}</span></td>
               <td><span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span></td>
               <td class="num">{{ .Tasks }}</td>
-              <td class="num">{{ .Samples }}</td>
+              <td class="num">{{ if .SampleRange }}{{ .SampleRange }}{{ else }}{{ .Samples }}{{ end }}</td>
               <td class="mono" style="font-size:13px">{{ if .Rates }}{{ .Rates }}{{ else }}—{{ end }}</td>
               <td><span class="mono" style="font-size:13px">{{ if .Commit }}{{ .Commit }}{{ else }}—{{ end }}</span></td>
               <td style="color:var(--muted);font-size:13px">{{ .Age }}</td>
@@ -352,7 +352,7 @@ const runDetailTemplate = `
           </div>
           <div class="meta-tile">
             <div class="label">Total Samples</div>
-            <div class="value num">{{ .TotalSamples }}</div>
+            <div class="value num">{{ .TotalSamples }}{{ if .SampleRange }} <span style="font-size:13px;font-weight:normal;color:var(--muted)">({{ .SampleRange }})</span>{{ end }}</div>
           </div>
           <div class="meta-tile">
             <div class="label">Mean Success Rate</div>
@@ -403,7 +403,7 @@ const runDetailTemplate = `
                   <span style="color:var(--muted)">—</span>
                   {{ end }}
                 </td>
-                <td class="num">{{ if gt .Samples 0 }}{{ .Successes }}/{{ .Samples }}{{ else }}—{{ end }}</td>
+                <td class="num">{{ if gt .Samples 0 }}{{ .Successes }}/{{ .Samples }}{{ if .SampleRange }} <span style="font-size:11px;color:var(--muted)">({{ .SampleRange }})</span>{{ end }}{{ else }}—{{ end }}</td>
                 <td class="mono" style="font-size:13px">{{ if .Method }}{{ .Method }}{{ else }}—{{ end }}</td>
                 <td>
                   {{ if .LogPath }}

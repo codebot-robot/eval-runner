@@ -689,6 +689,12 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, nil
 	}
 
+	// Validate RunSpec constraints (mutual exclusivity of limit and sampleRange, valid range bounds).
+	if err := ValidateRunSpec(run.Spec); err != nil {
+		logger.Error(err, "invalid run spec", "run", run.Name)
+		return r.failRun(ctx, &run, nil, fmt.Sprintf("invalid spec: %v", err))
+	}
+
 	// Ensure finalizer is attached before creating or processing sandbox.
 	if !controllerutil.ContainsFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox) {
 		controllerutil.AddFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox)
@@ -1366,47 +1372,53 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 			manifestMap[t.ID] = t
 		}
 	}
+	effRange := EffectiveSampleRange(spec)
 
 	if len(spec.Tasks) > 0 {
 		for _, taskID := range spec.Tasks {
 			task, exists := manifestMap[taskID]
 			if !exists {
 				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:      taskID,
-					Phase:   v1alpha1.TaskPhaseFailed,
-					Message: "task not found in manifest",
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseFailed,
+					Message:     "task not found in manifest",
+					SampleRange: effRange,
 				})
 				continue
 			}
 
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:      taskID,
-					Phase:   v1alpha1.TaskPhaseFailed,
-					Message: "resources not supported yet",
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseFailed,
+					Message:     "resources not supported yet",
+					SampleRange: effRange,
 				})
 				continue
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
-				ID:    taskID,
-				Phase: v1alpha1.TaskPhasePending,
+				ID:          taskID,
+				Phase:       v1alpha1.TaskPhasePending,
+				SampleRange: effRange,
 			})
 		}
 	} else if manifest != nil {
 		for _, task := range manifest.Tasks {
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:      task.ID,
-					Phase:   v1alpha1.TaskPhaseFailed,
-					Message: "resources not supported yet",
+					ID:          task.ID,
+					Phase:       v1alpha1.TaskPhaseFailed,
+					Message:     "resources not supported yet",
+					SampleRange: effRange,
 				})
 				continue
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
-				ID:    task.ID,
-				Phase: v1alpha1.TaskPhasePending,
+				ID:          task.ID,
+				Phase:       v1alpha1.TaskPhasePending,
+				SampleRange: effRange,
 			})
 		}
 	}
@@ -1864,6 +1876,11 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].SuccessRateCI = res.successRateCI
 				status.Tasks[i].Message = res.message
 				status.Tasks[i].LogPath = res.logPath
+				if res.sampleRange != nil {
+					status.Tasks[i].SampleRange = res.sampleRange
+				} else if status.Tasks[i].SampleRange == nil {
+					status.Tasks[i].SampleRange = EffectiveSampleRange(run.Spec)
+				}
 			}
 		}
 		status.Summary = ComputeRunSummary(status.Tasks)
@@ -1896,11 +1913,13 @@ type taskExecutionResult struct {
 	successRateCI *v1alpha1.ConfidenceInterval
 	message       string
 	logPath       string
+	sampleRange   *v1alpha1.SampleRange
 }
 
 func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) taskExecutionResult {
 	startTime := r.now()
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
+	effRange := EffectiveSampleRange(run.Spec)
 
 	var targetTask *v1alpha1.ManifestTask
 	manifest, manifestErr := r.getOrLoadManifest(ctx, run)
@@ -1916,9 +1935,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 	if targetTask == nil {
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: "task definition not found in manifest",
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     "task definition not found in manifest",
+			sampleRange: effRange,
 		}
 	}
 
@@ -1933,9 +1953,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	authToken, tokenErr := r.ensureTaskAuthToken(execCtx, run, taskID, sbKey)
 	if tokenErr != nil {
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: fmt.Sprintf("failed to get task auth token: %v", tokenErr),
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     fmt.Sprintf("failed to get task auth token: %v", tokenErr),
+			sampleRange: effRange,
 		}
 	}
 
@@ -2068,9 +2089,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 		logger.Error(errors.New(msg), "Task step git checkout failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
 		}
 	}
 
@@ -2080,10 +2102,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		cwd = filepath.Join("repo", targetTask.Workdir)
 	}
 
-	inspectCmd := []string{"inspect", "eval", targetTask.Spec, "--model", run.Spec.Model, "--log-dir", "/out", "--log-format", "json"}
-	if run.Spec.Limit != nil {
-		inspectCmd = append(inspectCmd, "--limit", strconv.Itoa(*run.Spec.Limit))
-	}
+	inspectCmd := InspectEvalArgs(*targetTask, run.Spec)
 
 	logger.Info("Starting task step 3: inspect eval", "command", inspectCmd, "cwd", cwd)
 	inspectRes, inspectErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
@@ -2095,9 +2114,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			msg := fmt.Sprintf("step inspect eval failed: unauthenticated: %v", inspectErr)
 			logger.Error(inspectErr, "Task step inspect eval failed", "task", taskID)
 			return taskExecutionResult{
-				taskID:  taskID,
-				phase:   v1alpha1.TaskPhaseFailed,
-				message: msg,
+				taskID:      taskID,
+				phase:       v1alpha1.TaskPhaseFailed,
+				message:     msg,
+				sampleRange: effRange,
 			}
 		}
 		var stderr string
@@ -2127,9 +2147,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 		logger.Error(errors.New(msg), "Task step inspect eval failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
 		}
 	}
 
@@ -2141,9 +2162,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		msg := fmt.Sprintf("failed to list /out: %v", lsErr)
 		logger.Error(lsErr, "Task step list /out failed", "task", taskID)
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
 		}
 	}
 
@@ -2159,9 +2181,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		msg := "no valid JSON log found in /out"
 		logger.Error(errors.New(msg), "Task step find JSON log failed", "task", taskID)
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
 		}
 	}
 
@@ -2173,9 +2196,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		msg := fmt.Sprintf("failed to read inspect log: %v", readErr)
 		logger.Error(readErr, "Task step read inspect log failed", "task", taskID)
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
 		}
 	}
 
@@ -2185,14 +2209,19 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		msg := fmt.Sprintf("failed to parse inspect log: %v", parseErr)
 		logger.Error(parseErr, "Task step parse inspect log failed", "task", taskID)
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
 		}
 	}
 
 	// Step 6: Store artifact
 	finishTime := r.now()
+	var artifactSampleRange *artifacts.SampleRange
+	if effRange != nil {
+		artifactSampleRange = &artifacts.SampleRange{Start: effRange.Start, End: effRange.End}
+	}
 	meta := artifacts.RunMetadata{
 		RunName:      run.Name,
 		RunNamespace: run.Namespace,
@@ -2204,17 +2233,19 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		MeanScore:    agg.MeanScore,
 		StartedAt:    &startTime,
 		FinishedAt:   &finishTime,
+		SampleRange:  artifactSampleRange,
 	}
 	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
 	if storeErr != nil {
 		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
 		return taskExecutionResult{
-			taskID:    taskID,
-			phase:     v1alpha1.TaskPhaseFailed,
-			samples:   agg.Samples,
-			successes: agg.Successes,
-			meanScore: agg.MeanScore,
-			message:   fmt.Sprintf("failed to store artifact: %v", storeErr),
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			samples:     agg.Samples,
+			successes:   agg.Successes,
+			meanScore:   agg.MeanScore,
+			message:     fmt.Sprintf("failed to store artifact: %v", storeErr),
+			sampleRange: effRange,
 		}
 	}
 
@@ -2222,10 +2253,11 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		msg := "no scored samples"
 		logger.Error(errors.New(msg), "Task completed without scored samples", "task", taskID)
 		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
-			logPath: logPath,
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			logPath:     logPath,
+			sampleRange: effRange,
 		}
 	}
 
@@ -2263,6 +2295,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		successRate:   successRate,
 		successRateCI: successRateCI,
 		logPath:       logPath,
+		sampleRange:   effRange,
 	}
 }
 
@@ -2433,6 +2466,56 @@ func truncateMessage(msg string, maxBytes int) string {
 		cutoff--
 	}
 	return msg[:cutoff] + suffix
+}
+
+// ValidateRunSpec validates mutual exclusivity of limit and sampleRange, and range constraints.
+func ValidateRunSpec(spec v1alpha1.RunSpec) error {
+	if spec.Limit != nil && spec.SampleRange != nil {
+		return errors.New("limit and sampleRange are mutually exclusive")
+	}
+	if spec.Limit != nil && *spec.Limit < 1 {
+		return fmt.Errorf("limit must be >= 1, got %d", *spec.Limit)
+	}
+	if spec.SampleRange != nil {
+		if spec.SampleRange.Start < 1 {
+			return fmt.Errorf("sampleRange.start must be >= 1, got %d", spec.SampleRange.Start)
+		}
+		if spec.SampleRange.End < spec.SampleRange.Start {
+			return fmt.Errorf("sampleRange.end (%d) must be >= start (%d)", spec.SampleRange.End, spec.SampleRange.Start)
+		}
+	}
+	return nil
+}
+
+// EffectiveSampleRange returns the effective sample window for a RunSpec.
+// If SampleRange is set, it is returned.
+// If Limit is set, a 1-based range {1, Limit} is returned.
+// If neither is set, nil is returned.
+func EffectiveSampleRange(spec v1alpha1.RunSpec) *v1alpha1.SampleRange {
+	if spec.SampleRange != nil {
+		return &v1alpha1.SampleRange{
+			Start: spec.SampleRange.Start,
+			End:   spec.SampleRange.End,
+		}
+	}
+	if spec.Limit != nil {
+		return &v1alpha1.SampleRange{
+			Start: 1,
+			End:   *spec.Limit,
+		}
+	}
+	return nil
+}
+
+// InspectEvalArgs builds the CLI arguments for inspect eval.
+func InspectEvalArgs(targetTask v1alpha1.ManifestTask, spec v1alpha1.RunSpec) []string {
+	cmd := []string{"inspect", "eval", targetTask.Spec, "--model", spec.Model, "--log-dir", "/out", "--log-format", "json"}
+	if spec.SampleRange != nil {
+		cmd = append(cmd, "--limit", fmt.Sprintf("%d-%d", spec.SampleRange.Start, spec.SampleRange.End))
+	} else if spec.Limit != nil {
+		cmd = append(cmd, "--limit", strconv.Itoa(*spec.Limit))
+	}
+	return cmd
 }
 
 // DefaultMaxRatesSummaryLength is the maximum length of the compact rates printer column string before truncation.

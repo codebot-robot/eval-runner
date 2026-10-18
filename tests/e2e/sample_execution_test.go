@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 )
 
@@ -237,6 +238,174 @@ spec:
 
 		// Clean up
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
+	})
+
+	t.Run("SampleRangeExecution", func(t *testing.T) {
+		run1Name := "sample-range-run-1"
+		run2Name := "sample-range-run-2"
+		candRunName := "sample-range-run-cand"
+		compName := "sample-range-comparison"
+
+		// Clean up any previous runs or comparisons
+		harness.runCmd("kubectl", "delete", "run", run1Name, run2Name, candRunName, "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
+
+		run1Manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 1
+    end: 5
+`, run1Name, commit)
+
+		run2Manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 6
+    end: 10
+`, run2Name, commit)
+
+		runCandManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 1
+    end: 5
+`, candRunName, commit)
+
+		compManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Comparison
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  baseline:
+    run: %s
+  candidate:
+    run: %s
+  equivalenceMargin: 0.05
+`, compName, run1Name, candRunName)
+
+		harness.KubectlApplyContent(run1Manifest)
+		harness.KubectlApplyContent(run2Manifest)
+		harness.KubectlApplyContent(runCandManifest)
+		harness.KubectlApplyContent(compManifest)
+
+		// Wait for all Runs to reach Completed
+		run1 := harness.WaitForRunPhase("eval-runner", run1Name, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+		run2 := harness.WaitForRunPhase("eval-runner", run2Name, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+		harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		// Assert status.tasks[].samples is 5 each
+		if len(run1.Status.Tasks) == 0 {
+			t.Fatalf("Expected tasks in run1 status.tasks, got 0")
+		}
+		for _, task := range run1.Status.Tasks {
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("Expected run1 task %s to be Completed, got %s", task.ID, task.Phase)
+			}
+			if task.Samples != 5 {
+				t.Errorf("Expected run1 task %s to have samples=5, got %d", task.ID, task.Samples)
+			}
+			if task.SampleRange == nil || task.SampleRange.Start != 1 || task.SampleRange.End != 5 {
+				t.Errorf("Expected run1 task %s to have sampleRange {1, 5}, got %+v", task.ID, task.SampleRange)
+			}
+		}
+
+		if len(run2.Status.Tasks) == 0 {
+			t.Fatalf("Expected tasks in run2 status.tasks, got 0")
+		}
+		for _, task := range run2.Status.Tasks {
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("Expected run2 task %s to be Completed, got %s", task.ID, task.Phase)
+			}
+			if task.Samples != 5 {
+				t.Errorf("Expected run2 task %s to have samples=5, got %d", task.ID, task.Samples)
+			}
+			if task.SampleRange == nil || task.SampleRange.Start != 6 || task.SampleRange.End != 10 {
+				t.Errorf("Expected run2 task %s to have sampleRange {6, 10}, got %+v", task.ID, task.SampleRange)
+			}
+		}
+
+		// Read stored Inspect logs for run1 and run2 to assert disjoint sample IDs
+		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
+		loadInspectSampleIDs := func(task v1alpha1.TaskStatus) map[string]bool {
+			logSuffix := strings.TrimPrefix(task.LogPath, "/tmp/")
+			findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -path '*/%s' -type f", logSuffix)
+			foundFile := strings.TrimSpace(harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd))
+			if foundFile == "" {
+				t.Fatalf("Log file not found on node for %s", task.LogPath)
+			}
+			firstFile := strings.Split(foundFile, "\n")[0]
+			logContent := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
+			scores, err := artifacts.ParseInspectSampleScores([]byte(logContent))
+			if err != nil {
+				t.Fatalf("Failed to parse sample scores for %s: %v", task.ID, err)
+			}
+			ids := make(map[string]bool)
+			for _, s := range scores {
+				ids[s.ID] = true
+			}
+			return ids
+		}
+
+		idsRun1 := loadInspectSampleIDs(run1.Status.Tasks[0])
+		idsRun2 := loadInspectSampleIDs(run2.Status.Tasks[0])
+
+		if len(idsRun1) != 5 {
+			t.Errorf("Expected 5 sample IDs in run1, got %d: %+v", len(idsRun1), idsRun1)
+		}
+		if len(idsRun2) != 5 {
+			t.Errorf("Expected 5 sample IDs in run2, got %d: %+v", len(idsRun2), idsRun2)
+		}
+
+		for id := range idsRun1 {
+			if idsRun2[id] {
+				t.Errorf("Expected disjoint sample IDs, but ID %s appears in both run1 and run2", id)
+			}
+		}
+
+		// Wait for Comparison to reach Completed phase
+		comp := harness.WaitForComparisonPhase("eval-runner", compName, string(v1alpha1.ComparisonPhaseCompleted), 60*time.Second)
+		if len(comp.Status.Tasks) == 0 {
+			t.Fatalf("Expected comparison tasks, got 0")
+		}
+		for _, task := range comp.Status.Tasks {
+			if task.Pairs != 5 {
+				t.Errorf("Expected task %s comparison pairs=5, got %d", task.ID, task.Pairs)
+			}
+		}
+
+		// Clean up
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", run1Name, 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", run2Name, 30*time.Second)
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
 	})
 

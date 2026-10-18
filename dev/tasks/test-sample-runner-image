@@ -36,4 +36,24 @@ docker run --rm sample-runner-test:latest python -c "import google.genai, openai
 echo "=== Verifying inspect eval --help ==="
 docker run --rm sample-runner-test:latest inspect eval --help >/dev/null
 
+echo "=== Verifying inspect eval --limit range syntax ==="
+docker run --rm sample-runner-test:latest bash -c '
+cat << "EOF" > /tmp/task.py
+from inspect_ai import Task, task
+from inspect_ai.dataset import Sample, MemoryDataset
+from inspect_ai.scorer import match
+from inspect_ai.solver import generate
+
+@task
+def sample_task():
+    return Task(
+        dataset=[Sample(input=f"Question {i}", target=f"Answer {i}", id=f"sample-{i}") for i in range(1, 11)],
+        solver=[generate()],
+        scorer=match(),
+    )
+EOF
+cd /tmp
+inspect eval task.py --model mockllm/model --limit 1-5 --log-dir /tmp/logs >/dev/null
+'
+
 echo "=== sample-runner image smoke test passed successfully ==="

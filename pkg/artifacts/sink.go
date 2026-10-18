@@ -16,6 +16,7 @@ package artifacts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -246,6 +247,26 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 
 	if err := os.WriteFile(targetPath, data, 0644); err != nil {
 		return "", err
+	}
+
+	summary := TaskSummary{
+		TaskID:      meta.TaskID,
+		Model:       meta.Model,
+		Commit:      meta.Commit,
+		Samples:     meta.Samples,
+		Successes:   meta.Successes,
+		MeanScore:   meta.MeanScore,
+		StartedAt:   meta.StartedAt,
+		FinishedAt:  meta.FinishedAt,
+		SampleRange: meta.SampleRange,
+	}
+	summaryBytes, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal summary.json: %w", err)
+	}
+	summaryBytes = append(summaryBytes, '\n')
+	if err := os.WriteFile(filepath.Join(targetDir, "summary.json"), summaryBytes, 0644); err != nil {
+		return "", fmt.Errorf("failed to write summary.json: %w", err)
 	}
 
 	return targetPath, nil

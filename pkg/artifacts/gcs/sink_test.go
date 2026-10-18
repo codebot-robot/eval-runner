@@ -53,6 +53,7 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 		MeanScore:    &score,
 		StartedAt:    &startTime,
 		FinishedAt:   &finishTime,
+		SampleRange:  &artifacts.SampleRange{Start: 1, End: 10},
 	}
 
 	logFilename := "2026-10-17_readme_eval.json"
@@ -116,6 +117,9 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 	}
 	if summary.MeanScore == nil || *summary.MeanScore != 0.85 {
 		t.Errorf("Expected MeanScore 0.85, got %v", summary.MeanScore)
+	}
+	if summary.SampleRange == nil || summary.SampleRange.Start != 1 || summary.SampleRange.End != 10 {
+		t.Errorf("Expected SampleRange {1, 10}, got %+v", summary.SampleRange)
 	}
 	if summary.StartedAt == nil || !summary.StartedAt.Equal(startTime) {
 		t.Errorf("Expected StartedAt %v, got %v", startTime, summary.StartedAt)

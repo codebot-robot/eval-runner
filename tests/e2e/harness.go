@@ -552,6 +552,36 @@ func (h *Harness) WaitForComparisonVerdict(namespace, compName, expectedVerdict 
 	}
 }
 
+func (h *Harness) WaitForComparisonPhase(namespace, compName, expectedPhase string, timeout time.Duration) *v1alpha1.Comparison {
+	h.t.Logf("Waiting for Comparison %s/%s to reach phase %s (timeout %v)", namespace, compName, expectedPhase, timeout)
+	start := time.Now()
+	var lastComp v1alpha1.Comparison
+	var lastErr error
+	for {
+		cmd := exec.Command("kubectl", "get", "comparison", compName, "-n", namespace, "-o", "json")
+		out, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+		} else {
+			var c v1alpha1.Comparison
+			if err := json.Unmarshal(out, &c); err != nil {
+				lastErr = err
+			} else {
+				lastComp = c
+				if string(c.Status.Phase) == expectedPhase {
+					return &c
+				}
+			}
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Comparison %s/%s to reach phase %s; last verdict: %s, phase: %s, message: %s, lastErr: %v",
+				namespace, compName, expectedPhase, lastComp.Status.Verdict, lastComp.Status.Phase, lastComp.Status.Message, lastErr)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 func (h *Harness) WaitForSandboxDeleted(namespace, sandboxName string, timeout time.Duration) {
 	h.t.Logf("Waiting for Sandbox %s/%s to be deleted (timeout %v)", namespace, sandboxName, timeout)
 	start := time.Now()

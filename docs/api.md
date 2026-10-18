@@ -109,7 +109,10 @@ status:
 | `repo.commit` | `string` | The exact git commit SHA (7 to 64 hex characters) to check out. **Required.** |
 | `model` | `string` | Inspect model identifier (e.g. `mockllm/model`, `google/gemini-3.5-flash-lite`). If empty, the Run stops after discovery. |
 | `tasks` | `[]string` | Optional allow-list of task IDs to run. Default: all tasks declaring `resources: []`. |
-| `limit` | `*int` | Optional per-task cap on samples (passed to Inspect as `--limit`) for cost and time control. |
+| `limit` | `*int` | Optional per-task cap on samples (passed to Inspect as `--limit`) for cost and time control. Mutually exclusive with `sampleRange`. |
+| `sampleRange` | `*SampleRange` | Optional 1-based inclusive window of samples to evaluate (`{start, end}`). Passed to Inspect as `--limit START-END`. Mutually exclusive with `limit`. |
+| `sampleRange.start` | `int` | 1-based inclusive start index in the dataset order ($\ge 1$). |
+| `sampleRange.end` | `int` | 1-based inclusive end index in the dataset order ($\ge \text{start}$). |
 
 ## Status (`status`)
 
@@ -150,6 +153,7 @@ status:
 | `successRateCI` | `*ConfidenceInterval` | 95% confidence interval for success rate. See [ConfidenceInterval](#confidenceinterval) and [Statistics](statistics.md). |
 | `message` | `string` | Failure detail or bounded error information if the task failed. |
 | `logPath` | `string` | Storage path or URI where the raw Inspect log was stored by the artifact sink. |
+| `sampleRange` | `*SampleRange` | Sample window evaluated for this task (`{start, end}`). |
 
 ### ConfidenceInterval
 
