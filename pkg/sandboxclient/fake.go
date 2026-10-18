@@ -18,6 +18,8 @@ import (
 	"context"
 	"crypto/tls"
 	"sync"
+
+	"github.com/gke-labs/eval-runner/pkg/discovery"
 )
 
 // FakeClient is a test fake implementing Client and Factory.
@@ -54,6 +56,10 @@ type FakeClient struct {
 	LastPodIP     string
 	LastAuthToken string
 	LastTLSConfig *tls.Config
+
+	StdoutLimit   int64
+	StderrLimit   int64
+	ReadFileLimit int64
 }
 
 // NewFakeClient returns a new FakeClient.
@@ -71,6 +77,15 @@ func (f *FakeClient) NewClient(podIP string, opts ...Option) (Client, error) {
 	f.LastPodIP = podIP
 	f.LastAuthToken = o.AuthToken
 	f.LastTLSConfig = o.TLSConfig
+	if o.StdoutLimit > 0 {
+		f.StdoutLimit = o.StdoutLimit
+	}
+	if o.StderrLimit > 0 {
+		f.StderrLimit = o.StderrLimit
+	}
+	if o.ReadFileLimit > 0 {
+		f.ReadFileLimit = o.ReadFileLimit
+	}
 	f.mu.Unlock()
 	return f, nil
 }
@@ -81,12 +96,19 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 	f.ReadFileCalls = append(f.ReadFileCalls, path)
 	fn := f.ReadFileFn
 	inspectLog := f.InspectLog
+	readFileLimit := f.ReadFileLimit
 	f.mu.Unlock()
 
 	if fn != nil {
 		return fn(ctx, path)
 	}
 	if inspectLog != nil {
+		if readFileLimit > 0 && int64(len(inspectLog)) > readFileLimit {
+			return nil, &discovery.LimitError{
+				Stream: "file",
+				Limit:  readFileLimit,
+			}
+		}
 		return inspectLog, nil
 	}
 	return nil, nil
@@ -112,10 +134,21 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 	f.Calls = append(f.Calls, cfg)
 	call := f.CallCount
 	execFn := f.ExecFn
+	stdoutLimit := f.StdoutLimit
+	if stdoutLimit <= 0 {
+		stdoutLimit = discovery.MaxStdoutBytes
+	}
 	f.mu.Unlock()
 
 	if execFn != nil {
-		return execFn(call, ctx, cfg)
+		res, err := execFn(call, ctx, cfg)
+		if err != nil && isResourceExhausted(err) {
+			return res, &discovery.LimitError{
+				Stream: "stdout",
+				Limit:  stdoutLimit,
+			}
+		}
+		return res, err
 	}
 
 	if len(cfg.Command) == 0 {
@@ -129,6 +162,12 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 
 	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
 		if f.CloneErr != nil {
+			if isResourceExhausted(f.CloneErr) {
+				return nil, &discovery.LimitError{
+					Stream: "stdout",
+					Limit:  stdoutLimit,
+				}
+			}
 			return nil, f.CloneErr
 		}
 		return &ExecuteResult{ExitCode: f.CloneExit, Stderr: f.CloneStderr}, nil
@@ -136,6 +175,12 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 
 	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "checkout" {
 		if f.CheckoutErr != nil {
+			if isResourceExhausted(f.CheckoutErr) {
+				return nil, &discovery.LimitError{
+					Stream: "stdout",
+					Limit:  stdoutLimit,
+				}
+			}
 			return nil, f.CheckoutErr
 		}
 		return &ExecuteResult{ExitCode: f.CheckoutExit, Stderr: f.CheckoutStderr}, nil
@@ -143,6 +188,12 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 
 	if cmd0 == "./.evals/list" {
 		if f.ListErr != nil {
+			if isResourceExhausted(f.ListErr) {
+				return nil, &discovery.LimitError{
+					Stream: "stdout",
+					Limit:  stdoutLimit,
+				}
+			}
 			return nil, f.ListErr
 		}
 		return &ExecuteResult{ExitCode: 0, Stdout: f.ListStdout, Stderr: f.ListStderr}, nil
@@ -150,6 +201,12 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 
 	if cmd0 == "inspect" {
 		if f.InspectErr != nil {
+			if isResourceExhausted(f.InspectErr) {
+				return nil, &discovery.LimitError{
+					Stream: "stdout",
+					Limit:  stdoutLimit,
+				}
+			}
 			return nil, f.InspectErr
 		}
 		return &ExecuteResult{ExitCode: f.InspectExit, Stdout: f.InspectStdout, Stderr: f.InspectStderr}, nil

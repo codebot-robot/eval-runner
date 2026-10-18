@@ -17,6 +17,7 @@ package sandboxclient
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,9 +27,11 @@ import (
 
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
@@ -44,6 +47,10 @@ const (
 
 	// DefaultReadFileLimit is the default maximum size for files read via REST (10 MiB).
 	DefaultReadFileLimit = 10 * 1024 * 1024
+
+	// DefaultGRPCHeadroom is the additional buffer allocated for gRPC message overhead and
+	// small excess output before gRPC's MaxCallRecvMsgSize triggers ResourceExhausted (4 MiB).
+	DefaultGRPCHeadroom = 4 * 1024 * 1024
 )
 
 // ProcessConfig configures a process execution in the sandbox.
@@ -87,14 +94,15 @@ func (f FactoryFunc) NewClient(podIP string, opts ...Option) (Client, error) {
 
 // ClientOptions configures a Client instance.
 type ClientOptions struct {
-	GRPCPort      int
-	RESTPort      int
-	StdoutLimit   int64
-	StderrLimit   int64
-	ReadFileLimit int64
-	AuthToken     string
-	TLSConfig     *tls.Config
-	HTTPClient    *http.Client
+	GRPCPort           int
+	RESTPort           int
+	StdoutLimit        int64
+	StderrLimit        int64
+	ReadFileLimit      int64
+	MaxCallRecvMsgSize int
+	AuthToken          string
+	TLSConfig          *tls.Config
+	HTTPClient         *http.Client
 }
 
 // Option configures ClientOptions.
@@ -139,6 +147,13 @@ func WithStderrLimit(limit int64) Option {
 func WithReadFileLimit(limit int64) Option {
 	return func(o *ClientOptions) {
 		o.ReadFileLimit = limit
+	}
+}
+
+// WithMaxCallRecvMsgSize overrides the maximum message size the gRPC client can receive.
+func WithMaxCallRecvMsgSize(size int) Option {
+	return func(o *ClientOptions) {
+		o.MaxCallRecvMsgSize = size
 	}
 }
 
@@ -200,6 +215,12 @@ func New(podIP string, opts ...Option) (Client, error) {
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
+	maxRecvMsgSize := options.MaxCallRecvMsgSize
+	if maxRecvMsgSize <= 0 {
+		maxRecvMsgSize = int(options.StdoutLimit + options.StderrLimit + DefaultGRPCHeadroom)
+	}
+	dialOpts = append(dialOpts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgSize)))
+
 	if options.AuthToken != "" {
 		token := options.AuthToken
 		dialOpts = append(dialOpts,
@@ -266,11 +287,6 @@ func (c *sandboxdClient) Execute(ctx context.Context, cfg ProcessConfig) (*Execu
 		req.Config.Cwd = &cfg.Cwd
 	}
 
-	resp, err := c.processClient.Execute(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
 	stdoutLimit := c.stdoutLimit
 	if stdoutLimit <= 0 {
 		stdoutLimit = discovery.MaxStdoutBytes
@@ -278,6 +294,17 @@ func (c *sandboxdClient) Execute(ctx context.Context, cfg ProcessConfig) (*Execu
 	stderrLimit := c.stderrLimit
 	if stderrLimit <= 0 {
 		stderrLimit = discovery.MaxStderrBytes
+	}
+
+	resp, err := c.processClient.Execute(ctx, req)
+	if err != nil {
+		if isResourceExhausted(err) {
+			return nil, &discovery.LimitError{
+				Stream: "stdout",
+				Limit:  stdoutLimit,
+			}
+		}
+		return nil, err
 	}
 
 	stdoutWriter := discovery.NewLimitWriter(stdoutLimit, "stdout")
@@ -300,6 +327,17 @@ func (c *sandboxdClient) Execute(ctx context.Context, cfg ProcessConfig) (*Execu
 	}
 
 	return result, nil
+}
+
+func isResourceExhausted(err error) bool {
+	if status.Code(err) == codes.ResourceExhausted {
+		return true
+	}
+	var s interface{ GRPCStatus() *status.Status }
+	if errors.As(err, &s) {
+		return s.GRPCStatus().Code() == codes.ResourceExhausted
+	}
+	return false
 }
 
 func (c *sandboxdClient) ReadFile(ctx context.Context, path string) ([]byte, error) {
