@@ -750,3 +750,131 @@ func TestServerSortTiebreaker(t *testing.T) {
 		}
 	})
 }
+
+func TestServerRunsList_SampleRange(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "range-run",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/example/repo",
+				Commit: "abcdef123456",
+			},
+			Model: "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{
+				Start: 9,
+				End:   16,
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Summary: &v1alpha1.RunSummary{
+				Tasks:          "1/1",
+				TasksCompleted: 1,
+				TasksTotal:     1,
+				TotalSamples:   8,
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "triage/task",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					Samples: 8,
+					SampleRange: &v1alpha1.SampleRange{
+						Start: 9,
+						End:   16,
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		Build()
+
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "samples 9-16") {
+		t.Errorf("expected Runs view to contain 'samples 9-16', got body:\n%s", body)
+	}
+}
+
+func TestServerRunDetail_SampleRange(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "range-run-detail",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/example/repo",
+				Commit: "abcdef123456",
+			},
+			Model: "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{
+				Start: 9,
+				End:   16,
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Summary: &v1alpha1.RunSummary{
+				Tasks:          "1/1",
+				TasksCompleted: 1,
+				TasksTotal:     1,
+				TotalSamples:   8,
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "triage/task",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					Samples: 8,
+					SampleRange: &v1alpha1.SampleRange{
+						Start: 9,
+						End:   16,
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		Build()
+
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/range-run-detail", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "samples 9-16") {
+		t.Errorf("expected Run Detail view to contain 'samples 9-16', got body:\n%s", body)
+	}
+}

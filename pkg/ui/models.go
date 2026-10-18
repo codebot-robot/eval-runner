@@ -34,16 +34,17 @@ const (
 
 // RunListItem represents a single run row in the /runs list view.
 type RunListItem struct {
-	Name      string
-	Namespace string
-	Phase     v1alpha1.RunPhase
-	PhaseChip string // good, bad, warn, neutral, pending
-	Tasks     string // e.g. "2/2"
-	Samples   int
-	Rates     string
-	Commit    string // short commit
-	Age       string // e.g. "14m"
-	Link      string // "/runs/<ns>/<name>"
+	Name        string
+	Namespace   string
+	Phase       v1alpha1.RunPhase
+	PhaseChip   string // good, bad, warn, neutral, pending
+	Tasks       string // e.g. "2/2"
+	Samples     int
+	SampleRange string // compact, e.g. "samples 9-16"
+	Rates       string
+	Commit      string // short commit
+	Age         string // e.g. "14m"
+	Link        string // "/runs/<ns>/<name>"
 }
 
 // RunsListView is the view model for the /runs list page.
@@ -63,20 +64,21 @@ type RunsListView struct {
 
 // RunTaskRow represents a single eval task in the /runs/<ns>/<name> detail view.
 type RunTaskRow struct {
-	ID        string
-	Phase     v1alpha1.TaskPhase
-	PhaseChip string // good, bad, warn, neutral, pending
-	RateStr   string // e.g. "0.84"
-	HasCI     bool
-	CILeftPx  float64
-	CIWidthPx float64
-	CIDotPx   float64
-	CILabel   string // e.g. "[0.72, 0.95]"
-	Samples   int
-	Successes int
-	Method    string // e.g. "wilson", "t"
-	LogPath   string // text path or URI
-	Message   string
+	ID          string
+	Phase       v1alpha1.TaskPhase
+	PhaseChip   string // good, bad, warn, neutral, pending
+	RateStr     string // e.g. "0.84"
+	HasCI       bool
+	CILeftPx    float64
+	CIWidthPx   float64
+	CIDotPx     float64
+	CILabel     string // e.g. "[0.72, 0.95]"
+	Samples     int
+	Successes   int
+	Method      string // e.g. "wilson", "t"
+	LogPath     string // text path or URI
+	Message     string
+	SampleRange string // e.g. "samples 9-16"
 }
 
 // RunDetailView is the view model for the /runs/<ns>/<name> detail page.
@@ -100,6 +102,7 @@ type RunDetailView struct {
 	TasksFailed      int
 	TasksTotal       int
 	TotalSamples     int
+	SampleRange      string // e.g. "samples 9-16"
 	MeanSuccessRate  string
 	SuccessRateRange string
 	CompactRates     string

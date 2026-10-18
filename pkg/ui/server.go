@@ -221,17 +221,30 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 			tasks = fmt.Sprintf("0/%d", run.Status.Discovery.TaskCount)
 		}
 
+		var sampleRangeStr string
+		if run.Spec.SampleRange != nil {
+			sampleRangeStr = fmt.Sprintf("samples %d-%d", run.Spec.SampleRange.Start, run.Spec.SampleRange.End)
+		} else {
+			for _, t := range run.Status.Tasks {
+				if t.SampleRange != nil && run.Spec.Limit == nil {
+					sampleRangeStr = fmt.Sprintf("samples %d-%d", t.SampleRange.Start, t.SampleRange.End)
+					break
+				}
+			}
+		}
+
 		items = append(items, RunListItem{
-			Name:      run.Name,
-			Namespace: run.Namespace,
-			Phase:     run.Status.Phase,
-			PhaseChip: phaseChipClass(run.Status.Phase),
-			Tasks:     tasks,
-			Samples:   samples,
-			Rates:     rates,
-			Commit:    ShortCommit(run.Spec.Repo.Commit),
-			Age:       FormatAge(run.CreationTimestamp),
-			Link:      fmt.Sprintf("/runs/%s/%s", run.Namespace, run.Name),
+			Name:        run.Name,
+			Namespace:   run.Namespace,
+			Phase:       run.Status.Phase,
+			PhaseChip:   phaseChipClass(run.Status.Phase),
+			Tasks:       tasks,
+			Samples:     samples,
+			SampleRange: sampleRangeStr,
+			Rates:       rates,
+			Commit:      ShortCommit(run.Spec.Repo.Commit),
+			Age:         FormatAge(run.CreationTimestamp),
+			Link:        fmt.Sprintf("/runs/%s/%s", run.Namespace, run.Name),
 		})
 	}
 
@@ -317,21 +330,29 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			method = task.SuccessRateCI.Method
 		}
 
+		var taskSampleRange string
+		if run.Spec.SampleRange != nil {
+			taskSampleRange = fmt.Sprintf("samples %d-%d", run.Spec.SampleRange.Start, run.Spec.SampleRange.End)
+		} else if task.SampleRange != nil && run.Spec.Limit == nil {
+			taskSampleRange = fmt.Sprintf("samples %d-%d", task.SampleRange.Start, task.SampleRange.End)
+		}
+
 		taskRows = append(taskRows, RunTaskRow{
-			ID:        task.ID,
-			Phase:     task.Phase,
-			PhaseChip: taskPhaseChipClass(task.Phase),
-			RateStr:   rateStr,
-			HasCI:     hasCI,
-			CILeftPx:  leftPx,
-			CIWidthPx: widthPx,
-			CIDotPx:   dotPx,
-			CILabel:   ciLabel,
-			Samples:   task.Samples,
-			Successes: task.Successes,
-			Method:    method,
-			LogPath:   task.LogPath,
-			Message:   task.Message,
+			ID:          task.ID,
+			Phase:       task.Phase,
+			PhaseChip:   taskPhaseChipClass(task.Phase),
+			RateStr:     rateStr,
+			HasCI:       hasCI,
+			CILeftPx:    leftPx,
+			CIWidthPx:   widthPx,
+			CIDotPx:     dotPx,
+			CILabel:     ciLabel,
+			Samples:     task.Samples,
+			Successes:   task.Successes,
+			Method:      method,
+			LogPath:     task.LogPath,
+			Message:     task.Message,
+			SampleRange: taskSampleRange,
 		})
 	}
 
@@ -391,6 +412,18 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		tasksTotal = run.Status.Discovery.TaskCount
 	}
 
+	var detailSampleRange string
+	if run.Spec.SampleRange != nil {
+		detailSampleRange = fmt.Sprintf("samples %d-%d", run.Spec.SampleRange.Start, run.Spec.SampleRange.End)
+	} else {
+		for _, t := range run.Status.Tasks {
+			if t.SampleRange != nil && run.Spec.Limit == nil {
+				detailSampleRange = fmt.Sprintf("samples %d-%d", t.SampleRange.Start, t.SampleRange.End)
+				break
+			}
+		}
+	}
+
 	view := RunDetailView{
 		ActiveTab:        NavTabRuns,
 		Name:             run.Name,
@@ -409,6 +442,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		TasksFailed:      tasksFailed,
 		TasksTotal:       tasksTotal,
 		TotalSamples:     totalSamples,
+		SampleRange:      detailSampleRange,
 		MeanSuccessRate:  meanSuccessRate,
 		SuccessRateRange: successRateRange,
 		CompactRates:     compactRates,
