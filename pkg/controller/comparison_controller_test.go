@@ -2036,3 +2036,221 @@ func TestComparisonReconcile_SampleRangePairing(t *testing.T) {
 		}
 	})
 }
+
+func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
+	scheme := setupScheme(t)
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	execTaskID := "docs/readme_comprehension"
+	blindTaskID := "docs/readme_comprehension_blind"
+	candLogPath := "gs://test-bucket/runs/cand-commit/" + execTaskID + "/log.json"
+	baseLogPath := "gs://test-bucket/runs/base-commit/" + execTaskID + "/log.json"
+
+	// 8 identical sample scores => unchanged within margin
+	scores := make([]stats.SampleScore, 8)
+	for i := 0; i < 8; i++ {
+		scores[i] = stats.SampleScore{ID: fmt.Sprintf("sample-%d", i+1), Score: 0.8}
+	}
+	fakeGCS.Objects["test-bucket/runs/cand-commit/"+execTaskID+"/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(execTaskID, scores),
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit/"+execTaskID+"/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(execTaskID, scores),
+	}
+
+	manifestData := []byte(`{"tasks": [{"id": "docs/readme_comprehension"}, {"id": "docs/readme_comprehension_blind"}]}`)
+	fakeGCS.Objects["test-bucket/runs/cand-commit/manifest.json"] = fakes.FakeObject{
+		Data: manifestData,
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit/manifest.json"] = fakes.FakeObject{
+		Data: manifestData,
+	}
+
+	t.Run("two runs restricted to one of two manifest tasks produce a single status.tasks entry and UNCHANGED verdict", func(t *testing.T) {
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-overlap", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model: "mockllm/model",
+				Tasks: []string{execTaskID},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         2,
+					EligibleTaskCount: 2,
+					TaskIDs:           []string{execTaskID, blindTaskID},
+					ManifestPath:      "gs://test-bucket/runs/cand-commit/manifest.json",
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      execTaskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: candLogPath,
+					},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-overlap", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model: "mockllm/model",
+				Tasks: []string{execTaskID},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         2,
+					EligibleTaskCount: 2,
+					TaskIDs:           []string{execTaskID, blindTaskID},
+					ManifestPath:      "gs://test-bucket/runs/base-commit/manifest.json",
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      execTaskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: baseLogPath,
+					},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "cmp-overlap", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-overlap"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-overlap"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "cmp-overlap"}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Failed to get updated comparison: %v", err)
+		}
+
+		if len(updated.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task in comparison status.tasks, got %d: %+v", len(updated.Status.Tasks), updated.Status.Tasks)
+		}
+		if updated.Status.Tasks[0].ID != execTaskID {
+			t.Errorf("Expected task %s, got %s", execTaskID, updated.Status.Tasks[0].ID)
+		}
+		if updated.Status.Tasks[0].Label != v1alpha1.ComparisonTaskLabelUnchanged {
+			t.Errorf("Expected task label %s, got %s", v1alpha1.ComparisonTaskLabelUnchanged, updated.Status.Tasks[0].Label)
+		}
+		if updated.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
+			t.Errorf("Expected aggregate verdict %s, got %s", v1alpha1.ComparisonVerdictUnchanged, updated.Status.Verdict)
+		}
+		if updated.Status.Summary == nil || updated.Status.Summary.Tasks != "1/1" {
+			t.Errorf("Expected summary tasks 1/1, got %+v", updated.Status.Summary)
+		}
+	})
+
+	t.Run("spec.tasks naming unexecuted task surfaces in status.message and does not add inconclusive row", func(t *testing.T) {
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-spec", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model: "mockllm/model",
+				Tasks: []string{execTaskID},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      execTaskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: candLogPath,
+					},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-spec", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model: "mockllm/model",
+				Tasks: []string{execTaskID},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      execTaskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: baseLogPath,
+					},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "cmp-spec-unexecuted", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-spec"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-spec"},
+				Tasks:     []string{execTaskID, "docs/never_executed_task"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "cmp-spec-unexecuted"}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Failed to get updated comparison: %v", err)
+		}
+
+		if len(updated.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task in comparison status.tasks, got %d: %+v", len(updated.Status.Tasks), updated.Status.Tasks)
+		}
+		if updated.Status.Tasks[0].ID != execTaskID {
+			t.Errorf("Expected task %s, got %s", execTaskID, updated.Status.Tasks[0].ID)
+		}
+		if updated.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
+			t.Errorf("Expected aggregate verdict %s, got %s", v1alpha1.ComparisonVerdictUnchanged, updated.Status.Verdict)
+		}
+		if !strings.Contains(updated.Status.Message, "docs/never_executed_task") {
+			t.Errorf("Expected status.message to mention docs/never_executed_task, got %q", updated.Status.Message)
+		}
+	})
+}
