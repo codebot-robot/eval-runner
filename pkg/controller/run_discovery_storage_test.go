@@ -584,3 +584,7 @@ func (f *failingSink) ArtifactPrefix(commit string) string {
 func (f *failingSink) IsDurable() bool {
 	return true
 }
+
+func (f *failingSink) Close() error {
+	return nil
+}

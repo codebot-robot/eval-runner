@@ -21,11 +21,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/internal/fakes"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 )
 
+var _ StorageClient = (*fakes.FakeStorageClient)(nil)
+
 func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 	sink, err := New(t.Context(), "gs://my-eval-bucket", WithStorageClient(fakeClient))
 	if err != nil {
 		t.Fatalf("Failed to create GCSSink: %v", err)
@@ -129,7 +132,7 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 }
 
 func TestGCSSink_CapBehavior(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 	capLimit := int64(30)
 	sink, err := New(t.Context(), "my-eval-bucket",
 		WithStorageClient(fakeClient),
@@ -187,115 +190,24 @@ func TestGCSSink_CapBehavior(t *testing.T) {
 }
 
 func TestGCSSink_PathValidationAndTraversal(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient))
 	if err != nil {
 		t.Fatalf("Failed to create GCSSink: %v", err)
 	}
 
-	validMeta := artifacts.RunMetadata{
-		TaskID: "docs/readme_comprehension",
-		Commit: "1234567890ab",
-	}
-
-	tests := []struct {
-		name     string
-		meta     artifacts.RunMetadata
-		filename string
-	}{
-		{
-			name: "empty commit",
-			meta: artifacts.RunMetadata{
-				TaskID: "docs/readme_comprehension",
-				Commit: "",
-			},
-			filename: "log.json",
-		},
-		{
-			name: "commit with slash",
-			meta: artifacts.RunMetadata{
-				TaskID: "docs/readme_comprehension",
-				Commit: "foo/bar",
-			},
-			filename: "log.json",
-		},
-		{
-			name: "commit with traversal",
-			meta: artifacts.RunMetadata{
-				TaskID: "docs/readme_comprehension",
-				Commit: "../foo",
-			},
-			filename: "log.json",
-		},
-		{
-			name: "empty taskID",
-			meta: artifacts.RunMetadata{
-				TaskID: "",
-				Commit: "1234567890ab",
-			},
-			filename: "log.json",
-		},
-		{
-			name: "taskID with double dot",
-			meta: artifacts.RunMetadata{
-				TaskID: "docs/../escape",
-				Commit: "1234567890ab",
-			},
-			filename: "log.json",
-		},
-		{
-			name: "taskID with leading slash",
-			meta: artifacts.RunMetadata{
-				TaskID: "/docs/readme",
-				Commit: "1234567890ab",
-			},
-			filename: "log.json",
-		},
-		{
-			name: "taskID with trailing slash",
-			meta: artifacts.RunMetadata{
-				TaskID: "docs/readme/",
-				Commit: "1234567890ab",
-			},
-			filename: "log.json",
-		},
-		{
-			name: "taskID with backslash",
-			meta: artifacts.RunMetadata{
-				TaskID: "docs\\readme",
-				Commit: "1234567890ab",
-			},
-			filename: "log.json",
-		},
-		{
-			name:     "empty filename",
-			meta:     validMeta,
-			filename: "",
-		},
-		{
-			name:     "filename with slash",
-			meta:     validMeta,
-			filename: "sub/log.json",
-		},
-		{
-			name:     "filename with double dot",
-			meta:     validMeta,
-			filename: "../log.json",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := sink.StoreArtifact(t.Context(), tt.meta, tt.filename, []byte("data"))
+	for _, tt := range artifacts.ArtifactPathValidationTestCases() {
+		t.Run(tt.Name, func(t *testing.T) {
+			_, err := sink.StoreArtifact(t.Context(), tt.Meta, tt.Filename, []byte("data"))
 			if err == nil {
-				t.Errorf("Expected error for %s, got nil", tt.name)
+				t.Errorf("Expected error for %s, got nil", tt.Name)
 			}
 		})
 	}
 }
 
 func TestGCSSink_BucketNormalizationAndValidation(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 
 	validBuckets := []struct {
 		input    string
@@ -336,7 +248,7 @@ func TestGCSSink_BucketNormalizationAndValidation(t *testing.T) {
 }
 
 func TestGCSSink_ErrorPropagation(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient))
 	if err != nil {
 		t.Fatalf("Failed to create GCSSink: %v", err)
@@ -393,7 +305,7 @@ func TestValidateBucket(t *testing.T) {
 }
 
 func TestGCSSink_StoreComparisonAndLoad(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient), WithMaxUploadBytes(100))
 	if err != nil {
 		t.Fatalf("Failed to create GCSSink: %v", err)
@@ -421,7 +333,7 @@ func TestGCSSink_StoreComparisonAndLoad(t *testing.T) {
 
 	// Store and verify run artifact for loading
 	runPayload := []byte(`{"version": 2, "samples": []}`)
-	fakeClient.Objects["eval-bucket/runs/commit1/task1/log.json"] = FakeObject{Data: runPayload}
+	fakeClient.Objects["eval-bucket/runs/commit1/task1/log.json"] = fakes.FakeObject{Data: runPayload}
 
 	// Load via gs:// URI
 	loaded, err := sink.Load(t.Context(), "gs://eval-bucket/runs/commit1/task1/log.json")
@@ -453,14 +365,14 @@ func TestGCSSink_StoreComparisonAndLoad(t *testing.T) {
 
 	// Exceeds max bytes
 	oversized := make([]byte, 200)
-	fakeClient.Objects["eval-bucket/runs/oversized.json"] = FakeObject{Data: oversized}
+	fakeClient.Objects["eval-bucket/runs/oversized.json"] = fakes.FakeObject{Data: oversized}
 	if _, err := sink.Load(t.Context(), "gs://eval-bucket/runs/oversized.json"); err == nil {
 		t.Errorf("Expected error for oversized artifact load, got nil")
 	}
 }
 
 func TestGCSSink_StoreManifest(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 	sink, err := New(t.Context(), "gs://eval-bucket",
 		WithStorageClient(fakeClient),
 		WithMaxUploadBytes(50),
@@ -564,7 +476,7 @@ func TestGCSSink_StoreManifest(t *testing.T) {
 }
 
 func TestGCSSink_FirstWriteAgainstEmptyBucket_AllObjectKinds(t *testing.T) {
-	fakeClient := NewFakeStorageClient()
+	fakeClient := fakes.NewFakeStorageClient()
 	sink, err := New(t.Context(), "gs://empty-bucket", WithStorageClient(fakeClient))
 	if err != nil {
 		t.Fatalf("Failed to create GCSSink: %v", err)
@@ -624,5 +536,25 @@ func TestGCSSink_FirstWriteAgainstEmptyBucket_AllObjectKinds(t *testing.T) {
 	}
 	if _, ok := fakeClient.GetObject("empty-bucket", "comparisons/comp-123.json"); !ok {
 		t.Errorf("comparison.json not found in storage client")
+	}
+}
+
+func TestGCSSink_Close(t *testing.T) {
+	fakeClient := fakes.NewFakeStorageClient()
+	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	if err := sink.Close(); err != nil {
+		t.Errorf("Expected nil on Close, got: %v", err)
+	}
+	if !fakeClient.Closed {
+		t.Errorf("Expected fakeClient.Closed to be true")
+	}
+
+	// Idempotent Close
+	if err := sink.Close(); err != nil {
+		t.Errorf("Expected nil on second Close, got: %v", err)
 	}
 }

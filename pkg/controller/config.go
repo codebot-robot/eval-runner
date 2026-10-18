@@ -41,6 +41,8 @@ const (
 	ConfigMapKeyArtifactBucket = "artifactBucket"
 	// ConfigMapKeyArtifactDir is the ConfigMap key for the local artifact directory.
 	ConfigMapKeyArtifactDir = "artifactDir"
+	// ConfigMapKeyArtifactMaxUploadBytes is the ConfigMap key for the maximum artifact upload byte limit.
+	ConfigMapKeyArtifactMaxUploadBytes = "artifactMaxUploadBytes"
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.
 	ConfigMapKeyDiscoveryDeadline = "discoveryDeadline"
 	// ConfigMapKeyExecutionDeadline is the ConfigMap key for sample execution deadline.
@@ -80,21 +82,22 @@ const (
 // KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
 // covering both eval-runner controller and eval-runner-webhook keys.
 var KnownConfigMapKeys = map[string]struct{}{
-	ConfigMapKeyArtifactBucket:      {},
-	ConfigMapKeyArtifactDir:         {},
-	ConfigMapKeyDiscoveryDeadline:   {},
-	ConfigMapKeyExecutionDeadline:   {},
-	ConfigMapKeyMaxParallelTasks:    {},
-	ConfigMapKeyModelSecret:         {},
-	ConfigMapKeySandboxdImage:       {},
-	ConfigMapKeyTaskGracePeriod:     {},
-	ConfigMapKeyGitHubTokenSecret:   {},
-	ConfigMapKeyGitHubAppSecret:     {},
-	ConfigMapKeyUIBaseURL:           {},
-	ConfigMapKeyGitHubWebhookSecret: {},
-	ConfigMapKeyWebhookRepositories: {},
-	ConfigMapKeyDefaultModel:        {},
-	ConfigMapKeyDefaultLimit:        {},
+	ConfigMapKeyArtifactBucket:         {},
+	ConfigMapKeyArtifactDir:            {},
+	ConfigMapKeyArtifactMaxUploadBytes: {},
+	ConfigMapKeyDiscoveryDeadline:      {},
+	ConfigMapKeyExecutionDeadline:      {},
+	ConfigMapKeyMaxParallelTasks:       {},
+	ConfigMapKeyModelSecret:            {},
+	ConfigMapKeySandboxdImage:          {},
+	ConfigMapKeyTaskGracePeriod:        {},
+	ConfigMapKeyGitHubTokenSecret:      {},
+	ConfigMapKeyGitHubAppSecret:        {},
+	ConfigMapKeyUIBaseURL:              {},
+	ConfigMapKeyGitHubWebhookSecret:    {},
+	ConfigMapKeyWebhookRepositories:    {},
+	ConfigMapKeyDefaultModel:           {},
+	ConfigMapKeyDefaultLimit:           {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -119,34 +122,36 @@ func UnknownConfigMapKeys(cm *corev1.ConfigMap) []string {
 // ClusterConfig holds the effective cluster-wide settings resolved with precedence:
 // explicit flag > ConfigMap key > built-in default.
 type ClusterConfig struct {
-	ArtifactBucket    string
-	ArtifactDir       string
-	DiscoveryDeadline time.Duration
-	ExecutionDeadline time.Duration
-	GitHubTokenSecret string
-	GitHubAppSecret   string
-	MaxParallelTasks  int
-	ModelSecret       string
-	SandboxdImage     string
-	TaskGracePeriod   time.Duration
-	UIBaseURL         string
+	ArtifactBucket         string
+	ArtifactDir            string
+	ArtifactMaxUploadBytes int64
+	DiscoveryDeadline      time.Duration
+	ExecutionDeadline      time.Duration
+	GitHubTokenSecret      string
+	GitHubAppSecret        string
+	MaxParallelTasks       int
+	ModelSecret            string
+	SandboxdImage          string
+	TaskGracePeriod        time.Duration
+	UIBaseURL              string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
 type RawFlags struct {
-	ArtifactBucket    string
-	ArtifactDir       string
-	DiscoveryDeadline time.Duration
-	ExecutionDeadline time.Duration
-	GitHubTokenSecret string
-	GitHubAppSecret   string
-	MaxParallelTasks  int
-	ModelSecret       string
-	SandboxdImage     string
-	TaskGracePeriod   time.Duration
-	UIBaseURL         string
-	StrictConfig      bool
-	Explicit          map[string]bool
+	ArtifactBucket         string
+	ArtifactDir            string
+	ArtifactMaxUploadBytes int64
+	DiscoveryDeadline      time.Duration
+	ExecutionDeadline      time.Duration
+	GitHubTokenSecret      string
+	GitHubAppSecret        string
+	MaxParallelTasks       int
+	ModelSecret            string
+	SandboxdImage          string
+	TaskGracePeriod        time.Duration
+	UIBaseURL              string
+	StrictConfig           bool
+	Explicit               map[string]bool
 }
 
 // IsExplicit reports whether a flag by name was explicitly set on the command line.
@@ -160,17 +165,18 @@ func (f RawFlags) IsExplicit(name string) bool {
 // DefaultClusterConfig returns a ClusterConfig populated with built-in defaults.
 func DefaultClusterConfig() ClusterConfig {
 	return ClusterConfig{
-		ArtifactBucket:    "",
-		ArtifactDir:       "",
-		DiscoveryDeadline: DefaultDiscoveryDeadline,
-		ExecutionDeadline: DefaultExecutionDeadline,
-		GitHubTokenSecret: DefaultGitHubTokenSecret,
-		GitHubAppSecret:   "",
-		MaxParallelTasks:  DefaultMaxParallelTasks,
-		ModelSecret:       DefaultModelSecret,
-		SandboxdImage:     discovery.SandboxdImage,
-		TaskGracePeriod:   DefaultTaskGracePeriod,
-		UIBaseURL:         "",
+		ArtifactBucket:         "",
+		ArtifactDir:            "",
+		ArtifactMaxUploadBytes: gcs.DefaultMaxUploadBytes,
+		DiscoveryDeadline:      DefaultDiscoveryDeadline,
+		ExecutionDeadline:      DefaultExecutionDeadline,
+		GitHubTokenSecret:      DefaultGitHubTokenSecret,
+		GitHubAppSecret:        "",
+		MaxParallelTasks:       DefaultMaxParallelTasks,
+		ModelSecret:            DefaultModelSecret,
+		SandboxdImage:          discovery.SandboxdImage,
+		TaskGracePeriod:        DefaultTaskGracePeriod,
+		UIBaseURL:              "",
 	}
 }
 
@@ -181,25 +187,27 @@ func FlagsFromFlagSet(
 	discoveryDeadline, executionDeadline, taskGracePeriod time.Duration,
 	maxParallelTasks int,
 	strictConfig bool,
+	artifactMaxUploadBytes int64,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
 		explicit[f.Name] = true
 	})
 	return RawFlags{
-		ArtifactBucket:    artifactBucket,
-		ArtifactDir:       artifactDir,
-		DiscoveryDeadline: discoveryDeadline,
-		ExecutionDeadline: executionDeadline,
-		GitHubTokenSecret: gitHubTokenSecret,
-		GitHubAppSecret:   gitHubAppSecret,
-		MaxParallelTasks:  maxParallelTasks,
-		ModelSecret:       modelSecret,
-		SandboxdImage:     sandboxdImage,
-		TaskGracePeriod:   taskGracePeriod,
-		UIBaseURL:         uiBaseURL,
-		StrictConfig:      strictConfig,
-		Explicit:          explicit,
+		ArtifactBucket:         artifactBucket,
+		ArtifactDir:            artifactDir,
+		ArtifactMaxUploadBytes: artifactMaxUploadBytes,
+		DiscoveryDeadline:      discoveryDeadline,
+		ExecutionDeadline:      executionDeadline,
+		GitHubTokenSecret:      gitHubTokenSecret,
+		GitHubAppSecret:        gitHubAppSecret,
+		MaxParallelTasks:       maxParallelTasks,
+		ModelSecret:            modelSecret,
+		SandboxdImage:          sandboxdImage,
+		TaskGracePeriod:        taskGracePeriod,
+		UIBaseURL:              uiBaseURL,
+		StrictConfig:           strictConfig,
+		Explicit:               explicit,
 	}
 }
 
@@ -380,6 +388,18 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				}
 			}
 		}
+
+		// 11. artifactMaxUploadBytes
+		if val, ok := cm.Data[ConfigMapKeyArtifactMaxUploadBytes]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				parsed, err := strconv.ParseInt(trimmed, 10, 64)
+				if err != nil || parsed <= 0 {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be a positive integer", ConfigMapKeyArtifactMaxUploadBytes, val, ns, name)
+				}
+				cfg.ArtifactMaxUploadBytes = parsed
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -396,6 +416,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		} else {
 			cfg.ArtifactDir = flags.ArtifactDir
 		}
+	}
+	if flags.IsExplicit("artifact-max-upload-bytes") {
+		cfg.ArtifactMaxUploadBytes = flags.ArtifactMaxUploadBytes
 	}
 	if flags.IsExplicit("discovery-deadline") {
 		cfg.DiscoveryDeadline = flags.DiscoveryDeadline

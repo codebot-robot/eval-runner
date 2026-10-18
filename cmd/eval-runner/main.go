@@ -84,6 +84,7 @@ func main() {
 	var sandboxdImage string
 	var artifactBucket string
 	var artifactDir string
+	var artifactMaxUploadBytes int64
 	var gitHubTokenSecret string
 	var gitHubAppSecret string
 	var uiBaseURL string
@@ -108,6 +109,7 @@ func main() {
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Local filesystem directory for storing evaluation artifacts")
 	flag.BoolVar(&strictConfig, "strict-config", false, "Fail startup if eval-runner-config contains unrecognised keys")
+	flag.Int64Var(&artifactMaxUploadBytes, "artifact-max-upload-bytes", gcs.DefaultMaxUploadBytes, "Maximum size in bytes of an uploaded Inspect log before truncation (sets capped in summary.json if exceeded)")
 
 	opts := zap.Options{
 		Development: true,
@@ -131,6 +133,7 @@ func main() {
 		taskGracePeriod,
 		maxParallelTasks,
 		strictConfig,
+		artifactMaxUploadBytes,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -278,7 +281,11 @@ func main() {
 
 	var sink artifacts.ArtifactSink
 	if clusterConfig.ArtifactBucket != "" {
-		gcsSink, err := gcs.New(context.Background(), clusterConfig.ArtifactBucket)
+		var gcsOpts []gcs.Option
+		if clusterConfig.ArtifactMaxUploadBytes > 0 {
+			gcsOpts = append(gcsOpts, gcs.WithMaxUploadBytes(clusterConfig.ArtifactMaxUploadBytes))
+		}
+		gcsSink, err := gcs.New(context.Background(), clusterConfig.ArtifactBucket, gcsOpts...)
 		if err != nil {
 			setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", clusterConfig.ArtifactBucket)
 			os.Exit(1)
@@ -290,6 +297,11 @@ func main() {
 		setupLog.Info("neither artifactBucket nor artifactDir configured; using default in-memory sink (non-durable: controller restarts reset Runs to Pending to re-discover)")
 		sink = artifacts.NewInMemorySink()
 	}
+	defer func() {
+		if err := sink.Close(); err != nil {
+			setupLog.Error(err, "error closing artifact sink on shutdown")
+		}
+	}()
 
 	reconciler := &controller.RunReconciler{
 		Client:               mgr.GetClient(),

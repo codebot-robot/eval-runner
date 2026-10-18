@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/internal/fakes"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
@@ -272,7 +273,7 @@ func TestReconcilePodReadySuccess_GCSSink_EmptyBucketFirstWrite(t *testing.T) {
 		ListStdout: validManifestJSON,
 	}
 
-	fakeGCSClient := gcs.NewFakeStorageClient()
+	fakeGCSClient := fakes.NewFakeStorageClient()
 	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
 	if err != nil {
 		t.Fatalf("Failed to create GCSSink: %v", err)
@@ -4301,7 +4302,7 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 		},
 	}
 
-	fakeGCSClient := gcs.NewFakeStorageClient()
+	fakeGCSClient := fakes.NewFakeStorageClient()
 	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
 	if err != nil {
 		t.Fatalf("Failed to create GCSSink: %v", err)
@@ -4428,6 +4429,172 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 	}
 }
 
+func TestReconcileArtifactSink_UploadCapRecordedInSummary(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "docs/readme_comprehension", Spec: "docs.py@readme"},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-gcs-capped",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abcdef123456",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"eval": {
+			"task": "docs/readme_comprehension",
+			"model": "mockllm/model",
+			"created": "2026-10-17T12:00:00Z"
+		},
+		"results": {
+			"scores": [
+				{"name": "accuracy", "metrics": {"accuracy": {"value": 0.5}}}
+			],
+			"total_samples": 2,
+			"completed_samples": 2
+		},
+		"samples": [
+			{"id": "1", "scores": {"accuracy": {"value": 1.0}}},
+			{"id": "2", "scores": {"accuracy": {"value": 0.0}}}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "2026-10-17_readme_eval.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return []byte(inspectLog), nil
+		},
+	}
+
+	fakeGCSClient := fakes.NewFakeStorageClient()
+	capLimit := int64(100)
+	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner",
+		gcs.WithStorageClient(fakeGCSClient),
+		gcs.WithMaxUploadBytes(capLimit),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    executor,
+		ArtifactSink:     gcsSink,
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-gcs-capped"}}
+
+	// Turn 1: Creates sandbox
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 1 error: %v", err)
+	}
+
+	// Create ready pod
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun("test-run-gcs-capped", "docs/readme_comprehension"),
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.50",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Turn 2: Executes task and writes artifacts to GCS
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue to check completion")
+	}
+
+	// Turn 3: Run marked Completed
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 3 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("Expected Run phase Completed, got %s", updatedRun.Status.Phase)
+	}
+
+	// Verify log object exists and is truncated to capLimit
+	logObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json")
+	if !exists {
+		t.Fatalf("Log object was not uploaded to GCS")
+	}
+	if int64(len(logObj.Data)) != capLimit {
+		t.Errorf("Expected uploaded log data capped to %d bytes, got %d", capLimit, len(logObj.Data))
+	}
+	if string(logObj.Data) != inspectLog[:capLimit] {
+		t.Errorf("Expected uploaded log to match prefix of inspectLog")
+	}
+
+	// Verify summary.json has Capped=true and CapBytes=capLimit
+	summaryObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/summary.json")
+	if !exists {
+		t.Fatalf("summary.json was not uploaded to GCS")
+	}
+
+	var summary artifacts.TaskSummary
+	if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
+		t.Fatalf("Failed to parse summary.json: %v", err)
+	}
+	if !summary.Capped {
+		t.Errorf("Expected summary.Capped to be true when upload exceeds capLimit")
+	}
+	if summary.CapBytes != capLimit {
+		t.Errorf("Expected summary.CapBytes=%d, got %d", capLimit, summary.CapBytes)
+	}
+}
+
 func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) {
 	scheme := setupScheme(t)
 
@@ -4481,7 +4648,7 @@ func TestReconcileArtifactSink_StorageErrorPropagatesToTaskStatus(t *testing.T) 
 		},
 	}
 
-	fakeGCSClient := gcs.NewFakeStorageClient()
+	fakeGCSClient := fakes.NewFakeStorageClient()
 	// Inject storage write error
 	fakeGCSClient.Errors["my-bucket/runs/abcdef123456/task-1/log.json"] = errors.New("storage: 403 Forbidden: permission denied")
 

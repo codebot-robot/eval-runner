@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package gcs
+package fakes
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 	"cloud.google.com/go/storage"
 )
 
-// FakeStorageClient is an in-memory test double for StorageClient.
+// FakeStorageClient is an in-memory test double for gcs.StorageClient.
 type FakeStorageClient struct {
 	mu         sync.Mutex
 	Objects    map[string]FakeObject // key: "bucket/object"

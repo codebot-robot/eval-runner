@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -489,14 +490,15 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	githubApp := fs.String("github-app-secret", "", "github app secret")
 	uiURL := fs.String("ui-base-url", "", "ui base url")
 	strictConfig := fs.Bool("strict-config", false, "strict config")
+	uploadBytes := fs.Int64("artifact-max-upload-bytes", 10*1024*1024, "artifact max upload bytes")
 
-	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config"})
+	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes set
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -517,6 +519,12 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	}
 	if !rawFlags.StrictConfig {
 		t.Errorf("expected StrictConfig to be true")
+	}
+	if !rawFlags.IsExplicit("artifact-max-upload-bytes") {
+		t.Errorf("expected artifact-max-upload-bytes to be explicit")
+	}
+	if rawFlags.ArtifactMaxUploadBytes != 5242880 {
+		t.Errorf("expected ArtifactMaxUploadBytes 5242880, got %d", rawFlags.ArtifactMaxUploadBytes)
 	}
 	if rawFlags.IsExplicit("github-app-secret") {
 		t.Errorf("expected github-app-secret NOT to be explicit")
@@ -783,21 +791,22 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 	// 3. all recognized keys
 	cmRecognized := &corev1.ConfigMap{
 		Data: map[string]string{
-			ConfigMapKeyArtifactBucket:      "gs://b",
-			ConfigMapKeyArtifactDir:         "/tmp",
-			ConfigMapKeyDiscoveryDeadline:   "10m",
-			ConfigMapKeyExecutionDeadline:   "30m",
-			ConfigMapKeyMaxParallelTasks:    "4",
-			ConfigMapKeyModelSecret:         "sec",
-			ConfigMapKeySandboxdImage:       "img:tag",
-			ConfigMapKeyTaskGracePeriod:     "30s",
-			ConfigMapKeyGitHubTokenSecret:   "gh-token",
-			ConfigMapKeyGitHubAppSecret:     "gh-app",
-			ConfigMapKeyUIBaseURL:           "https://ui",
-			ConfigMapKeyGitHubWebhookSecret: "gh-wh",
-			ConfigMapKeyWebhookRepositories: "org/repo",
-			ConfigMapKeyDefaultModel:        "model",
-			ConfigMapKeyDefaultLimit:        "5",
+			ConfigMapKeyArtifactBucket:         "gs://b",
+			ConfigMapKeyArtifactDir:            "/tmp",
+			ConfigMapKeyDiscoveryDeadline:      "10m",
+			ConfigMapKeyExecutionDeadline:      "30m",
+			ConfigMapKeyMaxParallelTasks:       "4",
+			ConfigMapKeyModelSecret:            "sec",
+			ConfigMapKeySandboxdImage:          "img:tag",
+			ConfigMapKeyTaskGracePeriod:        "30s",
+			ConfigMapKeyGitHubTokenSecret:      "gh-token",
+			ConfigMapKeyGitHubAppSecret:        "gh-app",
+			ConfigMapKeyUIBaseURL:              "https://ui",
+			ConfigMapKeyArtifactMaxUploadBytes: "10485760",
+			ConfigMapKeyGitHubWebhookSecret:    "gh-wh",
+			ConfigMapKeyWebhookRepositories:    "org/repo",
+			ConfigMapKeyDefaultModel:           "model",
+			ConfigMapKeyDefaultLimit:           "5",
 		},
 	}
 	if unknown := UnknownConfigMapKeys(cmRecognized); unknown != nil {
@@ -1108,4 +1117,57 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 			t.Errorf("expected GitHubTokenSecret disabled via flag, got %q", cfg.GitHubTokenSecret)
 		}
 	})
+}
+
+func TestResolveConfig_ArtifactMaxUploadBytes(t *testing.T) {
+	// 1. Built-in default
+	defCfg := DefaultClusterConfig()
+	if defCfg.ArtifactMaxUploadBytes != gcs.DefaultMaxUploadBytes {
+		t.Errorf("expected default ArtifactMaxUploadBytes %d, got %d", gcs.DefaultMaxUploadBytes, defCfg.ArtifactMaxUploadBytes)
+	}
+
+	// 2. ConfigMap override with artifactMaxUploadBytes
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyArtifactMaxUploadBytes: "5242880",
+		},
+	}
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("ResolveConfig failed: %v", err)
+	}
+	if cfg.ArtifactMaxUploadBytes != 5242880 {
+		t.Errorf("expected ArtifactMaxUploadBytes 5242880, got %d", cfg.ArtifactMaxUploadBytes)
+	}
+
+	// 3. Flag override with artifact-max-upload-bytes
+	flags := RawFlags{
+		ArtifactMaxUploadBytes: 1048576,
+		Explicit:               map[string]bool{"artifact-max-upload-bytes": true},
+	}
+	cfgFlag, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("ResolveConfig failed: %v", err)
+	}
+	if cfgFlag.ArtifactMaxUploadBytes != 1048576 {
+		t.Errorf("expected ArtifactMaxUploadBytes 1048576, got %d", cfgFlag.ArtifactMaxUploadBytes)
+	}
+
+	// 4. Invalid non-numeric or <= 0
+	invalidCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyArtifactMaxUploadBytes: "-10",
+		},
+	}
+	if _, err := ResolveConfig(invalidCM, RawFlags{}); err == nil {
+		t.Errorf("expected error for negative artifactMaxUploadBytes, got nil")
+	}
 }

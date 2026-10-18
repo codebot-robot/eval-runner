@@ -65,6 +65,11 @@ func (s *NoopSink) IsDurable() bool {
 	return false
 }
 
+// Close implements ArtifactSink for NoopSink.
+func (s *NoopSink) Close() error {
+	return nil
+}
+
 // LocalDirSink is an ArtifactSink that writes artifacts to a local directory hierarchy.
 type LocalDirSink struct {
 	BaseDir string
@@ -77,7 +82,7 @@ func (s *LocalDirSink) StoreComparison(ctx context.Context, comparisonName strin
 	if strings.TrimSpace(s.BaseDir) == "" {
 		return "", fmt.Errorf("base directory must not be empty")
 	}
-	if err := validateSafeComponent("comparisonName", comparisonName); err != nil {
+	if err := ValidateSafeComponent("comparisonName", comparisonName); err != nil {
 		return "", err
 	}
 
@@ -108,7 +113,7 @@ func (s *LocalDirSink) StoreManifest(ctx context.Context, meta RunMetadata, data
 	if strings.TrimSpace(s.BaseDir) == "" {
 		return "", fmt.Errorf("base directory must not be empty")
 	}
-	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+	if err := ValidateSafeComponent("commit", meta.Commit); err != nil {
 		return "", err
 	}
 
@@ -204,13 +209,8 @@ func (s *LocalDirSink) ArtifactPrefix(commit string) string {
 	return filepath.Join(s.BaseDir, "runs", commit) + "/"
 }
 
-func validateSafeComponent(name, val string) error {
-	if strings.TrimSpace(val) == "" {
-		return fmt.Errorf("%s must not be empty", name)
-	}
-	if strings.Contains(val, "/") || strings.Contains(val, "\\") || strings.Contains(val, "..") || strings.ContainsRune(val, 0) {
-		return fmt.Errorf("%s %q contains invalid characters or traversal elements", name, val)
-	}
+// Close implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) Close() error {
 	return nil
 }
 
@@ -220,28 +220,13 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 		return "", fmt.Errorf("base directory must not be empty")
 	}
 
-	if err := validateSafeComponent("runNamespace", meta.RunNamespace); err != nil {
-		return "", err
-	}
-	if err := validateSafeComponent("runName", meta.RunName); err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(meta.TaskID) == "" {
-		return "", fmt.Errorf("taskID must not be empty")
-	}
-	if strings.Contains(meta.TaskID, "..") || strings.ContainsRune(meta.TaskID, 0) {
-		return "", fmt.Errorf("taskID %q contains invalid traversal elements", meta.TaskID)
-	}
-	if err := validateSafeComponent("filename", filename); err != nil {
+	if err := ValidateArtifact(meta, filename); err != nil {
 		return "", err
 	}
 
 	escapedTaskID := url.QueryEscape(meta.TaskID)
 	var targetDir string
 	if meta.Commit != "" {
-		if err := validateSafeComponent("commit", meta.Commit); err != nil {
-			return "", err
-		}
 		targetDir = filepath.Join(s.BaseDir, "runs", meta.Commit, escapedTaskID)
 	} else {
 		targetDir = filepath.Join(s.BaseDir, meta.RunNamespace, meta.RunName, escapedTaskID)

@@ -56,10 +56,15 @@ func (s *InMemorySink) ArtifactPrefix(commit string) string {
 	return fmt.Sprintf("mem://runs/%s/", commit)
 }
 
+// Close implements ArtifactSink for InMemorySink.
+func (s *InMemorySink) Close() error {
+	return nil
+}
+
 // StoreManifest persists the discovered manifest JSON as runs/<commit>/manifest.json.
 // Writing the same object twice for the same commit is a no-op when the hash matches.
 func (s *InMemorySink) StoreManifest(ctx context.Context, meta RunMetadata, data []byte) (string, error) {
-	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+	if err := ValidateSafeComponent("commit", meta.Commit); err != nil {
 		return "", err
 	}
 
@@ -98,18 +103,12 @@ func (s *InMemorySink) StoreManifest(ctx context.Context, meta RunMetadata, data
 
 // StoreArtifact persists the raw log bytes for a task.
 func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
-	if strings.TrimSpace(meta.TaskID) == "" {
-		return "", fmt.Errorf("taskID must not be empty")
-	}
-	if err := validateSafeComponent("filename", filename); err != nil {
+	if err := ValidateArtifact(meta, filename); err != nil {
 		return "", err
 	}
 
 	var objKey string
 	if meta.Commit != "" {
-		if err := validateSafeComponent("commit", meta.Commit); err != nil {
-			return "", err
-		}
 		objKey = fmt.Sprintf("runs/%s/%s/%s", meta.Commit, meta.TaskID, filename)
 	} else {
 		objKey = fmt.Sprintf("runs/%s/%s/%s/%s", meta.RunNamespace, meta.RunName, meta.TaskID, filename)
@@ -128,7 +127,7 @@ func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 
 // StoreComparison persists comparison summary data as comparisons/<comparisonName>.json.
 func (s *InMemorySink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
-	if err := validateSafeComponent("comparisonName", comparisonName); err != nil {
+	if err := ValidateSafeComponent("comparisonName", comparisonName); err != nil {
 		return "", err
 	}
 

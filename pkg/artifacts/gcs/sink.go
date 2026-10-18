@@ -23,6 +23,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"cloud.google.com/go/storage"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
@@ -95,6 +96,8 @@ type GCSSink struct {
 	bucket         string
 	maxUploadBytes int64
 	client         StorageClient
+	mu             sync.Mutex
+	closed         bool
 }
 
 var _ artifacts.ArtifactSink = (*GCSSink)(nil)
@@ -154,6 +157,12 @@ func (s *GCSSink) MaxUploadBytes() int64 {
 
 // Close closes the underlying storage client.
 func (s *GCSSink) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
 	if s.client != nil {
 		return s.client.Close()
 	}
@@ -177,7 +186,7 @@ func (s *GCSSink) ArtifactPrefix(commit string) string {
 // GCS must error, not truncate, above the cap.
 // Writing the same object twice for the same commit is a no-op when the hash matches.
 func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
-	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+	if err := artifacts.ValidateSafeComponent("commit", meta.Commit); err != nil {
 		return "", err
 	}
 	if s.bucket == "" {
@@ -220,7 +229,7 @@ func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata,
 
 // StoreComparison persists comparison summary data as comparisons/<comparisonName>.json and returns the gs:// URI.
 func (s *GCSSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
-	if err := validateSafeComponent("comparisonName", comparisonName); err != nil {
+	if err := artifacts.ValidateSafeComponent("comparisonName", comparisonName); err != nil {
 		return "", err
 	}
 	if s.bucket == "" {
@@ -296,14 +305,11 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 
 // StoreArtifact writes the inspect log and summary.json to GCS and returns the gs:// URI.
 func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+	if err := artifacts.ValidateArtifact(meta, filename); err != nil {
 		return "", err
 	}
-	if err := validateTaskID(meta.TaskID); err != nil {
-		return "", err
-	}
-	if err := validateSafeComponent("filename", filename); err != nil {
-		return "", err
+	if meta.Commit == "" {
+		return "", fmt.Errorf("commit must not be empty")
 	}
 	if s.bucket == "" {
 		return "", fmt.Errorf("bucket name is empty")
@@ -373,35 +379,6 @@ func normalizeAndValidateBucket(raw string) (string, error) {
 		return "", fmt.Errorf("bucket name %q contains invalid characters", raw)
 	}
 	return b, nil
-}
-
-func validateSafeComponent(name, val string) error {
-	if strings.TrimSpace(val) == "" {
-		return fmt.Errorf("%s must not be empty", name)
-	}
-	if strings.Contains(val, "/") || strings.Contains(val, "\\") || strings.Contains(val, "..") || strings.ContainsRune(val, 0) {
-		return fmt.Errorf("%s %q contains invalid characters or traversal elements", name, val)
-	}
-	return nil
-}
-
-func validateTaskID(taskID string) error {
-	if strings.TrimSpace(taskID) == "" {
-		return fmt.Errorf("taskID must not be empty")
-	}
-	if strings.Contains(taskID, "\\") || strings.Contains(taskID, "..") || strings.ContainsRune(taskID, 0) {
-		return fmt.Errorf("taskID %q contains invalid characters or traversal elements", taskID)
-	}
-	if strings.HasPrefix(taskID, "/") || strings.HasSuffix(taskID, "/") {
-		return fmt.Errorf("taskID %q must not start or end with a slash", taskID)
-	}
-	parts := strings.Split(taskID, "/")
-	for _, p := range parts {
-		if p == "" || p == "." || p == ".." {
-			return fmt.Errorf("taskID %q contains empty or invalid path segment %q", taskID, p)
-		}
-	}
-	return nil
 }
 
 func isObjectNotFound(err error) bool {
