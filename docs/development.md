@@ -71,6 +71,9 @@ To build the `sandboxd` image from the fork:
 ./dev/tasks/build-sandboxd
 ```
 Pass `--push` to push the image to a container registry, or pass `IMAGE_PREFIX` and `IMAGE_TAG` to customize the tag.
+Pass `--clone-only` to prepare the checkout without building the image.
+
+`dev/tasks/build-sandboxd` uses a sibling checkout (`../agent-sandbox`) if present, or clones the pinned commit outside the repository into `${XDG_CACHE_HOME:-~/.cache}/eval-runner/agent-sandbox` (configurable via `AGENT_SANDBOX_DIR`). The fork is intentionally never cloned under the repository tree.
 
 For production and multi-platform releases (`linux/amd64,linux/arm64`), maintainers build and push the image using:
 ```bash
@@ -169,6 +172,24 @@ If a cluster was previously deployed with `latest` (or an unchanged tag) and did
 
 ```bash
 kubectl -n eval-runner rollout restart deployment/eval-runner-controller
+```
+
+### Repository Isolation and Manifest Guards
+
+`ap` automatically discovers all `k8s/` and `images/` directories located anywhere under the repository tree to determine manifests to apply and container images to build.
+
+**Rule**: Nothing under the repository tree may contain a `k8s/` or `images/` directory that is not ours.
+
+**Why**: If an external project or fork (such as `agent-sandbox`) is cloned under the repo tree (e.g. under `.build/`), `ap deploy` will discover and attempt to apply all of its manifests (such as `controller.yaml` and CRD definitions) to the target cluster. In the case of `agent-sandbox`, this can roll the cluster's `agent-sandbox-controller` Deployment to an unresolvable image reference and fail CRD reconciliation, breaking sandbox management across the cluster.
+
+Both `./dev/tasks/deploy` and `./dev/tasks/test-deploy` enforce this by asserting that `ap deploy --dry-run` lists only the manifests from this repository's `k8s/` directory and rejecting any foreign manifest paths or directories.
+
+#### Operator Recovery Note
+
+If a deployment was accidentally performed with foreign `agent-sandbox` manifests in the tree, rolling `agent-sandbox-controller` to an unresolvable image, operators can recover the deployment on the cluster with:
+
+```bash
+kubectl -n agent-sandbox-system rollout undo deployment/agent-sandbox-controller
 ```
 
 ## Creating a Run by Hand
