@@ -128,10 +128,8 @@ spec:
                 description: Phase is the lifecycle phase of the comparison (Running,
                   Completed, Failed).
                 enum:
-                - Pending
                 - Running
                 - Completed
-                - Failed
                 type: string
               summary:
                 description: Summary provides aggregate statistics across tasks in
