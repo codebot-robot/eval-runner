@@ -233,7 +233,8 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Discovery deadline | `--discovery-deadline` / ConfigMap `discoveryDeadline` | `10m` | Overall discovery deadline exceeded; Run marked `Failed` and sandbox deleted. |
 | Execution deadline | `--execution-deadline` / ConfigMap `executionDeadline` | `30m` | Overall sample execution deadline exceeded; Run marked `Failed` and sandboxes deleted. |
 | Max parallel tasks | `--max-parallel-tasks` / ConfigMap `maxParallelTasks` | `4` | Caps concurrent task sandboxes executing at one time. |
-| Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` to disable). |
+| Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` or `"none"` to disable). |
+| Strict configuration | `--strict-config` | `false` | When true, fails controller startup immediately if `eval-runner-config` contains unrecognised keys. |
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
 | Artifact bucket | `--artifact-bucket` / ConfigMap `artifactBucket` | `""` (in-memory sink) | GCS bucket URI (`gs://<bucket>`) or name where manifests, Inspect logs, and `summary.json` are stored. |
 | Artifact directory | `--artifact-dir` | `""` (in-memory sink) | Local filesystem directory for storing manifests, evaluation logs, and comparison artifacts when GCS is not configured. |

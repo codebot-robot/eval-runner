@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -486,14 +488,15 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	githubToken := fs.String("github-token-secret", "github-token", "github token secret")
 	githubApp := fs.String("github-app-secret", "", "github app secret")
 	uiURL := fs.String("ui-base-url", "", "ui base url")
+	strictConfig := fs.Bool("strict-config", false, "strict config")
 
-	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com"})
+	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config set
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -508,6 +511,12 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	}
 	if !rawFlags.IsExplicit("ui-base-url") {
 		t.Errorf("expected ui-base-url to be explicit")
+	}
+	if !rawFlags.IsExplicit("strict-config") {
+		t.Errorf("expected strict-config to be explicit")
+	}
+	if !rawFlags.StrictConfig {
+		t.Errorf("expected StrictConfig to be true")
 	}
 	if rawFlags.IsExplicit("github-app-secret") {
 		t.Errorf("expected github-app-secret NOT to be explicit")
@@ -742,4 +751,361 @@ func TestResolveConfig_ArtifactDir(t *testing.T) {
 	if cfgOverride.ArtifactDir != "/custom/dir" {
 		t.Errorf("expected ArtifactDir /custom/dir, got %q", cfgOverride.ArtifactDir)
 	}
+}
+
+type testLogSink struct {
+	entries []string
+}
+
+func (s *testLogSink) Init(info logr.RuntimeInfo) {}
+func (s *testLogSink) Enabled(level int) bool     { return true }
+func (s *testLogSink) Info(level int, msg string, keysAndValues ...any) {
+	s.entries = append(s.entries, fmt.Sprintf("%s: %v", msg, keysAndValues))
+}
+func (s *testLogSink) Error(err error, msg string, keysAndValues ...any) {
+	s.entries = append(s.entries, fmt.Sprintf("ERROR: %s: %v (%v)", msg, keysAndValues, err))
+}
+func (s *testLogSink) WithValues(keysAndValues ...any) logr.LogSink { return s }
+func (s *testLogSink) WithName(name string) logr.LogSink            { return s }
+
+func TestUnknownConfigMapKeys(t *testing.T) {
+	// 1. nil ConfigMap
+	if unknown := UnknownConfigMapKeys(nil); unknown != nil {
+		t.Errorf("expected nil for nil ConfigMap, got %v", unknown)
+	}
+
+	// 2. nil Data
+	cmEmpty := &corev1.ConfigMap{}
+	if unknown := UnknownConfigMapKeys(cmEmpty); unknown != nil {
+		t.Errorf("expected nil for nil Data, got %v", unknown)
+	}
+
+	// 3. all recognized keys
+	cmRecognized := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyArtifactBucket:      "gs://b",
+			ConfigMapKeyArtifactDir:         "/tmp",
+			ConfigMapKeyDiscoveryDeadline:   "10m",
+			ConfigMapKeyExecutionDeadline:   "30m",
+			ConfigMapKeyMaxParallelTasks:    "4",
+			ConfigMapKeyModelSecret:         "sec",
+			ConfigMapKeySandboxdImage:       "img:tag",
+			ConfigMapKeyTaskGracePeriod:     "30s",
+			ConfigMapKeyGitHubTokenSecret:   "gh-token",
+			ConfigMapKeyGitHubAppSecret:     "gh-app",
+			ConfigMapKeyUIBaseURL:           "https://ui",
+			ConfigMapKeyGitHubWebhookSecret: "gh-wh",
+			ConfigMapKeyWebhookRepositories: "org/repo",
+			ConfigMapKeyDefaultModel:        "model",
+			ConfigMapKeyDefaultLimit:        "5",
+		},
+	}
+	if unknown := UnknownConfigMapKeys(cmRecognized); unknown != nil {
+		t.Errorf("expected nil for recognized keys, got %v", unknown)
+	}
+
+	// 4. unrecognized keys are returned sorted
+	cmWithUnknown := &corev1.ConfigMap{
+		Data: map[string]string{
+			"artifactBuckets": "gs://typo",
+			"unknownKey2":     "val2",
+			"anotherUnknown":  "val1",
+			"artifactBucket":  "gs://good",
+		},
+	}
+	expected := []string{"anotherUnknown", "artifactBuckets", "unknownKey2"}
+	unknown := UnknownConfigMapKeys(cmWithUnknown)
+	if !reflect.DeepEqual(unknown, expected) {
+		t.Errorf("expected %v, got %v", expected, unknown)
+	}
+}
+
+func TestResolveConfig_StrictMode(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			"artifactBuckets": "gs://typo",
+			"artifactBucket":  "gs://valid-bucket",
+		},
+	}
+
+	// When strict-config is disabled (default), unknown keys are ignored by ResolveConfig
+	cfg, err := ResolveConfig(cm, RawFlags{StrictConfig: false})
+	if err != nil {
+		t.Fatalf("unexpected error when strict-config is false: %v", err)
+	}
+	if cfg.ArtifactBucket != "gs://valid-bucket" {
+		t.Errorf("expected ArtifactBucket gs://valid-bucket, got %q", cfg.ArtifactBucket)
+	}
+
+	// When strict-config is enabled, ResolveConfig fails fast with descriptive error
+	_, err = ResolveConfig(cm, RawFlags{StrictConfig: true})
+	if err == nil {
+		t.Fatal("expected error when strict-config is true, got nil")
+	}
+	if !strings.Contains(err.Error(), "unrecognised keys in ConfigMap") {
+		t.Errorf("expected error mentioning unrecognised keys, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "artifactBuckets") {
+		t.Errorf("expected error mentioning artifactBuckets, got %q", err.Error())
+	}
+
+	// When strict-config is enabled but all keys are valid, ResolveConfig succeeds
+	cmValid := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			"artifactBucket": "gs://valid-bucket",
+		},
+	}
+	cfgValid, err := ResolveConfig(cmValid, RawFlags{StrictConfig: true})
+	if err != nil {
+		t.Fatalf("unexpected error when strict-config is true with valid keys: %v", err)
+	}
+	if cfgValid.ArtifactBucket != "gs://valid-bucket" {
+		t.Errorf("expected ArtifactBucket gs://valid-bucket, got %q", cfgValid.ArtifactBucket)
+	}
+}
+
+func TestLoadAndResolveClusterConfig_UnknownKeyWarning(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 to scheme: %v", err)
+	}
+
+	cmUnknown := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			"artifactBuckets": "gs://typo",
+			"extraField":      "value",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cmUnknown).Build()
+
+	sink := &testLogSink{}
+	logger := logr.New(sink)
+
+	cfg, err := LoadAndResolveClusterConfig(
+		t.Context(),
+		fakeClient,
+		"eval-runner",
+		DefaultConfigMapName,
+		RawFlags{},
+		logger,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Verify built-in defaults applied
+	if cfg != DefaultClusterConfig() {
+		t.Errorf("expected default cluster config, got %+v", cfg)
+	}
+
+	// Verify warning logged
+	warningFound := false
+	for _, entry := range sink.entries {
+		if strings.Contains(entry, "warning: unrecognised keys in ConfigMap") &&
+			strings.Contains(entry, "artifactBuckets") &&
+			strings.Contains(entry, "extraField") {
+			warningFound = true
+			break
+		}
+	}
+	if !warningFound {
+		t.Errorf("expected warning logged for unrecognised keys, got entries: %v", sink.entries)
+	}
+
+	// Verify fail-fast when StrictConfig is enabled
+	sinkStrict := &testLogSink{}
+	loggerStrict := logr.New(sinkStrict)
+	_, err = LoadAndResolveClusterConfig(
+		t.Context(),
+		fakeClient,
+		"eval-runner",
+		DefaultConfigMapName,
+		RawFlags{StrictConfig: true},
+		loggerStrict,
+	)
+	if err == nil {
+		t.Fatal("expected error under strict config, got nil")
+	}
+	if !strings.Contains(err.Error(), "unrecognised keys in ConfigMap") {
+		t.Errorf("expected unrecognised keys error, got %v", err)
+	}
+
+	// Verify no warning logged when only recognized keys are present
+	cmKnown := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			"artifactBucket": "gs://valid-bucket",
+		},
+	}
+	fakeClientKnown := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cmKnown).Build()
+	sinkKnown := &testLogSink{}
+	loggerKnown := logr.New(sinkKnown)
+	_, err = LoadAndResolveClusterConfig(
+		t.Context(),
+		fakeClientKnown,
+		"eval-runner",
+		DefaultConfigMapName,
+		RawFlags{},
+		loggerKnown,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, entry := range sinkKnown.entries {
+		if strings.Contains(entry, "unrecognised keys") {
+			t.Errorf("unexpected warning logged for recognized keys: %s", entry)
+		}
+	}
+}
+
+func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
+	defaults := DefaultClusterConfig()
+
+	// 1. Empty string for all keys retains built-in defaults (does not disable)
+	t.Run("empty strings retain built-in defaults", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "eval-runner",
+				Name:      DefaultConfigMapName,
+			},
+			Data: map[string]string{
+				ConfigMapKeyArtifactBucket:    "",
+				ConfigMapKeyArtifactDir:       "",
+				ConfigMapKeyDiscoveryDeadline: "",
+				ConfigMapKeyExecutionDeadline: "",
+				ConfigMapKeyMaxParallelTasks:  "",
+				ConfigMapKeyModelSecret:       "",
+				ConfigMapKeySandboxdImage:     "",
+				ConfigMapKeyTaskGracePeriod:   "",
+				ConfigMapKeyGitHubTokenSecret: "",
+				ConfigMapKeyGitHubAppSecret:   "",
+				ConfigMapKeyUIBaseURL:         "",
+			},
+		}
+
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != defaults {
+			t.Errorf("expected empty strings to retain defaults %+v, got %+v", defaults, cfg)
+		}
+	})
+
+	// 2. Whitespace-only strings retain built-in defaults
+	t.Run("whitespace strings retain built-in defaults", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "eval-runner",
+				Name:      DefaultConfigMapName,
+			},
+			Data: map[string]string{
+				ConfigMapKeyModelSecret:       "   ",
+				ConfigMapKeyGitHubTokenSecret: " \t ",
+				ConfigMapKeyDiscoveryDeadline: " ",
+			},
+		}
+
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ModelSecret != defaults.ModelSecret {
+			t.Errorf("expected ModelSecret default %q, got %q", defaults.ModelSecret, cfg.ModelSecret)
+		}
+		if cfg.GitHubTokenSecret != defaults.GitHubTokenSecret {
+			t.Errorf("expected GitHubTokenSecret default %q, got %q", defaults.GitHubTokenSecret, cfg.GitHubTokenSecret)
+		}
+		if cfg.DiscoveryDeadline != defaults.DiscoveryDeadline {
+			t.Errorf("expected DiscoveryDeadline default %v, got %v", defaults.DiscoveryDeadline, cfg.DiscoveryDeadline)
+		}
+	})
+
+	// 3. Sentinel "none" (case-insensitive) explicitly disables features/credentials
+	t.Run("sentinel none disables features in ConfigMap", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "eval-runner",
+				Name:      DefaultConfigMapName,
+			},
+			Data: map[string]string{
+				ConfigMapKeyModelSecret:       "none",
+				ConfigMapKeyGitHubTokenSecret: "None",
+				ConfigMapKeyArtifactBucket:    "NONE",
+				ConfigMapKeyArtifactDir:       "none",
+				ConfigMapKeyGitHubAppSecret:   "none",
+				ConfigMapKeyUIBaseURL:         "none",
+			},
+		}
+
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ModelSecret != "" {
+			t.Errorf("expected ModelSecret disabled (empty), got %q", cfg.ModelSecret)
+		}
+		if cfg.GitHubTokenSecret != "" {
+			t.Errorf("expected GitHubTokenSecret disabled (empty), got %q", cfg.GitHubTokenSecret)
+		}
+		if cfg.ArtifactBucket != "" {
+			t.Errorf("expected ArtifactBucket disabled (empty), got %q", cfg.ArtifactBucket)
+		}
+		if cfg.ArtifactDir != "" {
+			t.Errorf("expected ArtifactDir disabled (empty), got %q", cfg.ArtifactDir)
+		}
+		if cfg.GitHubAppSecret != "" {
+			t.Errorf("expected GitHubAppSecret disabled (empty), got %q", cfg.GitHubAppSecret)
+		}
+		if cfg.UIBaseURL != "" {
+			t.Errorf("expected UIBaseURL disabled (empty), got %q", cfg.UIBaseURL)
+		}
+	})
+
+	// 4. Explicit flags with sentinel "none" or empty string disable features
+	t.Run("explicit flag with none disables features", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "eval-runner",
+				Name:      DefaultConfigMapName,
+			},
+			Data: map[string]string{
+				ConfigMapKeyModelSecret:       "custom-model-secret",
+				ConfigMapKeyGitHubTokenSecret: "custom-token-secret",
+			},
+		}
+		flags := RawFlags{
+			ModelSecret:       "none",
+			GitHubTokenSecret: "None",
+			Explicit: map[string]bool{
+				"model-secret":        true,
+				"github-token-secret": true,
+			},
+		}
+
+		cfg, err := ResolveConfig(cm, flags)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ModelSecret != "" {
+			t.Errorf("expected ModelSecret disabled via flag, got %q", cfg.ModelSecret)
+		}
+		if cfg.GitHubTokenSecret != "" {
+			t.Errorf("expected GitHubTokenSecret disabled via flag, got %q", cfg.GitHubTokenSecret)
+		}
+	})
 }

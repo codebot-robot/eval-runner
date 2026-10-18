@@ -418,6 +418,7 @@ data:
 
 Supported ConfigMap keys include:
 - `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
+- `artifactDir`: Local filesystem directory for storing evaluation artifacts.
 - `defaultLimit`: Default sample limit for webhook-created Runs (e.g. `10`).
 - `defaultModel`: Default model identifier for webhook-created Runs (e.g. `mockllm/model`).
 - `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).
@@ -427,11 +428,32 @@ Supported ConfigMap keys include:
 - `githubWebhookSecret`: Name of Secret in controller namespace containing GitHub webhook secret (default `github-webhook`).
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
 - `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
+- `sandboxdImage`: Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset).
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
 - `uiBaseURL`: Base URL for the eval-runner UI (e.g. `https://eval-runner.example.com`) to generate absolute links in PR comments.
 - `webhookRepositories`: Comma-separated list of allowed repositories (`owner/name`). If unset, all repositories are accepted.
 
 Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the ConfigMap is absent, all built-in defaults are used.
+
+### Empty-Value Semantics and Feature Disabling
+
+Empty values in the ConfigMap (empty string or whitespace-only) are unified across all keys to mean **"unset, use default"**; they do not disable features or clear defaults.
+
+To explicitly disable a feature or credential that has a non-empty built-in default (such as `modelSecret` or `githubTokenSecret`), specify the sentinel value `none`:
+
+```yaml
+data:
+  # Disables injecting model credentials into sample sandboxes
+  modelSecret: "none"
+  # Disables posting GitHub comments or check runs
+  githubTokenSecret: "none"
+```
+
+### Unrecognised Keys and Strict Configuration
+
+At startup, the controller inspects `eval-runner-config` and logs an informational warning listing any unrecognised keys (such as typos like `artifactBuckets`).
+
+To protect against misconfigurations by failing startup immediately when unrecognised keys are detected, pass `--strict-config` to the controller (default is off).
 
 ## GitHub PR Reporting
 
