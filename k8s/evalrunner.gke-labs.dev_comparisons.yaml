@@ -100,6 +100,12 @@ spec:
                 maximum: 0.5
                 minimum: 0
                 type: number
+              extraSamples:
+                default: 0
+                description: ExtraSamples requests running that many more samples
+                  per undecided task beyond the stopping rule.
+                minimum: 0
+                type: integer
               pullRequest:
                 description: PullRequest references an optional GitHub pull request
                   to report results to.
@@ -124,6 +130,28 @@ spec:
                 - number
                 - repository
                 type: object
+              sampling:
+                description: Sampling specifies batch size and stopping rule parameters.
+                properties:
+                  batchSize:
+                    default: 8
+                    description: 'BatchSize is the number of samples per extension
+                      batch (default: 8).'
+                    minimum: 1
+                    type: integer
+                  initialBatch:
+                    default: 8
+                    description: 'InitialBatch is the number of samples in batch 1
+                      (default: 8).'
+                    minimum: 1
+                    type: integer
+                  maxSamplesPerTask:
+                    default: 96
+                    description: 'MaxSamplesPerTask is the maximum samples per task
+                      across all batches (default: 96).'
+                    minimum: 1
+                    type: integer
+                type: object
               tasks:
                 description: |-
                   Tasks is an optional allow-list of task IDs to compare.
@@ -138,6 +166,66 @@ spec:
           status:
             description: ComparisonStatus defines the observed state of Comparison.
             properties:
+              batches:
+                description: Batches tracks the sequence of paired batches evaluated
+                  for this comparison.
+                items:
+                  description: ComparisonBatchStatus tracks one paired batch evaluation
+                    for a Comparison.
+                  properties:
+                    baselineRun:
+                      description: BaselineRun is the name of the baseline Run resource
+                        for this batch.
+                      type: string
+                    candidateRun:
+                      description: CandidateRun is the name of the candidate Run resource
+                        for this batch.
+                      type: string
+                    index:
+                      description: Index is the 1-based index of this batch (1, 2,
+                        ...).
+                      minimum: 1
+                      type: integer
+                    phase:
+                      description: Phase is the execution phase of this batch (Running,
+                        Completed, Failed).
+                      enum:
+                      - Running
+                      - Completed
+                      - Failed
+                      type: string
+                    sampleRange:
+                      description: SampleRange is the sample window evaluated in this
+                        batch.
+                      properties:
+                        end:
+                          description: End is the 1-based inclusive end index in the
+                            dataset.
+                          minimum: 1
+                          type: integer
+                        start:
+                          description: Start is the 1-based inclusive start index
+                            in the dataset.
+                          minimum: 1
+                          type: integer
+                      required:
+                      - end
+                      - start
+                      type: object
+                      x-kubernetes-validations:
+                      - message: end must be greater than or equal to start
+                        rule: self.end >= self.start
+                  required:
+                  - baselineRun
+                  - candidateRun
+                  - index
+                  - sampleRange
+                  type: object
+                type: array
+              extraSamplesApplied:
+                description: ExtraSamplesApplied records the count of extra samples
+                  that have been applied.
+                type: integer
               message:
                 description: Message is human-readable detail on failure or current
                   status.
@@ -210,6 +298,11 @@ spec:
                       maximum: 1
                       minimum: 0
                       type: number
+                    decision:
+                      description: Decision is the stopping rule decision outcome
+                        for this task (improved, regressed, unchanged, inconclusive,
+                        continue).
+                      type: string
                     delta:
                       description: Delta is the sample mean difference (candidate
                         - baseline).
@@ -268,9 +361,25 @@ spec:
                       description: Pairs is the number of matched (paired) sample
                         pairs.
                       type: integer
+                    samples:
+                      description: Samples is the total count of evaluated samples
+                        for this task across batches.
+                      type: integer
+                    samplesRun:
+                      description: SamplesRun is the total number of samples evaluated
+                        for this task across batches.
+                      type: integer
+                    suggestedNext:
+                      description: SuggestedNext is the suggested number of additional
+                        samples to run if undecided.
+                      type: integer
                     ties:
                       description: Ties is the number of paired samples where candidate
                         and baseline scored equally.
+                      type: integer
+                    tokens:
+                      description: Tokens is the total token count consumed for this
+                        task across evaluated runs, when present in Inspect logs.
                       type: integer
                     wins:
                       description: Wins is the number of paired samples where the

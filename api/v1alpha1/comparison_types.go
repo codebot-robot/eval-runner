@@ -81,6 +81,54 @@ type PullRequestSpec struct {
 	BaseSHA string `json:"baseSHA,omitempty"`
 }
 
+// SamplingSpec defines batch sizes and sample caps for adaptive paired sampling.
+type SamplingSpec struct {
+	// InitialBatch is the number of samples in batch 1 (default: 8).
+	// +kubebuilder:default=8
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	InitialBatch *int `json:"initialBatch,omitempty"`
+
+	// BatchSize is the number of samples per extension batch (default: 8).
+	// +kubebuilder:default=8
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	BatchSize *int `json:"batchSize,omitempty"`
+
+	// MaxSamplesPerTask is the maximum samples per task across all batches (default: 96).
+	// +kubebuilder:default=96
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxSamplesPerTask *int `json:"maxSamplesPerTask,omitempty"`
+}
+
+const (
+	DefaultInitialBatch      = 8
+	DefaultBatchSize         = 8
+	DefaultMaxSamplesPerTask = 96
+)
+
+func (s *SamplingSpec) EffectiveInitialBatch() int {
+	if s != nil && s.InitialBatch != nil && *s.InitialBatch > 0 {
+		return *s.InitialBatch
+	}
+	return DefaultInitialBatch
+}
+
+func (s *SamplingSpec) EffectiveBatchSize() int {
+	if s != nil && s.BatchSize != nil && *s.BatchSize > 0 {
+		return *s.BatchSize
+	}
+	return DefaultBatchSize
+}
+
+func (s *SamplingSpec) EffectiveMaxSamplesPerTask() int {
+	if s != nil && s.MaxSamplesPerTask != nil && *s.MaxSamplesPerTask > 0 {
+		return *s.MaxSamplesPerTask
+	}
+	return DefaultMaxSamplesPerTask
+}
+
 // ComparisonSpec defines the desired state of Comparison.
 type ComparisonSpec struct {
 	// Baseline specifies the baseline Run to compare against.
@@ -106,6 +154,16 @@ type ComparisonSpec struct {
 	// PullRequest references an optional GitHub pull request to report results to.
 	// +optional
 	PullRequest *PullRequestSpec `json:"pullRequest,omitempty"`
+
+	// Sampling specifies batch size and stopping rule parameters.
+	// +optional
+	Sampling *SamplingSpec `json:"sampling,omitempty"`
+
+	// ExtraSamples requests running that many more samples per undecided task beyond the stopping rule.
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ExtraSamples int `json:"extraSamples,omitempty"`
 }
 
 // DeltaConfidenceInterval represents a confidence interval on a difference/delta in [-1, 1].
@@ -130,6 +188,36 @@ type ComparisonDropped struct {
 	// Baseline is the number of baseline samples dropped due to lack of a matching candidate.
 	// +optional
 	Baseline int `json:"baseline"`
+}
+
+// ComparisonBatchPhase represents the lifecycle phase of a batch.
+// +kubebuilder:validation:Enum=Running;Completed;Failed
+type ComparisonBatchPhase string
+
+const (
+	ComparisonBatchPhaseRunning   ComparisonBatchPhase = "Running"
+	ComparisonBatchPhaseCompleted ComparisonBatchPhase = "Completed"
+	ComparisonBatchPhaseFailed    ComparisonBatchPhase = "Failed"
+)
+
+// ComparisonBatchStatus tracks one paired batch evaluation for a Comparison.
+type ComparisonBatchStatus struct {
+	// Index is the 1-based index of this batch (1, 2, ...).
+	// +kubebuilder:validation:Minimum=1
+	Index int `json:"index"`
+
+	// SampleRange is the sample window evaluated in this batch.
+	SampleRange SampleRange `json:"sampleRange"`
+
+	// CandidateRun is the name of the candidate Run resource for this batch.
+	CandidateRun string `json:"candidateRun"`
+
+	// BaselineRun is the name of the baseline Run resource for this batch.
+	BaselineRun string `json:"baselineRun"`
+
+	// Phase is the execution phase of this batch (Running, Completed, Failed).
+	// +optional
+	Phase ComparisonBatchPhase `json:"phase,omitempty"`
 }
 
 // ComparisonTaskStatus records the paired comparison results for a single task.
@@ -183,6 +271,26 @@ type ComparisonTaskStatus struct {
 	// Label is the decision outcome for this task: improved, regressed, unchanged, inconclusive, or running.
 	// +optional
 	Label ComparisonTaskLabel `json:"label,omitempty"`
+
+	// SamplesRun is the total number of samples evaluated for this task across batches.
+	// +optional
+	SamplesRun int `json:"samplesRun,omitempty"`
+
+	// Decision is the stopping rule decision outcome for this task (improved, regressed, unchanged, inconclusive, continue).
+	// +optional
+	Decision string `json:"decision,omitempty"`
+
+	// SuggestedNext is the suggested number of additional samples to run if undecided.
+	// +optional
+	SuggestedNext int `json:"suggestedNext,omitempty"`
+
+	// Samples is the total count of evaluated samples for this task across batches.
+	// +optional
+	Samples int `json:"samples,omitempty"`
+
+	// Tokens is the total token count consumed for this task across evaluated runs, when present in Inspect logs.
+	// +optional
+	Tokens *int `json:"tokens,omitempty"`
 }
 
 // ComparisonSummary provides aggregate statistics across tasks in a Comparison.
@@ -230,6 +338,14 @@ type ComparisonStatus struct {
 	// Tasks records the status and paired comparison results for each evaluated task.
 	// +optional
 	Tasks []ComparisonTaskStatus `json:"tasks,omitempty"`
+
+	// Batches tracks the sequence of paired batches evaluated for this comparison.
+	// +optional
+	Batches []ComparisonBatchStatus `json:"batches,omitempty"`
+
+	// ExtraSamplesApplied records the count of extra samples that have been applied.
+	// +optional
+	ExtraSamplesApplied int `json:"extraSamplesApplied"`
 
 	// Summary provides aggregate statistics across tasks in the Comparison.
 	// +optional
