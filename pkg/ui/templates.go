@@ -523,7 +523,8 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
         <th>this PR</th>
         <th colspan="2">Δ (95% CI)</th>
         <th>label</th>
-        <th>runs</th>
+        <th>samples</th>{{ if .HasTokens }}
+        <th>tokens</th>{{ end }}
       </tr>
     </thead>
     <tbody>
@@ -551,11 +552,12 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
           {{ if or (gt .DroppedCand 0) (gt .DroppedBase 0) }}
           <span style="font-size:11px;color:var(--muted);display:block">dropped: {{ .DroppedCand }} cand, {{ .DroppedBase }} base</span>
           {{ end }}
-        </td>
+        </td>{{ if $.HasTokens }}
+        <td class="num">{{ if .Tokens }}{{ .Tokens.Total }}{{ else }}—{{ end }}</td>{{ end }}
       </tr>
       {{ else }}
       <tr>
-        <td colspan="7" class="empty-state">No task comparisons recorded.</td>
+        <td colspan="{{ if .HasTokens }}8{{ else }}7{{ end }}" class="empty-state">No task comparisons recorded.</td>
       </tr>
       {{ end }}
     </tbody>
@@ -603,12 +605,49 @@ const comparisonDetailTemplate = `
         {{ end }}
 
         {{ template "comparison_table" . }}
+        {{- if .Actions }}
+        <div style="margin-top:16px">
+          {{ range .Actions }}
+          <div style="font-size:14px;color:var(--ink-2);margin-top:4px">{{ . }}</div>
+          {{ end }}
+        </div>
+        {{- end }}
+        {{- if .Batches }}
+        <h2 style="font-size:17px;font-weight:600;margin:24px 0 12px">Batches</h2>
+        <div style="overflow-x:auto">
+          <table class="ci">
+            <thead>
+              <tr>
+                <th>batch</th>
+                <th>phase</th>
+                <th>samples</th>
+                <th>candidate run</th>
+                <th>baseline run</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{ range .Batches }}
+              <tr>
+                <td class="mono" style="font-weight:600">batch {{ .Index }}</td>
+                <td><span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span></td>
+                <td class="num">{{ if .SampleRange }}{{ .SampleRange }}{{ else }}—{{ end }}</td>
+                <td><a href="/runs/{{ $.Namespace }}/{{ .CandidateRun }}" class="mono" style="font-size:13px">{{ .CandidateRun }}</a></td>
+                <td><a href="/runs/{{ $.Namespace }}/{{ .BaselineRun }}" class="mono" style="font-size:13px">{{ .BaselineRun }}</a></td>
+              </tr>
+              {{ end }}
+            </tbody>
+          </table>
+        </div>
+        {{- end }}
       </div>
 
       <div class="card-footer">
         <span><b>Base:</b> commit <span class="mono">{{ if .BaseCommitShort }}{{ .BaseCommitShort }}{{ else }}—{{ end }}</span> (<a href="/runs/{{ .Namespace }}/{{ .BaseRun }}">{{ .BaseRun }}</a>)</span>
         <span><b>Candidate:</b> commit <span class="mono">{{ if .CandCommitShort }}{{ .CandCommitShort }}{{ else }}—{{ end }}</span> (<a href="/runs/{{ .Namespace }}/{{ .CandRun }}">{{ .CandRun }}</a>)</span>
         <span><b>Samples:</b> {{ if .SamplesSummary }}{{ .SamplesSummary }}{{ else }}{{ .TotalSamples }} run · {{ .TotalPairs }} paired{{ if or (gt .TotalDroppedCand 0) (gt .TotalDroppedBase 0) }} · dropped: {{ .TotalDroppedCand }} cand, {{ .TotalDroppedBase }} base{{ end }}{{ end }}</span>
+        {{- if .Batches }}
+        <span><b>Batches:</b> {{ len .Batches }}</span>
+        {{- end }}
         {{ if .SummaryPath }}
         <span style="font-size:12px" class="mono" title="{{ .SummaryPath }}">{{ .SummaryPath }}</span>
         {{ end }}
@@ -632,5 +671,13 @@ var (
 
 // RenderComparisonTable renders the comparison table sub-template to the given writer.
 func RenderComparisonTable(w io.Writer, view ComparisonTableView) error {
+	if !view.HasTokens {
+		for _, t := range view.Tasks {
+			if t.Tokens != nil {
+				view.HasTokens = true
+				break
+			}
+		}
+	}
 	return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", view)
 }

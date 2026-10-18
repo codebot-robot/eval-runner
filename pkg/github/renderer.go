@@ -99,10 +99,23 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	}
 
 	// 3. Table
-	sb.WriteString("| eval | base | this PR | Δ (95% CI) | label | runs |\n")
-	sb.WriteString("| --- | --- | --- | --- | --- | --- |\n")
-
+	hasTokens := false
 	rows := ui.ComparisonRows(comp)
+	for _, row := range rows {
+		if row.Tokens != nil {
+			hasTokens = true
+			break
+		}
+	}
+
+	if hasTokens {
+		sb.WriteString("| eval | base | this PR | Δ (95% CI) | label | samples | tokens |\n")
+		sb.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
+	} else {
+		sb.WriteString("| eval | base | this PR | Δ (95% CI) | label | samples |\n")
+		sb.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+	}
+
 	for _, row := range rows {
 		escapedID := EscapeCell(row.ID)
 		deltaStr := "—"
@@ -112,19 +125,35 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 			deltaStr = row.Delta
 		}
 
-		runsCount := row.Pairs
+		samplesCount := row.Pairs
 		if row.SamplesRun > 0 {
-			runsCount = row.SamplesRun
+			samplesCount = row.SamplesRun
 		}
 
-		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %d |\n",
-			escapedID,
-			row.BaseRate,
-			row.CandRate,
-			deltaStr,
-			row.Label,
-			runsCount,
-		))
+		if hasTokens {
+			tokensStr := "—"
+			if row.Tokens != nil {
+				tokensStr = fmt.Sprintf("%d", row.Tokens.Total)
+			}
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %d | %s |\n",
+				escapedID,
+				row.BaseRate,
+				row.CandRate,
+				deltaStr,
+				row.Label,
+				samplesCount,
+				tokensStr,
+			))
+		} else {
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %d |\n",
+				escapedID,
+				row.BaseRate,
+				row.CandRate,
+				deltaStr,
+				row.Label,
+				samplesCount,
+			))
+		}
 	}
 	sb.WriteString("\n")
 

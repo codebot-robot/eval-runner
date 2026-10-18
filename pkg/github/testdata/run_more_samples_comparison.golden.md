@@ -2,7 +2,7 @@
 
 ## INCONCLUSIVE · P(improvement) = 0.26
 
-| eval | base | this PR | Δ (95% CI) | label | runs |
+| eval | base | this PR | Δ (95% CI) | label | samples |
 | --- | --- | --- | --- | --- | --- |
 | docs/readme\_comprehension | 1.00 | 1.00 | +0.00 [+0.00, +0.00] | unchanged | 20 |
 | docs/readme\_comprehension\_blind | 0.20 | 0.15 | -0.05 [-0.15, +0.00] | inconclusive | 20 |
