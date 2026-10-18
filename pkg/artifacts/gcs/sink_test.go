@@ -482,7 +482,7 @@ func TestGCSSink_StoreManifest(t *testing.T) {
 
 	manifestData := []byte(`{"tasks":[{"id":"t1"}]}`)
 
-	// 1. Success store
+	// 1. Object absent: first write succeeds and records write
 	uri, err := sink.StoreManifest(t.Context(), meta, manifestData)
 	if err != nil {
 		t.Fatalf("StoreManifest failed: %v", err)
@@ -491,6 +491,10 @@ func TestGCSSink_StoreManifest(t *testing.T) {
 	expectedURI := "gs://eval-bucket/runs/abcdef12/manifest.json"
 	if uri != expectedURI {
 		t.Errorf("Expected URI %q, got %q", expectedURI, uri)
+	}
+
+	if fakeClient.WriteCount() != 1 {
+		t.Errorf("Expected WriteCount=1 after first write, got %d", fakeClient.WriteCount())
 	}
 
 	// Verify object and metadata
@@ -505,7 +509,7 @@ func TestGCSSink_StoreManifest(t *testing.T) {
 		t.Errorf("Metadata mismatch: got %+v", obj.Metadata)
 	}
 
-	// 2. Idempotency: second write with same content is a no-op
+	// 2. Object present with the same hash/content: no-op (no write occurs)
 	uri2, err := sink.StoreManifest(t.Context(), meta, manifestData)
 	if err != nil {
 		t.Fatalf("Second StoreManifest failed: %v", err)
@@ -513,8 +517,36 @@ func TestGCSSink_StoreManifest(t *testing.T) {
 	if uri2 != uri {
 		t.Errorf("Expected identical URI on idempotent write: %q vs %q", uri2, uri)
 	}
+	if fakeClient.WriteCount() != 1 {
+		t.Errorf("Expected WriteCount to remain 1 after identical write, got %d", fakeClient.WriteCount())
+	}
 
-	// 3. Error above cap (must error, NOT truncate)
+	// 3. Object present with different hash/content: overwrites existing object
+	differentData := []byte(`{"tasks":[{"id":"t2"}]}`)
+	uri3, err := sink.StoreManifest(t.Context(), meta, differentData)
+	if err != nil {
+		t.Fatalf("StoreManifest with different content failed: %v", err)
+	}
+	if uri3 != uri {
+		t.Errorf("Expected URI %q, got %q", uri, uri3)
+	}
+	if fakeClient.WriteCount() != 2 {
+		t.Errorf("Expected WriteCount=2 after overwrite, got %d", fakeClient.WriteCount())
+	}
+	updatedObj, ok := fakeClient.GetObject("eval-bucket", "runs/abcdef12/manifest.json")
+	if !ok || string(updatedObj.Data) != string(differentData) {
+		t.Errorf("Expected object data to be overwritten with %s, got %s", differentData, updatedObj.Data)
+	}
+
+	// 4. Other error during existence check propagates failure
+	fakeClient.Errors["eval-bucket/runs/abcdef12/manifest.json"] = errors.New("storage: 500 internal server error")
+	_, err = sink.StoreManifest(t.Context(), meta, manifestData)
+	if err == nil || !strings.Contains(err.Error(), "failed to check existing manifest") {
+		t.Errorf("Expected error checking manifest when storage fails, got: %v", err)
+	}
+	delete(fakeClient.Errors, "eval-bucket/runs/abcdef12/manifest.json")
+
+	// 5. Error above cap (must error, NOT truncate)
 	oversized := make([]byte, 100)
 	_, err = sink.StoreManifest(t.Context(), meta, oversized)
 	if err == nil {
@@ -524,9 +556,73 @@ func TestGCSSink_StoreManifest(t *testing.T) {
 		t.Errorf("Unexpected error message: %v", err)
 	}
 
-	// 4. Missing manifest load returns ErrNotFound
+	// 6. Missing manifest load returns ErrNotFound
 	_, err = sink.Load(t.Context(), "gs://eval-bucket/runs/abcdef12/missing.json")
 	if !artifacts.IsNotFound(err) {
 		t.Errorf("Expected artifacts.IsNotFound(err) to be true, got: %v", err)
+	}
+}
+
+func TestGCSSink_FirstWriteAgainstEmptyBucket_AllObjectKinds(t *testing.T) {
+	fakeClient := NewFakeStorageClient()
+	sink, err := New(t.Context(), "gs://empty-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:      "test-run",
+		RunNamespace: "eval-runner",
+		TaskID:       "task-1",
+		Model:        "mockllm/model",
+		Commit:       "commit123",
+		TaskCount:    1,
+	}
+
+	// 1. Manifest first write against empty bucket succeeds
+	manifestData := []byte(`{"tasks":[{"id":"task-1"}]}`)
+	manifestURI, err := sink.StoreManifest(t.Context(), meta, manifestData)
+	if err != nil {
+		t.Fatalf("First write of StoreManifest against empty bucket failed: %v", err)
+	}
+	expectedManifestURI := "gs://empty-bucket/runs/commit123/manifest.json"
+	if manifestURI != expectedManifestURI {
+		t.Errorf("Expected manifest URI %q, got %q", expectedManifestURI, manifestURI)
+	}
+
+	// 2. Artifact first write against empty bucket succeeds
+	logData := []byte(`{"results":{"score":1.0}}`)
+	logURI, err := sink.StoreArtifact(t.Context(), meta, "eval.json", logData)
+	if err != nil {
+		t.Fatalf("First write of StoreArtifact against empty bucket failed: %v", err)
+	}
+	expectedLogURI := "gs://empty-bucket/runs/commit123/task-1/eval.json"
+	if logURI != expectedLogURI {
+		t.Errorf("Expected log URI %q, got %q", expectedLogURI, logURI)
+	}
+
+	// 3. Comparison first write against empty bucket succeeds
+	compData := []byte(`{"verdict":"IMPROVED"}`)
+	compURI, err := sink.StoreComparison(t.Context(), "comp-123", compData)
+	if err != nil {
+		t.Fatalf("First write of StoreComparison against empty bucket failed: %v", err)
+	}
+	expectedCompURI := "gs://empty-bucket/comparisons/comp-123.json"
+	if compURI != expectedCompURI {
+		t.Errorf("Expected comparison URI %q, got %q", expectedCompURI, compURI)
+	}
+
+	// Verify all objects exist in storage client
+	if _, ok := fakeClient.GetObject("empty-bucket", "runs/commit123/manifest.json"); !ok {
+		t.Errorf("manifest.json not found in storage client")
+	}
+	if _, ok := fakeClient.GetObject("empty-bucket", "runs/commit123/task-1/eval.json"); !ok {
+		t.Errorf("log artifact not found in storage client")
+	}
+	if _, ok := fakeClient.GetObject("empty-bucket", "runs/commit123/task-1/summary.json"); !ok {
+		t.Errorf("summary.json not found in storage client")
+	}
+	if _, ok := fakeClient.GetObject("empty-bucket", "comparisons/comp-123.json"); !ok {
+		t.Errorf("comparison.json not found in storage client")
 	}
 }

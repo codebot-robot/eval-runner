@@ -222,6 +222,113 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 	}
 }
 
+func TestReconcilePodReadySuccess_GCSSink_EmptyBucketFirstWrite(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-gcs-first-write",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "a1b23a0",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun("test-run-gcs-first-write")
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	validManifestJSON := `{
+		"tasks": [
+			{"id": "triage/runbook_lookup", "workdir": "evals", "spec": "runbook.py@lookup"},
+			{"id": "triage/summary_quality", "workdir": "evals", "spec": "summary.py@quality"}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		ListStdout: validManifestJSON,
+	}
+
+	fakeGCSClient := gcs.NewFakeStorageClient()
+	gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     gcsSink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-gcs-first-write"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Did not expect RequeueAfter on success")
+	}
+
+	// Assert Run updated to Discovered with Manifest stored in GCS
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Fatalf("Expected phase Discovered, got %s (message: %s)", updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+	if updatedRun.Status.Discovery == nil || updatedRun.Status.Discovery.TaskCount != 2 {
+		t.Fatalf("Expected 2 tasks in discovery, got: %+v", updatedRun.Status.Discovery)
+	}
+	expectedURI := "gs://justinbs-knotai-dev-eval-runner/runs/a1b23a0/manifest.json"
+	if updatedRun.Status.Discovery.ManifestPath != expectedURI {
+		t.Errorf("Expected ManifestPath %q, got %q", expectedURI, updatedRun.Status.Discovery.ManifestPath)
+	}
+	if updatedRun.Status.Discovery.ManifestHash == "" {
+		t.Errorf("Expected ManifestHash populated in discovery")
+	}
+
+	// Verify the manifest object actually exists in the fake GCS client
+	if _, ok := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/a1b23a0/manifest.json"); !ok {
+		t.Fatalf("Expected manifest object to be written to fake GCS client")
+	}
+	if fakeGCSClient.WriteCount() != 1 {
+		t.Errorf("Expected 1 write call, got %d", fakeGCSClient.WriteCount())
+	}
+}
+
 func TestReconcileBadCommitFailsAndCleansUp(t *testing.T) {
 	scheme := setupScheme(t)
 
