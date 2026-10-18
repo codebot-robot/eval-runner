@@ -385,8 +385,9 @@ func getRunPlannedTaskIDs(run *v1alpha1.Run) map[string]bool {
 }
 
 // determineCompletedTaskIDs returns only tasks executed by both Runs with phase Completed,
-// filtered by comp.Spec.Tasks if specified. It also returns any tasks from comp.Spec.Tasks
-// that were not executed by both runs so they can be surfaced in status.message.
+// filtered by comp.Spec.Tasks if specified. It also returns unexecuted tasks: any task
+// specified in comp.Spec.Tasks or attempted by either Run that was not Completed by both,
+// so they can be surfaced in status.message.
 func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) (taskIDs []string, unexecuted []string) {
 	candCompleted := make(map[string]bool)
 	for i := range candRun.Status.Tasks {
@@ -418,8 +419,21 @@ func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1al
 			taskIDs = append(taskIDs, id)
 		}
 	}
+
+	seen := map[string]bool{}
+	for _, run := range []*v1alpha1.Run{candRun, baseRun} {
+		for i := range run.Status.Tasks {
+			id := run.Status.Tasks[i].ID
+			if !seen[id] && !(candCompleted[id] && baseCompleted[id]) {
+				seen[id] = true
+				unexecuted = append(unexecuted, id)
+			}
+		}
+	}
+
 	sort.Strings(taskIDs)
-	return taskIDs, nil
+	sort.Strings(unexecuted)
+	return taskIDs, unexecuted
 }
 
 func findTaskStatus(tasks []v1alpha1.TaskStatus, taskID string) *v1alpha1.TaskStatus {
