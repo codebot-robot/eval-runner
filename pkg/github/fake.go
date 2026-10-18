@@ -43,6 +43,8 @@ type FakeGitHubServer struct {
 	comments       map[int64]*IssueComment
 	issueComments  map[string][]int64 // "owner/repo#number" -> comment IDs
 	checkRuns      map[int64]*FakeCheckRun
+	permissions    map[string]string  // "owner/repo/user" -> permission level
+	reactions      map[int64][]string // commentID -> reactions
 	nextCommentID  int64
 	nextCheckRunID int64
 	currentUser    string
@@ -67,6 +69,8 @@ func NewFakeGitHubServer() *FakeGitHubServer {
 		comments:       make(map[int64]*IssueComment),
 		issueComments:  make(map[string][]int64),
 		checkRuns:      make(map[int64]*FakeCheckRun),
+		permissions:    make(map[string]string),
+		reactions:      make(map[int64][]string),
 		nextCommentID:  1000,
 		nextCheckRunID: 5000,
 		currentUser:    "test-user",
@@ -98,6 +102,21 @@ func (f *FakeGitHubServer) SetAppSlug(slug string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.appSlug = slug
+}
+
+// SetUserPermission sets collaborator permission for a user in owner/repo.
+func (f *FakeGitHubServer) SetUserPermission(owner, repo, user, permission string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fmt.Sprintf("%s/%s/%s", strings.ToLower(owner), strings.ToLower(repo), strings.ToLower(user))
+	f.permissions[key] = permission
+}
+
+// CommentReactions returns all reactions created on commentID.
+func (f *FakeGitHubServer) CommentReactions(commentID int64) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.reactions[commentID]...)
 }
 
 // Client returns an HTTPClient configured to use this fake server.
@@ -273,9 +292,21 @@ func (f *FakeGitHubServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1b. Comment reaction: /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions
+	if strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/issues/comments/") && strings.HasSuffix(path, "/reactions") && r.Method == http.MethodPost {
+		f.handleCreateReaction(w, r)
+		return
+	}
+
 	// 2. Update issue comment: /repos/{owner}/{repo}/issues/comments/{comment_id}
 	if strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/issues/comments/") {
 		f.handleUpdateComment(w, r)
+		return
+	}
+
+	// 2b. Collaborator permission: /repos/{owner}/{repo}/collaborators/{username}/permission
+	if strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/collaborators/") && strings.HasSuffix(path, "/permission") && r.Method == http.MethodGet {
+		f.handleGetPermission(w, r)
 		return
 	}
 
@@ -488,6 +519,69 @@ func (f *FakeGitHubServer) handleUpdateCheckRun(w http.ResponseWriter, r *http.R
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(checkRunResponse{ID: cr.ID}); err != nil {
+		_ = err
+	}
+}
+
+func (f *FakeGitHubServer) handleGetPermission(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// ["repos", owner, repo, "collaborators", username, "permission"]
+	if len(parts) != 6 {
+		http.NotFound(w, r)
+		return
+	}
+	owner, repo, user := strings.ToLower(parts[1]), strings.ToLower(parts[2]), strings.ToLower(parts[4])
+	key := fmt.Sprintf("%s/%s/%s", owner, repo, user)
+	perm, ok := f.permissions[key]
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		if err := json.NewEncoder(w).Encode(map[string]string{"message": "User is not a collaborator"}); err != nil {
+			_ = err
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"permission": perm,
+		"role_name":  perm,
+	}); err != nil {
+		_ = err
+	}
+}
+
+func (f *FakeGitHubServer) handleCreateReaction(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// ["repos", owner, repo, "issues", "comments", commentID, "reactions"]
+	if len(parts) != 7 {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := strconv.ParseInt(parts[5], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid comment id", http.StatusBadRequest)
+		return
+	}
+
+	var payload reactionPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	f.reactions[id] = append(f.reactions[id], payload.Content)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"content": payload.Content,
+	}); err != nil {
 		_ = err
 	}
 }

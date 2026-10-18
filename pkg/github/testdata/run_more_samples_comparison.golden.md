@@ -9,4 +9,4 @@
 
 80 run · 40 paired · paired against base commit 05ce4d8 · `/comparisons/eval-runner/docs-eval-run-more-samples` · gs://eval-bucket/comparisons/docs-eval-run-more-samples.json
 
-- run 16 more samples (docs/readme\_comprehension\_blind)
+- comment `/eval more 16` to run 16 more samples (docs/readme\_comprehension\_blind)

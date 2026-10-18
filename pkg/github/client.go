@@ -47,6 +47,14 @@ type Client interface {
 	UpdateIssueComment(ctx context.Context, owner, repo string, commentID int64, body string) error
 	CreateCheckRun(ctx context.Context, owner, repo string, headSHA string, state CheckRunState) (int64, error)
 	UpdateCheckRun(ctx context.Context, owner, repo string, checkRunID int64, state CheckRunState) error
+	GetRepoPermission(ctx context.Context, owner, repo string, username string) (string, error)
+	CreateCommentReaction(ctx context.Context, owner, repo string, commentID int64, reaction string) error
+}
+
+// HasWriteAccess reports whether a GitHub collaborator permission level allows write operations.
+func HasWriteAccess(permission string) bool {
+	p := strings.ToLower(strings.TrimSpace(permission))
+	return p == "admin" || p == "write" || p == "maintain"
 }
 
 // RateLimitError represents a rate limit error (429 or 403 with rate limit headers).
@@ -384,4 +392,34 @@ func (c *HTTPClient) UpdateCheckRun(ctx context.Context, owner, repo string, che
 		},
 	}
 	return c.doRequest(ctx, http.MethodPatch, path, payload, nil)
+}
+
+type repoPermissionResponse struct {
+	Permission string `json:"permission"`
+	RoleName   string `json:"role_name"`
+}
+
+func (c *HTTPClient) GetRepoPermission(ctx context.Context, owner, repo string, username string) (string, error) {
+	path := fmt.Sprintf("/repos/%s/%s/collaborators/%s/permission", owner, repo, username)
+	var resp repoPermissionResponse
+	if err := c.doRequest(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		var permErr *PermanentError
+		if errors.As(err, &permErr) && permErr.StatusCode == http.StatusNotFound {
+			return "none", nil
+		}
+		return "", err
+	}
+	if resp.Permission != "" {
+		return resp.Permission, nil
+	}
+	return resp.RoleName, nil
+}
+
+type reactionPayload struct {
+	Content string `json:"content"`
+}
+
+func (c *HTTPClient) CreateCommentReaction(ctx context.Context, owner, repo string, commentID int64, reaction string) error {
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentID)
+	return c.doRequest(ctx, http.MethodPost, path, reactionPayload{Content: reaction}, nil)
 }

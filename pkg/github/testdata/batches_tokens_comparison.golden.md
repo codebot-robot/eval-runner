@@ -12,4 +12,4 @@ Running batch 2 (1 tasks continuing)
 
 64 run · 32 paired · paired against base commit a81d0c4 · `/comparisons/eval-runner/docs-eval-batches-tokens` · gs://eval-bucket/comparisons/docs-eval-batches-tokens.json
 
-- run 16 more samples (docs/readme\_comprehension\_blind)
+- comment `/eval more 16` to run 16 more samples (docs/readme\_comprehension\_blind)

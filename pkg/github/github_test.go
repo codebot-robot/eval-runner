@@ -1325,8 +1325,16 @@ func TestRenderComparisonMarkdown_RunMoreSamples(t *testing.T) {
 	comp.Status.Tasks[1].SuggestedNext = 32
 
 	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
-	if !strings.Contains(got, "- run 32 more samples (docs/readme\\_comprehension\\_blind)") {
+	if !strings.Contains(got, "- comment `/eval more 32` to run 32 more samples (docs/readme\\_comprehension\\_blind)") {
 		t.Errorf("expected markdown to contain action for inconclusive task, got:\n%s", got)
+	}
+
+	// Single-task comparison should omit task ID in the hint
+	singleComp := comp.DeepCopy()
+	singleComp.Status.Tasks = []v1alpha1.ComparisonTaskStatus{comp.Status.Tasks[1]}
+	gotSingle := RenderComparisonMarkdown(singleComp, baseRun, candRun, "")
+	if !strings.Contains(gotSingle, "- comment `/eval more 32` to run 32 more samples\n") {
+		t.Errorf("expected single-task markdown to contain action without task ID, got:\n%s", gotSingle)
 	}
 }
 
@@ -1341,8 +1349,8 @@ func TestRenderComparisonMarkdown_SingleTaskAction(t *testing.T) {
 		},
 	}
 	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
-	if !strings.Contains(got, "- run 20 more samples\n") {
-		t.Errorf("expected markdown to contain '- run 20 more samples', got:\n%s", got)
+	if !strings.Contains(got, "- comment `/eval more 20` to run 20 more samples\n") {
+		t.Errorf("expected markdown to contain '- comment `/eval more 20` to run 20 more samples', got:\n%s", got)
 	}
 	if strings.Contains(got, "(single_task)") {
 		t.Errorf("expected single-task action to omit task ID, got:\n%s", got)
