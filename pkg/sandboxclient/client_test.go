@@ -538,3 +538,155 @@ func TestSandboxClient_TLSAndSANVerification(t *testing.T) {
 		t.Errorf("expected ReadFile without client cert to fail, but it succeeded")
 	}
 }
+
+func TestSandboxClient_ResourceExhaustedMapsToLimitError(t *testing.T) {
+	grpcLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer grpcLis.Close()
+
+	mockSrv := &mockProcessServer{}
+	grpcServer := grpc.NewServer()
+	processv1.RegisterProcessServiceServer(grpcServer, mockSrv)
+	go func() {
+		_ = grpcServer.Serve(grpcLis)
+	}()
+	defer grpcServer.Stop()
+
+	_, portStr, err := net.SplitHostPort(grpcLis.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to split host port: %v", err)
+	}
+	grpcPort, _ := strconv.Atoi(portStr)
+
+	// Case 1: Server explicitly returns ResourceExhausted status code
+	mockSrv.execErr = status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs 4194304)")
+	client, err := New("127.0.0.1", WithGRPCPort(grpcPort), WithStdoutLimit(100))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.Execute(t.Context(), ProcessConfig{Command: []string{"echo"}})
+	if err == nil {
+		t.Fatalf("expected Execute to fail with LimitError, got nil")
+	}
+	var limitErr *discovery.LimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("expected discovery.LimitError, got: %T (%v)", err, err)
+	}
+	if limitErr.Stream != "stdout" {
+		t.Errorf("expected Stream 'stdout', got: %q", limitErr.Stream)
+	}
+	if limitErr.Limit != 100 {
+		t.Errorf("expected Limit 100, got: %d", limitErr.Limit)
+	}
+
+	// Case 2: Response exceeds MaxCallRecvMsgSize at gRPC transport layer
+	mockSrv.execErr = nil
+	mockSrv.execResp = &processv1.ExecuteResponse{
+		ExitCode: 0,
+		Stdout:   []byte(strings.Repeat("a", 300)),
+	}
+
+	clientBounded, err := New("127.0.0.1",
+		WithGRPCPort(grpcPort),
+		WithStdoutLimit(50),
+		WithMaxCallRecvMsgSize(150),
+	)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer clientBounded.Close()
+
+	_, err = clientBounded.Execute(t.Context(), ProcessConfig{Command: []string{"echo"}})
+	if err == nil {
+		t.Fatalf("expected Execute to fail with LimitError when gRPC message exceeds MaxCallRecvMsgSize")
+	}
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("expected discovery.LimitError, got: %T (%v)", err, err)
+	}
+	if limitErr.Stream != "stdout" {
+		t.Errorf("expected Stream 'stdout', got: %q", limitErr.Stream)
+	}
+	if limitErr.Limit != 50 {
+		t.Errorf("expected Limit 50, got: %d", limitErr.Limit)
+	}
+}
+
+func TestFakeClient_LimitsAndResourceExhausted(t *testing.T) {
+	fakeClient := NewFakeClient()
+	fakeClient.StdoutLimit = 200
+	fakeClient.ReadFileLimit = 10
+
+	// 1. ResourceExhausted on ListErr maps to LimitError
+	fakeClient.ListErr = status.Error(codes.ResourceExhausted, "message larger than max")
+	_, err := fakeClient.Execute(t.Context(), ProcessConfig{Command: []string{"./.evals/list"}})
+	if err == nil {
+		t.Fatalf("expected LimitError from ListErr, got nil")
+	}
+	var limitErr *discovery.LimitError
+	if !errors.As(err, &limitErr) || limitErr.Stream != "stdout" || limitErr.Limit != 200 {
+		t.Errorf("unexpected LimitError: %+v", err)
+	}
+
+	// 2. ResourceExhausted on InspectErr maps to LimitError
+	fakeClient.InspectErr = status.Error(codes.ResourceExhausted, "message larger than max")
+	_, err = fakeClient.Execute(t.Context(), ProcessConfig{Command: []string{"inspect", "eval"}})
+	if err == nil {
+		t.Fatalf("expected LimitError from InspectErr, got nil")
+	}
+	if !errors.As(err, &limitErr) || limitErr.Stream != "stdout" || limitErr.Limit != 200 {
+		t.Errorf("unexpected LimitError: %+v", err)
+	}
+
+	// 3. ResourceExhausted on ExecFn maps to LimitError
+	fakeClient.ExecFn = func(call int, ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error) {
+		return nil, status.Error(codes.ResourceExhausted, "exhausted in custom fn")
+	}
+	_, err = fakeClient.Execute(t.Context(), ProcessConfig{Command: []string{"custom"}})
+	if err == nil {
+		t.Fatalf("expected LimitError from ExecFn, got nil")
+	}
+	if !errors.As(err, &limitErr) || limitErr.Stream != "stdout" || limitErr.Limit != 200 {
+		t.Errorf("unexpected LimitError: %+v", err)
+	}
+	fakeClient.ExecFn = nil
+
+	// 4. ReadFile over cap fails with LimitError
+	fakeClient.InspectLog = []byte("12345678901") // 11 bytes > 10 byte limit
+	_, err = fakeClient.ReadFile(t.Context(), "out.json")
+	if err == nil {
+		t.Fatalf("expected LimitError from ReadFile, got nil")
+	}
+	if !errors.As(err, &limitErr) || limitErr.Stream != "file" || limitErr.Limit != 10 {
+		t.Errorf("expected file LimitError, got: %+v", err)
+	}
+
+	// 5. ReadFile within cap succeeds
+	fakeClient.InspectLog = []byte("12345") // 5 bytes <= 10 byte limit
+	data, err := fakeClient.ReadFile(t.Context(), "out.json")
+	if err != nil {
+		t.Fatalf("unexpected error from ReadFile within limit: %v", err)
+	}
+	if string(data) != "12345" {
+		t.Errorf("expected '12345', got %q", string(data))
+	}
+
+	// 6. Factory preserves options
+	factoryClient, err := fakeClient.NewClient("10.0.0.1", WithStdoutLimit(500), WithReadFileLimit(50))
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	if fakeClient.StdoutLimit != 500 {
+		t.Errorf("expected StdoutLimit 500, got %d", fakeClient.StdoutLimit)
+	}
+	if fakeClient.ReadFileLimit != 50 {
+		t.Errorf("expected ReadFileLimit 50, got %d", fakeClient.ReadFileLimit)
+	}
+	if fakeClient.LastPodIP != "10.0.0.1" {
+		t.Errorf("expected LastPodIP '10.0.0.1', got %q", fakeClient.LastPodIP)
+	}
+	_ = factoryClient
+}

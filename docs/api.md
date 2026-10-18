@@ -206,10 +206,14 @@ The `Run` CRD declares additional printer columns for `kubectl`:
 
 Because `.evals/list` and `inspect eval` execute within untrusted sandboxes, the controller enforces strict size boundaries on exec streams, manifests, and status updates. This protects the controller against memory exhaustion and prevents rejected status writes to the Kubernetes API server (etcd enforces a ~1.5 MiB object limit).
 
+Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sandboxclient`. The reconciler interprets typed limit errors (`discovery.LimitError`) without duplicate checks. Oversized gRPC responses (including gRPC `ResourceExhausted` errors when a command exceeds message bounds) map directly to typed stream limit errors.
+
 | Limit | Constant / Flag | Default | Behavior when Exceeded |
 |---|---|---|---|
-| Discovery stdout | `--max-stdout-bytes` | `1048576` (1 MiB) | Remaining output discarded; Run marked `Failed` with `stdout limit exceeded`. |
-| Discovery stderr | `--max-stderr-bytes` | `65536` (64 KiB) | Remaining output discarded; Run marked `Failed` with `stderr limit exceeded`. |
+| Discovery stdout | `--max-stdout-bytes` | `1048576` (1 MiB) | Enforced by sandbox client; remaining output discarded; Run marked `Failed` with `stdout limit exceeded`. |
+| Discovery stderr | `--max-stderr-bytes` | `65536` (64 KiB) | Enforced by sandbox client; remaining output discarded; Run marked `Failed` with `stderr limit exceeded`. |
+| Sandbox file read | `DefaultReadFileLimit` | `10485760` (10 MiB) | Enforced by sandbox client REST `ReadFile` (`io.LimitReader`); fails with typed `file limit exceeded`. |
+| gRPC message receive headroom | `DefaultGRPCHeadroom` | `4194304` (4 MiB) | Headroom added to stream limits to configure gRPC `MaxCallRecvMsgSize`; oversized messages trigger `ResourceExhausted` which maps to typed `stdout limit exceeded`. |
 | Manifest tasks | `MaxTasks` | `1000` | Validation fails, Run marked `Failed` with task count error. |
 | Failure message length | `MaxMessageBytes` | `4096` | Truncated safely with `\n... [truncated]`. |
 | Stderr tail lines | `MaxStderrLines` | `10` | Only the most recent lines of stderr are retained. |

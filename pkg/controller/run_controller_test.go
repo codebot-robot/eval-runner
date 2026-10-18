@@ -832,10 +832,9 @@ func TestReconcileStatusMessageBoundedOnFailure(t *testing.T) {
 	}
 }
 
-func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
-	hugeStdout := strings.Repeat("x", int(discovery.MaxStdoutBytes)+10)
+func TestReconcileResourceExhaustedMapsToLimitError(t *testing.T) {
 	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
-		ListStdout: hugeStdout,
+		ListErr: status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs 4194304)"),
 	})
 
 	_, err := f.reconciler.Reconcile(t.Context(), f.req)
@@ -855,13 +854,12 @@ func TestReconcileStdoutOverLimitWithoutExecutorError(t *testing.T) {
 	}
 }
 
-func TestReconcileStderrOverLimitWithoutExecutorError(t *testing.T) {
-	hugeStderr := strings.Repeat("x", int(discovery.MaxStderrBytes)+10)
+func TestReconcileNoSecondLimitInReconciler(t *testing.T) {
+	// Manifest with valid tasks; reconciler does not re-check byte size when client reports no limit error
+	validJSON := `{"tasks":[{"id":"t1","spec":"s1"}]}`
 	f := newDiscoveringRunFixture(t, &sandboxclient.FakeClient{
-		ListStderr: hugeStderr,
-		ListStdout: `{"tasks":[{"id":"t1","spec":"s1"}]}`,
+		ListStdout: validJSON,
 	})
-	f.reconciler.MaxStderrBytes = discovery.MaxStderrBytes
 
 	_, err := f.reconciler.Reconcile(t.Context(), f.req)
 	if err != nil {
@@ -872,11 +870,8 @@ func TestReconcileStderrOverLimitWithoutExecutorError(t *testing.T) {
 	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
 		t.Fatalf("Failed to get run: %v", err)
 	}
-	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
-		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
-	}
-	if !strings.Contains(updatedRun.Status.Message, "stderr limit exceeded") {
-		t.Errorf("Expected message to contain 'stderr limit exceeded', got: %s", updatedRun.Status.Message)
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase Discovered, got %s (message: %s)", updatedRun.Status.Phase, updatedRun.Status.Message)
 	}
 }
 

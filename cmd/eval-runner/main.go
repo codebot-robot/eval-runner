@@ -288,8 +288,6 @@ func main() {
 		DiscoveryDeadline:    clusterConfig.DiscoveryDeadline,
 		ExecutionDeadline:    clusterConfig.ExecutionDeadline,
 		TaskGracePeriod:      clusterConfig.TaskGracePeriod,
-		MaxStdoutBytes:       maxStdoutBytes,
-		MaxStderrBytes:       maxStderrBytes,
 		MaxMessageBytes:      discovery.MaxMessageBytes,
 		MaxDiscoveryAttempts: maxDiscoveryAttempts,
 		MaxParallelTasks:     clusterConfig.MaxParallelTasks,
