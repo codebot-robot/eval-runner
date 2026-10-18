@@ -419,6 +419,7 @@ data:
 Supported ConfigMap keys include:
 - `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
 - `artifactDir`: Local filesystem directory for storing evaluation artifacts.
+- `artifactMaxUploadBytes`: Maximum size in bytes of an uploaded Inspect log before truncation (default `10485760`, 10 MiB).
 - `defaultLimit`: Default sample limit for webhook-created Runs (e.g. `10`).
 - `defaultModel`: Default model identifier for webhook-created Runs (e.g. `mockllm/model`).
 - `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).

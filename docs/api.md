@@ -238,7 +238,7 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
 | Artifact bucket | `--artifact-bucket` / ConfigMap `artifactBucket` | `""` (in-memory sink) | GCS bucket URI (`gs://<bucket>`) or name where manifests, Inspect logs, and `summary.json` are stored. |
 | Artifact directory | `--artifact-dir` | `""` (in-memory sink) | Local filesystem directory for storing manifests, evaluation logs, and comparison artifacts when GCS is not configured. |
-| Artifact upload size | `DefaultMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded artifact; manifests error above cap; task logs are capped. |
+| Artifact upload size | `--artifact-max-upload-bytes` / ConfigMap `artifactMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded artifact (default 10 MiB, equal to sandbox ReadFile limit); manifests error above cap; task logs are capped and recorded with `capped` in `summary.json`. |
 | Artifact load size | `DefaultMaxLoadBytes` | `10485760` (10 MiB) | Maximum size of an artifact loaded from the sink. |
 
 ---

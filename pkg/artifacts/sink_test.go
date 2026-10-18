@@ -83,61 +83,12 @@ func TestLocalDirSink_DirectoryTraversalRejected(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	sink := &LocalDirSink{BaseDir: tempDir}
-	validMeta := RunMetadata{
-		RunName:      "test-run",
-		RunNamespace: "eval-runner",
-		TaskID:       "task-1",
-	}
 
-	tests := []struct {
-		name     string
-		meta     RunMetadata
-		filename string
-	}{
-		{
-			name:     "filename with double dot",
-			meta:     validMeta,
-			filename: "../../etc/passwd",
-		},
-		{
-			name:     "filename with slash",
-			meta:     validMeta,
-			filename: "subdir/result.json",
-		},
-		{
-			name: "taskID with double dot",
-			meta: RunMetadata{
-				RunName:      "test-run",
-				RunNamespace: "eval-runner",
-				TaskID:       "../../escape",
-			},
-			filename: "result.json",
-		},
-		{
-			name: "runNamespace with double dot",
-			meta: RunMetadata{
-				RunName:      "test-run",
-				RunNamespace: "../ns",
-				TaskID:       "task-1",
-			},
-			filename: "result.json",
-		},
-		{
-			name: "runName with double dot",
-			meta: RunMetadata{
-				RunName:      "../run",
-				RunNamespace: "eval-runner",
-				TaskID:       "task-1",
-			},
-			filename: "result.json",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := sink.StoreArtifact(t.Context(), tt.meta, tt.filename, []byte("data"))
+	for _, tt := range ArtifactPathValidationTestCases() {
+		t.Run(tt.Name, func(t *testing.T) {
+			_, err := sink.StoreArtifact(t.Context(), tt.Meta, tt.Filename, []byte("data"))
 			if err == nil {
-				t.Errorf("Expected error for %s, got nil", tt.name)
+				t.Errorf("Expected error for %s, got nil", tt.Name)
 			}
 		})
 	}
@@ -386,5 +337,24 @@ func TestIsNotFound_ErrorsIsOnly(t *testing.T) {
 	transientErrNoSuchFile := errors.New("temporary failure: no such file or directory (transient mount blip)")
 	if IsNotFound(transientErrNoSuchFile) {
 		t.Errorf("Expected transient error containing 'no such file or directory' to NOT be classified as not-found")
+	}
+}
+
+func TestSinkClose(t *testing.T) {
+	sinks := []struct {
+		name string
+		sink ArtifactSink
+	}{
+		{"NoopSink", &NoopSink{}},
+		{"LocalDirSink", &LocalDirSink{BaseDir: t.TempDir()}},
+		{"InMemorySink", NewInMemorySink()},
+	}
+
+	for _, tc := range sinks {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.sink.Close(); err != nil {
+				t.Errorf("%s Close returned unexpected error: %v", tc.name, err)
+			}
+		})
 	}
 }

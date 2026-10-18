@@ -78,4 +78,7 @@ type ArtifactSink interface {
 
 	// IsDurable reports whether the sink provides durable persistent storage across restarts.
 	IsDurable() bool
+
+	// Close releases any resources held by the sink (e.g. underlying network connections or storage clients).
+	Close() error
 }

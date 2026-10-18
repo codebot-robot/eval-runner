@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/internal/fakes"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -269,7 +270,7 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fakeGCS := gcs.NewFakeStorageClient()
+			fakeGCS := fakes.NewFakeStorageClient()
 			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
 			if err != nil {
 				t.Fatalf("Failed to create GCS sink: %v", err)
@@ -279,12 +280,12 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 			baseLogPath := "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json"
 
 			if len(tt.candScores) > 0 {
-				fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+				fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
 					Data: makeSyntheticInspectLog(taskID, tt.candScores),
 				}
 			}
 			if len(tt.baseScores) > 0 {
-				fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+				fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
 					Data: makeSyntheticInspectLog(taskID, tt.baseScores),
 				}
 			}
@@ -535,7 +536,7 @@ func TestComparisonReconciler_FindComparisonsForRun(t *testing.T) {
 func TestComparisonReconciler_CommitPrefixMismatch(t *testing.T) {
 	scheme := setupScheme(t)
 
-	fakeGCS := gcs.NewFakeStorageClient()
+	fakeGCS := fakes.NewFakeStorageClient()
 	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
@@ -762,17 +763,17 @@ func TestComparisonReconciler_EpochAwarePairing(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fakeGCS := gcs.NewFakeStorageClient()
+			fakeGCS := fakes.NewFakeStorageClient()
 			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
 			if err != nil {
 				t.Fatalf("Failed to create GCS sink: %v", err)
 			}
 			candLogPath := "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"
 			baseLogPath := "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json"
-			fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+			fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
 				Data: makeSyntheticInspectLogWithEpochs(taskID, tc.candSamples),
 			}
-			fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+			fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
 				Data: makeSyntheticInspectLogWithEpochs(taskID, tc.baseSamples),
 			}
 
@@ -875,17 +876,17 @@ func TestComparisonReconciler_ExplicitMarginZero(t *testing.T) {
 		baseScores = append(baseScores, stats.SampleScore{ID: fmt.Sprintf("%d", i), Score: 0.80})
 	}
 
-	fakeGCS := gcs.NewFakeStorageClient()
+	fakeGCS := fakes.NewFakeStorageClient()
 	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
 	candLogPath := "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"
 	baseLogPath := "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json"
-	fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+	fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
 		Data: makeSyntheticInspectLog(taskID, candScores),
 	}
-	fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = gcs.FakeObject{
+	fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
 		Data: makeSyntheticInspectLog(taskID, baseScores),
 	}
 
@@ -994,7 +995,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 	scheme := setupScheme(t)
 
 	taskID := "docs/readme_comprehension"
-	fakeGCS := gcs.NewFakeStorageClient()
+	fakeGCS := fakes.NewFakeStorageClient()
 	sink, err := gcs.New(t.Context(), "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
 	if err != nil {
 		t.Fatalf("failed to create GCS sink: %v", err)
@@ -1011,8 +1012,8 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		{ID: "1", Score: 0.0},
 		{ID: "2", Score: 0.0},
 	})
-	fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspect}
-	fakeGCS.Objects["eval-bucket/runs/base-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: baseInspect}
+	fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: candInspect}
+	fakeGCS.Objects["eval-bucket/runs/base-commit/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: baseInspect}
 
 	candRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
@@ -1167,7 +1168,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			{ID: "1", Score: 0.0},
 			{ID: "2", Score: 0.0},
 		})
-		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspectUpdated}
+		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: candInspectUpdated}
 
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("second Reconcile error: %v", err)
@@ -1684,7 +1685,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			{ID: "1", Score: 0.0},
 			{ID: "2", Score: 0.0},
 		})
-		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspectUpdated}
+		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: candInspectUpdated}
 
 		// Second reconcile: should reuse cached AppTokenProvider, making ZERO new access_tokens requests
 		if _, err := reconciler.Reconcile(ctx, req); err != nil {
@@ -1710,7 +1711,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			{ID: "1", Score: 1.0},
 			{ID: "2", Score: 1.0},
 		})
-		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspectUpdated3}
+		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: candInspectUpdated3}
 
 		// Third reconcile: secret changed, cache invalidated -> exactly 2 access_tokens requests
 		if _, err := reconciler.Reconcile(ctx, req); err != nil {
