@@ -85,6 +85,8 @@ func main() {
 	var artifactBucket string
 	var artifactDir string
 	var gitHubTokenSecret string
+	var gitHubAppSecret string
+	var uiBaseURL string
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -98,6 +100,8 @@ func main() {
 	flag.IntVar(&maxParallelTasks, "max-parallel-tasks", controller.DefaultMaxParallelTasks, "Maximum number of task sandboxes to run concurrently")
 	flag.StringVar(&modelSecret, "model-secret", controller.DefaultModelSecret, "Name of Secret in sandbox namespace containing model credentials")
 	flag.StringVar(&gitHubTokenSecret, "github-token-secret", controller.DefaultGitHubTokenSecret, "Name of Secret in controller namespace containing GitHub token")
+	flag.StringVar(&gitHubAppSecret, "github-app-secret", "", "Name of Secret in controller namespace containing GitHub App credentials")
+	flag.StringVar(&uiBaseURL, "ui-base-url", "", "Base URL for the eval-runner UI (e.g. https://eval-runner.example.com)")
 	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
 	flag.StringVar(&sandboxdImage, "sandboxd-image", "", "Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset)")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
@@ -118,6 +122,8 @@ func main() {
 		modelSecret,
 		sandboxdImage,
 		gitHubTokenSecret,
+		gitHubAppSecret,
+		uiBaseURL,
 		discoveryDeadline,
 		executionDeadline,
 		taskGracePeriod,
@@ -313,6 +319,8 @@ func main() {
 		ArtifactSink:        sink,
 		ControllerNamespace: evalRunnerNamespace,
 		GitHubTokenSecret:   clusterConfig.GitHubTokenSecret,
+		GitHubAppSecret:     clusterConfig.GitHubAppSecret,
+		UIBaseURL:           clusterConfig.UIBaseURL,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {

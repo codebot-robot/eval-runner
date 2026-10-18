@@ -16,11 +16,13 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -78,6 +80,16 @@ type ComparisonArtifact struct {
 	CreatedAt    time.Time                `json:"createdAt"`
 }
 
+// GitHubCredentials holds credentials extracted from a Secret for factory injection.
+type GitHubCredentials struct {
+	Token          string
+	AppID          string
+	InstallationID string
+	PrivateKey     []byte
+	AppSlug        string
+	AppAuth        *github.AppTokenProvider
+}
+
 // ComparisonReconciler reconciles a Comparison object.
 type ComparisonReconciler struct {
 	client.Client
@@ -85,7 +97,14 @@ type ComparisonReconciler struct {
 	ArtifactSink        artifacts.ArtifactSink
 	ControllerNamespace string
 	GitHubTokenSecret   string
-	GitHubClientFactory func(token string) github.Client
+	GitHubAppSecret     string
+	UIBaseURL           string
+	GitHubBaseURL       string
+	GitHubClientFactory func(creds GitHubCredentials) github.Client
+
+	cachedAppMu   sync.Mutex
+	cachedAppKey  string
+	cachedAppAuth *github.AppTokenProvider
 }
 
 func (r *ComparisonReconciler) artifactSink() artifacts.ArtifactSink {
@@ -106,6 +125,36 @@ func (r *ComparisonReconciler) gitHubTokenSecret() string {
 	return r.GitHubTokenSecret
 }
 
+func (r *ComparisonReconciler) getOrCreateAppAuth(secret *corev1.Secret, appID, installationID, appSlug string, privKey []byte) (*github.AppTokenProvider, error) {
+	cacheKey := fmt.Sprintf("%s/%s:%s", secret.Namespace, secret.Name, secret.ResourceVersion)
+	if secret.ResourceVersion == "" {
+		h := sha256.Sum256(append([]byte(appID+":"+installationID+":"), privKey...))
+		cacheKey = fmt.Sprintf("%s/%s:%x", secret.Namespace, secret.Name, h)
+	}
+
+	r.cachedAppMu.Lock()
+	defer r.cachedAppMu.Unlock()
+
+	if r.cachedAppKey == cacheKey && r.cachedAppAuth != nil {
+		return r.cachedAppAuth, nil
+	}
+
+	appAuth, err := github.NewAppTokenProvider(github.AppConfig{
+		AppID:          appID,
+		InstallationID: installationID,
+		PrivateKeyPEM:  privKey,
+		AppSlug:        appSlug,
+		BaseURL:        r.GitHubBaseURL,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	r.cachedAppKey = cacheKey
+	r.cachedAppAuth = appAuth
+	return appAuth, nil
+}
+
 func (r *ComparisonReconciler) reportToGitHub(
 	ctx context.Context,
 	comp *v1alpha1.Comparison,
@@ -115,8 +164,15 @@ func (r *ComparisonReconciler) reportToGitHub(
 		return nil
 	}
 
-	secretName := r.gitHubTokenSecret()
-	if secretName == "" {
+	secretNames := []string{}
+	if r.GitHubAppSecret != "" {
+		secretNames = append(secretNames, r.GitHubAppSecret)
+	}
+	if r.gitHubTokenSecret() != "" && r.gitHubTokenSecret() != r.GitHubAppSecret {
+		secretNames = append(secretNames, r.gitHubTokenSecret())
+	}
+
+	if len(secretNames) == 0 {
 		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
 			Message: "disabled",
 		}
@@ -126,37 +182,99 @@ func (r *ComparisonReconciler) reportToGitHub(
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var secret corev1.Secret
-	key := types.NamespacedName{
-		Namespace: r.controllerNamespace(),
-		Name:      secretName,
-	}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
-				Message: "disabled",
-			}
-			return nil
+	var ghClient github.Client
+	for _, secretName := range secretNames {
+		var secret corev1.Secret
+		key := types.NamespacedName{
+			Namespace: r.controllerNamespace(),
+			Name:      secretName,
 		}
-		return fmt.Errorf("failed to get github token secret: %w", err)
+		if err := r.Get(ctx, key, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("failed to get github credentials secret %q: %w", secretName, err)
+		}
+
+		appID := strings.TrimSpace(string(secret.Data["app-id"]))
+		if appID == "" {
+			appID = strings.TrimSpace(string(secret.Data["app_id"]))
+		}
+		installationID := strings.TrimSpace(string(secret.Data["installation-id"]))
+		if installationID == "" {
+			installationID = strings.TrimSpace(string(secret.Data["installation_id"]))
+		}
+		privKey := secret.Data["private-key"]
+		if len(privKey) == 0 {
+			privKey = secret.Data["private_key"]
+		}
+		appSlug := strings.TrimSpace(string(secret.Data["app-slug"]))
+		if appSlug == "" {
+			appSlug = strings.TrimSpace(string(secret.Data["app_slug"]))
+		}
+		token := strings.TrimSpace(string(secret.Data["token"]))
+
+		// App credentials are preferred over token
+		if appID != "" && installationID != "" && len(privKey) > 0 {
+			var appAuth *github.AppTokenProvider
+			if r.GitHubClientFactory == nil {
+				var err error
+				appAuth, err = r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
+				if err != nil {
+					comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
+						Message: fmt.Sprintf("invalid app credentials: %v", err),
+					}
+					return nil
+				}
+			} else {
+				var err error
+				appAuth, err = r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
+				if err != nil {
+					_ = err
+				}
+			}
+
+			creds := GitHubCredentials{
+				AppID:          appID,
+				InstallationID: installationID,
+				PrivateKey:     privKey,
+				AppSlug:        appSlug,
+				AppAuth:        appAuth,
+			}
+			if r.GitHubClientFactory != nil {
+				ghClient = r.GitHubClientFactory(creds)
+			} else {
+				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
+					AppAuth: appAuth,
+					BaseURL: r.GitHubBaseURL,
+				})
+			}
+			break
+		} else if token != "" {
+			creds := GitHubCredentials{
+				Token: token,
+			}
+			if r.GitHubClientFactory != nil {
+				ghClient = r.GitHubClientFactory(creds)
+			} else {
+				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
+					Token:   token,
+					BaseURL: r.GitHubBaseURL,
+				})
+			}
+			break
+		}
 	}
 
-	token := strings.TrimSpace(string(secret.Data["token"]))
-	if token == "" {
+	if ghClient == nil {
 		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
 			Message: "disabled",
 		}
 		return nil
 	}
 
-	var ghClient github.Client
-	if r.GitHubClientFactory != nil {
-		ghClient = r.GitHubClientFactory(token)
-	} else {
-		ghClient = github.NewHTTPClient(github.HTTPClientConfig{Token: token})
-	}
-
 	reporter := github.NewReporter(ghClient)
+	reporter.UIBaseURL = r.UIBaseURL
 	repStatus, err := reporter.Report(ctx, comp, baseRun, candRun)
 	if repStatus != nil {
 		comp.Status.Reporting = repStatus

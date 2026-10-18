@@ -484,14 +484,16 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	sandboxd := fs.String("sandboxd-image", "", "sandboxd image")
 	grace := fs.Duration("task-grace-period", 30*time.Second, "task grace period")
 	githubToken := fs.String("github-token-secret", "github-token", "github token secret")
+	githubApp := fs.String("github-app-secret", "", "github app secret")
+	uiURL := fs.String("ui-base-url", "", "ui base url")
 
-	// Parse with only artifact-bucket and max-parallel-tasks set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret"})
+	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url set
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *discovery, *execution, *grace, *parallel)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -504,11 +506,110 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	if !rawFlags.IsExplicit("github-token-secret") {
 		t.Errorf("expected github-token-secret to be explicit")
 	}
+	if !rawFlags.IsExplicit("ui-base-url") {
+		t.Errorf("expected ui-base-url to be explicit")
+	}
+	if rawFlags.IsExplicit("github-app-secret") {
+		t.Errorf("expected github-app-secret NOT to be explicit")
+	}
 	if rawFlags.IsExplicit("discovery-deadline") {
 		t.Errorf("expected discovery-deadline NOT to be explicit")
 	}
 	if rawFlags.IsExplicit("model-secret") {
 		t.Errorf("expected model-secret NOT to be explicit")
+	}
+}
+
+func TestResolveConfig_UIBaseURL(t *testing.T) {
+	// 1. Built-in default
+	defCfg := DefaultClusterConfig()
+	if defCfg.UIBaseURL != "" {
+		t.Errorf("expected default UIBaseURL empty, got %q", defCfg.UIBaseURL)
+	}
+
+	// 2. ConfigMap override with trailing slash normalization
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyUIBaseURL: "https://eval.example.com/",
+		},
+	}
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.UIBaseURL != "https://eval.example.com" {
+		t.Errorf("expected UIBaseURL %q, got %q", "https://eval.example.com", cfg.UIBaseURL)
+	}
+
+	// 3. Flag override takes precedence
+	flags := RawFlags{
+		UIBaseURL: "https://override.example.com",
+		Explicit:  map[string]bool{"ui-base-url": true},
+	}
+	cfgWithFlag, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgWithFlag.UIBaseURL != "https://override.example.com" {
+		t.Errorf("expected UIBaseURL %q, got %q", "https://override.example.com", cfgWithFlag.UIBaseURL)
+	}
+
+	// 4. Invalid protocol returns error
+	invalidCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyUIBaseURL: "ftp://eval.example.com",
+		},
+	}
+	_, err = ResolveConfig(invalidCM, RawFlags{})
+	if err == nil {
+		t.Fatalf("expected error for non-http(s) UIBaseURL, got nil")
+	}
+}
+
+func TestResolveConfig_GitHubAppSecret(t *testing.T) {
+	// 1. Built-in default
+	defCfg := DefaultClusterConfig()
+	if defCfg.GitHubAppSecret != "" {
+		t.Errorf("expected default GitHubAppSecret empty, got %q", defCfg.GitHubAppSecret)
+	}
+
+	// 2. ConfigMap override
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyGitHubAppSecret: "custom-app-secret",
+		},
+	}
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GitHubAppSecret != "custom-app-secret" {
+		t.Errorf("expected GitHubAppSecret %q, got %q", "custom-app-secret", cfg.GitHubAppSecret)
+	}
+
+	// 3. Explicit flag override takes precedence
+	flags := RawFlags{
+		GitHubAppSecret: "flag-app-secret",
+		Explicit:        map[string]bool{"github-app-secret": true},
+	}
+	cfgWithFlag, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgWithFlag.GitHubAppSecret != "flag-app-secret" {
+		t.Errorf("expected GitHubAppSecret %q, got %q", "flag-app-secret", cfgWithFlag.GitHubAppSecret)
 	}
 }
 

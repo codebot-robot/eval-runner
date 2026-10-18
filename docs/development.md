@@ -422,11 +422,13 @@ Supported ConfigMap keys include:
 - `defaultModel`: Default model identifier for webhook-created Runs (e.g. `mockllm/model`).
 - `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).
 - `executionDeadline`: Overall deadline for sample execution to complete (default `30m`).
-- `githubTokenSecret`: Name of Secret in controller namespace containing GitHub token (default `github-token`).
+- `githubAppSecret`: Name of Secret in controller namespace containing GitHub App credentials.
+- `githubTokenSecret`: Name of Secret in controller namespace containing GitHub credentials (default `github-token`).
 - `githubWebhookSecret`: Name of Secret in controller namespace containing GitHub webhook secret (default `github-webhook`).
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
 - `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
+- `uiBaseURL`: Base URL for the eval-runner UI (e.g. `https://eval-runner.example.com`) to generate absolute links in PR comments.
 - `webhookRepositories`: Comma-separated list of allowed repositories (`owner/name`). If unset, all repositories are accepted.
 
 Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the ConfigMap is absent, all built-in defaults are used.
@@ -435,17 +437,47 @@ Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the Conf
 
 When a `Comparison` resource is linked to a pull request via `spec.pullRequest`, the controller automatically posts and updates a single in-place comment on the PR containing the statistical verdict and per-eval results table, alongside a GitHub check run named `eval-runner / evals`.
 
-### Creating the Token Secret
+Both GitHub App authentication (preferred, supporting full check runs) and Personal Access Token (PAT) authentication (comment-only) are supported. When credentials for both are provided, GitHub App authentication is preferred.
 
-The controller authenticates to the GitHub API using a personal access token (PAT) stored in Secret `eval-runner/github-token` (key `token`).
+### Option A: GitHub App Authentication (Preferred)
+
+Creating and updating GitHub Check Runs via the REST API requires a GitHub App (fine-grained personal access tokens are restricted by GitHub's security model from creating check runs).
+
+1. **Register a GitHub App:**
+   In GitHub Organization / User Settings -> Developer Settings -> GitHub Apps -> New GitHub App:
+   - **GitHub App name**: e.g. `eval-runner` (or your choice).
+   - **Homepage URL**: Your project or UI URL.
+   - **Webhook**: Active can be disabled (or configure webhook URL if integrating with `eval-runner-webhook`).
+   - **Repository permissions:**
+     - **Pull requests**: Read and write (to list, create, and update PR comments)
+     - **Checks**: Read and write (to create and update check runs)
+   - Install the GitHub App on your target repositories (e.g. `gke-labs/eval-runner`).
+
+2. **Download Private Key & Note IDs:**
+   - Under App settings, generate and download a private key (`eval-runner.private-key.pem`).
+   - Note the **App ID** on the General settings page.
+   - Under Install App, select your account/organization and note the **Installation ID** from the URL (`https://github.com/settings/installations/<installation-id>`).
+
+3. **Create the Secret in the controller namespace:**
+   ```bash
+   kubectl create secret generic github-token \
+     --namespace=eval-runner \
+     --from-literal=app-id=123456 \
+     --from-literal=installation-id=987654 \
+     --from-file=private-key=eval-runner.private-key.pem
+   ```
+
+   *(Note: The controller mints RS256 JWTs and exchanges them for GitHub App installation access tokens with automatic 1-hour caching and refresh. The private key and tokens live exclusively in the `eval-runner` controller namespace and are never mounted in sandbox pods.)*
+
+### Option B: Personal Access Token (PAT) Authentication
+
+If you do not have permission to install a GitHub App, a personal access token (PAT) can be used for PR commenting. Check runs will be skipped gracefully with a recorded status message.
 
 1. **Generate a fine-grained GitHub token:**
    In GitHub Settings -> Developer Settings -> Personal Access Tokens -> Fine-grained tokens:
    - Target repository: Select the target repository (e.g. `gke-labs/eval-runner`).
    - Repository permissions:
      - **Pull requests**: Read and write (to list, create, and update PR comments)
-
-   *(Note: Under GitHub's REST API permissions, creating and updating check runs requires a GitHub App installation token, which will be supported in a follow-up issue. Fine-grained PATs post the PR comment and record `status.reporting.message: "check runs unavailable with token auth; comment posted"` without failing the comparison.)*
 
 2. **Create the Secret in the controller namespace:**
    ```bash
@@ -454,10 +486,12 @@ The controller authenticates to the GitHub API using a personal access token (PA
      --from-literal=token=github_pat_...
    ```
 
-   *(Note: The token lives exclusively in the `eval-runner` controller namespace and is never mounted in sandbox pods. If the secret is absent, reporting is cleanly disabled with `status.reporting.message: "disabled"` without failing the comparison.)*
-
 3. **Custom Secret Name (Optional):**
-   To use a secret other than `github-token`, configure `githubTokenSecret` in the `eval-runner-config` ConfigMap or pass `--github-token-secret=<secret-name>`.
+   To use a secret other than `github-token`, configure `githubTokenSecret` (or `githubAppSecret`) in the `eval-runner-config` ConfigMap or pass `--github-token-secret=<secret-name>` (or `--github-app-secret=<secret-name>`).
+
+### Web UI Links in Comments
+
+By default, the web view link in the footer of PR comments renders as code text (e.g. `` `/comparisons/eval-runner/comp-1` ``). To format it as an absolute Markdown link (e.g. `[web view](https://eval-runner.example.com/comparisons/eval-runner/comp-1)`), configure `uiBaseURL` in the `eval-runner-config` ConfigMap or pass `--ui-base-url=<url>`.
 
 ### Linking a Comparison to a PR
 

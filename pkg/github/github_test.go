@@ -15,9 +15,16 @@
 package github
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -132,7 +139,7 @@ func sameCommitComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alph
 
 func TestRenderComparisonMarkdown_Golden(t *testing.T) {
 	comp, baseRun, candRun := sameCommitComparisonFixture()
-	got := RenderComparisonMarkdown(comp, baseRun, candRun)
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
 
 	goldenPath := "testdata/same_commit_comparison.golden.md"
 	wantBytes, err := os.ReadFile(goldenPath)
@@ -152,8 +159,10 @@ func TestCheckRunStateForComparison_Matrix(t *testing.T) {
 		verdict            v1alpha1.ComparisonVerdict
 		pImp               *float64
 		candSamples        int
+		candLimit          *int
 		candTasks          []v1alpha1.TaskStatus
 		baseSamples        int
+		baseLimit          *int
 		baseTasks          []v1alpha1.TaskStatus
 		expectedStatus     string
 		expectedConclusion string
@@ -163,12 +172,14 @@ func TestCheckRunStateForComparison_Matrix(t *testing.T) {
 			name:    "RunningWithSamples",
 			verdict: v1alpha1.ComparisonVerdictRunning,
 			candTasks: []v1alpha1.TaskStatus{
-				{Samples: 48},
+				{ID: "task1"},
 			},
+			candLimit:   ptr(48),
 			candSamples: 24,
 			baseTasks: []v1alpha1.TaskStatus{
-				{Samples: 48},
+				{ID: "task1"},
 			},
+			baseLimit:          ptr(48),
 			baseSamples:        0,
 			expectedStatus:     "in_progress",
 			expectedConclusion: "",
@@ -224,16 +235,22 @@ func TestCheckRunStateForComparison_Matrix(t *testing.T) {
 				},
 			}
 			var candRun, baseRun *v1alpha1.Run
-			if tt.candSamples > 0 || len(tt.candTasks) > 0 {
+			if tt.candSamples > 0 || len(tt.candTasks) > 0 || tt.candLimit != nil {
 				candRun = &v1alpha1.Run{
+					Spec: v1alpha1.RunSpec{
+						Limit: tt.candLimit,
+					},
 					Status: v1alpha1.RunStatus{
 						Summary: &v1alpha1.RunSummary{TotalSamples: tt.candSamples},
 						Tasks:   tt.candTasks,
 					},
 				}
 			}
-			if tt.baseSamples > 0 || len(tt.baseTasks) > 0 {
+			if tt.baseSamples > 0 || len(tt.baseTasks) > 0 || tt.baseLimit != nil {
 				baseRun = &v1alpha1.Run{
+					Spec: v1alpha1.RunSpec{
+						Limit: tt.baseLimit,
+					},
 					Status: v1alpha1.RunStatus{
 						Summary: &v1alpha1.RunSummary{TotalSamples: tt.baseSamples},
 						Tasks:   tt.baseTasks,
@@ -410,7 +427,7 @@ func TestRenderComparisonMarkdown_HostileID(t *testing.T) {
 		},
 	}
 
-	got := RenderComparisonMarkdown(comp, nil, nil)
+	got := RenderComparisonMarkdown(comp, nil, nil, "")
 
 	// 1. Genuine marker for this comparison must be present
 	if !HasComparisonMarker(got, "eval-runner", "my-comp") {
@@ -502,6 +519,377 @@ func TestReporter_CheckRun403_PartialStatus(t *testing.T) {
 	}
 	if len(server.RequestLog()) != reqCountBefore {
 		t.Errorf("expected 0 new requests on idempotent call, got %d", len(server.RequestLog())-reqCountBefore)
+	}
+}
+
+func TestAppAuthentication(t *testing.T) {
+	ctx := t.Context()
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate test RSA key: %v", err)
+	}
+
+	pkcs1PEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+	})
+
+	pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(privKey)
+	if err != nil {
+		t.Fatalf("failed to marshal PKCS8 key: %v", err)
+	}
+	pkcs8PEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: pkcs8Bytes,
+	})
+
+	// 1. Verify key parsing for PKCS#1 and PKCS#8
+	if _, err := ParseRSAPrivateKey(pkcs1PEM); err != nil {
+		t.Errorf("failed to parse PKCS#1 private key: %v", err)
+	}
+	if _, err := ParseRSAPrivateKey(pkcs8PEM); err != nil {
+		t.Errorf("failed to parse PKCS#8 private key: %v", err)
+	}
+	if _, err := ParseRSAPrivateKey([]byte("not a pem key")); err == nil {
+		t.Errorf("expected error parsing invalid PEM key")
+	}
+
+	// 2. Verify JWT generation
+	jwt, err := GenerateAppJWT("123456", privKey, time.Now())
+	if err != nil {
+		t.Fatalf("failed to generate app JWT: %v", err)
+	}
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts in JWT, got %d", len(parts))
+	}
+
+	// 3. Test AppTokenProvider with fake server
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	server.SetAppSlug("custom-eval-app")
+
+	provider, err := NewAppTokenProvider(AppConfig{
+		AppID:          "123456",
+		InstallationID: "987654",
+		PrivateKeyPEM:  pkcs1PEM,
+		BaseURL:        server.URL(),
+		HTTPClient:     server.server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create AppTokenProvider: %v", err)
+	}
+
+	// First call exchanges JWT for token
+	tok1, err := provider.Token(ctx)
+	if err != nil {
+		t.Fatalf("Token failed: %v", err)
+	}
+	if tok1 != "ghs_fake_installation_token" {
+		t.Errorf("expected 'ghs_fake_installation_token', got %q", tok1)
+	}
+
+	// Second call reuses cached token
+	tok2, err := provider.Token(ctx)
+	if err != nil {
+		t.Fatalf("Token second call failed: %v", err)
+	}
+	if tok2 != tok1 {
+		t.Errorf("expected cached token %q, got %q", tok1, tok2)
+	}
+
+	// Test Identity fetches app slug
+	identity, err := provider.Identity(ctx)
+	if err != nil {
+		t.Fatalf("Identity failed: %v", err)
+	}
+	if identity != "custom-eval-app[bot]" {
+		t.Errorf("expected 'custom-eval-app[bot]', got %q", identity)
+	}
+
+	// 4. Test Report with AppClient creates check run (not 403)
+	appClient, err := server.AppClient("123456", "987654", pkcs1PEM)
+	if err != nil {
+		t.Fatalf("failed to create AppClient: %v", err)
+	}
+	reporter := NewReporter(appClient)
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+
+	status, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("Report with app auth failed: %v", err)
+	}
+	if status.CommentID == 0 {
+		t.Errorf("expected non-zero CommentID")
+	}
+	if status.CheckRunID == 0 {
+		t.Errorf("expected non-zero CheckRunID with App auth")
+	}
+	if status.Message != "" {
+		t.Errorf("expected empty message on success, got %q", status.Message)
+	}
+}
+
+func TestListIssueComments_Pagination(t *testing.T) {
+	ctx := t.Context()
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	// Create 5 comments on issue 42
+	for i := 1; i <= 5; i++ {
+		server.AddCommentWithAuthor("gke-labs", "eval-runner", 42, fmt.Sprintf("comment %d", i), "user1")
+	}
+
+	client := server.Client("test-token")
+	comments, err := client.ListIssueComments(ctx, "gke-labs", "eval-runner", 42)
+	if err != nil {
+		t.Fatalf("ListIssueComments failed: %v", err)
+	}
+	if len(comments) != 5 {
+		t.Fatalf("expected 5 comments across pages, got %d", len(comments))
+	}
+	for i, c := range comments {
+		expectedBody := fmt.Sprintf("comment %d", i+1)
+		if c.Body != expectedBody {
+			t.Errorf("comment %d body = %q, want %q", i, c.Body, expectedBody)
+		}
+	}
+
+	// Now add a 6th comment that contains our comparison marker
+	markerBody := ComparisonMarker("eval-runner", "docs-eval-same-commit") + "\n\nExisting report"
+	server.AddCommentWithAuthor("gke-labs", "eval-runner", 42, markerBody, "test-user")
+
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	comp.Spec.PullRequest.Number = 42
+
+	reporter := NewReporter(client)
+	status, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+	// The reporter should find the comment on later pages rather than creating a duplicate
+	if status.CommentID == 0 {
+		t.Errorf("expected to find existing comment ID from pagination")
+	}
+	// Check total comments on server is still 6 (no new comment added)
+	if len(server.Comments()) != 6 {
+		t.Errorf("expected 6 comments on server (marker found, updated in place), got %d", len(server.Comments()))
+	}
+}
+
+func TestReporter_AuthorCheck(t *testing.T) {
+	ctx := t.Context()
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	server.SetCurrentUser("eval-runner[bot]")
+
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	comp.Spec.PullRequest.Number = 10
+
+	// 1. Another user (e.g. malicious-user) creates a comment containing the comparison marker
+	marker := ComparisonMarker(comp.Namespace, comp.Name)
+	foreignCommentID := server.AddCommentWithAuthor("gke-labs", "eval-runner", 10, marker+"\nForeign hijack comment", "malicious-user")
+
+	client := server.Client("bot-token")
+	reporter := NewReporter(client)
+
+	// Report must NOT match malicious-user's comment and must create its own comment
+	status, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+	if status.CommentID == foreignCommentID {
+		t.Errorf("reporter hijacked foreign comment authored by malicious-user")
+	}
+
+	// Verify that the malicious comment is unchanged
+	for _, c := range server.Comments() {
+		if c.ID == foreignCommentID {
+			if !strings.Contains(c.Body, "Foreign hijack comment") {
+				t.Errorf("foreign comment was overwritten: %q", c.Body)
+			}
+		}
+	}
+
+	// 2. A subsequent report matches our own comment and updates it
+	comp.Status.Reporting = nil // reset to test marker search with our own comment now present
+	status2, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("second Report failed: %v", err)
+	}
+	if status2.CommentID != status.CommentID {
+		t.Errorf("expected to match our own comment ID %d, got %d", status.CommentID, status2.CommentID)
+	}
+}
+
+func TestRenderComparisonMarkdown_UIBaseURL(t *testing.T) {
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+
+	// 1. Without uiBaseURL: link is rendered as code text
+	gotDefault := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(gotDefault, "`/comparisons/eval-runner/docs-eval-same-commit`") {
+		t.Errorf("expected code-text path when uiBaseURL is empty, got:\n%s", gotDefault)
+	}
+	if strings.Contains(gotDefault, "[web view]") {
+		t.Errorf("unexpected '[web view]' when uiBaseURL is empty")
+	}
+
+	// 2. With uiBaseURL: link is rendered as absolute markdown link
+	uiURL := "https://eval.example.com"
+	gotURL := RenderComparisonMarkdown(comp, baseRun, candRun, uiURL)
+	expectedLink := "[web view](https://eval.example.com/comparisons/eval-runner/docs-eval-same-commit)"
+	if !strings.Contains(gotURL, expectedLink) {
+		t.Errorf("expected %q when uiBaseURL is set, got:\n%s", expectedLink, gotURL)
+	}
+
+	// 3. Trailing slash is normalized
+	gotTrailing := RenderComparisonMarkdown(comp, baseRun, candRun, "https://eval.example.com/")
+	if !strings.Contains(gotTrailing, expectedLink) {
+		t.Errorf("expected trailing slash to be normalized to %q, got:\n%s", expectedLink, gotTrailing)
+	}
+
+	// 4. Reporter passes UIBaseURL through to markdown
+	server := NewFakeGitHubServer()
+	defer server.Close()
+	client := server.Client("token")
+	reporter := NewReporter(client)
+	reporter.UIBaseURL = "https://eval.example.com"
+
+	status, err := reporter.Report(t.Context(), comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+	comments := server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	if !strings.Contains(comments[0].Body, expectedLink) {
+		t.Errorf("expected comment on server to contain %q, got:\n%s", expectedLink, comments[0].Body)
+	}
+	_ = status
+}
+
+func TestReporter_CheckRunRetryableError_HashGateNotSwallowed(t *testing.T) {
+	ctx := t.Context()
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("token")
+	reporter := NewReporter(client)
+
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+
+	// Inject 502 Bad Gateway on check-runs
+	server.InjectPathError("POST", "/repos/gke-labs/eval-runner/check-runs", http.StatusBadGateway, `{"message":"Server Error"}`)
+
+	// First call: comment succeeds, check-run fails with 502
+	status1, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if err == nil || !IsRetryable(err) {
+		t.Fatalf("expected retryable error on 502, got %v", err)
+	}
+	if status1 == nil {
+		t.Fatalf("expected non-nil partial status")
+	}
+	if status1.CommentID == 0 {
+		t.Errorf("expected commentID to be preserved on retryable check-run failure")
+	}
+	if status1.LastPostedHash != "" {
+		t.Errorf("expected LastPostedHash to be empty on retryable check-run failure, got %q", status1.LastPostedHash)
+	}
+	if status1.CheckRunID != 0 {
+		t.Errorf("expected checkRunID 0, got %d", status1.CheckRunID)
+	}
+
+	// Simulate controller persisting partial status on reconcile requeue
+	comp.Status.Reporting = status1
+
+	// Second call: check-run error is gone; Report must NOT be swallowed by hash gate,
+	// and must retry CreateCheckRun!
+	checkRunsBefore := len(server.CheckRuns())
+	status2, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("second call failed: %v", err)
+	}
+	if status2.CheckRunID == 0 {
+		t.Errorf("expected CheckRunID to be populated on retry")
+	}
+	if status2.LastPostedHash == "" {
+		t.Errorf("expected LastPostedHash to be populated after successful check-run")
+	}
+	if len(server.CheckRuns()) != checkRunsBefore+1 {
+		t.Errorf("expected CreateCheckRun to be executed on retry")
+	}
+
+	// Third call: content unchanged and CheckRun succeeded -> hash gate blocks duplicate requests
+	reqCountBefore := len(server.RequestLog())
+	comp.Status.Reporting = status2
+	status3, err := reporter.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("third call failed: %v", err)
+	}
+	if status3.LastPostedHash != status2.LastPostedHash {
+		t.Errorf("expected same hash")
+	}
+	if len(server.RequestLog()) != reqCountBefore {
+		t.Errorf("expected 0 new requests on idempotent call, got %d", len(server.RequestLog())-reqCountBefore)
+	}
+}
+
+func TestAppAuthentication_NoSlugError(t *testing.T) {
+	ctx := t.Context()
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate test RSA key: %v", err)
+	}
+
+	pkcs1PEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+	})
+
+	server := NewFakeGitHubServer()
+	defer server.Close()
+	server.SetAppSlug("") // empty slug
+
+	provider, err := NewAppTokenProvider(AppConfig{
+		AppID:          "123456",
+		InstallationID: "987654",
+		PrivateKeyPEM:  pkcs1PEM,
+		BaseURL:        server.URL(),
+		HTTPClient:     server.server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create AppTokenProvider: %v", err)
+	}
+
+	_, err = provider.Identity(ctx)
+	if err == nil {
+		t.Fatalf("expected error when /app returns empty slug, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not contain an app slug") {
+		t.Errorf("expected error message mentioning 'did not contain an app slug', got: %v", err)
+	}
+}
+
+func TestListIssueComments_RejectsExternalLink(t *testing.T) {
+	ctx := t.Context()
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	// Inject external Link header pointing outside server.URL
+	server.InjectPathError("GET", "/repos/gke-labs/eval-runner/issues/1/comments", http.StatusOK, `[]`, map[string]string{
+		"Link": `<https://evil.example.com/comments?page=2>; rel="next"`,
+	})
+
+	client := server.Client("test-token")
+	_, err := client.ListIssueComments(ctx, "gke-labs", "eval-runner", 1)
+	if err == nil {
+		t.Fatalf("expected error following external link, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to follow link header outside base URL") {
+		t.Errorf("expected error message to mention 'refusing to follow link header outside base URL', got: %v", err)
 	}
 }
 

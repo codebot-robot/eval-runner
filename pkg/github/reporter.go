@@ -28,7 +28,8 @@ import (
 
 // Reporter handles posting Comparison results to a GitHub pull request and check run.
 type Reporter struct {
-	Client Client
+	Client    Client
+	UIBaseURL string
 }
 
 // NewReporter creates a new GitHub Reporter.
@@ -67,7 +68,7 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	}
 	owner, repo := parts[0], parts[1]
 
-	markdown := RenderComparisonMarkdown(comp, baseRun, candRun)
+	markdown := RenderComparisonMarkdown(comp, baseRun, candRun, r.UIBaseURL)
 	checkState := CheckRunStateForComparison(comp, baseRun, candRun)
 	hash := HashContent(markdown, checkState)
 
@@ -96,15 +97,22 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	}
 
 	if commentID == 0 {
-		// Search for marker in existing PR comments
+		currentUser, err := r.Client.CurrentUser(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		// Search for marker in existing PR comments, matching author against authenticated identity
 		comments, err := r.Client.ListIssueComments(ctx, owner, repo, comp.Spec.PullRequest.Number)
 		if err != nil {
 			return nil, err
 		}
 		for _, c := range comments {
 			if HasComparisonMarker(c.Body, comp.Namespace, comp.Name) {
-				commentID = c.ID
-				break
+				if currentUser == "" || strings.EqualFold(c.User.Login, currentUser) {
+					commentID = c.ID
+					break
+				}
 			}
 		}
 
@@ -122,9 +130,8 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	}
 
 	partialStatus := &v1alpha1.ComparisonReportingStatus{
-		CommentID:      commentID,
-		CheckRunID:     checkRunID,
-		LastPostedHash: hash,
+		CommentID:  commentID,
+		CheckRunID: checkRunID,
 	}
 
 	// 2. Check run upsert
@@ -142,6 +149,7 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 					checkRunID = 0
 				} else if errors.As(err, &pe) && pe.StatusCode == http.StatusForbidden {
 					partialStatus.Message = "check runs unavailable with token auth; comment posted"
+					partialStatus.LastPostedHash = hash
 					return partialStatus, nil
 				} else {
 					return partialStatus, err
@@ -155,6 +163,7 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 				var pe *PermanentError
 				if errors.As(err, &pe) && pe.StatusCode == http.StatusForbidden {
 					partialStatus.Message = "check runs unavailable with token auth; comment posted"
+					partialStatus.LastPostedHash = hash
 					return partialStatus, nil
 				}
 				return partialStatus, err
@@ -164,5 +173,6 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 		}
 	}
 
+	partialStatus.LastPostedHash = hash
 	return partialStatus, nil
 }

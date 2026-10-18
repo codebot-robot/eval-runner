@@ -32,6 +32,30 @@ type CheckRunState struct {
 	Summary    string // detailed summary text
 }
 
+// PlannedSamples returns the planned total samples for a Run, computed as limit x tasks.
+// If limit or task count cannot be determined, it returns 0.
+func PlannedSamples(run *v1alpha1.Run) int {
+	if run == nil {
+		return 0
+	}
+	limit := 0
+	if run.Spec.Limit != nil && *run.Spec.Limit > 0 {
+		limit = *run.Spec.Limit
+	}
+	if limit <= 0 {
+		return 0
+	}
+	tasks := 0
+	if len(run.Spec.Tasks) > 0 {
+		tasks = len(run.Spec.Tasks)
+	} else if run.Status.Discovery != nil && run.Status.Discovery.EligibleTaskCount > 0 {
+		tasks = run.Status.Discovery.EligibleTaskCount
+	} else if len(run.Status.Tasks) > 0 {
+		tasks = len(run.Status.Tasks)
+	}
+	return limit * tasks
+}
+
 // CheckRunStateForComparison maps a Comparison and its candidate/baseline Runs
 // to the CheckRunState for the "eval-runner / evals" check run across all 5 verdicts.
 func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) CheckRunState {
@@ -80,24 +104,20 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 		state.Status = "in_progress"
 		state.Conclusion = ""
 
-		// Calculate N (completed samples) and M (total planned samples)
+		// Calculate N (completed samples) and M (total planned samples: limit x tasks)
 		completed := 0
 		total := 0
 		if candRun != nil {
 			if candRun.Status.Summary != nil {
 				completed += candRun.Status.Summary.TotalSamples
 			}
-			for _, t := range candRun.Status.Tasks {
-				total += t.Samples
-			}
+			total += PlannedSamples(candRun)
 		}
 		if baseRun != nil {
 			if baseRun.Status.Summary != nil {
 				completed += baseRun.Status.Summary.TotalSamples
 			}
-			for _, t := range baseRun.Status.Tasks {
-				total += t.Samples
-			}
+			total += PlannedSamples(baseRun)
 		}
 
 		if total > 0 {

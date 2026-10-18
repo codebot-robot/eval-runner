@@ -15,7 +15,11 @@
 package controller
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"strings"
 	"testing"
@@ -1114,8 +1118,8 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
 			GitHubTokenSecret:   "github-token",
-			GitHubClientFactory: func(token string) github.Client {
-				return server.Client(token)
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
 			},
 		}
 
@@ -1216,8 +1220,8 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
 			GitHubTokenSecret:   "github-token",
-			GitHubClientFactory: func(token string) github.Client {
-				return server.Client(token)
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
 			},
 		}
 
@@ -1254,8 +1258,8 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
 			GitHubTokenSecret:   "github-token",
-			GitHubClientFactory: func(token string) github.Client {
-				return server.Client(token)
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
 			},
 		}
 
@@ -1303,8 +1307,8 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
 			GitHubTokenSecret:   "github-token",
-			GitHubClientFactory: func(token string) github.Client {
-				return server.Client(token)
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
 			},
 		}
 
@@ -1341,8 +1345,8 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
 			GitHubTokenSecret:   "github-token",
-			GitHubClientFactory: func(token string) github.Client {
-				return server.Client(token)
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
 			},
 		}
 
@@ -1419,6 +1423,302 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		}
 		if updated.Status.Reporting == nil || updated.Status.Reporting.Message != "disabled" {
 			t.Errorf("expected reporting.message = 'disabled', got %+v", updated.Status.Reporting)
+		}
+	})
+
+	t.Run("app auth in secret preferred over token and creates check run", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("failed to generate test RSA key: %v", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+		})
+
+		appSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data: map[string][]byte{
+				"app-id":          []byte("12345"),
+				"installation-id": []byte("67890"),
+				"private-key":     pemBytes,
+				"token":           []byte("fallback-pat-token"),
+			},
+		}
+
+		comp := makeComp("comp-app-auth")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, appSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		factoryCalled := false
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				factoryCalled = true
+				if creds.AppID != "12345" || creds.InstallationID != "67890" || creds.AppAuth == nil {
+					t.Errorf("expected App credentials with AppAuth, got: %+v", creds)
+				}
+				return server.Client("app-inst-token")
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-app-auth"}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		if !factoryCalled {
+			t.Errorf("expected GitHubClientFactory to be called")
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if updated.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected non-zero CommentID")
+		}
+		if updated.Status.Reporting.CheckRunID == 0 {
+			t.Errorf("expected non-zero CheckRunID with App auth")
+		}
+	})
+
+	t.Run("uiBaseURL produces absolute link in PR comment", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-ui-url")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			UIBaseURL:           "https://eval-ui.example.com",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-ui-url"}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		comments := server.Comments()
+		if len(comments) != 1 {
+			t.Fatalf("expected 1 comment, got %d", len(comments))
+		}
+		expectedURL := "[web view](https://eval-ui.example.com/comparisons/eval-runner/comp-ui-url)"
+		if !strings.Contains(comments[0].Body, expectedURL) {
+			t.Errorf("expected comment body to contain absolute link %q, got:\n%s", expectedURL, comments[0].Body)
+		}
+	})
+
+	t.Run("retryable 502 on check run persists comment ID with empty hash and retries on second reconcile", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		// Inject 502 Bad Gateway on check runs
+		server.InjectPathError("POST", "/repos/gke-labs/eval-runner/check-runs", 502, `{"message":"Bad Gateway"}`)
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-retry-checkrun")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-retry-checkrun"}}
+
+		// 1. First reconcile fails on check run with 502 (retryable error returned)
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err == nil {
+			t.Fatalf("expected error on 502 check-run creation")
+		}
+
+		var updated1 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated1); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated1.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if updated1.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected CommentID to be preserved despite check run failure")
+		}
+		if updated1.Status.Reporting.LastPostedHash != "" {
+			t.Errorf("expected LastPostedHash to be empty so requeue is not swallowed by hash gate, got %q", updated1.Status.Reporting.LastPostedHash)
+		}
+		if updated1.Status.Reporting.CheckRunID != 0 {
+			t.Errorf("expected CheckRunID 0, got %d", updated1.Status.Reporting.CheckRunID)
+		}
+
+		// 2. Second reconcile (check run error is cleared)
+		// Hash gate does not swallow because LastPostedHash is empty; check run is created!
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("second Reconcile error: %v", err)
+		}
+
+		var updated2 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated2); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated2.Status.Reporting.CheckRunID == 0 {
+			t.Errorf("expected non-zero CheckRunID after second reconcile")
+		}
+		if updated2.Status.Reporting.LastPostedHash == "" {
+			t.Errorf("expected LastPostedHash to be set after check run succeeds")
+		}
+		if len(server.CheckRuns()) != 1 {
+			t.Errorf("expected 1 check run on server, got %d", len(server.CheckRuns()))
+		}
+	})
+
+	t.Run("app auth installation token cache survives across reconciles", func(t *testing.T) {
+		ctx := t.Context()
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("failed to generate test RSA key: %v", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+		})
+
+		appSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "github-token",
+				Namespace:       "eval-runner",
+				ResourceVersion: "1",
+			},
+			Data: map[string][]byte{
+				"app-id":          []byte("12345"),
+				"installation-id": []byte("67890"),
+				"private-key":     pemBytes,
+			},
+		}
+
+		comp := makeComp("comp-cached-auth")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, appSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubBaseURL:       server.URL(),
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-cached-auth"}}
+
+		// First reconcile: makes 1 access_tokens request
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("first Reconcile error: %v", err)
+		}
+
+		countAccessTokens := func() int {
+			count := 0
+			for _, r := range server.RequestLog() {
+				if strings.Contains(r, "/access_tokens") {
+					count++
+				}
+			}
+			return count
+		}
+
+		if got := countAccessTokens(); got != 1 {
+			t.Fatalf("expected 1 access_tokens request on first reconcile, got %d", got)
+		}
+
+		// Update candidate run inspected log to trigger second report (non-idempotent)
+		candInspectUpdated := makeSyntheticInspectLog(taskID, []stats.SampleScore{
+			{ID: "1", Score: 0.0},
+			{ID: "2", Score: 0.0},
+		})
+		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspectUpdated}
+
+		// Second reconcile: should reuse cached AppTokenProvider, making ZERO new access_tokens requests
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("second Reconcile error: %v", err)
+		}
+
+		if got := countAccessTokens(); got != 1 {
+			t.Errorf("expected still 1 access_tokens request after second reconcile (cache survived), got %d", got)
+		}
+
+		// Now simulate updating the secret (new ResourceVersion or new key)
+		var latestSecret corev1.Secret
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "github-token"}, &latestSecret); err != nil {
+			t.Fatalf("failed to get secret: %v", err)
+		}
+		latestSecret.Data["app-id"] = []byte("99999")
+		if err := cl.Update(ctx, &latestSecret); err != nil {
+			t.Fatalf("failed to update secret: %v", err)
+		}
+
+		// Update candidate log again
+		candInspectUpdated3 := makeSyntheticInspectLog(taskID, []stats.SampleScore{
+			{ID: "1", Score: 1.0},
+			{ID: "2", Score: 1.0},
+		})
+		fakeGCS.Objects["eval-bucket/runs/cand-commit/"+taskID+"/inspect.json"] = gcs.FakeObject{Data: candInspectUpdated3}
+
+		// Third reconcile: secret changed, cache invalidated -> exactly 2 access_tokens requests
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("third Reconcile error: %v", err)
+		}
+
+		if got := countAccessTokens(); got != 2 {
+			t.Errorf("expected 2 access_tokens requests after secret changed, got %d", got)
 		}
 	})
 }

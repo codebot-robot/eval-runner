@@ -42,7 +42,9 @@ func EscapeCell(s string) string {
 
 // RenderComparisonMarkdown renders a GitHub pull request comment for a Comparison,
 // using ui.ComparisonRows and ui.ComparisonSummary so the comment matches the web view.
-func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) string {
+// If uiBaseURL is provided, the web-view link is rendered as an absolute Markdown link;
+// otherwise it renders as code text.
+func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, uiBaseURL string) string {
 	if comp == nil {
 		return ""
 	}
@@ -107,6 +109,10 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 
 	webPath := fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name)
 	linkStr := fmt.Sprintf("`%s`", webPath)
+	if strings.TrimSpace(uiBaseURL) != "" {
+		baseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+		linkStr = fmt.Sprintf("[web view](%s%s)", baseURL, webPath)
+	}
 
 	footerParts := []string{samplesStr, pairedAgainstStr, linkStr}
 	if comp.Status.SummaryPath != "" {
