@@ -430,4 +430,49 @@ func TestExtractInspectTokens(t *testing.T) {
 			t.Fatalf("expected nil tokens, got %v", tokens)
 		}
 	})
+
+	t.Run("OnlyTotalTokensReturnsNil", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"stats": {
+				"model_usage": {
+					"mockllm/model": {
+						"total_tokens": 100
+					}
+				}
+			}
+		}`
+		tokens, err := ExtractInspectTokens([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if tokens != nil {
+			t.Fatalf("expected nil tokens when only total_tokens is set, got %+v", tokens)
+		}
+	})
+
+	t.Run("SampleOnlyTotalTokensReturnsNil", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"samples": [
+				{
+					"id": 1,
+					"model_usage": {
+						"mockllm/model": {
+							"total_tokens": 100
+						}
+					}
+				}
+			]
+		}`
+		tokens, err := ExtractInspectTokens([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if tokens != nil {
+			t.Fatalf("expected nil tokens when only sample total_tokens is set, got %+v", tokens)
+		}
+	})
 }

@@ -371,7 +371,7 @@ func ExtractInspectTokens(data []byte) (*TaskTokens, error) {
 
 	if log.Stats != nil && len(log.Stats.ModelUsage) > 0 {
 		for _, usage := range log.Stats.ModelUsage {
-			if usage.TotalTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+			if usage.InputTokens > 0 || usage.OutputTokens > 0 {
 				inputTokens += usage.InputTokens
 				outputTokens += usage.OutputTokens
 				foundTokens = true
@@ -385,7 +385,7 @@ func ExtractInspectTokens(data []byte) (*TaskTokens, error) {
 	for _, s := range log.Samples {
 		if len(s.ModelUsage) > 0 {
 			for _, usage := range s.ModelUsage {
-				if usage.TotalTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+				if usage.InputTokens > 0 || usage.OutputTokens > 0 {
 					inputTokens += usage.InputTokens
 					outputTokens += usage.OutputTokens
 					foundTokens = true
