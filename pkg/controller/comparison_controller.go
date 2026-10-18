@@ -1099,7 +1099,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			totalCandTokens = &v1alpha1.TaskTokens{
 				Input:  candInputSum,
 				Output: candOutputSum,
-				Total:  candTotalSum,
+				Total:  candInputSum + candOutputSum,
 			}
 		}
 		var totalBaseTokens *v1alpha1.TaskTokens
@@ -1107,7 +1107,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			totalBaseTokens = &v1alpha1.TaskTokens{
 				Input:  baseInputSum,
 				Output: baseOutputSum,
-				Total:  baseTotalSum,
+				Total:  baseInputSum + baseOutputSum,
 			}
 		}
 		var totalTokens *v1alpha1.TaskTokens
@@ -1115,7 +1115,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			totalTokens = &v1alpha1.TaskTokens{
 				Input:  candInputSum + baseInputSum,
 				Output: candOutputSum + baseOutputSum,
-				Total:  candTotalSum + baseTotalSum,
+				Total:  (candInputSum + baseInputSum) + (candOutputSum + baseOutputSum),
 			}
 		}
 
