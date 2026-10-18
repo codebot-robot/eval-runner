@@ -267,6 +267,115 @@ func (h *Harness) GetGitServerCommit(namespace, repoName string) string {
 	return strings.TrimSpace(out)
 }
 
+func (h *Harness) DeployFakeGCSServer(namespace, bucket string) {
+	h.t.Logf("Deploying fake-gcs-server in namespace %s with bucket %s", namespace, bucket)
+
+	manifest := fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-gcs-server
+  namespace: %s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-gcs-server
+  template:
+    metadata:
+      labels:
+        app: fake-gcs-server
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: fake-gcs-server
+        image: fsouza/fake-gcs-server:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - -scheme
+        - http
+        - -port
+        - "4443"
+        - -backend
+        - memory
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        ports:
+        - containerPort: 4443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-gcs-server
+  namespace: %s
+spec:
+  selector:
+    app: fake-gcs-server
+  ports:
+  - port: 4443
+    targetPort: 4443
+`, namespace, namespace)
+
+	h.KubectlApplyContent(manifest)
+	h.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=available", "deployment/fake-gcs-server", "--timeout=90s")
+
+	postData := fmt.Sprintf(`{"name":"%s"}`, bucket)
+	h.runCmd("kubectl", "exec", "-n", namespace, "deployment/fake-gcs-server", "--", "wget", "-q", "-O-", "--post-data="+postData, "--header=Content-Type: application/json", "http://localhost:4443/storage/v1/b?project=test")
+}
+
+func (h *Harness) ConfigureGCSSink(bucket string) {
+	h.t.Logf("Configuring controller with GCS sink pointing to bucket %s on fake-gcs-server", bucket)
+	cmManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eval-runner-config
+  namespace: eval-runner
+data:
+  artifactBucket: %s
+`, bucket)
+	h.KubectlApplyContent(cmManifest)
+
+	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST=fake-gcs-server.eval-runner.svc:4443")
+	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
+}
+
+func (h *Harness) ConfigureLocalDirSink() {
+	h.t.Log("Restoring controller to LocalDir artifact sink")
+	cmManifest := `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eval-runner-config
+  namespace: eval-runner
+data:
+  artifactDir: /tmp/artifacts
+`
+	h.KubectlApplyContent(cmManifest)
+
+	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST-")
+	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
+}
+
+func (h *Harness) GetGCSObjects(namespace, bucket string) string {
+	url := fmt.Sprintf("http://localhost:4443/storage/v1/b/%s/o", bucket)
+	return h.runCmd("kubectl", "exec", "-n", namespace, "deployment/fake-gcs-server", "--", "wget", "-q", "-O-", url)
+}
+
 func (h *Harness) WaitForSandboxExists(namespace, sandboxName string, timeout time.Duration) {
 	h.t.Logf("Waiting for Sandbox %s/%s to be created (timeout %v)", namespace, sandboxName, timeout)
 	start := time.Now()

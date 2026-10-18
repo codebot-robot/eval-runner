@@ -239,4 +239,79 @@ spec:
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
 	})
+
+	t.Run("GCSEmulatorDiscoveryAndExecution", func(t *testing.T) {
+		bucket := "test-eval-bucket"
+		harness.DeployFakeGCSServer("eval-runner", bucket)
+		harness.ConfigureGCSSink(bucket)
+		t.Cleanup(func() {
+			harness.ConfigureLocalDirSink()
+		})
+
+		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
+		runName := "gcs-emulator-sample-run"
+
+		// Clean up any existing run
+		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  limit: 1
+`, runName, commit)
+
+		harness.KubectlApplyContent(manifest)
+
+		// Wait for Run to reach Completed
+		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		// Verify discovery populated GCS manifest path and hash
+		if run.Status.Discovery == nil {
+			t.Fatalf("Expected status.discovery to be populated")
+		}
+		expectedManifestPath := fmt.Sprintf("gs://%s/runs/%s/manifest.json", bucket, commit)
+		if run.Status.Discovery.ManifestPath != expectedManifestPath {
+			t.Errorf("Expected manifestPath %q, got %q", expectedManifestPath, run.Status.Discovery.ManifestPath)
+		}
+		if !strings.HasPrefix(run.Status.Discovery.ManifestHash, "sha256:") {
+			t.Errorf("Expected ManifestHash to start with sha256:, got %s", run.Status.Discovery.ManifestHash)
+		}
+
+		// Verify sample task completed and stored log in GCS
+		if len(run.Status.Tasks) == 0 {
+			t.Fatalf("Expected tasks in status.tasks, got 0")
+		}
+		for _, task := range run.Status.Tasks {
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("Expected task %s to be Completed, got %s (message: %s)", task.ID, task.Phase, task.Message)
+			}
+			expectedLogPrefix := fmt.Sprintf("gs://%s/runs/%s/%s/", bucket, commit, task.ID)
+			if !strings.HasPrefix(task.LogPath, expectedLogPrefix) {
+				t.Errorf("Expected task logPath to start with %q, got %q", expectedLogPrefix, task.LogPath)
+			}
+		}
+
+		// Verify objects actually exist in fake-gcs-server
+		objectsJSON := harness.GetGCSObjects("eval-runner", bucket)
+		t.Logf("Objects in fake-gcs-server:\n%s", objectsJSON)
+		if !strings.Contains(objectsJSON, fmt.Sprintf("runs/%s/manifest.json", commit)) {
+			t.Errorf("Expected manifest.json to be stored in fake-gcs-server, but object list was:\n%s", objectsJSON)
+		}
+		for _, task := range run.Status.Tasks {
+			if !strings.Contains(objectsJSON, fmt.Sprintf("runs/%s/%s/summary.json", commit, task.ID)) {
+				t.Errorf("Expected summary.json for task %s to be stored in fake-gcs-server", task.ID)
+			}
+		}
+
+		// Clean up
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+	})
 }

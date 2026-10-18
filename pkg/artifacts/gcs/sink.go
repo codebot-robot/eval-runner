@@ -201,7 +201,7 @@ func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata,
 		if bytes.Equal(existing, data) {
 			return fmt.Sprintf("gs://%s/%s", s.bucket, manifestObject), nil
 		}
-	} else if !artifacts.IsNotFound(err) {
+	} else if !isObjectNotFound(err) {
 		return "", fmt.Errorf("failed to check existing manifest at gs://%s/%s: %w", s.bucket, manifestObject, err)
 	}
 
@@ -285,7 +285,7 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 
 	data, err := s.client.ReadObject(ctx, bucket, object, capLimit)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "does not exist") {
+		if isObjectNotFound(err) {
 			return nil, fmt.Errorf("%w: failed to read artifact from gs://%s/%s: %v", artifacts.ErrNotFound, bucket, object, err)
 		}
 		return nil, fmt.Errorf("failed to read artifact from gs://%s/%s: %w", bucket, object, err)
@@ -402,4 +402,11 @@ func validateTaskID(taskID string) error {
 		}
 	}
 	return nil
+}
+
+func isObjectNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, storage.ErrObjectNotExist) || artifacts.IsNotFound(err) || strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "not found")
 }

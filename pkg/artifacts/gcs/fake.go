@@ -19,15 +19,16 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"cloud.google.com/go/storage"
 )
 
 // FakeStorageClient is an in-memory test double for StorageClient.
 type FakeStorageClient struct {
-	mu      sync.Mutex
-	Objects map[string]FakeObject // key: "bucket/object"
-	Errors  map[string]error      // key: "bucket/object" -> injected error
-	Closed  bool
+	mu         sync.Mutex
+	Objects    map[string]FakeObject // key: "bucket/object"
+	Errors     map[string]error      // key: "bucket/object" -> injected error
+	WriteCalls []FakeObject
+	Closed     bool
 }
 
 // FakeObject represents a stored object in FakeStorageClient.
@@ -77,13 +78,15 @@ func (f *FakeStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket,
 		}
 	}
 
-	f.Objects[key] = FakeObject{
+	obj := FakeObject{
 		Bucket:      bucket,
 		Object:      object,
 		ContentType: contentType,
 		Metadata:    metaCopy,
 		Data:        dataCopy,
 	}
+	f.Objects[key] = obj
+	f.WriteCalls = append(f.WriteCalls, obj)
 	return nil
 }
 
@@ -102,7 +105,7 @@ func (f *FakeStorageClient) ReadObject(ctx context.Context, bucket, object strin
 
 	obj, ok := f.Objects[key]
 	if !ok {
-		return nil, fmt.Errorf("%w: object %s not found", artifacts.ErrNotFound, key)
+		return nil, storage.ErrObjectNotExist
 	}
 	if maxBytes > 0 && int64(len(obj.Data)) > maxBytes {
 		return nil, fmt.Errorf("object gs://%s/%s exceeds maximum size of %d bytes", bucket, object, maxBytes)
@@ -126,4 +129,11 @@ func (f *FakeStorageClient) GetObject(bucket, object string) (FakeObject, bool) 
 	defer f.mu.Unlock()
 	obj, ok := f.Objects[bucket+"/"+object]
 	return obj, ok
+}
+
+// WriteCount returns the total number of successful WriteObject calls recorded.
+func (f *FakeStorageClient) WriteCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.WriteCalls)
 }
