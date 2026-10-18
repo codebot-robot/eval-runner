@@ -324,81 +324,116 @@ func (r *ComparisonReconciler) findComparisonsForRun(ctx context.Context, obj cl
 	return requests
 }
 
-func (r *ComparisonReconciler) determineTaskIDs(ctx context.Context, comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) []string {
+func determineRunningTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) []string {
+	candTasks := getRunPlannedTaskIDs(candRun)
+	baseTasks := getRunPlannedTaskIDs(baseRun)
+
 	if len(comp.Spec.Tasks) > 0 {
-		return comp.Spec.Tasks
-	}
-
-	taskMap := make(map[string]bool)
-
-	// Collect from candidate discovery or manifest
-	if candRun.Status.Discovery != nil {
-		if candRun.Status.Discovery.TaskCount > len(candRun.Status.Discovery.TaskIDs) && candRun.Status.Discovery.ManifestPath != "" {
-			// Needs more than capped IDs: load the manifest by URI
-			manifestBytes, err := r.artifactSink().Load(ctx, candRun.Status.Discovery.ManifestPath)
-			if err != nil {
-				for _, id := range candRun.Status.Discovery.TaskIDs {
-					taskMap[id] = true
-				}
-			} else {
-				m, parseErr := discovery.ParseManifest(manifestBytes)
-				if parseErr != nil || m == nil {
-					for _, id := range candRun.Status.Discovery.TaskIDs {
-						taskMap[id] = true
-					}
-				} else {
-					for _, t := range m.Tasks {
-						taskMap[t.ID] = true
-					}
-				}
-			}
-		} else {
-			for _, id := range candRun.Status.Discovery.TaskIDs {
-				taskMap[id] = true
+		if candTasks == nil || baseTasks == nil {
+			return comp.Spec.Tasks
+		}
+		var taskIDs []string
+		for _, id := range comp.Spec.Tasks {
+			if candTasks[id] && baseTasks[id] {
+				taskIDs = append(taskIDs, id)
 			}
 		}
+		return taskIDs
 	}
 
-	// Also check baseline discovery
-	if baseRun.Status.Discovery != nil {
-		if baseRun.Status.Discovery.TaskCount > len(baseRun.Status.Discovery.TaskIDs) && baseRun.Status.Discovery.ManifestPath != "" {
-			manifestBytes, err := r.artifactSink().Load(ctx, baseRun.Status.Discovery.ManifestPath)
-			if err != nil {
-				for _, id := range baseRun.Status.Discovery.TaskIDs {
-					taskMap[id] = true
-				}
-			} else {
-				m, parseErr := discovery.ParseManifest(manifestBytes)
-				if parseErr != nil || m == nil {
-					for _, id := range baseRun.Status.Discovery.TaskIDs {
-						taskMap[id] = true
-					}
-				} else {
-					for _, t := range m.Tasks {
-						taskMap[t.ID] = true
-					}
-				}
-			}
-		} else {
-			for _, id := range baseRun.Status.Discovery.TaskIDs {
-				taskMap[id] = true
-			}
+	if candTasks == nil || baseTasks == nil {
+		var known []string
+		var source map[string]bool
+		if candTasks != nil {
+			source = candTasks
+		} else if baseTasks != nil {
+			source = baseTasks
 		}
-	}
-
-	for _, t := range candRun.Status.Tasks {
-		taskMap[t.ID] = true
-	}
-	for _, t := range baseRun.Status.Tasks {
-		taskMap[t.ID] = true
+		for id := range source {
+			known = append(known, id)
+		}
+		sort.Strings(known)
+		return known
 	}
 
 	var taskIDs []string
-	for id := range taskMap {
-		taskIDs = append(taskIDs, id)
+	for id := range candTasks {
+		if baseTasks[id] {
+			taskIDs = append(taskIDs, id)
+		}
 	}
 	sort.Strings(taskIDs)
 	return taskIDs
+}
+
+func getRunPlannedTaskIDs(run *v1alpha1.Run) map[string]bool {
+	if len(run.Spec.Tasks) > 0 {
+		m := make(map[string]bool, len(run.Spec.Tasks))
+		for _, id := range run.Spec.Tasks {
+			m[id] = true
+		}
+		return m
+	}
+	if len(run.Status.Tasks) > 0 {
+		m := make(map[string]bool, len(run.Status.Tasks))
+		for _, t := range run.Status.Tasks {
+			m[t.ID] = true
+		}
+		return m
+	}
+	return nil
+}
+
+// determineCompletedTaskIDs returns only tasks executed by both Runs with phase Completed,
+// filtered by comp.Spec.Tasks if specified. It also returns unexecuted tasks: any task
+// specified in comp.Spec.Tasks or attempted by either Run that was not Completed by both,
+// so they can be surfaced in status.message.
+func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) (taskIDs []string, unexecuted []string) {
+	candCompleted := make(map[string]bool)
+	for i := range candRun.Status.Tasks {
+		if candRun.Status.Tasks[i].Phase == v1alpha1.TaskPhaseCompleted {
+			candCompleted[candRun.Status.Tasks[i].ID] = true
+		}
+	}
+
+	baseCompleted := make(map[string]bool)
+	for i := range baseRun.Status.Tasks {
+		if baseRun.Status.Tasks[i].Phase == v1alpha1.TaskPhaseCompleted {
+			baseCompleted[baseRun.Status.Tasks[i].ID] = true
+		}
+	}
+
+	if len(comp.Spec.Tasks) > 0 {
+		for _, id := range comp.Spec.Tasks {
+			if candCompleted[id] && baseCompleted[id] {
+				taskIDs = append(taskIDs, id)
+			} else {
+				unexecuted = append(unexecuted, id)
+			}
+		}
+		return taskIDs, unexecuted
+	}
+
+	for id := range candCompleted {
+		if baseCompleted[id] {
+			taskIDs = append(taskIDs, id)
+		}
+	}
+
+	seen := map[string]bool{}
+	for _, run := range []*v1alpha1.Run{candRun, baseRun} {
+		for i := range run.Status.Tasks {
+			id := run.Status.Tasks[i].ID
+			if !seen[id] && !(candCompleted[id] && baseCompleted[id]) {
+				seen[id] = true
+				unexecuted = append(unexecuted, id)
+			}
+		}
+	}
+
+	sort.Strings(taskIDs)
+	sort.Strings(unexecuted)
+	return taskIDs, unexecuted
 }
 
 func findTaskStatus(tasks []v1alpha1.TaskStatus, taskID string) *v1alpha1.TaskStatus {
@@ -469,7 +504,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	isTerminalCand := isTerminalRunPhase(candidateRun.Status.Phase)
 
 	if !isTerminalBase || !isTerminalCand {
-		taskIDs := r.determineTaskIDs(ctx, &comp, &baselineRun, &candidateRun)
+		taskIDs := determineRunningTaskIDs(&comp, &baselineRun, &candidateRun)
 		var tasks []v1alpha1.ComparisonTaskStatus
 		for _, id := range taskIDs {
 			tasks = append(tasks, v1alpha1.ComparisonTaskStatus{
@@ -499,7 +534,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	// Both Runs are terminal; perform pairing and comparison
-	taskIDs := r.determineTaskIDs(ctx, &comp, &baselineRun, &candidateRun)
+	taskIDs, unexecuted := determineCompletedTaskIDs(&comp, &baselineRun, &candidateRun)
 	margin := stats.DefaultEquivalenceMargin
 	if comp.Spec.EquivalenceMargin != nil {
 		margin = *comp.Spec.EquivalenceMargin
@@ -710,6 +745,39 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	runVerdict := stats.AggregateVerdict(reports)
 	pImp := runVerdict.PImprovement
 
+	var unexecutedNotes []string
+	if len(unexecuted) > 0 {
+		var neitherExecuted []string
+		var notBothExecuted []string
+		for _, id := range unexecuted {
+			candTask := findTaskStatus(candidateRun.Status.Tasks, id)
+			baseTask := findTaskStatus(baselineRun.Status.Tasks, id)
+			candRan := candTask != nil && candTask.Phase == v1alpha1.TaskPhaseCompleted
+			baseRan := baseTask != nil && baseTask.Phase == v1alpha1.TaskPhaseCompleted
+			if !candRan && !baseRan {
+				neitherExecuted = append(neitherExecuted, id)
+			} else {
+				notBothExecuted = append(notBothExecuted, id)
+			}
+		}
+		if len(neitherExecuted) > 0 {
+			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed: %s", strings.Join(neitherExecuted, ", ")))
+		}
+		if len(notBothExecuted) > 0 {
+			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed by both runs: %s", strings.Join(notBothExecuted, ", ")))
+		}
+	}
+
+	message := runVerdict.Summary
+	if len(unexecutedNotes) > 0 {
+		noteStr := strings.Join(unexecutedNotes, "; ")
+		if message != "" {
+			message = fmt.Sprintf("%s; %s", message, noteStr)
+		} else {
+			message = noteStr
+		}
+	}
+
 	// Store paired table as comparisons/<name>.json in the artifact sink
 	artifact := ComparisonArtifact{
 		Comparison:   comp.Name,
@@ -718,7 +786,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		Candidate:    comp.Spec.Candidate.Run,
 		Verdict:      string(runVerdict.Verdict),
 		PImprovement: runVerdict.PImprovement,
-		Summary:      runVerdict.Summary,
+		Summary:      message,
 		Tasks:        taskArtifacts,
 		CreatedAt:    time.Now().UTC(),
 	}
@@ -757,7 +825,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			Tasks: fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)),
 		}
 		status.SummaryPath = summaryPath
-		status.Message = runVerdict.Summary
+		status.Message = message
 	})
 }
 
