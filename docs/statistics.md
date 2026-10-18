@@ -83,7 +83,13 @@ When candidate and baseline performances are positively correlated on the same b
 
 Samples with missing pairs (e.g. candidate evaluated on an ID not in baseline, or vice-versa) are explicitly counted and reported in `DroppedCandidate` and `DroppedBaseline`. They are never silently ignored or imputed.
 
-### 2.3 Confidence Interval on Paired Delta
+### 2.3 Stable Sample IDs vs Positional Fallback
+
+Pairing keys strictly on sample IDs (such as Inspect's `sample.id`). Evaluation tasks must provide explicit, stable sample IDs (e.g. `FieldSpec(id="id", ...)`) rather than relying on framework positional indices (`1, 2, ...`). Positional IDs are a fallback, not a design: if a pull request inserts, deletes, or reorders a benchmark question, every sample after that point silently shifts ID and pairs against an entirely different question on the baseline side. This produces an artificially confident but invalid paired estimate instead of dropping mismatched samples.
+
+With explicit sample IDs, altered, added, or deleted questions are correctly identified as unmatched and accounted for in `DroppedCandidate` / `DroppedBaseline`. Meanwhile, benchmark datasets should keep row order stable (see §2.6) because sampling windows and batching remain positional; explicit IDs ensure statistical pairing survives dataset modifications across commits.
+
+### 2.4 Confidence Interval on Paired Delta
 
 `pkg/stats` provides both:
 1. **Bootstrap Percentile CI (Default)**: Re-samples paired differences $B=2,000$ times with a fixed seed (`DefaultSeed = 42`) and takes empirical quantiles $(\alpha/2, 1 - \alpha/2)$.
@@ -91,7 +97,7 @@ Samples with missing pairs (e.g. candidate evaluated on an ID not in baseline, o
    - *Degenerate intervals at small $n$*: If all paired differences in a sample are identical (for example, 1 win, or 2 ties), all bootstrap resamples produce the exact same mean, yielding a zero-width interval $[d, d]$. The stopping rule in `Decide` guards against premature termination by requiring a minimum sample count (`MinPairsToDecide = 8`) before CI-based stopping rules can fire.
 2. **Normal Approximation CI**: Classical $\bar{d} \pm z \cdot (s_d / \sqrt{n})$ reported alongside for direct analytical comparison.
 
-### 2.4 Posterior P(improvement) and Tie Splitting
+### 2.5 Posterior P(improvement) and Tie Splitting
 
 `PImprovement` is the posterior probability that the candidate configuration is superior to the baseline:
 $$P(\text{improvement}) = P(\Delta > 0) + 0.5 \cdot P(\Delta = 0)$$
@@ -109,7 +115,7 @@ Ties are split evenly ($0.5 \cdot P(\Delta = 0)$). When paired differences are i
 
 *Rationale*: Unlike Beta-Binomial models that collapse differences into win/loss/tie buckets, the Bayesian Bootstrap operates directly on continuous differences, seamlessly handling Inspect partial credit while preserving exact Bayesian posterior interpretation. Tie splitting ensures neutral expectations ($P \approx 0.50$) on parity benchmarks, while the uniform prior prevents degenerate zero posterior probabilities on small sample counts with ties.
 
-### 2.5 Dataset Stability and Sample Windows
+### 2.6 Dataset Stability and Sample Windows
 
 To support adaptive sampling and batch extension via sample windows (`spec.sampleRange {start, end}`), eval datasets **must maintain a stable, deterministic sample ordering**:
 - Tasks must **not** randomly shuffle their dataset, or must shuffle with a fixed, deterministic seed.

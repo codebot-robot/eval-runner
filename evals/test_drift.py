@@ -16,21 +16,40 @@
 
 import json
 from pathlib import Path
+import re
 import unittest
 
 from docs_comprehension import _read_documentation
 
 DATASET_PATH = Path(__file__).resolve().parent / "datasets" / "readme_questions.jsonl"
+ID_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
 def validate_dataset(samples: list[dict], docs: str) -> None:
-    """Validates that every sample contains an evidence string found in the injected docs,
-    and that any optional 'absent' strings do not appear in the injected docs.
+    """Validates that every sample contains a unique, valid kebab-case 'id',
+    an evidence string found in the injected docs, and that any optional
+    'absent' strings do not appear in the injected docs.
 
-    Raises ValueError if a sample is missing evidence, evidence is not in docs,
-    or any 'absent' string appears in docs.
+    Raises ValueError if a sample is missing id or evidence, has invalid id format,
+    duplicate ids, evidence is not in docs, or any 'absent' string appears in docs.
     """
+    seen_ids = set()
     for i, sample in enumerate(samples):
+        sample_id = sample.get("id")
+        if not sample_id or not isinstance(sample_id, str) or not sample_id.strip():
+            raise ValueError(
+                f"Sample #{i + 1} ({sample.get('input', 'unknown')}) is missing a valid 'id' field."
+            )
+        if not ID_PATTERN.match(sample_id):
+            raise ValueError(
+                f"Sample #{i + 1} ({sample.get('input', 'unknown')}) has invalid id format: '{sample_id}'. Expected lowercase kebab-case (e.g. 'readme-tagline')."
+            )
+        if sample_id in seen_ids:
+            raise ValueError(
+                f"Sample #{i + 1} ({sample.get('input', 'unknown')}) has duplicate id: '{sample_id}'."
+            )
+        seen_ids.add(sample_id)
+
         evidence = sample.get("evidence")
         if not evidence or not isinstance(evidence, str) or not evidence.strip():
             raise ValueError(
@@ -81,10 +100,94 @@ class TestDocsDrift(unittest.TestCase):
             self.assertIsInstance(sample["absent"], list)
             self.assertGreater(len(sample["absent"]), 0, f"Negative control has empty 'absent' list: {sample.get('input')}")
 
+    def test_missing_id_field_fails(self):
+        """Negative unit check: Samples missing the id field must fail validation."""
+        bad_sample = [
+            {
+                "input": "Sample without id",
+                "choices": ["A", "B", "C", "D"],
+                "target": "A",
+                "source": "README.md",
+                "evidence": "CI for evals",
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            validate_dataset(bad_sample, self.docs)
+        self.assertIn("missing a valid 'id' field", str(ctx.exception))
+
+    def test_empty_id_field_fails(self):
+        """Negative unit check: Samples with an empty id string must fail validation."""
+        bad_sample = [
+            {
+                "id": "   ",
+                "input": "Sample with empty id",
+                "choices": ["A", "B", "C", "D"],
+                "target": "A",
+                "source": "README.md",
+                "evidence": "CI for evals",
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            validate_dataset(bad_sample, self.docs)
+        self.assertIn("missing a valid 'id' field", str(ctx.exception))
+
+    def test_invalid_id_format_fails(self):
+        """Negative unit check: Samples with uppercase, spaces, or non-kebab-case ids must fail validation."""
+        for bad_id in ["Readme-Tagline", "readme_tagline", "readme tagline", "readme--tagline", "-readme", "readme-"]:
+            bad_sample = [
+                {
+                    "id": bad_id,
+                    "input": "Sample with bad id format",
+                    "choices": ["A", "B", "C", "D"],
+                    "target": "A",
+                    "source": "README.md",
+                    "evidence": "CI for evals",
+                }
+            ]
+            with self.assertRaises(ValueError) as ctx:
+                validate_dataset(bad_sample, self.docs)
+            self.assertIn("invalid id format", str(ctx.exception))
+
+    def test_duplicate_id_fails(self):
+        """Negative unit check: Samples with duplicate ids must fail validation."""
+        bad_samples = [
+            {
+                "id": "duplicate-id",
+                "input": "Sample 1",
+                "choices": ["A", "B", "C", "D"],
+                "target": "A",
+                "source": "README.md",
+                "evidence": "CI for evals",
+            },
+            {
+                "id": "duplicate-id",
+                "input": "Sample 2",
+                "choices": ["A", "B", "C", "D"],
+                "target": "A",
+                "source": "README.md",
+                "evidence": "CI for evals",
+            },
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            validate_dataset(bad_samples, self.docs)
+        self.assertIn("duplicate id", str(ctx.exception))
+
+    def test_load_dataset_has_explicit_sample_ids(self):
+        """Verifies that docs_comprehension._load_dataset() maps sample IDs from the jsonl."""
+        from docs_comprehension import _load_dataset
+
+        ds = _load_dataset()
+        self.assertEqual(len(ds), len(self.samples))
+        for sample, raw in zip(ds, self.samples):
+            self.assertEqual(sample.id, raw["id"])
+            self.assertIsInstance(sample.id, str)
+            self.assertTrue(bool(sample.id.strip()))
+
     def test_missing_evidence_field_fails(self):
         """Negative unit check: Samples missing the evidence field must fail validation."""
         bad_sample = [
             {
+                "id": "test-sample",
                 "input": "Sample without evidence",
                 "choices": ["A", "B", "C", "D"],
                 "target": "A",
@@ -99,6 +202,7 @@ class TestDocsDrift(unittest.TestCase):
         """Negative unit check: Samples with an empty evidence string must fail validation."""
         bad_sample = [
             {
+                "id": "test-sample",
                 "input": "Sample with empty evidence",
                 "choices": ["A", "B", "C", "D"],
                 "target": "A",
@@ -114,6 +218,7 @@ class TestDocsDrift(unittest.TestCase):
         """Negative unit check: Samples with evidence not appearing in documentation must fail validation."""
         bad_sample = [
             {
+                "id": "test-sample",
                 "input": "Sample with hallucinated evidence",
                 "choices": ["A", "B", "C", "D"],
                 "target": "A",
@@ -129,6 +234,7 @@ class TestDocsDrift(unittest.TestCase):
         """Negative unit check: Samples with an absent string appearing in documentation must fail validation."""
         bad_sample = [
             {
+                "id": "test-sample",
                 "input": "Sample with forbidden string found in docs",
                 "choices": ["A", "B", "C", "D"],
                 "target": "A",
@@ -145,6 +251,7 @@ class TestDocsDrift(unittest.TestCase):
         """Negative unit check: Samples with an invalid absent field type or empty item must fail validation."""
         bad_sample_non_list = [
             {
+                "id": "test-sample",
                 "input": "Sample with non-list absent",
                 "choices": ["A", "B", "C", "D"],
                 "target": "A",
@@ -159,6 +266,7 @@ class TestDocsDrift(unittest.TestCase):
 
         bad_sample_empty_str = [
             {
+                "id": "test-sample",
                 "input": "Sample with empty absent item",
                 "choices": ["A", "B", "C", "D"],
                 "target": "A",

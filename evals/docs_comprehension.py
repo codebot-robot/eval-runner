@@ -79,6 +79,7 @@ def _load_dataset():
     dataset = json_dataset(
         json_file=str(DATASET_PATH),
         sample_fields=FieldSpec(
+            id="id",
             input="input",
             choices="choices",
             target="target",

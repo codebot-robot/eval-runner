@@ -84,4 +84,25 @@ trap 'rm -rf "${MOCK_LOG_DIR}"' EXIT
 
 uv run --locked inspect eval docs_comprehension.py --model mockllm/model --limit 2 --log-dir "${MOCK_LOG_DIR}"
 
+uv run --locked python -c "
+from pathlib import Path
+from inspect_ai.log import read_eval_log
+
+logs = list(Path('${MOCK_LOG_DIR}').glob('*.eval'))
+if not logs:
+    raise RuntimeError('No eval log files found in ${MOCK_LOG_DIR}')
+expected_ids = ['readme-tagline', 'readme-unit-of-measurement']
+for log_file in logs:
+    log = read_eval_log(str(log_file))
+    if not log.samples:
+        raise RuntimeError(f'No samples found in log file {log_file}')
+    sample_ids = [s.id for s in log.samples]
+    if sample_ids != expected_ids:
+        raise RuntimeError(f'Log {log_file.name} sample IDs {sample_ids!r} != expected {expected_ids!r}')
+    for s in log.samples:
+        if not s.id or not isinstance(s.id, str):
+            raise RuntimeError(f'Log {log_file.name} sample has non-string or missing id: {s.id!r}')
+print('Eval log explicit sample IDs verified.')
+"
+
 echo "=== test-evals passed successfully ==="
