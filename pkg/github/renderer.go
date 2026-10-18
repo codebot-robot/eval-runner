@@ -23,11 +23,8 @@ import (
 )
 
 const (
-	maxCommentBytes = 60000
-	maxIDList       = 20
-
-	MaxCommentBytes = maxCommentBytes
-	MaxIDList       = maxIDList
+	MaxCommentBytes = 60000
+	MaxIDList       = 20
 )
 
 // FormatIDList formats a slice of task IDs, truncating to maxIDs if exceeded,
@@ -53,7 +50,9 @@ var idListPrefixes = []string{
 }
 
 // TruncateNoteIDLists scans a notes string for task ID lists introduced by standard prefixes
-// and truncates each ID list to at most maxIDs IDs with an explicit "... and N more" marker.
+// and truncates each ID list to at most MaxIDList IDs with an explicit "... and N more" marker.
+// This provides defence-in-depth for older Comparisons or objects created by external writers
+// whose status.message was not bounded by the controller.
 func TruncateNoteIDLists(notes string) string {
 	if notes == "" {
 		return ""
@@ -77,11 +76,11 @@ func TruncateNoteIDLists(notes string) string {
 			}
 
 			ids := strings.Split(idListStr, ", ")
-			if len(ids) > maxIDList {
+			if len(ids) > MaxIDList {
 				if prefix == "candidate task failed: " {
 					before = clause[:idx] + "candidate tasks failed: "
 				}
-				clauses[i] = before + FormatIDList(ids, maxIDList)
+				clauses[i] = before + FormatIDList(ids, MaxIDList)
 				modified = true
 			}
 			break
@@ -276,12 +275,26 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		actions := ui.ComparisonActions(comp)
 		if len(actions) > 0 {
 			var lines []string
-			for _, action := range actions {
+			actionCount := len(actions)
+			limit := actionCount
+			if limit > MaxIDList {
+				limit = MaxIDList
+			}
+			for i := 0; i < limit; i++ {
+				action := actions[i]
 				if action.ShowTaskID && action.TaskID != "" {
 					lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples (%s)", action.SuggestedNext, action.SuggestedNext, EscapeCell(action.TaskID)))
 				} else {
 					lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples", action.SuggestedNext, action.SuggestedNext))
 				}
+			}
+			if actionCount > MaxIDList {
+				remaining := actionCount - MaxIDList
+				taskWord := "tasks"
+				if remaining == 1 {
+					taskWord = "task"
+				}
+				lines = append(lines, fmt.Sprintf("- ... and %d more inconclusive %s (see the Comparison view)", remaining, taskWord))
 			}
 			footerBuilder.WriteString("\n")
 			footerBuilder.WriteString(strings.Join(lines, "\n"))
@@ -301,26 +314,36 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	fullSB.WriteString(footerAndActionsStr)
 	fullComment := fullSB.String()
 
-	if len(fullComment) <= maxCommentBytes {
+	if len(fullComment) <= MaxCommentBytes {
 		return fullComment
 	}
 
-	// Body exceeds maxCommentBytes; drop table rows from the bottom while adding
-	// "... N more tasks (see the Comparison view)"
+	// Body exceeds MaxCommentBytes; drop table rows from the bottom while adding
+	// an explicit marker separated by blank lines from table and footer.
 	prefixLens := make([]int, len(rowStrings)+1)
 	for i := 0; i < len(rowStrings); i++ {
 		prefixLens[i+1] = prefixLens[i] + len(rowStrings[i])
 	}
 
-	baseLen := len(headerStr) + len(tableHeader) + 1 + len(footerAndActionsStr) // 1 for \n after table
+	baseLen := len(headerStr) + len(tableHeader) + 1 + 1 + len(footerAndActionsStr) // 1 for \n after table, 1 for \n after marker
 	k := 0
 	for candidates := len(rowStrings) - 1; candidates >= 0; candidates-- {
 		dropped := len(rowStrings) - candidates
-		markerLine := fmt.Sprintf("... %d more tasks (see the Comparison view)\n", dropped)
-		if baseLen+prefixLens[candidates]+len(markerLine) <= maxCommentBytes {
+		taskWord := "tasks"
+		if dropped == 1 {
+			taskWord = "task"
+		}
+		markerLine := fmt.Sprintf("... %d more %s (see the Comparison view)\n", dropped, taskWord)
+		if baseLen+prefixLens[candidates]+len(markerLine) <= MaxCommentBytes {
 			k = candidates
 			break
 		}
+	}
+
+	dropped := len(rowStrings) - k
+	taskWord := "tasks"
+	if dropped == 1 {
+		taskWord = "task"
 	}
 
 	var sb strings.Builder
@@ -329,7 +352,8 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	for i := 0; i < k; i++ {
 		sb.WriteString(rowStrings[i])
 	}
-	sb.WriteString(fmt.Sprintf("... %d more tasks (see the Comparison view)\n", len(rowStrings)-k))
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("... %d more %s (see the Comparison view)\n", dropped, taskWord))
 	sb.WriteString("\n")
 	sb.WriteString(footerAndActionsStr)
 	return sb.String()

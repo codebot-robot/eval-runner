@@ -1658,8 +1658,8 @@ func TestRenderComparisonMarkdown_500Tasks_Bounded(t *testing.T) {
 
 	got := RenderComparisonMarkdown(comp, baseRun, candRun, "https://eval.example.com")
 
-	if len(got) > maxCommentBytes {
-		t.Fatalf("rendered markdown exceeds limit %d: got %d bytes", maxCommentBytes, len(got))
+	if len(got) > MaxCommentBytes {
+		t.Fatalf("rendered markdown exceeds limit %d: got %d bytes", MaxCommentBytes, len(got))
 	}
 
 	expectedMarkerSuffix := "more tasks (see the Comparison view)"
@@ -1667,7 +1667,7 @@ func TestRenderComparisonMarkdown_500Tasks_Bounded(t *testing.T) {
 		t.Fatalf("expected rendered markdown to contain marker %q, got:\n%s", expectedMarkerSuffix, got)
 	}
 
-	// Verify the table ends with the marker line before the footer
+	// Verify the table ends with the marker line separated by empty lines
 	lines := strings.Split(got, "\n")
 	markerLineIndex := -1
 	for idx, line := range lines {
@@ -1680,9 +1680,116 @@ func TestRenderComparisonMarkdown_500Tasks_Bounded(t *testing.T) {
 		t.Fatalf("marker line not found in rendered markdown lines")
 	}
 
-	// The line following the marker line should be empty (separating table from footer)
+	// The line before the marker line should be empty (separating table from marker)
+	if markerLineIndex-1 < 0 || lines[markerLineIndex-1] != "" {
+		t.Errorf("expected empty line before marker line, got %q", lines[markerLineIndex-1])
+	}
+	// The line following the marker line should be empty (separating marker from footer)
 	if markerLineIndex+1 >= len(lines) || lines[markerLineIndex+1] != "" {
 		t.Errorf("expected empty line after marker line, got %q", lines[markerLineIndex+1])
+	}
+}
+
+func TestRenderComparisonMarkdown_500InconclusiveTasks_Bounded(t *testing.T) {
+	const totalTasks = 500
+	tasks := make([]v1alpha1.ComparisonTaskStatus, totalTasks)
+	rate := 0.20
+	delta := 0.0
+	for i := 0; i < totalTasks; i++ {
+		tasks[i] = v1alpha1.ComparisonTaskStatus{
+			ID:            fmt.Sprintf("evals/task_%04d/long_benchmark_scenario_for_evalrunner_%s", i, strings.Repeat("x", 60)),
+			BaseRate:      &rate,
+			CandidateRate: &rate,
+			Delta:         &delta,
+			Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+			Pairs:         16,
+			SuggestedNext: 16,
+		}
+	}
+
+	pImp := 0.50
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-500-inconclusive",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			Verdict:      v1alpha1.ComparisonVerdictInconclusive,
+			PImprovement: &pImp,
+			Message:      "INCONCLUSIVE: 500 task(s) inconclusive; more samples recommended",
+			Summary: &v1alpha1.ComparisonSummary{
+				Tasks: fmt.Sprintf("%d/%d", totalTasks, totalTasks),
+			},
+			Tasks: tasks,
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "0123456789abcdef"}},
+	}
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "fedcba9876543210"}},
+	}
+
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "https://eval.example.com")
+
+	if len(got) > MaxCommentBytes {
+		t.Fatalf("rendered markdown exceeds limit %d: got %d bytes", MaxCommentBytes, len(got))
+	}
+
+	// Verify actions block is capped with the inconclusive tasks marker
+	expectedActionMarker := fmt.Sprintf("- ... and %d more inconclusive tasks (see the Comparison view)", totalTasks-MaxIDList)
+	if !strings.Contains(got, expectedActionMarker) {
+		t.Errorf("expected rendered markdown to contain actions marker %q, got:\n%s", expectedActionMarker, got)
+	}
+
+	// Verify table marker is also present and bounded
+	expectedTableMarker := "more tasks (see the Comparison view)"
+	if !strings.Contains(got, expectedTableMarker) {
+		t.Errorf("expected rendered markdown to contain table marker %q, got:\n%s", expectedTableMarker, got)
+	}
+}
+
+func TestRenderComparisonMarkdown_InconclusiveActions_SingularVsPlural(t *testing.T) {
+	// Exactly 21 inconclusive tasks -> 20 rendered + 1 more inconclusive task
+	const totalTasks = 21
+	tasks := make([]v1alpha1.ComparisonTaskStatus, totalTasks)
+	rate := 0.20
+	delta := 0.0
+	for i := 0; i < totalTasks; i++ {
+		tasks[i] = v1alpha1.ComparisonTaskStatus{
+			ID:            fmt.Sprintf("task_%02d", i),
+			BaseRate:      &rate,
+			CandidateRate: &rate,
+			Delta:         &delta,
+			Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+			Pairs:         16,
+			SuggestedNext: 16,
+		}
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "inconclusive-singular", Namespace: "eval-runner"},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseCompleted,
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			Tasks:   tasks,
+		},
+	}
+	baseRun := &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{Name: "base", Namespace: "eval-runner"}}
+	candRun := &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{Name: "cand", Namespace: "eval-runner"}}
+
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	expectedSingular := "- ... and 1 more inconclusive task (see the Comparison view)"
+	if !strings.Contains(got, expectedSingular) {
+		t.Errorf("expected singular marker %q, got:\n%s", expectedSingular, got)
 	}
 }
 
