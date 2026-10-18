@@ -587,4 +587,130 @@ spec:
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", b2CandName, 30*time.Second)
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", b2BaseName, 30*time.Second)
 	})
+
+	t.Run("BaselineBatchRunReuse", func(t *testing.T) {
+		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
+		baseRunName := "reuse-base-run"
+		cand1RunName := "reuse-cand1-run"
+		cand2RunName := "reuse-cand2-run"
+		comp1Name := "reuse-comp-1"
+		comp2Name := "reuse-comp-2"
+
+		// Clean up any existing resources
+		harness.runCmd("kubectl", "delete", "comparison", comp1Name, comp2Name, "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "run", baseRunName, cand1RunName, cand2RunName, "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "run", fmt.Sprintf("%s-b2-cand", comp1Name), fmt.Sprintf("%s-b2-base", comp1Name), "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "run", fmt.Sprintf("%s-b2-cand", comp2Name), fmt.Sprintf("%s-b2-base", comp2Name), "-n", "eval-runner", "--ignore-not-found")
+
+		manifest1 := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 1
+    end: 4
+---
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 1
+    end: 4
+---
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Comparison
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  candidate:
+    run: %s
+  baseline:
+    run: %s
+  sampling:
+    batchSize: 4
+    maxSamplesPerTask: 12
+`, cand1RunName, commit, baseRunName, commit, comp1Name, cand1RunName, baseRunName)
+
+		harness.KubectlApplyContent(manifest1)
+
+		// Wait for first Comparison to reach Completed (batch 1 + batch 2)
+		comp1 := harness.WaitForComparisonPhase("eval-runner", comp1Name, string(v1alpha1.ComparisonPhaseCompleted), 240*time.Second)
+
+		if len(comp1.Status.Batches) < 2 {
+			t.Fatalf("Expected comparison 1 to run at least 2 batches, got %d", len(comp1.Status.Batches))
+		}
+		comp1B2Base := comp1.Status.Batches[1].BaselineRun
+
+		// Now launch second Comparison sharing the same baseline commit and model with a new candidate run
+		manifest2 := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 1
+    end: 4
+---
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Comparison
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  candidate:
+    run: %s
+  baseline:
+    run: %s
+  sampling:
+    batchSize: 4
+    maxSamplesPerTask: 12
+`, cand2RunName, commit, comp2Name, cand2RunName, baseRunName)
+
+		harness.KubectlApplyContent(manifest2)
+
+		// Wait for second Comparison to reach Completed
+		comp2 := harness.WaitForComparisonPhase("eval-runner", comp2Name, string(v1alpha1.ComparisonPhaseCompleted), 240*time.Second)
+
+		if len(comp2.Status.Batches) < 2 {
+			t.Fatalf("Expected comparison 2 to run at least 2 batches, got %d", len(comp2.Status.Batches))
+		}
+
+		// Verify batch 2 of comparison 2 reused the baseline batch Run from comparison 1!
+		if comp2.Status.Batches[1].BaselineRun != comp1B2Base {
+			t.Errorf("Expected comparison 2 to reuse baseline run %q, got %q", comp1B2Base, comp2.Status.Batches[1].BaselineRun)
+		}
+
+		// Verify that a new baseline run was NOT created for comparison 2
+		unwantedBase := fmt.Sprintf("%s-b2-base", comp2Name)
+		out := harness.runCmd("kubectl", "get", "run", unwantedBase, "-n", "eval-runner", "--ignore-not-found")
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("Expected %s not to be created, but found: %s", unwantedBase, out)
+		}
+
+		// Clean up sandboxes
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", cand1RunName, 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", cand2RunName, 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+	})
 }
