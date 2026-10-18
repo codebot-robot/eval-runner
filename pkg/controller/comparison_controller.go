@@ -944,9 +944,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	for _, taskID := range taskIDs {
 		var allCandScores []stats.SampleScore
 		var allBaseScores []stats.SampleScore
-		candInputSum, candOutputSum, candTotalSum := 0, 0, 0
+		candInputSum, candOutputSum := 0, 0
 		hasCandTokens := false
-		baseInputSum, baseOutputSum, baseTotalSum := 0, 0, 0
+		baseInputSum, baseOutputSum := 0, 0
 		hasBaseTokens := false
 		taskExhausted := false
 		taskFailed := false
@@ -1064,13 +1064,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			if candTok, err := artifacts.ExtractInspectTokens(candData); err == nil && candTok != nil {
 				candInputSum += candTok.Input
 				candOutputSum += candTok.Output
-				candTotalSum += candTok.Total
 				hasCandTokens = true
 			}
 			if baseTok, err := artifacts.ExtractInspectTokens(baseData); err == nil && baseTok != nil {
 				baseInputSum += baseTok.Input
 				baseOutputSum += baseTok.Output
-				baseTotalSum += baseTok.Total
 				hasBaseTokens = true
 			}
 
