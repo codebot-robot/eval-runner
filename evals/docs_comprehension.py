@@ -70,8 +70,13 @@ def _read_documentation() -> str:
 
 
 def _load_dataset():
-    """Loads the comprehension questions dataset."""
-    return json_dataset(
+    """Loads the comprehension questions dataset.
+
+    Dataset order must remain stable so that windowed evaluations (e.g. sampleRange 1-5, 6-10)
+    evaluate deterministic samples across runs. Tasks must not shuffle their dataset,
+    or must shuffle with a fixed seed.
+    """
+    dataset = json_dataset(
         json_file=str(DATASET_PATH),
         sample_fields=FieldSpec(
             input="input",
@@ -79,7 +84,12 @@ def _load_dataset():
             target="target",
             metadata=["source", "evidence", "absent"],
         ),
+        shuffle=False,
     )
+    # Guard: verify dataset loaded and preserves deterministic sample order
+    if not dataset or len(dataset) == 0:
+        raise ValueError(f"Dataset at {DATASET_PATH} must not be empty")
+    return dataset
 
 
 @task

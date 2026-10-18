@@ -220,6 +220,21 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Check runs provide high-visibility PR check status directly integrated into GitHub's merge-blocking policies. Enabling native GitHub App authentication unlocks check runs while preserving zero-trust containment within the controller namespace. Author verification and Link-header pagination harden comment upserting against hijacking and duplicate comment creation on high-activity repositories.
 
+### ADR-025: Runs Evaluate Sample Windows; Batches are New Runs, Not Mutated Runs
+- **Date**: 2026-10-18
+- **Status**: Accepted
+- **Decision**:
+  1. **Windowed Sampling via `spec.sampleRange {start, end}`**: Add `sampleRange` (`{start, end}`) to `RunSpec`, representing 1-based inclusive positions in dataset order. It is mutually exclusive with `spec.limit` (enforced via OpenAPI CEL validation on the CRD and controller-side validation). `spec.limit: N` maintains the semantic of evaluating `sampleRange {1, N}`. If neither is set, all samples in the dataset are evaluated.
+  2. **Inspect CLI Flag**: Pass `spec.sampleRange` directly to Inspect CLI as `--limit START-END` (e.g. `--limit 1-5`, `--limit 6-10`), which is natively supported in Inspect 0.3.281.
+  3. **Batches As New, Immutable Runs**: For adaptive paired sampling, extension batches are scheduled by creating new, immutable `Run` resources with disjoint sample windows (e.g. Run 1 evaluates `1-8`, Run 2 evaluates `9-16`), rather than reopening or mutating completed Runs.
+  4. **Status & Artifact Recording**: Record the sample window in `status.tasks[].sampleRange`, in the per-run `summary.json`, and in the UI Runs view (e.g. `samples 9-16`).
+- **Rationale**:
+  Kubernetes controllers and cloud-native workflows heavily favor declarative immutability. Terminal Runs (`Completed` or `Failed`) clean up sandboxes, mTLS certificates, tokens, and ephemeral resources. Reopening terminal Runs would require complex re-attachment to destroyed sandboxes, mutating history, invalidating cached artifacts, and re-entrant state machines. Creating new Runs for each batch guarantees:
+  - **Run Immutability**: Once a Run reaches `Completed`, its status, logs, and artifacts are permanently immutable.
+  - **Baseline Reuse at Batch Granularity**: Baseline runs evaluated on window `1-8` or `9-16` can be reused by multiple candidate runs or PRs without re-evaluation.
+  - **No Sandbox Re-attachment**: Sandboxes are cleanly provisioned and deleted per Run lifecycle, eliminating persistent pod leakage and complicated re-attachment protocols.
+
+
 
 
 

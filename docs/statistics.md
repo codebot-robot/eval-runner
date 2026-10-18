@@ -109,6 +109,13 @@ Ties are split evenly ($0.5 \cdot P(\Delta = 0)$). When paired differences are i
 
 *Rationale*: Unlike Beta-Binomial models that collapse differences into win/loss/tie buckets, the Bayesian Bootstrap operates directly on continuous differences, seamlessly handling Inspect partial credit while preserving exact Bayesian posterior interpretation. Tie splitting ensures neutral expectations ($P \approx 0.50$) on parity benchmarks, while the uniform prior prevents degenerate zero posterior probabilities on small sample counts with ties.
 
+### 2.5 Dataset Stability and Sample Windows
+
+To support adaptive sampling and batch extension via sample windows (`spec.sampleRange {start, end}`), eval datasets **must maintain a stable, deterministic sample ordering**:
+- Tasks must **not** randomly shuffle their dataset, or must shuffle with a fixed, deterministic seed.
+- When datasets maintain stable order, evaluating window `sampleRange: {start: 1, end: 10}` and subsequent window `sampleRange: {start: 11, end: 20}` guarantees non-overlapping sample IDs across batches. Furthermore, evaluating identical windows on candidate and baseline ensures identical sample IDs are paired.
+- If a task randomly shuffled its dataset without a fixed seed, sample positions in windows would map to arbitrary, unpredictable sample IDs across candidate and baseline runs, destroying pairing efficiency and causing samples to be dropped (`DroppedCandidate` / `DroppedBaseline`).
+
 ---
 
 ## 3. Stopping Rule and Task Labels
