@@ -1645,6 +1645,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	runVerdict := stats.AggregateVerdict(reports)
 	pImp := runVerdict.PImprovement
 
+	sort.Strings(candFailed)
+
 	capped := false
 	if len(candFailed) > 0 {
 		if runVerdict.Verdict == stats.VerdictUnchanged || runVerdict.Verdict == stats.VerdictImproved {
