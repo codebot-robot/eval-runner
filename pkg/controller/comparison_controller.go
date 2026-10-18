@@ -45,6 +45,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+const (
+	// LabelBatchKey identifies a baseline batch evaluation by its deterministic hash.
+	LabelBatchKey = "evalrunner.gke-labs.dev/batch-key"
+	// LabelComparison references the parent Comparison resource.
+	LabelComparison = "evalrunner.gke-labs.dev/comparison"
+	// LabelBatch is the 1-based index of the evaluation batch.
+	LabelBatch = "evalrunner.gke-labs.dev/batch"
+	// LabelRole indicates whether a batch run is candidate or baseline.
+	LabelRole = "evalrunner.gke-labs.dev/role"
+)
+
 // PairedSampleScore records paired scores for a single sample ID.
 type PairedSampleScore struct {
 	ID             string  `json:"id"`
@@ -55,21 +66,25 @@ type PairedSampleScore struct {
 
 // ComparisonTaskArtifact records paired comparison details for a single task in the artifact JSON.
 type ComparisonTaskArtifact struct {
-	ID            string                           `json:"id"`
-	BaseRate      float64                          `json:"baseRate"`
-	CandidateRate float64                          `json:"candidateRate"`
-	Delta         float64                          `json:"delta"`
-	DeltaCI       v1alpha1.DeltaConfidenceInterval `json:"deltaCI"`
-	Pairs         int                              `json:"pairs"`
-	Wins          int                              `json:"wins"`
-	Losses        int                              `json:"losses"`
-	Ties          int                              `json:"ties"`
-	Dropped       v1alpha1.ComparisonDropped       `json:"dropped"`
-	Label         string                           `json:"label"`
-	PImprovement  float64                          `json:"pImprovement"`
-	SamplesRun    int                              `json:"samplesRun,omitempty"`
-	Decision      string                           `json:"decision,omitempty"`
-	PairsTable    []PairedSampleScore              `json:"pairsTable,omitempty"`
+	ID              string                           `json:"id"`
+	BaseRate        float64                          `json:"baseRate"`
+	CandidateRate   float64                          `json:"candidateRate"`
+	Delta           float64                          `json:"delta"`
+	DeltaCI         v1alpha1.DeltaConfidenceInterval `json:"deltaCI"`
+	Pairs           int                              `json:"pairs"`
+	Wins            int                              `json:"wins"`
+	Losses          int                              `json:"losses"`
+	Ties            int                              `json:"ties"`
+	Dropped         v1alpha1.ComparisonDropped       `json:"dropped"`
+	Label           string                           `json:"label"`
+	PImprovement    float64                          `json:"pImprovement"`
+	SamplesRun      int                              `json:"samplesRun,omitempty"`
+	Decision        string                           `json:"decision,omitempty"`
+	SuggestedNext   int                              `json:"suggestedNext,omitempty"`
+	Tokens          *v1alpha1.TaskTokens             `json:"tokens,omitempty"`
+	CandidateTokens *v1alpha1.TaskTokens             `json:"candidateTokens,omitempty"`
+	BaseTokens      *v1alpha1.TaskTokens             `json:"baseTokens,omitempty"`
+	PairsTable      []PairedSampleScore              `json:"pairsTable,omitempty"`
 }
 
 // ComparisonArtifact is the schema stored as comparisons/<name>.json in the artifact sink.
@@ -348,6 +363,100 @@ func (r *ComparisonReconciler) findComparisonsForRun(ctx context.Context, obj cl
 		}
 	}
 	return requests
+}
+
+// ComputeBatchKey calculates a deterministic SHA-256 hash identifying a baseline batch evaluation:
+// repo URL, commit, model, sorted task IDs, and sample window.
+func ComputeBatchKey(repoURL, commit, model string, tasks []string, window v1alpha1.SampleRange) string {
+	sortedTasks := make([]string, len(tasks))
+	copy(sortedTasks, tasks)
+	sort.Strings(sortedTasks)
+	raw := fmt.Sprintf("%s\n%s\n%s\n%s\n%d-%d", repoURL, commit, model, strings.Join(sortedTasks, ","), window.Start, window.End)
+	h := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("%x", h)[:32]
+}
+
+func sameTaskSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa := make([]string, len(a))
+	copy(sa, a)
+	sort.Strings(sa)
+	sb := make([]string, len(b))
+	copy(sb, b)
+	sort.Strings(sb)
+	for i := range sa {
+		if sa[i] != sb[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *ComparisonReconciler) findCompletedBaselineRun(ctx context.Context, namespace, repoURL, commit, model string, tasks []string, window v1alpha1.SampleRange) (*v1alpha1.Run, error) {
+	batchKey := ComputeBatchKey(repoURL, commit, model, tasks, window)
+
+	// 1. Label selector search
+	var runList v1alpha1.RunList
+	if err := r.List(ctx, &runList, client.InNamespace(namespace), client.MatchingLabels{
+		LabelBatchKey: batchKey,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to list runs by batch-key: %w", err)
+	}
+	for _, run := range runList.Items {
+		if run.Status.Phase == v1alpha1.RunPhaseCompleted && run.DeletionTimestamp == nil {
+			return &run, nil
+		}
+	}
+
+	// 2. Spec-matching fallback across completed runs in namespace
+	if err := r.List(ctx, &runList, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("failed to list runs for baseline matching: %w", err)
+	}
+	for _, run := range runList.Items {
+		if run.Status.Phase != v1alpha1.RunPhaseCompleted || run.DeletionTimestamp != nil {
+			continue
+		}
+		if run.Spec.Repo.URL == repoURL && run.Spec.Repo.Commit == commit && run.Spec.Model == model {
+			effRange := EffectiveSampleRange(run.Spec)
+			if effRange != nil && effRange.Start == window.Start && effRange.End == window.End {
+				if sameTaskSet(run.Spec.Tasks, tasks) {
+					return &run, nil
+				}
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+func (r *ComparisonReconciler) addOwnerReferenceToRun(ctx context.Context, run *v1alpha1.Run, comp *v1alpha1.Comparison) error {
+	for _, ref := range run.OwnerReferences {
+		if ref.UID == comp.UID {
+			return nil
+		}
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		var latest v1alpha1.Run
+		if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: run.Name}, &latest); err != nil {
+			return err
+		}
+		for _, ref := range latest.OwnerReferences {
+			if ref.UID == comp.UID {
+				return nil
+			}
+		}
+		latest.OwnerReferences = append(latest.OwnerReferences, metav1.OwnerReference{
+			APIVersion:         v1alpha1.GroupVersion.String(),
+			Kind:               "Comparison",
+			Name:               comp.Name,
+			UID:                comp.UID,
+			Controller:         ptr.To(false),
+			BlockOwnerDeletion: ptr.To(true),
+		})
+		return r.Update(ctx, &latest)
+	})
 }
 
 func toComparisonTaskLabel(label stats.TaskLabel) v1alpha1.ComparisonTaskLabel {
@@ -776,13 +885,18 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	type taskEval struct {
-		taskID     string
-		candScores []stats.SampleScore
-		baseScores []stats.SampleScore
-		exhausted  bool
-		est        stats.PairedEstimate
-		dec        stats.Decision
-		samplesRun int
+		taskID        string
+		candScores    []stats.SampleScore
+		baseScores    []stats.SampleScore
+		candTokens    *v1alpha1.TaskTokens
+		baseTokens    *v1alpha1.TaskTokens
+		tokens        *v1alpha1.TaskTokens
+		exhausted     bool
+		failed        bool
+		est           stats.PairedEstimate
+		dec           stats.Decision
+		suggestedNext int
+		samplesRun    int
 	}
 
 	var taskEvals []taskEval
@@ -790,7 +904,12 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	for _, taskID := range taskIDs {
 		var allCandScores []stats.SampleScore
 		var allBaseScores []stats.SampleScore
+		candInputSum, candOutputSum, candTotalSum := 0, 0, 0
+		hasCandTokens := false
+		baseInputSum, baseOutputSum, baseTotalSum := 0, 0, 0
+		hasBaseTokens := false
 		taskExhausted := false
+		taskFailed := false
 
 		for batchIdx, pair := range batchRuns {
 			if pair.candRun == nil || pair.baseRun == nil {
@@ -822,6 +941,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					candFailed = append(candFailed, taskID)
 				}
 				taskExhausted = true
+				taskFailed = true
 				continue
 			}
 
@@ -901,6 +1021,19 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				return ctrl.Result{}, err
 			}
 
+			if candTok, err := artifacts.ExtractInspectTokens(candData); err == nil && candTok != nil {
+				candInputSum += candTok.Input
+				candOutputSum += candTok.Output
+				candTotalSum += candTok.Total
+				hasCandTokens = true
+			}
+			if baseTok, err := artifacts.ExtractInspectTokens(baseData); err == nil && baseTok != nil {
+				baseInputSum += baseTok.Input
+				baseOutputSum += baseTok.Output
+				baseTotalSum += baseTok.Total
+				hasBaseTokens = true
+			}
+
 			// Check window length for dataset exhaustion:
 			// If seeds had no window, batch 1 is the whole dataset: treat as exhausted and do not batch past end.
 			if batchIdx == 0 && !seedHasWindow {
@@ -919,6 +1052,31 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			allCandScores = append(allCandScores, candScores...)
 			allBaseScores = append(allBaseScores, baseScores...)
+		}
+
+		var totalCandTokens *v1alpha1.TaskTokens
+		if hasCandTokens {
+			totalCandTokens = &v1alpha1.TaskTokens{
+				Input:  candInputSum,
+				Output: candOutputSum,
+				Total:  candTotalSum,
+			}
+		}
+		var totalBaseTokens *v1alpha1.TaskTokens
+		if hasBaseTokens {
+			totalBaseTokens = &v1alpha1.TaskTokens{
+				Input:  baseInputSum,
+				Output: baseOutputSum,
+				Total:  baseTotalSum,
+			}
+		}
+		var totalTokens *v1alpha1.TaskTokens
+		if hasCandTokens || hasBaseTokens {
+			totalTokens = &v1alpha1.TaskTokens{
+				Input:  candInputSum + baseInputSum,
+				Output: candOutputSum + baseOutputSum,
+				Total:  candTotalSum + baseTotalSum,
+			}
 		}
 
 		est := stats.ComparePaired(allCandScores, allBaseScores, 0.95)
@@ -958,14 +1116,28 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 		}
 
+		suggestedNext := 0
+		if !taskExhausted {
+			if dec.EstimatedSamples > 0 {
+				suggestedNext = dec.EstimatedSamples
+			} else if dec.NextBatchSize > 0 {
+				suggestedNext = dec.NextBatchSize
+			}
+		}
+
 		taskEvals = append(taskEvals, taskEval{
-			taskID:     taskID,
-			candScores: allCandScores,
-			baseScores: allBaseScores,
-			exhausted:  taskExhausted,
-			est:        est,
-			dec:        dec,
-			samplesRun: samplesRun,
+			taskID:        taskID,
+			candScores:    allCandScores,
+			baseScores:    allBaseScores,
+			candTokens:    totalCandTokens,
+			baseTokens:    totalBaseTokens,
+			tokens:        totalTokens,
+			exhausted:     taskExhausted,
+			failed:        taskFailed,
+			est:           est,
+			dec:           dec,
+			suggestedNext: suggestedNext,
+			samplesRun:    samplesRun,
 		})
 	}
 
@@ -1016,42 +1188,56 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			baseRunName := fmt.Sprintf("%s-b%d-base", comp.Name, nextBatchIndex)
 
 			batchRange := v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
+			batchKey := ComputeBatchKey(baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, continueTasks, batchRange)
 
-			// Idempotent creation: look up by name first
-			var existingBase v1alpha1.Run
-			if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseRunName}, &existingBase); apierrors.IsNotFound(err) {
-				baseSpec := baselineRun.Spec.DeepCopy()
-				baseSpec.Tasks = continueTasks
-				baseSpec.SampleRange = &v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
-				baseSpec.Limit = nil
+			// Baseline reuse lookup
+			existingBaseRun, err := r.findCompletedBaselineRun(ctx, comp.Namespace, baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, continueTasks, batchRange)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed looking up baseline run for reuse: %w", err)
+			}
+			if existingBaseRun != nil {
+				baseRunName = existingBaseRun.Name
+				if addErr := r.addOwnerReferenceToRun(ctx, existingBaseRun, &comp); addErr != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to add owner reference to reused baseline run %q: %w", baseRunName, addErr)
+				}
+				logger.Info("reusing completed baseline run for batch", "comparison", comp.Name, "batch", nextBatchIndex, "run", baseRunName, "batchKey", batchKey)
+			} else {
+				var existingBase v1alpha1.Run
+				if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseRunName}, &existingBase); apierrors.IsNotFound(err) {
+					baseSpec := baselineRun.Spec.DeepCopy()
+					baseSpec.Tasks = continueTasks
+					baseSpec.SampleRange = &v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
+					baseSpec.Limit = nil
 
-				baseClone := &v1alpha1.Run{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      baseRunName,
-						Namespace: comp.Namespace,
-						OwnerReferences: []metav1.OwnerReference{
-							{
-								APIVersion:         v1alpha1.GroupVersion.String(),
-								Kind:               "Comparison",
-								Name:               comp.Name,
-								UID:                comp.UID,
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
+					baseClone := &v1alpha1.Run{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      baseRunName,
+							Namespace: comp.Namespace,
+							OwnerReferences: []metav1.OwnerReference{
+								{
+									APIVersion:         v1alpha1.GroupVersion.String(),
+									Kind:               "Comparison",
+									Name:               comp.Name,
+									UID:                comp.UID,
+									Controller:         ptr.To(false),
+									BlockOwnerDeletion: ptr.To(true),
+								},
+							},
+							Labels: map[string]string{
+								LabelBatchKey:   batchKey,
+								LabelComparison: comp.Name,
+								LabelBatch:      strconv.Itoa(nextBatchIndex),
+								LabelRole:       "baseline",
 							},
 						},
-						Labels: map[string]string{
-							"evalrunner.gke-labs.dev/comparison": comp.Name,
-							"evalrunner.gke-labs.dev/batch":      strconv.Itoa(nextBatchIndex),
-							"evalrunner.gke-labs.dev/role":       "baseline",
-						},
-					},
-					Spec: *baseSpec,
+						Spec: *baseSpec,
+					}
+					if err := r.Create(ctx, baseClone); err != nil && !apierrors.IsAlreadyExists(err) {
+						return ctrl.Result{}, fmt.Errorf("failed to create baseline batch run: %w", err)
+					}
+				} else if err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed looking up baseline run %q: %w", baseRunName, err)
 				}
-				if err := r.Create(ctx, baseClone); err != nil && !apierrors.IsAlreadyExists(err) {
-					return ctrl.Result{}, fmt.Errorf("failed to create baseline batch run: %w", err)
-				}
-			} else if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed looking up baseline run %q: %w", baseRunName, err)
 			}
 
 			var existingCand v1alpha1.Run
@@ -1117,9 +1303,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						Candidate: te.est.DroppedCandidate,
 						Baseline:  te.est.DroppedBaseline,
 					},
-					Label:      toComparisonTaskLabel(te.dec.Label),
-					SamplesRun: te.samplesRun,
-					Decision:   v1alpha1.ComparisonTaskLabel(te.dec.Label),
+					Label:         toComparisonTaskLabel(te.dec.Label),
+					SamplesRun:    te.samplesRun,
+					Decision:      v1alpha1.ComparisonTaskLabel(te.dec.Label),
+					SuggestedNext: te.suggestedNext,
+					Tokens:        te.tokens,
 				})
 			}
 
@@ -1132,6 +1320,188 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					Tasks: fmt.Sprintf("%d/%d", len(taskIDs)-len(continueTasks), len(taskIDs)),
 				}
 				status.Message = fmt.Sprintf("Running batch %d (%d tasks continuing)", nextBatchIndex, len(continueTasks))
+			})
+		}
+	}
+
+	// Check extraSamples if all tasks have stopped
+	extraRequested := comp.Spec.ExtraSamples > comp.Status.ExtraSamplesApplied
+	if extraRequested {
+		var undecidedTasks []string
+		var decidedTasks []string
+		for _, te := range taskEvals {
+			if te.exhausted || te.failed {
+				continue
+			}
+			if te.dec.Label == stats.TaskLabelInconclusive {
+				undecidedTasks = append(undecidedTasks, te.taskID)
+			} else {
+				decidedTasks = append(decidedTasks, te.taskID)
+			}
+		}
+
+		var extraTasks []string
+		if len(undecidedTasks) > 0 {
+			extraTasks = undecidedTasks
+		} else {
+			extraTasks = decidedTasks
+		}
+
+		if len(extraTasks) > 0 {
+			nextBatchIndex := len(batches) + 1
+			lastBatch := batches[len(batches)-1]
+			nextStart := 1
+			if lastBatch.SampleRange != nil {
+				nextStart = lastBatch.SampleRange.End + 1
+			}
+			batchSize := 8
+			if comp.Spec.Sampling != nil {
+				batchSize = comp.Spec.Sampling.EffectiveBatchSize()
+			}
+			extraRemaining := comp.Spec.ExtraSamples - comp.Status.ExtraSamplesApplied
+			if extraRemaining < batchSize {
+				batchSize = extraRemaining
+			}
+			nextEnd := nextStart + batchSize - 1
+
+			candCloneName := fmt.Sprintf("%s-b%d-cand", comp.Name, nextBatchIndex)
+			baseRunName := fmt.Sprintf("%s-b%d-base", comp.Name, nextBatchIndex)
+
+			batchRange := v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
+			batchKey := ComputeBatchKey(baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, extraTasks, batchRange)
+
+			existingBase, err := r.findCompletedBaselineRun(ctx, comp.Namespace, baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, extraTasks, batchRange)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed looking up baseline run for extra batch reuse: %w", err)
+			}
+			if existingBase != nil {
+				baseRunName = existingBase.Name
+				if addErr := r.addOwnerReferenceToRun(ctx, existingBase, &comp); addErr != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to add owner reference to reused baseline run %q: %w", baseRunName, addErr)
+				}
+				logger.Info("reusing completed baseline run for extra batch", "comparison", comp.Name, "batch", nextBatchIndex, "run", baseRunName, "batchKey", batchKey)
+			} else {
+				var existingBaseRun v1alpha1.Run
+				if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseRunName}, &existingBaseRun); apierrors.IsNotFound(err) {
+					baseSpec := baselineRun.Spec.DeepCopy()
+					baseSpec.Tasks = extraTasks
+					baseSpec.SampleRange = &batchRange
+					baseSpec.Limit = nil
+
+					baseClone := &v1alpha1.Run{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      baseRunName,
+							Namespace: comp.Namespace,
+							OwnerReferences: []metav1.OwnerReference{
+								{
+									APIVersion:         v1alpha1.GroupVersion.String(),
+									Kind:               "Comparison",
+									Name:               comp.Name,
+									UID:                comp.UID,
+									Controller:         ptr.To(false),
+									BlockOwnerDeletion: ptr.To(true),
+								},
+							},
+							Labels: map[string]string{
+								LabelBatchKey:   batchKey,
+								LabelComparison: comp.Name,
+								LabelBatch:      strconv.Itoa(nextBatchIndex),
+								LabelRole:       "baseline",
+							},
+						},
+						Spec: *baseSpec,
+					}
+					if err := r.Create(ctx, baseClone); err != nil && !apierrors.IsAlreadyExists(err) {
+						return ctrl.Result{}, fmt.Errorf("failed to create baseline batch run: %w", err)
+					}
+				} else if err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed looking up baseline run %q: %w", baseRunName, err)
+				}
+			}
+
+			var existingCand v1alpha1.Run
+			if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: candCloneName}, &existingCand); apierrors.IsNotFound(err) {
+				candSpec := candidateRun.Spec.DeepCopy()
+				candSpec.Tasks = extraTasks
+				candSpec.SampleRange = &batchRange
+				candSpec.Limit = nil
+
+				candClone := &v1alpha1.Run{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      candCloneName,
+						Namespace: comp.Namespace,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         v1alpha1.GroupVersion.String(),
+								Kind:               "Comparison",
+								Name:               comp.Name,
+								UID:                comp.UID,
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(true),
+							},
+						},
+						Labels: map[string]string{
+							"evalrunner.gke-labs.dev/comparison": comp.Name,
+							"evalrunner.gke-labs.dev/batch":      strconv.Itoa(nextBatchIndex),
+							"evalrunner.gke-labs.dev/role":       "candidate",
+						},
+					},
+					Spec: *candSpec,
+				}
+				if err := r.Create(ctx, candClone); err != nil && !apierrors.IsAlreadyExists(err) {
+					return ctrl.Result{}, fmt.Errorf("failed to create candidate batch run: %w", err)
+				}
+			} else if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed looking up candidate run %q: %w", candCloneName, err)
+			}
+
+			batches = append(batches, v1alpha1.ComparisonBatchStatus{
+				Index:        nextBatchIndex,
+				SampleRange:  &batchRange,
+				CandidateRun: candCloneName,
+				BaselineRun:  baseRunName,
+				Phase:        v1alpha1.ComparisonPhaseRunning,
+			})
+
+			newExtraApplied := comp.Status.ExtraSamplesApplied + batchSize
+
+			var partialStatuses []v1alpha1.ComparisonTaskStatus
+			for _, te := range taskEvals {
+				partialStatuses = append(partialStatuses, v1alpha1.ComparisonTaskStatus{
+					ID:            te.taskID,
+					BaseRate:      &te.est.BaseMean,
+					CandidateRate: &te.est.CandidateMean,
+					Delta:         &te.est.MeanDelta,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: te.est.CI.Lower,
+						Upper: te.est.CI.Upper,
+					},
+					Pairs:  te.est.NumPairs,
+					Wins:   te.est.Wins,
+					Losses: te.est.Losses,
+					Ties:   te.est.Ties,
+					Dropped: v1alpha1.ComparisonDropped{
+						Candidate: te.est.DroppedCandidate,
+						Baseline:  te.est.DroppedBaseline,
+					},
+					Label:         toComparisonTaskLabel(te.dec.Label),
+					SamplesRun:    te.samplesRun,
+					Decision:      v1alpha1.ComparisonTaskLabel(te.dec.Label),
+					SuggestedNext: te.suggestedNext,
+					Tokens:        te.tokens,
+				})
+			}
+
+			return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
+				status.Phase = v1alpha1.ComparisonPhaseRunning
+				status.Verdict = v1alpha1.ComparisonVerdictRunning
+				status.Batches = batches
+				status.Tasks = partialStatuses
+				status.ExtraSamplesApplied = newExtraApplied
+				status.Summary = &v1alpha1.ComparisonSummary{
+					Tasks: fmt.Sprintf("%d/%d", len(taskIDs)-len(extraTasks), len(taskIDs)),
+				}
+				status.Message = fmt.Sprintf("Running extra batch %d (%d tasks)", nextBatchIndex, len(extraTasks))
 			})
 		}
 	}
@@ -1159,9 +1529,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				Candidate: te.est.DroppedCandidate,
 				Baseline:  te.est.DroppedBaseline,
 			},
-			Label:      toComparisonTaskLabel(te.dec.Label),
-			SamplesRun: te.samplesRun,
-			Decision:   v1alpha1.ComparisonTaskLabel(te.dec.Label),
+			Label:         toComparisonTaskLabel(te.dec.Label),
+			SamplesRun:    te.samplesRun,
+			Decision:      v1alpha1.ComparisonTaskLabel(te.dec.Label),
+			SuggestedNext: te.suggestedNext,
+			Tokens:        te.tokens,
 		}
 		taskStatuses = append(taskStatuses, taskStatus)
 
@@ -1218,11 +1590,15 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				Candidate: te.est.DroppedCandidate,
 				Baseline:  te.est.DroppedBaseline,
 			},
-			Label:        string(te.dec.Label),
-			PImprovement: te.est.PImprovement,
-			SamplesRun:   te.samplesRun,
-			Decision:     string(te.dec.Label),
-			PairsTable:   pairsTable,
+			Label:           string(te.dec.Label),
+			PImprovement:    te.est.PImprovement,
+			SamplesRun:      te.samplesRun,
+			Decision:        string(te.dec.Label),
+			SuggestedNext:   te.suggestedNext,
+			Tokens:          te.tokens,
+			CandidateTokens: te.candTokens,
+			BaseTokens:      te.baseTokens,
+			PairsTable:      pairsTable,
 		})
 	}
 
@@ -1337,6 +1713,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		status.PImprovement = &pImp
 		status.Batches = batches
 		status.Tasks = taskStatuses
+		status.ExtraSamplesApplied = comp.Status.ExtraSamplesApplied
 		status.Summary = &v1alpha1.ComparisonSummary{
 			Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)),
 			Skipped: len(skippedNotPlanned),

@@ -159,5 +159,24 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	sb.WriteString(strings.Join(footerParts, " · "))
 	sb.WriteString("\n")
 
+	// 5. Actions (e.g. run N more samples for inconclusive tasks)
+	if comp != nil {
+		var actions []string
+		for _, task := range comp.Status.Tasks {
+			if task.Label == v1alpha1.ComparisonTaskLabelInconclusive && task.SuggestedNext > 0 {
+				if len(comp.Status.Tasks) > 1 {
+					actions = append(actions, fmt.Sprintf("- run %d more samples (%s)", task.SuggestedNext, EscapeCell(task.ID)))
+				} else {
+					actions = append(actions, fmt.Sprintf("- run %d more samples", task.SuggestedNext))
+				}
+			}
+		}
+		if len(actions) > 0 {
+			sb.WriteString("\n")
+			sb.WriteString(strings.Join(actions, "\n"))
+			sb.WriteString("\n")
+		}
+	}
+
 	return sb.String()
 }
