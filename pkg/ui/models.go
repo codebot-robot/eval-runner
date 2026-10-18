@@ -146,20 +146,24 @@ type ComparisonTableView struct {
 
 // ComparisonTaskRow represents a single task row in the PR-comment table.
 type ComparisonTaskRow struct {
-	ID          string
-	BaseRate    string // e.g. "0.61"
-	CandRate    string // e.g. "0.84"
-	Delta       string // e.g. "+0.23"
-	HasCI       bool
-	CILeftPx    float64
-	CIWidthPx   float64
-	CIDotPx     float64
-	CILabel     string // e.g. "[+0.11, +0.35]"
-	StatusClass string // good, bad, warn, neutral, pending
-	Label       string // improved, regressed, unchanged, inconclusive, running
-	Pairs       int
-	DroppedCand int
-	DroppedBase int
+	ID            string
+	BaseRate      string // e.g. "0.61"
+	CandRate      string // e.g. "0.84"
+	Delta         string // e.g. "+0.23"
+	HasCI         bool
+	CILeftPx      float64
+	CIWidthPx     float64
+	CIDotPx       float64
+	CILabel       string // e.g. "[+0.11, +0.35]"
+	StatusClass   string // good, bad, warn, neutral, pending
+	Label         string // improved, regressed, unchanged, inconclusive, running
+	Pairs         int
+	DroppedCand   int
+	DroppedBase   int
+	SamplesRun    int
+	Decision      string
+	SuggestedNext int
+	Tokens        *int
 }
 
 // ComparisonRows maps a Comparison resource into a slice of ComparisonTaskRow
@@ -194,20 +198,24 @@ func ComparisonRows(comp *v1alpha1.Comparison) []ComparisonTaskRow {
 		}
 
 		rows = append(rows, ComparisonTaskRow{
-			ID:          task.ID,
-			BaseRate:    baseRate,
-			CandRate:    candRate,
-			Delta:       deltaStr,
-			HasCI:       hasCI,
-			CILeftPx:    leftPx,
-			CIWidthPx:   widthPx,
-			CIDotPx:     dotPx,
-			CILabel:     ciLabel,
-			StatusClass: labelStatusClass(task.Label),
-			Label:       string(task.Label),
-			Pairs:       task.Pairs,
-			DroppedCand: task.Dropped.Candidate,
-			DroppedBase: task.Dropped.Baseline,
+			ID:            task.ID,
+			BaseRate:      baseRate,
+			CandRate:      candRate,
+			Delta:         deltaStr,
+			HasCI:         hasCI,
+			CILeftPx:      leftPx,
+			CIWidthPx:     widthPx,
+			CIDotPx:       dotPx,
+			CILabel:       ciLabel,
+			StatusClass:   labelStatusClass(task.Label),
+			Label:         string(task.Label),
+			Pairs:         task.Pairs,
+			DroppedCand:   task.Dropped.Candidate,
+			DroppedBase:   task.Dropped.Baseline,
+			SamplesRun:    task.SamplesRun,
+			Decision:      task.Decision,
+			SuggestedNext: task.SuggestedNext,
+			Tokens:        task.Tokens,
 		})
 	}
 	return rows

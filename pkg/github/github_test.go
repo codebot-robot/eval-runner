@@ -772,6 +772,17 @@ func TestRenderComparisonMarkdown_UIBaseURL(t *testing.T) {
 	_ = status
 }
 
+func TestRenderComparisonMarkdown_RunMoreSamples(t *testing.T) {
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	// Set SuggestedNext on the inconclusive task
+	comp.Status.Tasks[1].SuggestedNext = 16
+
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(got, "run 16 more samples") {
+		t.Errorf("expected markdown to contain 'run 16 more samples', got:\n%s", got)
+	}
+}
+
 func TestReporter_CheckRunRetryableError_HashGateNotSwallowed(t *testing.T) {
 	ctx := t.Context()
 	server := NewFakeGitHubServer()
