@@ -44,6 +44,14 @@ type RunMetadata struct {
 	StartedAt   *time.Time
 	FinishedAt  *time.Time
 	SampleRange *SampleRange
+	Tokens      *TaskTokens
+}
+
+// TaskTokens records token usage breakdown for an evaluation task.
+type TaskTokens struct {
+	Input  int `json:"input,omitempty"`
+	Output int `json:"output,omitempty"`
+	Total  int `json:"total,omitempty"`
 }
 
 // SampleRange specifies a 1-based, inclusive window of samples.
@@ -65,6 +73,7 @@ type TaskSummary struct {
 	Capped      bool         `json:"capped"`
 	CapBytes    int64        `json:"capBytes,omitempty"`
 	SampleRange *SampleRange `json:"sampleRange,omitempty"`
+	Tokens      *TaskTokens  `json:"tokens,omitempty"`
 }
 
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.

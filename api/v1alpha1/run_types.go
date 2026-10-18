@@ -128,6 +128,25 @@ type TaskStatus struct {
 	// SampleRange is the sample window evaluated for this task.
 	// +optional
 	SampleRange *SampleRange `json:"sampleRange,omitempty"`
+
+	// Tokens is the token usage breakdown consumed for this task, when present in Inspect logs.
+	// +optional
+	Tokens *TaskTokens `json:"tokens,omitempty"`
+}
+
+// TaskTokens records token usage breakdown for an evaluation task.
+type TaskTokens struct {
+	// Input is the number of input/prompt tokens consumed.
+	// +optional
+	Input int `json:"input,omitempty"`
+
+	// Output is the number of output/completion tokens consumed.
+	// +optional
+	Output int `json:"output,omitempty"`
+
+	// Total is the total number of tokens consumed (input + output).
+	// +optional
+	Total int `json:"total,omitempty"`
 }
 
 // SampleRange specifies a 1-based, inclusive window of samples to evaluate.

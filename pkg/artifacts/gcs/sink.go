@@ -343,6 +343,7 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 		FinishedAt:  meta.FinishedAt,
 		Capped:      capped,
 		SampleRange: meta.SampleRange,
+		Tokens:      meta.Tokens,
 	}
 	if capped {
 		summary.CapBytes = capLimit

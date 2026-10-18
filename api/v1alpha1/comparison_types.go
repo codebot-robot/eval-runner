@@ -143,6 +143,11 @@ type ComparisonSpec struct {
 	// PullRequest references an optional GitHub pull request to report results to.
 	// +optional
 	PullRequest *PullRequestSpec `json:"pullRequest,omitempty"`
+
+	// ExtraSamples requests evaluating N additional samples per undecided task (or per all tasks if all are decided) beyond the stopping rule.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ExtraSamples int `json:"extraSamples,omitempty"`
 }
 
 // DeltaConfidenceInterval represents a confidence interval on a difference/delta in [-1, 1].
@@ -228,6 +233,14 @@ type ComparisonTaskStatus struct {
 	// Decision is the stopping rule decision: improved, regressed, unchanged, inconclusive, or continue.
 	// +optional
 	Decision ComparisonTaskLabel `json:"decision,omitempty"`
+
+	// SuggestedNext is the suggested number of additional samples to run if undecided.
+	// +optional
+	SuggestedNext int `json:"suggestedNext,omitempty"`
+
+	// Tokens is the token usage breakdown consumed for this task across evaluated runs, when present in Inspect logs.
+	// +optional
+	Tokens *TaskTokens `json:"tokens,omitempty"`
 }
 
 // ComparisonBatchStatus records the execution state of one paired batch of Runs.
@@ -300,6 +313,10 @@ type ComparisonStatus struct {
 	// Batches records the status of each paired batch of Runs evaluated for this Comparison.
 	// +optional
 	Batches []ComparisonBatchStatus `json:"batches,omitempty"`
+
+	// ExtraSamplesApplied records the number of extra samples that have been consumed into extension batches.
+	// +optional
+	ExtraSamplesApplied int `json:"extraSamplesApplied,omitempty"`
 
 	// Tasks records the status and paired comparison results for each evaluated task.
 	// +optional

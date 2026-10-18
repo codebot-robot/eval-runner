@@ -1876,6 +1876,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].SuccessRateCI = res.successRateCI
 				status.Tasks[i].Message = res.message
 				status.Tasks[i].LogPath = res.logPath
+				status.Tasks[i].Tokens = res.tokens
 				if res.sampleRange != nil {
 					status.Tasks[i].SampleRange = res.sampleRange
 				} else if status.Tasks[i].SampleRange == nil {
@@ -1911,6 +1912,7 @@ type taskExecutionResult struct {
 	meanScore     *float64
 	successRate   *float64
 	successRateCI *v1alpha1.ConfidenceInterval
+	tokens        *v1alpha1.TaskTokens
 	message       string
 	logPath       string
 	sampleRange   *v1alpha1.SampleRange
@@ -2217,6 +2219,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 
 	// Step 6: Store artifact
+	tokens, err := artifacts.ExtractInspectTokens(logBytes)
+	if err != nil {
+		logger.V(1).Info("failed to extract tokens from inspect log", "task", taskID, "error", err)
+	}
 	finishTime := r.now()
 	var artifactSampleRange *artifacts.SampleRange
 	if effRange != nil {
@@ -2234,6 +2240,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		StartedAt:    &startTime,
 		FinishedAt:   &finishTime,
 		SampleRange:  artifactSampleRange,
+		Tokens:       tokens,
 	}
 	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
 	if storeErr != nil {
@@ -2286,6 +2293,15 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}
 
+	var v1Tokens *v1alpha1.TaskTokens
+	if tokens != nil {
+		v1Tokens = &v1alpha1.TaskTokens{
+			Input:  tokens.Input,
+			Output: tokens.Output,
+			Total:  tokens.Total,
+		}
+	}
+
 	return taskExecutionResult{
 		taskID:        taskID,
 		phase:         v1alpha1.TaskPhaseCompleted,
@@ -2294,6 +2310,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		meanScore:     agg.MeanScore,
 		successRate:   successRate,
 		successRateCI: successRateCI,
+		tokens:        v1Tokens,
 		logPath:       logPath,
 		sampleRange:   effRange,
 	}

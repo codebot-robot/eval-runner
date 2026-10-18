@@ -154,6 +154,7 @@ status:
 | `message` | `string` | Failure detail or bounded error information if the task failed. |
 | `logPath` | `string` | Storage path or URI where the raw Inspect log was stored by the artifact sink. |
 | `sampleRange` | `*SampleRange` | Sample window evaluated for this task (`{start, end}`). |
+| `tokens` | `*int` | Total token count consumed for this task when present in Inspect logs. |
 
 ### ConfidenceInterval
 
@@ -280,6 +281,7 @@ spec:
 | `sampling` | `*ComparisonSamplingSpec` | Optional. Configures adaptive paired batch sampling driven by the stopping rule. When omitted, only the single pair of referenced runs is compared. |
 | `sampling.batchSize` | `int` | Number of samples to evaluate in each subsequent batch (default: `8`). |
 | `sampling.maxSamplesPerTask` | `int` | Maximum total number of samples evaluated per task across all batches (default: `64`). |
+| `extraSamples` | `int` | Optional. Additional samples requested beyond the stopping rule per undecided task (or all tasks if decided) (default: `0`). Evaluates beyond `sampling.maxSamplesPerTask`; bumping triggers more. |
 | `tasks` | `[]string` | Optional allow-list of task IDs to evaluate. When omitted, all tasks present in both runs are compared. |
 
 ## Status (`status`)
@@ -290,6 +292,7 @@ spec:
 | `verdict` | `ComparisonVerdict` | Aggregate run-level verdict: `IMPROVED`, `REGRESSED`, `UNCHANGED`, `INCONCLUSIVE`, `RUNNING`. |
 | `pImprovement` | `*float64` | Posterior probability that the candidate is a net improvement across evaluated tasks (range `[0, 1]`). |
 | `batches` | `[]ComparisonBatchStatus` | Records execution state of each paired batch of Runs (`index`, `sampleRange`, `candidateRun`, `baselineRun`, `phase`). |
+| `extraSamplesApplied` | `int` | Count of extra samples scheduled into extension batches (consumed request count). |
 | `tasks` | `[]ComparisonTaskStatus` | Per-task paired comparison statistics and labels. |
 | `tasks[].id` | `string` | Unique task identifier (e.g. `triage/runbook_lookup`). |
 | `tasks[].baseRate` | `*float64` | Mean score or success rate on baseline samples. |
@@ -304,12 +307,22 @@ spec:
 | `tasks[].label` | `ComparisonTaskLabel` | Decision outcome: `improved`, `regressed`, `unchanged`, `inconclusive`, `running`. |
 | `tasks[].samplesRun` | `int` | Total number of samples evaluated for this task across all batches. |
 | `tasks[].decision` | `ComparisonTaskLabel` | Stopping rule decision: `improved`, `regressed`, `unchanged`, `inconclusive`, `continue`. |
+| `tasks[].suggestedNext` | `int` | Suggested number of additional samples to evaluate if undecided (0 when dataset is exhausted). |
+| `tasks[].tokens` | `*TaskTokens` | Token counts (`input`, `output`, `total`) consumed across evaluated task runs when present in Inspect logs. |
 | `summary` | `*ComparisonSummary` | Aggregate statistics across tasks in the Comparison. |
 | `summary.tasks` | `string` | Compact string representing completed vs total tasks (e.g. `2/2`). |
 | `summary.skipped` | `int` | Count of tasks discovered in the manifest but not planned by either Run. |
 | `summaryPath` | `string` | Storage path or URI where the complete paired table was stored (`comparisons/<name>.json`). |
 | `message` | `string` | Human-readable explanation of the aggregate verdict or failure. In addition to the aggregate verdict summary, the controller emits policy notes: `candidate task failed: <ids>` (caps UNCHANGED or IMPROVED verdicts to INCONCLUSIVE with $P(\text{improvement}) \le 0.50$), `tasks not executed: <ids>` (tasks in scope executed by neither run), `tasks not executed by both runs: <ids>` (tasks executed by only one run), and `skipped (not planned): <ids>` (tasks discovered in the manifest but not planned by either run). |
 | `reporting` | `*ComparisonReportingStatus` | GitHub PR comment and Check Run reporting state (`commentID`, `checkRunID`, `lastPostedHash`, `message`). |
+
+### TaskTokens (`status.tasks[].tokens`)
+
+| Field | Type | Description |
+|---|---|---|
+| `input` | `int` | Input/prompt tokens consumed by models for this task. |
+| `output` | `int` | Output/completion tokens consumed by models for this task. |
+| `total` | `int` | Total tokens consumed for this task (`input + output`). |
 
 ### ComparisonSummary (`status.summary`)
 

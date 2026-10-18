@@ -404,4 +404,38 @@ For each evaluated task, sampling stops as soon as any of the following conditio
 2. **Cap Reached**: `samplesRun >= maxSamplesPerTask` without resolving the interval $\implies$ `inconclusive`.
 3. **Dataset Exhaustion**: A batch returns fewer samples than its requested window ($N_{\text{returned}} < \text{end} - \text{start} + 1$). The dataset has no more samples; the task is decided with what exists (`inconclusive` if still `continue`). The controller never issues a window entirely past the last observed sample.
 
+### 5.4 Extra Samples (`spec.extraSamples`)
+
+When a developer reviews an inconclusive comparison or wants higher precision on a decided outcome, they can ask the controller to evaluate more samples by setting `spec.extraSamples`:
+
+```yaml
+spec:
+  extraSamples: 16 # Evaluate 16 more samples beyond stopping rule
+```
+
+- **Targeted Execution**: Extra samples run for **undecided tasks** (`inconclusive`). If all tasks are already decided, extra samples run across all tasks.
+- **Unclamped by Sample Cap**: Because `extraSamples` is an explicit user request for further evidence beyond the stopping rule, it is not clamped by `maxSamplesPerTask` (for example, with cap 8 and `extraSamples: 8`, the controller will evaluate samples 9–16).
+- **Batching**: If `extraSamples > batchSize`, the controller schedules $\lceil \text{extraSamples} / \text{batchSize} \rceil$ sequential batches.
+- **Progress Tracking**: The controller records `status.extraSamplesApplied` with the count of extra samples scheduled into extension batches (serving as a consumed-request marker). Bumping `spec.extraSamples` again triggers additional batches.
+- **PR Comment Actions**: For inconclusive tasks with remaining dataset samples, the PR comment suggests actionable next steps using `suggestedNext` from `stats.Decide` (e.g. `- run 16 more samples`). When the dataset is exhausted, `suggestedNext` is zeroed and omitted.
+
+### 5.5 Baseline Reuse at Batch Granularity
+
+To avoid redundant evaluation when multiple pull requests or extra sample requests compare against the same baseline commit:
+
+- **Deterministic Batch Key**: Before creating a baseline batch Run, the controller computes a SHA-256 hash identifying the evaluation slice:
+  $$\text{batchKey} = \text{SHA256}(\text{repoURL} \mathbin{\Vert} \text{commit} \mathbin{\Vert} \text{model} \mathbin{\Vert} \text{tasks} \mathbin{\Vert} \text{start-end})[:32]$$
+  Baseline batch Runs are labeled with `evalrunner.gke-labs.dev/batch-key: <hash>`.
+- **Reuse Lookup**: The controller looks for an existing `Completed` Run in the namespace matching the batch key label. A spec-matching fallback allows any completed Run in the namespace with matching repo URL, commit, model, task set, and sample window (such as a user-created Run or independent seed) to be adopted as a baseline batch.
+- **Multiple Owner References**: Reused baseline Runs are updated to include owner references for each consuming Comparison (`controller: false`, `blockOwnerDeletion: true`), preventing garbage collection from deleting a shared baseline Run when an earlier Comparison is deleted.
+- **Cache Invalidation**: Any change in commit, model, task set, or sample range alters the batch key, automatically triggering creation of a fresh baseline Run.
+
+### 5.6 Cost Accounting & Token Usage
+
+Per-task sample counts (`samplesRun`) and model token usage are tracked across all evaluation batches:
+
+- **Token Extraction**: When Inspect logs contain `stats.model_usage` or sample-level `model_usage` (`input_tokens`, `output_tokens`, `total_tokens`), token usage is extracted via `ExtractInspectTokens` as a structured `{input, output, total}` object.
+- **Status & Summary**: Evaluated token counts are accumulated across candidate and baseline runs for each task, recorded in `Run.status.tasks[].tokens`, `Comparison.status.tasks[].tokens`, and written to `summary.json` alongside task execution metadata.
+
+
 

@@ -366,6 +366,30 @@ func TestRenderComparisonMarkdown_Golden_SkippedTask(t *testing.T) {
 	}
 }
 
+func runMoreSamplesComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	comp.Name = "docs-eval-run-more-samples"
+	comp.Status.SummaryPath = "gs://eval-bucket/comparisons/docs-eval-run-more-samples.json"
+	comp.Status.Tasks[1].SuggestedNext = 16
+	return comp, baseRun, candRun
+}
+
+func TestRenderComparisonMarkdown_Golden_RunMoreSamples(t *testing.T) {
+	comp, baseRun, candRun := runMoreSamplesComparisonFixture()
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+
+	goldenPath := "testdata/run_more_samples_comparison.golden.md"
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden file: %v", err)
+	}
+	want := string(wantBytes)
+
+	if got != want {
+		t.Errorf("RenderComparisonMarkdown mismatch (-got +want):\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
 func TestComparisonNotes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1140,6 +1164,17 @@ func TestRenderComparisonMarkdown_SamplesRun(t *testing.T) {
 	}
 	if !strings.Contains(got, "| docs/readme\\_comprehension\\_blind | 0.20 | 0.15 | -0.05 [-0.15, +0.00] | inconclusive | 16 |") {
 		t.Errorf("expected markdown to display 16 for task 1 runs, got:\n%s", got)
+	}
+}
+
+func TestRenderComparisonMarkdown_RunMoreSamples(t *testing.T) {
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	comp.Status.Tasks[1].Label = v1alpha1.ComparisonTaskLabelInconclusive
+	comp.Status.Tasks[1].SuggestedNext = 32
+
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(got, "- run 32 more samples (docs/readme\\_comprehension\\_blind)") {
+		t.Errorf("expected markdown to contain action for inconclusive task, got:\n%s", got)
 	}
 }
 

@@ -31,7 +31,20 @@ type InspectLog struct {
 	Status  string          `json:"status"`
 	Eval    InspectEval     `json:"eval"`
 	Results *InspectResults `json:"results,omitempty"`
+	Stats   *InspectStats   `json:"stats,omitempty"`
 	Samples []InspectSample `json:"samples,omitempty"`
+}
+
+// InspectStats holds run-level statistics including model usage.
+type InspectStats struct {
+	ModelUsage map[string]InspectModelUsage `json:"model_usage,omitempty"`
+}
+
+// InspectModelUsage reports token counts for a model.
+type InspectModelUsage struct {
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
+	TotalTokens  int `json:"total_tokens,omitempty"`
 }
 
 // InspectEval contains task and scorer configuration metadata.
@@ -69,9 +82,10 @@ type InspectMetric struct {
 
 // InspectSample represents an individual evaluated sample.
 type InspectSample struct {
-	ID     any                           `json:"id"`
-	Epoch  int                           `json:"epoch,omitempty"`
-	Scores map[string]InspectSampleScore `json:"scores,omitempty"`
+	ID         any                           `json:"id"`
+	Epoch      int                           `json:"epoch,omitempty"`
+	Scores     map[string]InspectSampleScore `json:"scores,omitempty"`
+	ModelUsage map[string]InspectModelUsage  `json:"model_usage,omitempty"`
 }
 
 // InspectSampleScore captures the score and outcome of a scorer for one sample.
@@ -332,4 +346,62 @@ func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 	}
 
 	return sampleScores, nil
+}
+
+// ExtractInspectTokens parses raw Inspect log JSON bytes and returns token usage breakdown if present.
+// Returns nil if no token counts or model usage are present in the log.
+func ExtractInspectTokens(data []byte) (*TaskTokens, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, fmt.Errorf("empty log data")
+	}
+
+	var log InspectLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal inspect log: %w", err)
+	}
+
+	inputTokens := 0
+	outputTokens := 0
+	totalTokens := 0
+	foundTokens := false
+
+	if log.Stats != nil && len(log.Stats.ModelUsage) > 0 {
+		for _, usage := range log.Stats.ModelUsage {
+			tot := usage.TotalTokens
+			if tot == 0 && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+				tot = usage.InputTokens + usage.OutputTokens
+			}
+			if tot > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+				inputTokens += usage.InputTokens
+				outputTokens += usage.OutputTokens
+				totalTokens += tot
+				foundTokens = true
+			}
+		}
+		if foundTokens {
+			return &TaskTokens{Input: inputTokens, Output: outputTokens, Total: totalTokens}, nil
+		}
+	}
+
+	for _, s := range log.Samples {
+		if len(s.ModelUsage) > 0 {
+			for _, usage := range s.ModelUsage {
+				tot := usage.TotalTokens
+				if tot == 0 && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+					tot = usage.InputTokens + usage.OutputTokens
+				}
+				if tot > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+					inputTokens += usage.InputTokens
+					outputTokens += usage.OutputTokens
+					totalTokens += tot
+					foundTokens = true
+				}
+			}
+		}
+	}
+
+	if foundTokens {
+		return &TaskTokens{Input: inputTokens, Output: outputTokens, Total: totalTokens}, nil
+	}
+	return nil, nil
 }
