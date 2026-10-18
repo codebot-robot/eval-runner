@@ -40,6 +40,32 @@ func EscapeCell(s string) string {
 	return s
 }
 
+// ComparisonNotes extracts the single-line notes to render under the verdict in PR comments:
+// the suffix after the verdict summary in status.message (e.g. skipped or not-executed tasks),
+// or status.message as a whole when the verdict is INCONCLUSIVE or REGRESSED.
+func ComparisonNotes(comp *v1alpha1.Comparison) string {
+	if comp == nil || comp.Status.Message == "" {
+		return ""
+	}
+
+	switch comp.Status.Verdict {
+	case v1alpha1.ComparisonVerdictInconclusive, v1alpha1.ComparisonVerdictRegressed:
+		return comp.Status.Message
+	default:
+		msg := comp.Status.Message
+		for _, prefix := range []string{"IMPROVED:", "UNCHANGED:", "RUNNING:"} {
+			if strings.HasPrefix(msg, prefix) {
+				parts := strings.SplitN(msg, "; ", 2)
+				if len(parts) > 1 {
+					return parts[1]
+				}
+				return ""
+			}
+		}
+		return msg
+	}
+}
+
 // RenderComparisonMarkdown renders a GitHub pull request comment for a Comparison,
 // using ui.ComparisonRows and ui.ComparisonSummary so the comment matches the web view.
 // If uiBaseURL is provided, the web-view link is rendered as an absolute Markdown link;
@@ -64,6 +90,12 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		sb.WriteString(fmt.Sprintf("## %s · P(improvement) = %.2f\n\n", verdict, *comp.Status.PImprovement))
 	} else {
 		sb.WriteString(fmt.Sprintf("## %s\n\n", verdict))
+	}
+
+	// Notes under the verdict line
+	if notes := ComparisonNotes(comp); notes != "" {
+		sb.WriteString(EscapeCell(notes))
+		sb.WriteString("\n\n")
 	}
 
 	// 3. Table
