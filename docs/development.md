@@ -776,6 +776,7 @@ Questions live in `evals/datasets/readme_questions.jsonl`. Each line is a JSON r
 
 ```json
 {
+  "id": "dev-unit-tests",
   "input": "Which command runs unit tests in the repository?",
   "choices": [
     "go test ./...",
@@ -790,12 +791,14 @@ Questions live in `evals/datasets/readme_questions.jsonl`. Each line is a JSON r
 ```
 
 Guidelines for writing questions:
+- **`id`**: A unique, stable sample identifier string (e.g. `readme-tagline`, `dev-kind-cluster`). Tasks must assign explicit sample IDs so that cross-commit comparisons pair identical questions by ID rather than relying on positional fallback. Positional IDs are a fallback, not a design. **Invariant: IDs are permanent.** Never rename or renumber an existing ID, and a question whose text, choices, or target changes materially gets a *new* ID (the old one retires). Otherwise the comparison will pair two different questions under the same key.
 - **`input`**: A clear question testing comprehension of facts stated in `README.md` or `docs/development.md`.
 - **`choices`**: Exactly 4 options (`A`, `B`, `C`, `D`).
 - **`target`**: The letter of the correct answer (`A`, `B`, `C`, or `D`).
 - **`source`**: The document and section where the answer is found (e.g., `README.md: Core Concepts`, `docs/development.md: Environment Variables`).
 - **`evidence`**: A short, non-empty substring from the injected documentation that must be present (verified by `test-evals` in CI as a drift guard).
 - **`absent`**: An optional list of non-empty substrings that must NOT appear in the injected documentation (verified by `test-evals` in CI to ensure negative controls do not break when previously omitted facts are added to the documentation).
+- **`dataset order`**: Keep dataset order stable by appending new questions to the end of the file. Sampling windows are positional, but explicit IDs ensure cross-commit pairing survives dataset edits.
 - **Guard against leakage**: Ask about repo-specific details (names of tools, commands, environment variables, verdicts) rather than general Kubernetes or software engineering facts.
 - **Negative controls ("Not stated")**: Include questions about plausible facts that are intentionally omitted from our documentation, with the correct target being "The documents do not state this." (or similar). This punishes models that guess confidently.
 
