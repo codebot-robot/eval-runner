@@ -16,16 +16,86 @@ package ui
 
 import (
 	"fmt"
-	"html/template"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+const (
+	DefaultPageLimit = 100
+	MaxPageLimit     = 500
+)
+
+func isValidNamespace(ns string) bool {
+	if ns == "" {
+		return false
+	}
+	return len(validation.IsDNS1123Label(ns)) == 0
+}
+
+func isValidResourceName(name string) bool {
+	if name == "" {
+		return false
+	}
+	return len(validation.IsDNS1123Subdomain(name)) == 0
+}
+
+func parsePagination(r *http.Request) (offset, limit int, err error) {
+	q := r.URL.Query()
+	offset = 0
+	limit = DefaultPageLimit
+
+	if oStr := q.Get("offset"); oStr != "" {
+		o, err := strconv.Atoi(oStr)
+		if err != nil || o < 0 {
+			return 0, 0, fmt.Errorf("invalid offset %q: must be non-negative integer", oStr)
+		}
+		offset = o
+	}
+
+	if lStr := q.Get("limit"); lStr != "" {
+		l, err := strconv.Atoi(lStr)
+		if err != nil || l <= 0 {
+			return 0, 0, fmt.Errorf("invalid limit %q: must be positive integer", lStr)
+		}
+		if l > MaxPageLimit {
+			l = MaxPageLimit
+		}
+		limit = l
+	}
+
+	return offset, limit, nil
+}
+
+func buildPageURL(baseURL string, query url.Values, newOffset int, limit int) string {
+	q := make(url.Values)
+	for k, v := range query {
+		q[k] = v
+	}
+	if newOffset > 0 {
+		q.Set("offset", strconv.Itoa(newOffset))
+	} else {
+		q.Del("offset")
+	}
+	if limit != DefaultPageLimit {
+		q.Set("limit", strconv.Itoa(limit))
+	} else {
+		q.Del("limit")
+	}
+	encoded := q.Encode()
+	if encoded == "" {
+		return baseURL
+	}
+	return baseURL + "?" + encoded
+}
 
 // Config configures the web UI server.
 type Config struct {
@@ -80,20 +150,37 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/runs", http.StatusFound)
 }
 
-func (s *Server) namespaceFor(r *http.Request) string {
+func (s *Server) namespaceFor(r *http.Request) (string, error) {
 	ns := r.URL.Query().Get("namespace")
 	if ns != "" {
-		return ns
+		if !isValidNamespace(ns) {
+			return "", fmt.Errorf("invalid namespace %q: must be a valid DNS-1123 label", ns)
+		}
+		return ns, nil
 	}
-	return s.cfg.DefaultNamespace
+	return s.cfg.DefaultNamespace, nil
 }
 
 func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	ns := s.namespaceFor(r)
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	offset, limit, err := parsePagination(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	var runList v1alpha1.RunList
 	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			http.Error(w, fmt.Sprintf("forbidden: access to namespace %q denied: %v", ns, err), http.StatusForbidden)
+			return
+		}
 		http.Error(w, fmt.Sprintf("failed to list runs in namespace %s: %v", ns, err), http.StatusInternalServerError)
 		return
 	}
@@ -103,8 +190,19 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		return runList.Items[i].CreationTimestamp.After(runList.Items[j].CreationTimestamp.Time)
 	})
 
-	items := make([]RunListItem, 0, len(runList.Items))
-	for _, run := range runList.Items {
+	totalCount := len(runList.Items)
+	start := offset
+	if start > totalCount {
+		start = totalCount
+	}
+	end := start + limit
+	if end > totalCount {
+		end = totalCount
+	}
+
+	pageRuns := runList.Items[start:end]
+	items := make([]RunListItem, 0, len(pageRuns))
+	for _, run := range pageRuns {
 		tasks := "—"
 		samples := 0
 		rates := ""
@@ -130,10 +228,38 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	hasMore := end < totalCount
+	hasPrev := start > 0
+
+	var nextLink, prevLink string
+	if hasMore {
+		nextLink = buildPageURL("/runs", r.URL.Query(), end, limit)
+	}
+	if hasPrev {
+		prevOffset := start - limit
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		prevLink = buildPageURL("/runs", r.URL.Query(), prevOffset, limit)
+	}
+
+	showingRange := ""
+	if totalCount > 0 {
+		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalCount)
+	}
+
 	view := RunsListView{
-		ActiveTab: NavTabRuns,
-		Namespace: ns,
-		Runs:      items,
+		ActiveTab:    NavTabRuns,
+		Namespace:    ns,
+		Runs:         items,
+		TotalCount:   totalCount,
+		Offset:       start,
+		Limit:        limit,
+		HasMore:      hasMore,
+		NextLink:     nextLink,
+		HasPrev:      hasPrev,
+		PrevLink:     prevLink,
+		ShowingRange: showingRange,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -146,8 +272,8 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns := r.PathValue("namespace")
 	name := r.PathValue("name")
-	if ns == "" || name == "" {
-		http.Error(w, "missing namespace or name in path", http.StatusBadRequest)
+	if !isValidNamespace(ns) || !isValidResourceName(name) {
+		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q", ns, name), http.StatusBadRequest)
 		return
 	}
 
@@ -155,6 +281,10 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
 		if apierrors.IsNotFound(err) {
 			http.Error(w, fmt.Sprintf("Run %s/%s not found", ns, name), http.StatusNotFound)
+			return
+		}
+		if apierrors.IsForbidden(err) {
+			http.Error(w, fmt.Sprintf("forbidden: access to run %s/%s denied: %v", ns, name, err), http.StatusForbidden)
 			return
 		}
 		http.Error(w, fmt.Sprintf("failed to get run %s/%s: %v", ns, name, err), http.StatusInternalServerError)
@@ -254,10 +384,24 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	ns := s.namespaceFor(r)
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	offset, limit, err := parsePagination(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	var compList v1alpha1.ComparisonList
 	if err := s.cfg.Client.List(ctx, &compList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			http.Error(w, fmt.Sprintf("forbidden: access to namespace %q denied: %v", ns, err), http.StatusForbidden)
+			return
+		}
 		http.Error(w, fmt.Sprintf("failed to list comparisons in namespace %s: %v", ns, err), http.StatusInternalServerError)
 		return
 	}
@@ -266,8 +410,19 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 		return compList.Items[i].CreationTimestamp.After(compList.Items[j].CreationTimestamp.Time)
 	})
 
-	items := make([]ComparisonListItem, 0, len(compList.Items))
-	for _, comp := range compList.Items {
+	totalCount := len(compList.Items)
+	start := offset
+	if start > totalCount {
+		start = totalCount
+	}
+	end := start + limit
+	if end > totalCount {
+		end = totalCount
+	}
+
+	pageComps := compList.Items[start:end]
+	items := make([]ComparisonListItem, 0, len(pageComps))
+	for _, comp := range pageComps {
 		pImp := "—"
 		if comp.Status.PImprovement != nil {
 			pImp = fmt.Sprintf("%.2f", *comp.Status.PImprovement)
@@ -292,10 +447,38 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	hasMore := end < totalCount
+	hasPrev := start > 0
+
+	var nextLink, prevLink string
+	if hasMore {
+		nextLink = buildPageURL("/comparisons", r.URL.Query(), end, limit)
+	}
+	if hasPrev {
+		prevOffset := start - limit
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		prevLink = buildPageURL("/comparisons", r.URL.Query(), prevOffset, limit)
+	}
+
+	showingRange := ""
+	if totalCount > 0 {
+		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalCount)
+	}
+
 	view := ComparisonsListView{
-		ActiveTab:   NavTabComparisons,
-		Namespace:   ns,
-		Comparisons: items,
+		ActiveTab:    NavTabComparisons,
+		Namespace:    ns,
+		Comparisons:  items,
+		TotalCount:   totalCount,
+		Offset:       start,
+		Limit:        limit,
+		HasMore:      hasMore,
+		NextLink:     nextLink,
+		HasPrev:      hasPrev,
+		PrevLink:     prevLink,
+		ShowingRange: showingRange,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -308,8 +491,8 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	ns := r.PathValue("namespace")
 	name := r.PathValue("name")
-	if ns == "" || name == "" {
-		http.Error(w, "missing namespace or name in path", http.StatusBadRequest)
+	if !isValidNamespace(ns) || !isValidResourceName(name) {
+		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q", ns, name), http.StatusBadRequest)
 		return
 	}
 
@@ -317,6 +500,10 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &comp); err != nil {
 		if apierrors.IsNotFound(err) {
 			http.Error(w, fmt.Sprintf("Comparison %s/%s not found", ns, name), http.StatusNotFound)
+			return
+		}
+		if apierrors.IsForbidden(err) {
+			http.Error(w, fmt.Sprintf("forbidden: access to comparison %s/%s denied: %v", ns, name, err), http.StatusForbidden)
 			return
 		}
 		http.Error(w, fmt.Sprintf("failed to get comparison %s/%s: %v", ns, name, err), http.StatusInternalServerError)
@@ -396,12 +583,12 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 			ID:          task.ID,
 			BaseRate:    baseRate,
 			CandRate:    candRate,
-			Delta:       template.HTML(deltaStr),
+			Delta:       deltaStr,
 			HasCI:       hasCI,
 			CILeftPx:    leftPx,
 			CIWidthPx:   widthPx,
 			CIDotPx:     dotPx,
-			CILabel:     template.HTML(ciLabel),
+			CILabel:     ciLabel,
 			StatusClass: labelStatusClass(task.Label),
 			Label:       string(task.Label),
 			Pairs:       task.Pairs,

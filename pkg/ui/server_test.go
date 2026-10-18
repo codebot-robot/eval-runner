@@ -15,6 +15,8 @@
 package ui
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,8 +24,12 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -358,8 +364,11 @@ func TestServerComparisonDetail(t *testing.T) {
 	if !strings.Contains(body, "0.84") {
 		t.Errorf("expected pr rate 0.84")
 	}
-	if !strings.Contains(body, "+0.23") {
-		t.Errorf("expected delta +0.23")
+	if !strings.Contains(body, "&#43;0.23") {
+		t.Errorf("expected delta &#43;0.23")
+	}
+	if !strings.Contains(body, "[&#43;0.11, &#43;0.35]") {
+		t.Errorf("expected CI label in cell")
 	}
 	if !strings.Contains(body, "improved") {
 		t.Errorf("expected label 'improved'")
@@ -394,4 +403,257 @@ func TestServerComparisonDetail(t *testing.T) {
 	if wNotFound.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing comparison, got %d", wNotFound.Code)
 	}
+}
+
+func TestServerRouteParamValidation(t *testing.T) {
+	scheme := newTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	invalidRoutes := []string{
+		// Invalid namespace in path
+		"/runs/UPPERCASE/run-1",
+		"/runs/eval_runner/run-1",
+		"/runs/-leading/run-1",
+		"/runs/trailing-/run-1",
+		"/runs/with..dots/run-1",
+		// Invalid name in path
+		"/runs/eval-runner/UPPERCASE",
+		"/runs/eval-runner/-leading-hyphen",
+		"/runs/eval-runner/trailing-hyphen-",
+		"/runs/eval-runner/with..double.dot",
+		"/runs/eval-runner/with_underscore",
+		"/runs/eval-runner/with%20spaces",
+		// Invalid query params on /runs
+		"/runs?namespace=UPPERCASE",
+		"/runs?namespace=bad_ns",
+		"/runs?limit=-1",
+		"/runs?limit=bad",
+		"/runs?offset=-1",
+		"/runs?offset=notanumber",
+		// Invalid namespace in path on /comparisons
+		"/comparisons/UPPERCASE/comp-1",
+		"/comparisons/eval_runner/comp-1",
+		// Invalid name in path on /comparisons
+		"/comparisons/eval-runner/COMP_UPPERCASE",
+		"/comparisons/eval-runner/-leading",
+		"/comparisons/eval-runner/with_underscore",
+		// Invalid query params on /comparisons
+		"/comparisons?namespace=UPPERCASE",
+		"/comparisons?namespace=bad_ns",
+		"/comparisons?limit=-5",
+		"/comparisons?limit=notanumber",
+		"/comparisons?offset=-2",
+		"/comparisons?offset=invalid",
+	}
+
+	for _, route := range invalidRoutes {
+		req := httptest.NewRequest(http.MethodGet, route, nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("route %q: expected 400 Bad Request, got %d", route, w.Code)
+		}
+	}
+}
+
+type forbiddenClient struct {
+	client.Reader
+}
+
+func (f *forbiddenClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	return apierrors.NewForbidden(schema.GroupResource{Group: "evalrunner.gke-labs.dev", Resource: "runs"}, key.Name, fmt.Errorf("access denied"))
+}
+
+func (f *forbiddenClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	return apierrors.NewForbidden(schema.GroupResource{Group: "evalrunner.gke-labs.dev", Resource: "runs"}, "", fmt.Errorf("access denied"))
+}
+
+func TestServerForbidden(t *testing.T) {
+	server := NewServer(Config{Client: &forbiddenClient{}})
+
+	forbiddenRequests := []string{
+		"/runs?namespace=secret-namespace",
+		"/runs/eval-runner/run-1",
+		"/comparisons?namespace=secret-namespace",
+		"/comparisons/eval-runner/comp-1",
+	}
+
+	for _, route := range forbiddenRequests {
+		req := httptest.NewRequest(http.MethodGet, route, nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("route %q: expected 403 Forbidden, got %d", route, w.Code)
+		}
+	}
+}
+
+func TestServerPagination(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create 5 runs with distinct timestamps
+	now := time.Now()
+	runs := make([]client.Object, 5)
+	for i := 0; i < 5; i++ {
+		runs[i] = &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              fmt.Sprintf("run-%d", i+1),
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-time.Duration(5-i) * time.Minute)), // run-5 is newest
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{Commit: fmt.Sprintf("commit%d", i+1)},
+				Model: "model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+			},
+		}
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runs...).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	t.Run("Page1", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs?limit=2&offset=0", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		// run-5 and run-4 should be present (newest first)
+		if !strings.Contains(body, "run-5") || !strings.Contains(body, "run-4") {
+			t.Errorf("expected run-5 and run-4 on page 1")
+		}
+		if strings.Contains(body, "run-3") {
+			t.Errorf("did not expect run-3 on page 1")
+		}
+
+		// Pagination controls: More link should be present, Previous should not
+		if !strings.Contains(body, "More →") {
+			t.Errorf("expected More link on page 1")
+		}
+		if !strings.Contains(body, "offset=2") {
+			t.Errorf("expected More link to contain offset=2")
+		}
+		if strings.Contains(body, "← Previous") {
+			t.Errorf("did not expect Previous link on page 1")
+		}
+		if !strings.Contains(body, "Showing 1–2 of 5") {
+			t.Errorf("expected range 'Showing 1–2 of 5'")
+		}
+	})
+
+	t.Run("Page2", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs?limit=2&offset=2", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		// run-3 and run-2 should be present
+		if !strings.Contains(body, "run-3") || !strings.Contains(body, "run-2") {
+			t.Errorf("expected run-3 and run-2 on page 2")
+		}
+		if strings.Contains(body, "run-5") || strings.Contains(body, "run-1") {
+			t.Errorf("unexpected run on page 2")
+		}
+
+		if !strings.Contains(body, "More →") {
+			t.Errorf("expected More link on page 2")
+		}
+		if !strings.Contains(body, "offset=4") {
+			t.Errorf("expected More link to contain offset=4")
+		}
+		if !strings.Contains(body, "← Previous") {
+			t.Errorf("expected Previous link on page 2")
+		}
+		if !strings.Contains(body, "Showing 3–4 of 5") {
+			t.Errorf("expected range 'Showing 3–4 of 5'")
+		}
+	})
+
+	t.Run("Page3", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs?limit=2&offset=4", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		// run-1 should be present
+		if !strings.Contains(body, "run-1") {
+			t.Errorf("expected run-1 on page 3")
+		}
+		if strings.Contains(body, "run-2") {
+			t.Errorf("did not expect run-2 on page 3")
+		}
+
+		// Last page: no More link
+		if strings.Contains(body, "More →") {
+			t.Errorf("did not expect More link on last page")
+		}
+		if !strings.Contains(body, "← Previous") {
+			t.Errorf("expected Previous link on page 3")
+		}
+		if !strings.Contains(body, "offset=2") {
+			t.Errorf("expected Previous link to contain offset=2")
+		}
+		if !strings.Contains(body, "Showing 5–5 of 5") {
+			t.Errorf("expected range 'Showing 5–5 of 5'")
+		}
+	})
+
+	t.Run("ComparisonsPagination", func(t *testing.T) {
+		comps := make([]client.Object, 3)
+		for i := 0; i < 3; i++ {
+			comps[i] = &v1alpha1.Comparison{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              fmt.Sprintf("comp-%d", i+1),
+					Namespace:         "eval-runner",
+					CreationTimestamp: metav1.NewTime(now.Add(-time.Duration(3-i) * time.Minute)),
+				},
+				Spec: v1alpha1.ComparisonSpec{
+					Baseline:  v1alpha1.ComparisonRunRef{Run: "base"},
+					Candidate: v1alpha1.ComparisonRunRef{Run: "cand"},
+				},
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictImproved,
+				},
+			}
+		}
+
+		compClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comps...).Build()
+		compServer := NewServer(Config{Client: compClient})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons?limit=2&offset=0", nil)
+		w := httptest.NewRecorder()
+		compServer.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		if !strings.Contains(body, "comp-3") || !strings.Contains(body, "comp-2") {
+			t.Errorf("expected comp-3 and comp-2 on page 1")
+		}
+		if strings.Contains(body, "comp-1") {
+			t.Errorf("did not expect comp-1 on page 1")
+		}
+		if !strings.Contains(body, "More →") {
+			t.Errorf("expected More link on comparisons page 1")
+		}
+	})
 }
