@@ -327,3 +327,73 @@ func TestParseInspectSampleScores(t *testing.T) {
 		}
 	})
 }
+
+func TestExtractInspectTokens(t *testing.T) {
+	t.Run("StatsModelUsagePresent", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"stats": {
+				"model_usage": {
+					"mockllm/model": {
+						"input_tokens": 258,
+						"output_tokens": 66,
+						"total_tokens": 324
+					}
+				}
+			}
+		}`
+		tokens, err := ExtractInspectTokens([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if tokens == nil || *tokens != 324 {
+			t.Fatalf("expected 324 tokens, got %v", tokens)
+		}
+	})
+
+	t.Run("SamplesModelUsageFallback", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"samples": [
+				{
+					"id": 1,
+					"model_usage": {
+						"mockllm/model": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+					}
+				},
+				{
+					"id": 2,
+					"model_usage": {
+						"mockllm/model": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}
+					}
+				}
+			]
+		}`
+		tokens, err := ExtractInspectTokens([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if tokens == nil || *tokens != 180 {
+			t.Fatalf("expected 180 tokens, got %v", tokens)
+		}
+	})
+
+	t.Run("NoTokensReturnsNil", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"samples": [
+				{"id": 1, "scores": {"accuracy": {"value": 1.0}}}
+			]
+		}`
+		tokens, err := ExtractInspectTokens([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if tokens != nil {
+			t.Fatalf("expected nil tokens, got %v", *tokens)
+		}
+	})
+}
