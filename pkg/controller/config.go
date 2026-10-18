@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,9 +60,61 @@ const (
 	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
 	ConfigMapKeyUIBaseURL = "uiBaseURL"
 
+	// ConfigMapKeyGitHubWebhookSecret is the ConfigMap key for the webhook secret name (used by eval-runner-webhook).
+	ConfigMapKeyGitHubWebhookSecret = "githubWebhookSecret"
+	// ConfigMapKeyWebhookRepositories is the ConfigMap key for repository allow-list (used by eval-runner-webhook).
+	ConfigMapKeyWebhookRepositories = "webhookRepositories"
+	// ConfigMapKeyDefaultModel is the ConfigMap key for the default model (used by eval-runner-webhook).
+	ConfigMapKeyDefaultModel = "defaultModel"
+	// ConfigMapKeyDefaultLimit is the ConfigMap key for the default sample limit (used by eval-runner-webhook).
+	ConfigMapKeyDefaultLimit = "defaultLimit"
+
+	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
+	// a credential or feature that otherwise has a non-empty built-in default.
+	ConfigSentinelDisabled = "none"
+
 	// DefaultGitHubTokenSecret is the default Secret name for GitHub credentials in controller namespace.
 	DefaultGitHubTokenSecret = "github-token"
 )
+
+// KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
+// covering both eval-runner controller and eval-runner-webhook keys.
+var KnownConfigMapKeys = map[string]struct{}{
+	ConfigMapKeyArtifactBucket:      {},
+	ConfigMapKeyArtifactDir:         {},
+	ConfigMapKeyDiscoveryDeadline:   {},
+	ConfigMapKeyExecutionDeadline:   {},
+	ConfigMapKeyMaxParallelTasks:    {},
+	ConfigMapKeyModelSecret:         {},
+	ConfigMapKeySandboxdImage:       {},
+	ConfigMapKeyTaskGracePeriod:     {},
+	ConfigMapKeyGitHubTokenSecret:   {},
+	ConfigMapKeyGitHubAppSecret:     {},
+	ConfigMapKeyUIBaseURL:           {},
+	ConfigMapKeyGitHubWebhookSecret: {},
+	ConfigMapKeyWebhookRepositories: {},
+	ConfigMapKeyDefaultModel:        {},
+	ConfigMapKeyDefaultLimit:        {},
+}
+
+// UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
+// Returns nil if cm or cm.Data is nil, or if all keys are recognized.
+func UnknownConfigMapKeys(cm *corev1.ConfigMap) []string {
+	if cm == nil || cm.Data == nil {
+		return nil
+	}
+	var unknown []string
+	for k := range cm.Data {
+		if _, ok := KnownConfigMapKeys[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return unknown
+}
 
 // ClusterConfig holds the effective cluster-wide settings resolved with precedence:
 // explicit flag > ConfigMap key > built-in default.
@@ -92,6 +145,7 @@ type RawFlags struct {
 	SandboxdImage     string
 	TaskGracePeriod   time.Duration
 	UIBaseURL         string
+	StrictConfig      bool
 	Explicit          map[string]bool
 }
 
@@ -126,6 +180,7 @@ func FlagsFromFlagSet(
 	artifactBucket, artifactDir, modelSecret, sandboxdImage, gitHubTokenSecret, gitHubAppSecret, uiBaseURL string,
 	discoveryDeadline, executionDeadline, taskGracePeriod time.Duration,
 	maxParallelTasks int,
+	strictConfig bool,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -143,13 +198,15 @@ func FlagsFromFlagSet(
 		SandboxdImage:     sandboxdImage,
 		TaskGracePeriod:   taskGracePeriod,
 		UIBaseURL:         uiBaseURL,
+		StrictConfig:      strictConfig,
 		Explicit:          explicit,
 	}
 }
 
 // ResolveConfig applies precedence: explicit flag > ConfigMap key > built-in default.
 // If the ConfigMap is nil or empty, built-in defaults are used (or explicit flags if set).
-// Returns an error if any value in the ConfigMap is malformed.
+// Returns an error if any value in the ConfigMap is malformed, or if StrictConfig is true
+// and unrecognised keys are present in the ConfigMap.
 func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) {
 	cfg := DefaultClusterConfig()
 
@@ -160,24 +217,39 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		name = cm.Name
 	}
 
+	if flags.StrictConfig {
+		unknown := UnknownConfigMapKeys(cm)
+		if len(unknown) > 0 {
+			return cfg, fmt.Errorf("unrecognised keys in ConfigMap %s/%s: %s", ns, name, strings.Join(unknown, ", "))
+		}
+	}
+
 	if cm != nil && cm.Data != nil {
 		// 1. artifactBucket
 		if val, ok := cm.Data[ConfigMapKeyArtifactBucket]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
-				if err := gcs.ValidateBucket(trimmed); err != nil {
-					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %w", ConfigMapKeyArtifactBucket, val, ns, name, err)
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.ArtifactBucket = ""
+				} else {
+					if err := gcs.ValidateBucket(trimmed); err != nil {
+						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %w", ConfigMapKeyArtifactBucket, val, ns, name, err)
+					}
+					cfg.ArtifactBucket = trimmed
 				}
-				cfg.ArtifactBucket = trimmed
-			} else {
-				cfg.ArtifactBucket = ""
 			}
 		}
 
 		// 1b. artifactDir
 		if val, ok := cm.Data[ConfigMapKeyArtifactDir]; ok {
 			trimmed := strings.TrimSpace(val)
-			cfg.ArtifactDir = trimmed
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.ArtifactDir = ""
+				} else {
+					cfg.ArtifactDir = trimmed
+				}
+			}
 		}
 
 		// 2. discoveryDeadline
@@ -229,12 +301,14 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[ConfigMapKeyModelSecret]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
-				if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
-					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyModelSecret, val, ns, name, strings.Join(errs, "; "))
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.ModelSecret = ""
+				} else {
+					if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
+						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyModelSecret, val, ns, name, strings.Join(errs, "; "))
+					}
+					cfg.ModelSecret = trimmed
 				}
-				cfg.ModelSecret = trimmed
-			} else {
-				cfg.ModelSecret = ""
 			}
 		}
 
@@ -265,12 +339,14 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[ConfigMapKeyGitHubTokenSecret]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
-				if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
-					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubTokenSecret, val, ns, name, strings.Join(errs, ", "))
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.GitHubTokenSecret = ""
+				} else {
+					if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
+						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubTokenSecret, val, ns, name, strings.Join(errs, ", "))
+					}
+					cfg.GitHubTokenSecret = trimmed
 				}
-				cfg.GitHubTokenSecret = trimmed
-			} else {
-				cfg.GitHubTokenSecret = ""
 			}
 		}
 
@@ -278,12 +354,14 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[ConfigMapKeyGitHubAppSecret]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
-				if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
-					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubAppSecret, val, ns, name, strings.Join(errs, ", "))
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.GitHubAppSecret = ""
+				} else {
+					if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
+						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubAppSecret, val, ns, name, strings.Join(errs, ", "))
+					}
+					cfg.GitHubAppSecret = trimmed
 				}
-				cfg.GitHubAppSecret = trimmed
-			} else {
-				cfg.GitHubAppSecret = ""
 			}
 		}
 
@@ -291,23 +369,33 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[ConfigMapKeyUIBaseURL]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
-				trimmed = strings.TrimRight(trimmed, "/")
-				if !strings.HasPrefix(trimmed, "http://") && !strings.HasPrefix(trimmed, "https://") {
-					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must begin with http:// or https://", ConfigMapKeyUIBaseURL, val, ns, name)
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.UIBaseURL = ""
+				} else {
+					trimmed = strings.TrimRight(trimmed, "/")
+					if !strings.HasPrefix(trimmed, "http://") && !strings.HasPrefix(trimmed, "https://") {
+						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must begin with http:// or https://", ConfigMapKeyUIBaseURL, val, ns, name)
+					}
+					cfg.UIBaseURL = trimmed
 				}
-				cfg.UIBaseURL = trimmed
-			} else {
-				cfg.UIBaseURL = ""
 			}
 		}
 	}
 
 	// Apply explicit flag overrides
 	if flags.IsExplicit("artifact-bucket") {
-		cfg.ArtifactBucket = flags.ArtifactBucket
+		if strings.EqualFold(flags.ArtifactBucket, ConfigSentinelDisabled) {
+			cfg.ArtifactBucket = ""
+		} else {
+			cfg.ArtifactBucket = flags.ArtifactBucket
+		}
 	}
 	if flags.IsExplicit("artifact-dir") {
-		cfg.ArtifactDir = flags.ArtifactDir
+		if strings.EqualFold(flags.ArtifactDir, ConfigSentinelDisabled) {
+			cfg.ArtifactDir = ""
+		} else {
+			cfg.ArtifactDir = flags.ArtifactDir
+		}
 	}
 	if flags.IsExplicit("discovery-deadline") {
 		cfg.DiscoveryDeadline = flags.DiscoveryDeadline
@@ -316,20 +404,36 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		cfg.ExecutionDeadline = flags.ExecutionDeadline
 	}
 	if flags.IsExplicit("github-token-secret") {
-		cfg.GitHubTokenSecret = flags.GitHubTokenSecret
+		if strings.EqualFold(flags.GitHubTokenSecret, ConfigSentinelDisabled) {
+			cfg.GitHubTokenSecret = ""
+		} else {
+			cfg.GitHubTokenSecret = flags.GitHubTokenSecret
+		}
 	}
 	if flags.IsExplicit("github-app-secret") {
-		cfg.GitHubAppSecret = flags.GitHubAppSecret
+		if strings.EqualFold(flags.GitHubAppSecret, ConfigSentinelDisabled) {
+			cfg.GitHubAppSecret = ""
+		} else {
+			cfg.GitHubAppSecret = flags.GitHubAppSecret
+		}
 	}
 	if flags.IsExplicit("ui-base-url") {
 		trimmed := strings.TrimRight(strings.TrimSpace(flags.UIBaseURL), "/")
-		cfg.UIBaseURL = trimmed
+		if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+			cfg.UIBaseURL = ""
+		} else {
+			cfg.UIBaseURL = trimmed
+		}
 	}
 	if flags.IsExplicit("max-parallel-tasks") {
 		cfg.MaxParallelTasks = flags.MaxParallelTasks
 	}
 	if flags.IsExplicit("model-secret") {
-		cfg.ModelSecret = flags.ModelSecret
+		if strings.EqualFold(flags.ModelSecret, ConfigSentinelDisabled) {
+			cfg.ModelSecret = ""
+		} else {
+			cfg.ModelSecret = flags.ModelSecret
+		}
 	}
 	if flags.IsExplicit("sandboxd-image") {
 		cfg.SandboxdImage = flags.SandboxdImage
@@ -366,7 +470,8 @@ func LoadClusterConfig(ctx context.Context, reader client.Reader, namespace, nam
 }
 
 // LoadAndResolveClusterConfig reads the configuration ConfigMap using reader (uncached),
-// applies precedence (explicit flag > ConfigMap key > built-in default), and logs effective settings.
+// applies precedence (explicit flag > ConfigMap key > built-in default), logs warnings for
+// any unrecognised ConfigMap keys, and logs effective settings.
 // Missing ConfigMap is handled gracefully by falling back to built-in defaults.
 func LoadAndResolveClusterConfig(
 	ctx context.Context,
@@ -381,6 +486,9 @@ func LoadAndResolveClusterConfig(
 	}
 	if cm != nil {
 		logger.Info("loaded per-cluster configmap", "namespace", cm.Namespace, "name", cm.Name)
+		if unknown := UnknownConfigMapKeys(cm); len(unknown) > 0 {
+			logger.Info("warning: unrecognised keys in ConfigMap", "unrecognisedKeys", unknown, "namespace", cm.Namespace, "name", cm.Name)
+		}
 	} else {
 		logger.Info("per-cluster configmap not found; using defaults", "namespace", namespace, "name", name)
 	}

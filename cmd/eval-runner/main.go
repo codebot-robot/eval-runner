@@ -87,6 +87,7 @@ func main() {
 	var gitHubTokenSecret string
 	var gitHubAppSecret string
 	var uiBaseURL string
+	var strictConfig bool
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -106,6 +107,7 @@ func main() {
 	flag.StringVar(&sandboxdImage, "sandboxd-image", "", "Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset)")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Local filesystem directory for storing evaluation artifacts")
+	flag.BoolVar(&strictConfig, "strict-config", false, "Fail startup if eval-runner-config contains unrecognised keys")
 
 	opts := zap.Options{
 		Development: true,
@@ -128,6 +130,7 @@ func main() {
 		executionDeadline,
 		taskGracePeriod,
 		maxParallelTasks,
+		strictConfig,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
