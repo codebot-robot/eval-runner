@@ -157,6 +157,24 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   In cluster environments where NetworkPolicy enforcement is disabled or missing (such as certain GKE configurations), plaintext bearer tokens over the pod network offer limited security against compromised neighbor pods. mTLS guarantees confidentiality, mutual authentication, and cryptographic isolation independent of the CNI. Pushing server certificates into the sandbox at creation time via a Secret deleted by the finalizer path (ADR-006) is atomic, avoids initial plaintext bootstrap channels, and ensures reliable garbage collection without requiring ownerReference patching across async object creation. The alternative—having sandboxd generate its private key locally and exchange a Certificate Signing Request (CSR) with the controller—would require an initial bootstrap channel, additional polling or coordination protocols, and complex state management, without providing significant additional security since sandboxd runs inside the sandbox pod managed by the controller. Serving `/v1/health` on dedicated plaintext port `:8081` preserves kubelet readiness checks without requiring kubelet to participate in controller mTLS. Future upstream proposals to agent-sandbox can also explore dynamic CA reloading (to hot-reload CA changes without container restarts) and optional pod-IP SANs (minted or updated once the pod IP is assigned by the CNI).
 
+### ADR-021: GitHub PR Reporting via In-Place Comment Upsert and Check Run State Mapping
+- **Date**: 2026-10-17
+- **Status**: Accepted
+- **Decision**:
+  1. **Linking Comparison to PR**: Add optional `spec.pullRequest: {repository, number, headSHA, baseSHA}` to the `Comparison` CRD. The Comparison already references candidate and baseline Runs; the PR reference specifies where to report.
+  2. **Shared Markdown Renderer**: Create `pkg/github.RenderComparisonMarkdown` built directly on `ui.ComparisonRows` and `ui.ComparisonSummary` so PR comments and the web view cannot drift. Format a hidden HTML marker (`<!-- eval-runner:comparison:<ns>/<name> -->`), verdict headline (`## <VERDICT> · P(improvement) = <p>`), table (`eval | base | this PR | Δ (95% CI) | label | runs`), and footer (samples run, paired against base commit, link to web view path, and storage URI as text).
+  3. **Check Run State Mapping**: Create and update a GitHub check run named `eval-runner / evals` on `headSHA` mapping the five verdicts:
+     - `RUNNING`: status `in_progress`, conclusion `""`, description `running · N of M samples`
+     - `IMPROVED`: status `completed`, conclusion `success`, description `IMPROVED · P(improvement) = 0.98`
+     - `UNCHANGED`: status `completed`, conclusion `success`, description `UNCHANGED`
+     - `INCONCLUSIVE`: status `completed`, conclusion `neutral`, description `INCONCLUSIVE · more samples recommended`
+     - `REGRESSED`: status `completed`, conclusion `failure`, description `REGRESSED`
+  4. **Marker-Based In-Place Upsert & Idempotency**: Update existing PR comments in-place by searching for the hidden marker comment if `status.reporting.commentID` is unknown. Record `status.reporting{commentID, checkRunID, lastPostedHash}` to skip GitHub API calls when content and state have not changed.
+  5. **Credentials & Zero-Trust Containment**: Token is read from Secret `eval-runner/github-token` (key `token`), configurable via `githubTokenSecret` in `eval-runner-config`. The token exists exclusively in the controller namespace and is never mounted in sandboxes. If the secret is absent, reporting is cleanly disabled (`status.reporting.message: "disabled"`) without failing the comparison.
+  6. **Error Classification**: Rate-limit (429 or 403 rate limit) and 5xx errors return errors to requeue with backoff. Permanent errors (403, 404, 422) are recorded in `status.reporting.message` without failing the comparison.
+- **Rationale**:
+  Delivers the product moment of eval-runner (functionality.md §5: verdict landing on the PR). Using a single in-place updating comment prevents PR clutter and avoids notification spam across incremental status updates. Building the Markdown renderer on top of `pkg/ui` models ensures that formatting, confidence intervals, and summary calculations remain consistent with the web view. Deriving check run conclusions from the five verdicts allows GitHub PR status checks to reflect statistical significance directly (with `neutral` for inconclusive results avoiding merge blockage by default). Storing credentials in the controller namespace preserves the project's zero-trust model.
+
 
 
 

@@ -420,11 +420,88 @@ Supported ConfigMap keys include:
 - `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
 - `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).
 - `executionDeadline`: Overall deadline for sample execution to complete (default `30m`).
+- `githubTokenSecret`: Name of Secret in controller namespace containing GitHub token (default `github-token`).
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
 - `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
 
 Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the ConfigMap is absent, all built-in defaults are used.
+
+## GitHub PR Reporting
+
+When a `Comparison` resource is linked to a pull request via `spec.pullRequest`, the controller automatically posts and updates a single in-place comment on the PR containing the statistical verdict and per-eval results table, alongside a GitHub check run named `eval-runner / evals`.
+
+### Creating the Token Secret
+
+The controller authenticates to the GitHub API using a personal access token (PAT) stored in Secret `eval-runner/github-token` (key `token`).
+
+1. **Generate a fine-grained GitHub token:**
+   In GitHub Settings -> Developer Settings -> Personal Access Tokens -> Fine-grained tokens:
+   - Target repository: Select the target repository (e.g. `gke-labs/eval-runner`).
+   - Repository permissions:
+     - **Pull requests**: Read and write (to list, create, and update PR comments)
+
+   *(Note: Under GitHub's REST API permissions, creating and updating check runs requires a GitHub App installation token, which will be supported in a follow-up issue. Fine-grained PATs post the PR comment and record `status.reporting.message: "check runs unavailable with token auth; comment posted"` without failing the comparison.)*
+
+2. **Create the Secret in the controller namespace:**
+   ```bash
+   kubectl create secret generic github-token \
+     --namespace=eval-runner \
+     --from-literal=token=github_pat_...
+   ```
+
+   *(Note: The token lives exclusively in the `eval-runner` controller namespace and is never mounted in sandbox pods. If the secret is absent, reporting is cleanly disabled with `status.reporting.message: "disabled"` without failing the comparison.)*
+
+3. **Custom Secret Name (Optional):**
+   To use a secret other than `github-token`, configure `githubTokenSecret` in the `eval-runner-config` ConfigMap or pass `--github-token-secret=<secret-name>`.
+
+### Linking a Comparison to a PR
+
+Specify `spec.pullRequest` on a `Comparison` custom resource:
+
+```yaml
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Comparison
+metadata:
+  name: docs-eval-same-commit
+  namespace: eval-runner
+spec:
+  baseline:
+    run: docs-eval-base-05ce4d8
+  candidate:
+    run: docs-eval-cand-05ce4d8
+  pullRequest:
+    repository: gke-labs/eval-runner
+    number: 98
+    headSHA: 05ce4d8
+    baseSHA: a81d0c4
+```
+
+### What the PR Comment Looks Like
+
+The comment is updated in-place on each reconcile using a hidden HTML marker (`<!-- eval-runner:comparison:<namespace>/<name> -->`), ensuring zero duplicate comments:
+
+```markdown
+<!-- eval-runner:comparison:eval-runner/docs-eval-same-commit -->
+
+## INCONCLUSIVE · P(improvement) = 0.26
+
+| eval | base | this PR | Δ (95% CI) | label | runs |
+| --- | --- | --- | --- | --- | --- |
+| docs/readme\_comprehension | 1.00 | 1.00 | +0.00 [+0.00, +0.00] | unchanged | 20 |
+| docs/readme\_comprehension\_blind | 0.20 | 0.15 | -0.05 [-0.15, +0.00] | inconclusive | 20 |
+
+80 run · 40 paired · paired against base commit 05ce4d8 · `/comparisons/eval-runner/docs-eval-same-commit` · gs://eval-bucket/comparisons/docs-eval-same-commit.json
+```
+
+### Check Run State Mapping
+
+The controller creates and updates a check run named `eval-runner / evals` on `headSHA`:
+- `RUNNING`: status `in_progress`, description `running · N of M samples`
+- `IMPROVED`: status `completed`, conclusion `success`, description `IMPROVED · P(improvement) = 0.98`
+- `UNCHANGED`: status `completed`, conclusion `success`, description `UNCHANGED`
+- `INCONCLUSIVE`: status `completed`, conclusion `neutral`, description `INCONCLUSIVE · more samples recommended`
+- `REGRESSED`: status `completed`, conclusion `failure`, description `REGRESSED`
 
 ### Browsing and Inspecting Results
 
