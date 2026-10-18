@@ -259,6 +259,7 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 		StartedAt:   meta.StartedAt,
 		FinishedAt:  meta.FinishedAt,
 		SampleRange: meta.SampleRange,
+		Tokens:      meta.Tokens,
 	}
 	summaryBytes, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
