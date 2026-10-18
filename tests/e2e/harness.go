@@ -110,6 +110,8 @@ func (h *Harness) DeployEvalRunner() {
 	// Build and load controller image
 	h.DockerBuild("eval-runner:e2e", filepath.Join(gitRoot, "images/eval-runner/Dockerfile"), gitRoot)
 	h.KindLoad("eval-runner:e2e")
+	h.DockerBuild("eval-runner-ui:e2e", filepath.Join(gitRoot, "images/eval-runner-ui/Dockerfile"), gitRoot)
+	h.KindLoad("eval-runner-ui:e2e")
 	h.DockerBuild("sample-runner:e2e", filepath.Join(gitRoot, "images/sample-runner/Dockerfile"), gitRoot)
 	h.KindLoad("sample-runner:e2e")
 
@@ -183,6 +185,21 @@ data:
 	h.KubectlApplyContent(modifiedDeploy)
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")
+
+	// Apply UI Deployment with image rewritten for kind local image
+	uiDeployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/ui-deployment.yaml"))
+	if err != nil {
+		h.t.Fatalf("Failed to read ui-deployment.yaml: %v", err)
+	}
+	modifiedUIDeploy := strings.Replace(
+		string(uiDeployContent),
+		"image: eval-runner-ui",
+		"image: eval-runner-ui:e2e\n        imagePullPolicy: Never",
+		1,
+	)
+	h.KubectlApplyContent(modifiedUIDeploy)
+
+	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-ui", "--timeout=60s")
 }
 
 func (h *Harness) DeployEvalRunnerUI() {

@@ -260,4 +260,26 @@ spec:
 		// Assert sandbox was deleted from eval-runner-sandbox
 		harness.WaitForSandboxDeleted("eval-runner-sandbox", sandboxName, 30*time.Second)
 	})
+
+	t.Run("UISmoke", func(t *testing.T) {
+		runName := "smoke-ui-run"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: https://github.com/gke-labs/eval-runner.git
+    commit: a81d0c4
+  model: test-model
+`, runName)
+		harness.KubectlApplyContent(manifest)
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+		})
+
+		runUISmoke(t, harness, runName)
+	})
 }
