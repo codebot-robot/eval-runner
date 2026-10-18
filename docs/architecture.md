@@ -23,7 +23,7 @@ Where [docs/concept/functionality.md](concept/functionality.md) describes the ta
 - Sample execution in isolated task sandboxes running Inspect (`inspect eval --limit a-b`)
 - The `Run` custom resource representing an immutable commit $\times$ sample window
 - The `Comparison` custom resource pairing candidate and baseline Runs
-- Adaptive paired batch evaluation driven by statistical stopping rules (Wilson/Student-t CIs, Rubin's Bayesian Bootstrap, tie-splitting, candidate-failure cap)
+- Adaptive paired batch evaluation driven by statistical stopping rules (bootstrap percentile CIs on paired deltas, Rubin's Bayesian Bootstrap for P(improvement), tie-splitting, candidate-failure cap)
 - GitHub PR integration (in-place comment updates and check runs via GitHub App or PAT auth)
 - Automated webhook integration (`eval-runner-webhook`) handling `pull_request` and `push` events with baseline cache reuse
 - Web dashboard UI (`eval-runner-ui`) serving Runs and Comparisons
@@ -50,20 +50,21 @@ The system consists of the following components running inside a Kubernetes clus
 |  |  +------------------+------------------+  |    |  +-------------+--------------+  |  |
 |  |                     | watches/updates     |    |                | creates/deletes |  |
 |  |  +------------------v------------------+  |    |  +-------------v--------------+  |  |
-|  |  | eval-runner Controller              +--------->| Sandbox Pods (mTLS + sandbx)|  |
-|  |  | (cmd/eval-runner)                   |  gRPC |  | - Discovery (.evals/list)  |  |
-|  |  +--------+------------------+---------+  :9090|  | - Task (inspect eval)      |  |
-|  |           |                  |            |  REST |  | - automountToken: false    |  |
-|  |  +--------v-------+  +-------v---------+  |  :8080|  | - runAsUser: 1000          |  |
-|  |  | Webhook Service|  | Web UI          |  |       |  | - drop: [ALL]              |  |
-|  |  | (cmd/webhook)  |  | (cmd/ui)         |  |       |  | - seccomp: RuntimeDefault  |  |
-|  |  +----------------+  +-----------------+  |       |  +----------------------------+  |  |
-|  +--------------------+----------------------+       +----------------------------------+  |
-|                       | writes artifacts                                                   |
-|                       v                                                                    |
-|             +-------------------+                                                          |
-|             | ArtifactSink      | (GCS / LocalDir / InMemory)                              |
-|             +-------------------+                                                          |
+|  |  | eval-runner Controller              +--+--->+--+ Sandbox Pods (mTLS)        |  |  |
+|  |  | (cmd/eval-runner)                   |  |gRPC|  | - Discovery (.evals/list)  |  |  |
+|  |  +--------+------------------+---------+  |9090|  | - Task (inspect eval)      |  |  |
+|  |           |                  |            |REST|  | - sandboxd runtime daemon  |  |  |
+|  |  +--------v-------+  +-------v---------+  |8080|  | - automountToken: false    |  |  |
+|  |  | Webhook Service|  | Web UI          |  |    |  | - runAsUser: 1000          |  |  |
+|  |  | (cmd/webhook)  |  | (cmd/ui)        |  |    |  | - drop: [ALL]              |  |  |
+|  |  +----------------+  +-----------------+  |    |  | - seccomp: RuntimeDefault  |  |  |
+|  |                                           |    |  +----------------------------+  |  |
+|  +--------------------+----------------------+    +----------------------------------+  |
+|                       | writes artifacts                                                |
+|                       v                                                                 |
+|             +-------------------+                                                       |
+|             | ArtifactSink      | (GCS / LocalDir / InMemory)                           |
+|             +-------------------+                                                       |
 +-----------------------------------------------------------------------------------------+
 ```
 
@@ -80,6 +81,7 @@ Key implementation details:
 - **Health probes**: Exposes HTTP health endpoints on port `:8081` (`/healthz` and `/readyz`).
 - **Pod execution**: Drives discovery and task execution through a typed client (`pkg/sandboxclient`) connecting directly to the sandbox pod IP over mutual TLS (mTLS): gRPC `ProcessService` on `:9090` and REST `FilesystemService` on `:8080`. Controller RBAC drops `pods/exec`.
 - **Configurable limits**: Command-line flags `--max-stdout-bytes` (default: 1 MiB) and `--max-stderr-bytes` (default: 64 KiB) configure buffer caps for captured process streams; `--artifact-max-upload-bytes` (default: 10 MiB) caps artifact upload size.
+- **Per-cluster configuration (`eval-runner-config` ConfigMap)**: Deployment-specific settings (such as `artifactBucket`, `discoveryDeadline`, `executionDeadline`, `maxParallelTasks`, default `modelSecret`, `sandboxdImage`, `uiBaseURL`, and GitHub secrets) are loaded from the `eval-runner-config` ConfigMap in the controller namespace (ADR-017, #70, #73, `pkg/configkeys`). Precedence order is explicit CLI flag > ConfigMap key > built-in default. Setting a key to the sentinel string `none` explicitly disables features or secrets without requiring flag modifications.
 
 ### The `Run` CRD (`evalrunner.gke-labs.dev/v1alpha1`)
 
@@ -99,8 +101,10 @@ The `Run` custom resource represents an evaluation execution against a specific 
   - `message`: Human-readable status or bounded error description.
   - `conditions`: Kubernetes conditions, including condition `Discovered` (`True` or `False`).
   - `discovery`: Pointers, hash, and counts for the discovered manifest (`manifestPath`, `manifestHash`, `taskCount`, `eligibleTaskCount`, and up to 50 `taskIDs`).
-  - `tasks`: Per-task execution results, including `status` (`Completed`, `Failed`), `sampleRange`, `samples`, `successRate`, `successRateCI` (95% Wilson score or Student's t-interval), `tokens` (`{input, output, total}`), `logPath`, and `error`.
-  - `summary`: Aggregate counts (`completedTasks`, `failedTasks`, `totalSamples`, `meanSuccessRate`, and range).
+  - `discoveryDeadline`: Overall deadline (`metav1.Time`) by which discovery must complete.
+  - `executionDeadline`: Overall deadline (`metav1.Time`) by which sample execution must complete.
+  - `tasks`: Per-task execution results (`TaskStatus`), including `phase` (`Pending`, `Running`, `Completed`, `Failed`), `samples`, `successes`, `meanScore`, `successRate`, `successRateCI` (95% Wilson score or Student's t-interval), `sampleRange`, `tokens` (`{input, output, total}`), `logPath`, and `message`.
+  - `summary`: Aggregate statistics across tasks (`RunSummary`): `tasksCompleted`, `tasksFailed`, `tasksTotal`, `totalSamples`, `meanSuccessRate`, `successRateRange {min,max}`, and printer strings `tasks`/`rates`.
   - `artifacts`: Base URI or path prefix for stored artifacts (`runs/<commit>/`).
 - **Finalizer**: `evalrunner.gke-labs.dev/discovery-sandbox` ensures discovery and task sandboxes in `eval-runner-sandbox` are cleaned up if a Run is deleted.
 
@@ -122,8 +126,8 @@ The `Comparison` custom resource pairs two `Run` resources, evaluates statistica
   - `phase`: Lifecycle phase: `Running` or `Completed`.
   - `verdict`: Aggregate run-level verdict: `IMPROVED`, `REGRESSED`, `UNCHANGED`, `INCONCLUSIVE`, or `RUNNING`.
   - `pImprovement`: Aggregate posterior probability of net improvement.
-  - `tasks`: Per-task paired metrics: `delta`, `deltaCI` (95% bootstrap percentile interval), `label` (`improved`, `regressed`, `unchanged`, `inconclusive`), `baseRate`, `candidateRate`, `samplesRun`, `wins`, `losses`, `ties`, `droppedCandidate`, `droppedBaseline`, and `tokens`.
-  - `batches`: List of completed and in-flight evaluation batch Run names.
+  - `tasks`: Per-task paired metrics (`ComparisonTaskStatus`): `baseRate`, `candidateRate`, `delta`, `deltaCI` (95% bootstrap percentile interval with normal-approximation fallback), `pairs`, `wins`, `losses`, `ties`, `dropped: {candidate, baseline}`, `label`, `decision`, `samplesRun`, `suggestedNext`, and `tokens`.
+  - `batches`: List of completed and in-flight evaluation batch records (`ComparisonBatchStatus` structs with `index`, `sampleRange`, `candidateRun`, `baselineRun`, and `phase`).
   - `summaryPath`: Storage path or URI where `comparisons/<name>.json` was written to the artifact sink.
   - `message`: Human-readable summary of verdicts, task notes, or candidate-task failure caps.
 
@@ -138,10 +142,10 @@ The `eval-runner-webhook` service (image `eval-runner-webhook`) receives GitHub 
 ### Web Dashboard UI (`cmd/eval-runner-ui`)
 
 The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboard:
-- `/runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
-- `/runs/<name>`: Detailed per-task breakdown for a single Run.
-- `/comparisons`: Overview of all Comparisons with verdicts, $P(\text{improvement})$, and batch progress.
-- `/comparisons/<name>`: Complete paired comparison table mirroring the PR comment layout.
+- `GET /runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
+- `GET /runs/{namespace}/{name}`: Detailed per-task breakdown for a single Run.
+- `GET /comparisons`: Overview of all Comparisons with verdicts, $P(\text{improvement})$, and batch progress.
+- `GET /comparisons/{namespace}/{name}`: Complete paired comparison table mirroring the PR comment layout.
 
 ### Two Namespaces
 
@@ -259,8 +263,9 @@ When a `Run` specifies `spec.model`, after discovery completes, the controller e
 ### Adaptive Paired Batches and Comparison Flow
 
 The `Comparison` reconciler pairs candidate and baseline Runs across batches (ADR-018, ADR-025, ADR-026):
+- **Task Intersection**: The controller only compares tasks that were Completed by both candidate and baseline Runs (#133); unexecuted tasks or tasks attempted by only one side are surfaced in `status.message` and the comparison summary rather than being counted as inconclusive or skewing the verdict.
 - **Sink-Based Sample Pairing**: Inspect logs for both candidate and baseline Runs are loaded from the artifact sink. Candidate and baseline samples are paired matching on stable Inspect `sample.id` extracted from Inspect logs (#131, ADR-018).
-- **Stopping Rule Evaluation**: Per-task differences are evaluated using `pkg/stats.Decide`. Stopping rules require a minimum of $n \ge 8$ pairs (`MinPairsToDecide = 8`) before CI stopping rules can fire. If the 95% CI on Δ excludes zero, the task stops as `improved` or `regressed`; if the CI lies entirely within $\pm \text{equivalenceMargin}$, the task stops as `unchanged`; if `maxSamplesPerTask` is reached, it stops as `inconclusive`.
+- **Stopping Rule Evaluation**: Per-task differences are evaluated using `pkg/stats.Decide`. Stopping rules require a minimum of $n \ge 8$ pairs (`MinPairsToDecide = 8`) before CI stopping rules can fire. If the 95% CI on Δ (bootstrap percentile interval by default, normal approximation as fallback) excludes zero, the task stops as `improved` or `regressed`; if the CI lies entirely within $\pm \text{equivalenceMargin}$, the task stops as `unchanged`; if `maxSamplesPerTask` is reached, it stops as `inconclusive`.
 - **Batch Extension via Immutable Runs**: If any task remains undecided and under `maxSamplesPerTask`, the `Comparison` controller schedules new immutable Run pairs (`<comp>-b<k>-cand`, `<comp>-b<k>-base`) evaluating the next sample window (`[highestPosition + 1, nextEnd]`) for undecided tasks only. Existing Completed baseline Runs targeting the same commit and window are reused across PRs (ADR-023, ADR-026).
 - **Verdict Aggregation and Capping**: Once all tasks reach a terminal stopping decision, run-level verdict and headline $P(\text{improvement})$ are aggregated with tie splitting (ADR-019). If a candidate task failed while the baseline completed (or was not planned), the failure caps any `UNCHANGED` or `IMPROVED` verdict to `INCONCLUSIVE` with $P(\text{improvement})$ capped at 0.50 (issue #141). The complete comparison table is written to `comparisons/<name>.json` in the artifact sink.
 
@@ -269,7 +274,7 @@ The `Comparison` reconciler pairs candidate and baseline Runs across batches (AD
 All artifacts are persisted to the configured `ArtifactSink` (Google Cloud Storage, local directory in Kind, or in-memory) under a deterministic layout (ADR-018, ADR-022, ADR-025, ADR-026):
 - `runs/<commit>/manifest.json`: Discovered task manifest produced by `.evals/list`.
 - `runs/<commit>/<task>/<inspect-log>.json`: Full Inspect evaluation log containing sample outputs and trajectories.
-- `runs/<commit>/summary.json` (and `runs/<commit>/<task>/summary.json`): Task execution summary with sample window, scores, and token breakdown.
+- `runs/<commit>/<task>/summary.json`: Task execution summary with sample window, scores, and token breakdown.
 - `comparisons/<name>.json`: Complete paired comparison table, per-task deltas, confidence intervals, and aggregate verdict.
 
 ### GitHub Reporting and Check Run State Mapping
@@ -457,7 +462,7 @@ The following table maps sections of the target product concept ([docs/concept/f
 | **§3.1, §3.4** | Sample execution in sandboxes | **Done** | Implemented in [#26](https://github.com/gke-labs/eval-runner/issues/26), [#44](https://github.com/gke-labs/eval-runner/pull/44), [#53](https://github.com/gke-labs/eval-runner/issues/53), [#125](https://github.com/gke-labs/eval-runner/issues/125) (ADR-016, ADR-025, ADR-026). Executed as one sandbox per task running `inspect eval --limit a-b` (sample window), not one pod per sample |
 | **§3.2** | Empty resources (`[]` = zero privilege) | **Done** | Implemented in `pkg/discovery/sandbox.go` (ADR-013) |
 | **§3.2** | Declared resources (`docker`, `kind`, `kubernetes-namespace`, cloud projects) & image builds | **Not started** | — |
-| **§4.1–§4.6** | Statistics (paired sampling, Wilson/t CI, stopping rule, verdicts, P(improvement), tie-splitting, candidate-failure cap, adaptive paired batch loop, extraSamples) | **Done** | Implemented in [#25](https://github.com/gke-labs/eval-runner/issues/25), [#29](https://github.com/gke-labs/eval-runner/pull/29), [#70](https://github.com/gke-labs/eval-runner/pull/70), [#73](https://github.com/gke-labs/eval-runner/issues/73), [#125](https://github.com/gke-labs/eval-runner/issues/125), [#141](https://github.com/gke-labs/eval-runner/issues/141), [#145](https://github.com/gke-labs/eval-runner/issues/145), [#148](https://github.com/gke-labs/eval-runner/issues/148) (ADR-016, ADR-018, ADR-019, ADR-025, ADR-026; docs/statistics.md). Changed-file affinity (§4.3) remains open |
+| **§4.1–§4.6** | Statistics (paired sampling, Wilson/t CI, stopping rule, verdicts, P(improvement), tie-splitting, candidate-failure cap, adaptive paired batch loop, extraSamples) | **Done** | Implemented in [#25](https://github.com/gke-labs/eval-runner/issues/25), [#29](https://github.com/gke-labs/eval-runner/pull/29), [#77](https://github.com/gke-labs/eval-runner/issues/77), [#84](https://github.com/gke-labs/eval-runner/issues/84), [#125](https://github.com/gke-labs/eval-runner/issues/125), [#141](https://github.com/gke-labs/eval-runner/issues/141), [#145](https://github.com/gke-labs/eval-runner/issues/145), [#148](https://github.com/gke-labs/eval-runner/issues/148) (ADR-016, ADR-018, ADR-019, ADR-025, ADR-026; docs/statistics.md). Changed-file affinity (§4.3) remains open |
 | **§5.1–§5.3** | GitHub integration (single updating PR comment, check run mapping, automated webhook receiver, baseline reuse, GitHub App auth) | **Done** | Implemented in [#98](https://github.com/gke-labs/eval-runner/issues/98), [#101](https://github.com/gke-labs/eval-runner/pull/101), [#105](https://github.com/gke-labs/eval-runner/issues/105), [#109](https://github.com/gke-labs/eval-runner/pull/109), [#115](https://github.com/gke-labs/eval-runner/issues/115), [#146](https://github.com/gke-labs/eval-runner/issues/146) (ADR-021, ADR-023, ADR-024). Check run maps INCONCLUSIVE to neutral; descriptions differ from mockup |
 | **§5.4** | Bot-authored PRs (miner PRs, fine-tune activations) | **Not started** | — |
 | **§6** | Trajectory storage in user bucket (Inspect log format, manifest, task summary, comparison table) | **Done** | Implemented in [#26](https://github.com/gke-labs/eval-runner/issues/26), [#44](https://github.com/gke-labs/eval-runner/pull/44), [#107](https://github.com/gke-labs/eval-runner/pull/107), [#111](https://github.com/gke-labs/eval-runner/issues/111) (ADR-018, ADR-022, ADR-026) |
@@ -467,7 +472,7 @@ The following table maps sections of the target product concept ([docs/concept/f
 | **§9.1** | Evals from the wild (anonymised eval submission) | **Not started** | — |
 | **§9.2** | Cohorts (tracking suite expansion over time) | **Not started** | — |
 | **§10** | Continuum view (Pareto frontier scatter plot) | **Not started** | — |
-| **§11** | Web application surfaces: Runs and Comparisons dashboard UI | **Done** | Implemented in [#77](https://github.com/gke-labs/eval-runner/pull/77), [#84](https://github.com/gke-labs/eval-runner/issues/84), [#88](https://github.com/gke-labs/eval-runner/issues/88), [#92](https://github.com/gke-labs/eval-runner/pull/92) (`cmd/eval-runner-ui`) |
+| **§11** | Web application surfaces: Runs and Comparisons dashboard UI | **Done** | Implemented in [#78](https://github.com/gke-labs/eval-runner/issues/78), [#92](https://github.com/gke-labs/eval-runner/pull/92), [#94](https://github.com/gke-labs/eval-runner/issues/94), [#99](https://github.com/gke-labs/eval-runner/pull/99) (`cmd/eval-runner-ui`) |
 | **§11** | PR surface in web UI, Budget/sampling detail chart, Cohorts, and Fine-tunes surfaces | **Not started** | Mockups exist under `docs/concept/ui/` |
 
 ### Controller Enhancements in Flight
@@ -476,7 +481,7 @@ Several targeted enhancements to discovery and sandbox management are tracked in
 - **Discovery deadline & pod waiting reasons**: Issue [#12](https://github.com/gke-labs/eval-runner/issues/12) / Issue [#41](https://github.com/gke-labs/eval-runner/issues/41) - Done.
 - **Clone failure retry with backoff**: Issue [#20](https://github.com/gke-labs/eval-runner/issues/20) / PR [#21](https://github.com/gke-labs/eval-runner/pull/21) - Done.
 - **Output limit exec cancellation**: Issue [#22](https://github.com/gke-labs/eval-runner/issues/22) - Done.
-- **Finalizer NoMatch tolerance**: Issue [#23](https://github.com/gke-labs/eval-runner/issues/23) - Done.
+- **Finalizer NoMatch tolerance**: Issue [#23](https://github.com/gke-labs/eval-runner/issues/23).
 - **Stderr tail on deadline expiry & injectable clock**: Issue [#24](https://github.com/gke-labs/eval-runner/issues/24) - Done.
 - **Docs eval drift guard & evidence checks**: Issue [#27](https://github.com/gke-labs/eval-runner/issues/27) - Done.
 - **Default-deny egress NetworkPolicy**: Issue [#33](https://github.com/gke-labs/eval-runner/issues/33).

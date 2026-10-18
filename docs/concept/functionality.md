@@ -190,7 +190,7 @@ eval-runner's `$4.10 · 96 samples · 14 min · same verdict`. Treat the problem
 
 - Every PR sample is paired with a baseline sample **on the same input** (paired by Inspect sample id, ADR-018, #131).
 - The estimand per task is the **delta in success rate** (PR minus base), with a 95% confidence
-  interval computed on the paired differences (using Rubin's Bayesian Bootstrap percentile CI as default and Student-t/Normal approximations, ADR-016, ADR-018, [docs/statistics.md](../statistics.md)), so per-input difficulty variance cancels.
+  interval computed on the paired differences (bootstrap percentile CI by default, normal approximation as fallback; P(improvement) via Rubin's Bayesian Bootstrap, ADR-018, ADR-019, [docs/statistics.md](../statistics.md)), so per-input difficulty variance cancels.
 - Baseline samples are cached and reused across PRs sharing the same base commit
   ("paired against base commit a81d0c4"). Cache invalidation policy when the base moves or batches extend is decided in ADR-023 and ADR-026: baseline Runs and batches are identified by a deterministic batch key covering repo URL, commit SHA, model, task set, and sample window (`sampleRange`). When the merge base moves or configuration changes, a fresh commit SHA or batch key is evaluated, automatically invalidating and replacing the baseline without mutating historical Runs.
 
@@ -320,7 +320,7 @@ eval-runner (or agents it hosts) author PRs in the same repo, which are then jud
 - **Implemented artifact layout**:
   - `runs/<commit>/manifest.json`: raw discovered task manifest from `.evals/list` (ADR-022)
   - `runs/<commit>/<task>/<inspect-log>.json`: full Inspect evaluation log with sample trajectories
-  - `runs/<commit>/summary.json` (and `runs/<commit>/<task>/summary.json`): task aggregates, sample range, and token usage (ADR-025, ADR-026)
+  - `runs/<commit>/<task>/summary.json`: task aggregates, sample range, and token usage (ADR-025, ADR-026)
   - `comparisons/<name>.json`: paired sample comparisons, deltas, confidence intervals, and aggregate verdict (ADR-018)
 
 ### Trajectory viewer (mockup: `ui/trajectory.html`)
@@ -462,7 +462,7 @@ The system is composed of the following components:
 3. **Web UI (`cmd/eval-runner-ui`)**: Web dashboard serving HTML views of `Runs` and `Comparisons`. *(Implemented; image `eval-runner-ui`).*
 4. **CLI Tool (`cmd/evalstats`)**: Terminal inspection of cluster Runs and Comparisons matching PR-comment table layouts. *(Implemented).*
 5. **Sandboxes & Runtime (`eval-runner-sandbox`)**: Isolated pods running `sandboxd` with mutual TLS (mTLS) and PSA-restricted profile, executing discovery (`.evals/list`) and task sample batches (`inspect eval --limit a-b`). *(Implemented).*
-6. **Artifact Store (`ArtifactSink`)**: Cloud (GCS via Workload Identity) or local/in-memory sink holding `runs/<commit>/manifest.json`, `runs/<commit>/<task>/<inspect-log>.json`, `runs/<commit>/summary.json`, and `comparisons/<name>.json`. *(Implemented).*
+6. **Artifact Store (`ArtifactSink`)**: Cloud (GCS via Workload Identity) or local/in-memory sink holding `runs/<commit>/manifest.json`, `runs/<commit>/<task>/<inspect-log>.json`, `runs/<commit>/<task>/summary.json`, and `comparisons/<name>.json`. *(Implemented).*
 7. **Trajectory Miner**: Pluggable coding agent that clusters failures and authors skill-fix PRs. *(Target future; not started).*
 8. **Fine-Tune Pipeline**: OpenRL training loop, candidate registry (`ft/<name>`), continuum measurement, activation PRs. *(Target future; not started).*
 9. **Eval-from-the-Wild Submitter**: Client-side anonymisation and PR submission of production failures. *(Target future; not started).*
