@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/webhook"
 )
 
@@ -140,10 +141,22 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 	if candRun.Labels[webhook.LabelPR] != "305" {
 		t.Errorf("expected candidate label %s=305, got %s", webhook.LabelPR, candRun.Labels[webhook.LabelPR])
 	}
+	if candRun.Spec.SampleRange == nil || candRun.Spec.SampleRange.Start != 1 || candRun.Spec.SampleRange.End != 8 {
+		t.Errorf("expected candidate SampleRange {1, 8}, got %+v", candRun.Spec.SampleRange)
+	}
+	if candRun.Spec.Limit != nil {
+		t.Errorf("expected candidate limit nil, got %v", candRun.Spec.Limit)
+	}
 
 	baseRun := harness.WaitForRunExists("eval-runner", baseRunName, 30*time.Second)
 	if baseRun.Spec.Repo.URL != "https://github.com/gke-labs/eval-runner.git" {
 		t.Errorf("expected baseline repo URL https://github.com/gke-labs/eval-runner.git, got %s", baseRun.Spec.Repo.URL)
+	}
+	if baseRun.Spec.SampleRange == nil || baseRun.Spec.SampleRange.Start != 1 || baseRun.Spec.SampleRange.End != 8 {
+		t.Errorf("expected baseline SampleRange {1, 8}, got %+v", baseRun.Spec.SampleRange)
+	}
+	if baseRun.Spec.Limit != nil {
+		t.Errorf("expected baseline limit nil, got %v", baseRun.Spec.Limit)
 	}
 
 	comp := harness.WaitForComparisonExists("eval-runner", compName, 30*time.Second)
@@ -155,6 +168,49 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 	}
 	if comp.Spec.PullRequest == nil || comp.Spec.PullRequest.Number != 305 {
 		t.Errorf("expected comparison PullRequest.Number=305, got %+v", comp.Spec.PullRequest)
+	}
+	if comp.Spec.Sampling == nil || comp.Spec.Sampling.BatchSize != 8 || comp.Spec.Sampling.MaxSamplesPerTask != 64 {
+		t.Errorf("expected comparison sampling {8, 64}, got %+v", comp.Spec.Sampling)
+	}
+
+	// 6. Post recorded signed issue_comment payload and assert spec.extraSamples is bumped
+	commentPayloadPath := filepath.Join(gitRoot, "pkg/webhook/testdata/issue_comment.json")
+	commentPayload, err := os.ReadFile(commentPayloadPath)
+	if err != nil {
+		t.Fatalf("failed to read recorded issue_comment fixture at %s: %v", commentPayloadPath, err)
+	}
+	commentSig := webhook.ComputeSignature(commentPayload, webhookSecret)
+
+	reqComment, err := http.NewRequest(http.MethodPost, baseURL+"/webhook", bytes.NewReader(commentPayload))
+	if err != nil {
+		t.Fatalf("failed to create comment webhook HTTP request: %v", err)
+	}
+	reqComment.Header.Set("Content-Type", "application/json")
+	reqComment.Header.Set(webhook.HeaderGitHubEvent, webhook.EventIssueComment)
+	reqComment.Header.Set(webhook.HeaderHubSignature256, commentSig)
+	reqComment.Header.Set(webhook.HeaderGitHubDelivery, "e2e-smoke-comment-delivery")
+
+	commentResp, err := http.DefaultClient.Do(reqComment)
+	if err != nil {
+		t.Fatalf("failed to POST comment webhook payload: %v", err)
+	}
+	commentRespBody, _ := io.ReadAll(commentResp.Body)
+	commentResp.Body.Close()
+	if commentResp.StatusCode != http.StatusOK {
+		t.Fatalf("comment webhook returned status %d: %s", commentResp.StatusCode, string(commentRespBody))
+	}
+
+	// 7. Verify spec.extraSamples on Comparison is bumped to 8
+	var updatedComp *v1alpha1.Comparison
+	for i := 0; i < 30; i++ {
+		updatedComp = harness.WaitForComparisonExists("eval-runner", compName, 5*time.Second)
+		if updatedComp.Spec.ExtraSamples == 8 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if updatedComp.Spec.ExtraSamples != 8 {
+		t.Errorf("expected comparison ExtraSamples=8, got %d", updatedComp.Spec.ExtraSamples)
 	}
 }
 
