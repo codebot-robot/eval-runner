@@ -16,6 +16,7 @@ package ui
 
 import (
 	"html/template"
+	"io"
 )
 
 const baseCSS = `
@@ -241,7 +242,7 @@ const runsListTemplate = `
     <div class="card">
       <div class="card-header">
         <h1 class="card-title">Runs</h1>
-        <span style="font-size:13px;color:var(--muted)">{{ len .Runs }} total</span>
+        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
       </div>
       <div style="overflow-x:auto">
         <table class="ci">
@@ -277,6 +278,17 @@ const runsListTemplate = `
           </tbody>
         </table>
       </div>
+      {{ if or .HasPrev .HasMore }}
+      <div class="pagination" style="padding:14px 24px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;font-size:13px">
+        <div>
+          {{ if .HasPrev }}<a href="{{ .PrevLink }}">← Previous</a>{{ end }}
+        </div>
+        <div style="color:var(--muted)">{{ .ShowingRange }}</div>
+        <div>
+          {{ if .HasMore }}<a href="{{ .NextLink }}">More →</a>{{ end }}
+        </div>
+      </div>
+      {{ end }}
     </div>
   </main>
 </body>
@@ -448,7 +460,7 @@ const comparisonsListTemplate = `
     <div class="card">
       <div class="card-header">
         <h1 class="card-title">Comparisons</h1>
-        <span style="font-size:13px;color:var(--muted)">{{ len .Comparisons }} total</span>
+        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
       </div>
       <div style="overflow-x:auto">
         <table class="ci">
@@ -484,11 +496,72 @@ const comparisonsListTemplate = `
           </tbody>
         </table>
       </div>
+      {{ if or .HasPrev .HasMore }}
+      <div class="pagination" style="padding:14px 24px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;font-size:13px">
+        <div>
+          {{ if .HasPrev }}<a href="{{ .PrevLink }}">← Previous</a>{{ end }}
+        </div>
+        <div style="color:var(--muted)">{{ .ShowingRange }}</div>
+        <div>
+          {{ if .HasMore }}<a href="{{ .NextLink }}">More →</a>{{ end }}
+        </div>
+      </div>
+      {{ end }}
     </div>
   </main>
 </body>
 </html>
 `
+
+const ComparisonTableTemplate = `{{ define "comparison_table" }}
+<div style="overflow-x:auto;margin-top:16px">
+  <table class="ci">
+    <thead>
+      <tr>
+        <th>eval</th>
+        <th>base</th>
+        <th>this PR</th>
+        <th colspan="2">Δ (95% CI)</th>
+        <th>label</th>
+        <th>runs</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Tasks }}
+      <tr>
+        <td class="mono" style="font-weight:600">{{ .ID }}</td>
+        <td class="num">{{ .BaseRate }}</td>
+        <td class="num">{{ .CandRate }}</td>
+        <td class="num">{{ .Delta }}{{ if .HasCI }} <span style="font-size:13px;color:var(--muted)">{{ .CILabel }}</span>{{ end }}</td>
+        <td>
+          {{ if .HasCI }}
+          <div class="cibar" title="Δ: {{ .Delta }} {{ .CILabel }}">
+            <div class="axis"></div>
+            <div class="zero" style="left:170px"></div>
+            <div class="range {{ .StatusClass }}-c" style="left:{{ printf "%.1f" .CILeftPx }}px; width:{{ printf "%.1f" .CIWidthPx }}px"></div>
+            <div class="pt {{ .StatusClass }}-c" style="left:{{ printf "%.1f" .CIDotPx }}px"></div>
+          </div>
+          {{ else }}
+          <span style="color:var(--muted)">—</span>
+          {{ end }}
+        </td>
+        <td><span class="chip {{ .StatusClass }}"><span class="dot"></span>{{ .Label }}</span></td>
+        <td class="num">
+          {{ .Pairs }}
+          {{ if or (gt .DroppedCand 0) (gt .DroppedBase 0) }}
+          <span style="font-size:11px;color:var(--muted);display:block">dropped: {{ .DroppedCand }} cand, {{ .DroppedBase }} base</span>
+          {{ end }}
+        </td>
+      </tr>
+      {{ else }}
+      <tr>
+        <td colspan="7" class="empty-state">No task comparisons recorded.</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+</div>
+{{ end }}`
 
 const comparisonDetailTemplate = `
 <!doctype html>
@@ -529,53 +602,7 @@ const comparisonDetailTemplate = `
         <div class="msg-alert"><b>Status:</b> {{ .Message }}</div>
         {{ end }}
 
-        <div style="overflow-x:auto;margin-top:16px">
-          <table class="ci">
-            <thead>
-              <tr>
-                <th>eval</th>
-                <th>base</th>
-                <th>this PR</th>
-                <th colspan="2">Δ (95% CI)</th>
-                <th>label</th>
-                <th>runs</th>
-              </tr>
-            </thead>
-            <tbody>
-              {{ range .Tasks }}
-              <tr>
-                <td class="mono" style="font-weight:600">{{ .ID }}</td>
-                <td class="num">{{ .BaseRate }}</td>
-                <td class="num">{{ .CandRate }}</td>
-                <td class="num">{{ .Delta }}</td>
-                <td>
-                  {{ if .HasCI }}
-                  <div class="cibar" title="Δ: {{ .Delta }} {{ .CILabel }}">
-                    <div class="axis"></div>
-                    <div class="zero" style="left:170px"></div>
-                    <div class="range {{ .StatusClass }}-c" style="left:{{ printf "%.1f" .CILeftPx }}px; width:{{ printf "%.1f" .CIWidthPx }}px"></div>
-                    <div class="pt {{ .StatusClass }}-c" style="left:{{ printf "%.1f" .CIDotPx }}px"></div>
-                  </div>
-                  {{ else }}
-                  <span style="color:var(--muted)">—</span>
-                  {{ end }}
-                </td>
-                <td><span class="chip {{ .StatusClass }}"><span class="dot"></span>{{ .Label }}</span></td>
-                <td class="num">
-                  {{ .Pairs }}
-                  {{ if or (gt .DroppedCand 0) (gt .DroppedBase 0) }}
-                  <span style="font-size:11px;color:var(--muted);display:block">dropped: {{ .DroppedCand }} cand, {{ .DroppedBase }} base</span>
-                  {{ end }}
-                </td>
-              </tr>
-              {{ else }}
-              <tr>
-                <td colspan="7" class="empty-state">No task comparisons recorded.</td>
-              </tr>
-              {{ end }}
-            </tbody>
-          </table>
-        </div>
+        {{ template "comparison_table" . }}
       </div>
 
       <div class="card-footer">
@@ -596,5 +623,23 @@ var (
 	tmplRunsList         = template.Must(template.New("runs_list").Parse(runsListTemplate))
 	tmplRunDetail        = template.Must(template.New("run_detail").Parse(runDetailTemplate))
 	tmplComparisonsList  = template.Must(template.New("comparisons_list").Parse(comparisonsListTemplate))
-	tmplComparisonDetail = template.Must(template.New("comparison_detail").Parse(comparisonDetailTemplate))
+	tmplComparisonTable  = template.Must(template.New("comparison_table").Parse(ComparisonTableTemplate))
+	tmplComparisonDetail = template.Must(template.Must(template.New("comparison_detail").Parse(ComparisonTableTemplate)).Parse(comparisonDetailTemplate))
+
+	// TmplComparisonTable is the parsed template for the comparison table sub-template.
+	TmplComparisonTable = tmplComparisonTable
 )
+
+// RenderComparisonTable renders the comparison table sub-template to the given writer.
+func RenderComparisonTable(w io.Writer, data any) error {
+	switch v := data.(type) {
+	case []ComparisonTaskRow:
+		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", ComparisonTableView{Tasks: v})
+	case ComparisonTableView:
+		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", v)
+	case ComparisonDetailView:
+		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", v)
+	default:
+		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", data)
+	}
+}

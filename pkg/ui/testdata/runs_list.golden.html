@@ -1,0 +1,269 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Runs · eval-runner</title>
+  <style>
+:root {
+  --indigo: #4F46E5;
+  --indigo-soft: #EEF2FF;
+  --teal: #14B8A6;
+  --teal-soft: #CCFBF1;
+  --ink: #111827;
+  --ink-2: #374151;
+  --muted: #6B7280;
+  --line: #E5E7EB;
+  --surface: #FFFFFF;
+  --canvas: #F8FAFC;
+  --good: #15803D;
+  --good-soft: #DCFCE7;
+  --bad: #B91C1C;
+  --bad-soft: #FEE2E2;
+  --warn: #B45309;
+  --warn-soft: #FEF3C7;
+  --neutral: #6B7280;
+  --neutral-soft: #F3F4F6;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--canvas);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.header-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.header-logo {
+  font-weight: 700;
+  font-size: 20px;
+  color: var(--indigo);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.header-logo:hover { text-decoration: none; }
+.nav-links {
+  display: flex;
+  gap: 8px;
+}
+.nav-link {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+.nav-link:hover {
+  color: var(--ink);
+  background: var(--neutral-soft);
+  text-decoration: none;
+}
+.nav-link.active {
+  color: var(--indigo);
+  background: var(--indigo-soft);
+  font-weight: 600;
+}
+
+.container {
+  max-width: 1320px;
+  margin: 28px auto;
+  padding: 0 24px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 2px 6px rgba(17,24,39,.04);
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.card-header {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.card-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.card-body {
+  padding: 24px;
+}
+.card-footer {
+  padding: 16px 24px;
+  background: var(--canvas);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  align-items: center;
+}
+
+.mono { font-family: var(--mono); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.chip.good { background: var(--good-soft); color: var(--good); }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+.chip.neutral { background: var(--neutral-soft); color: var(--neutral); }
+.chip.pending { background: var(--warn-soft); color: var(--warn); }
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+}
+
+ 
+.cibar { position: relative; height: 26px; width: 340px; }
+.cibar .axis { position: absolute; left: 0; right: 0; top: 12px; height: 2px; background: var(--line); }
+.cibar .zero { position: absolute; top: 2px; width: 2px; height: 22px; background: var(--muted); }
+.cibar .range { position: absolute; top: 11px; height: 4px; border-radius: 2px; }
+.cibar .pt { position: absolute; top: 6px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-sizing: border-box; }
+.good-c { background: var(--good); }
+.bad-c { background: var(--bad); }
+.warn-c { background: var(--warn); }
+.neutral-c { background: var(--neutral); }
+.indigo-c { background: var(--indigo); }
+.teal-c { background: var(--teal); }
+
+ 
+.cibar-01 { position: relative; height: 26px; width: 240px; }
+.cibar-01 .axis { position: absolute; left: 0; right: 0; top: 12px; height: 2px; background: var(--line); }
+.cibar-01 .tick-0 { position: absolute; left: 0; top: 5px; width: 1px; height: 15px; background: var(--muted); }
+.cibar-01 .tick-50 { position: absolute; left: 120px; top: 8px; width: 1px; height: 10px; background: var(--line); }
+.cibar-01 .tick-100 { position: absolute; right: 0; top: 5px; width: 1px; height: 15px; background: var(--muted); }
+.cibar-01 .range { position: absolute; top: 11px; height: 4px; border-radius: 2px; background: var(--indigo); }
+.cibar-01 .pt { position: absolute; top: 6px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-sizing: border-box; background: var(--indigo); }
+
+table.ci { width: 100%; border-collapse: collapse; font-size: 15px; }
+table.ci th { text-align: left; color: var(--muted); font-weight: 500; font-size: 13px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+table.ci td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.ci tbody tr:hover { background: #FAFBFD; }
+table.ci tbody tr:last-child td { border-bottom: none; }
+
+.verdict { font-size: 20px; margin: 4px 0 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.verdict-headline { font-size: 17px; color: var(--ink-2); }
+
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 22px; }
+.meta-tile { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; background: var(--canvas); }
+.meta-tile .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.meta-tile .value { font-size: 14px; font-weight: 600; color: var(--ink); word-break: break-all; }
+
+.empty-state { text-align: center; padding: 48px 16px; color: var(--muted); font-size: 15px; }
+.log-path { font-size: 12px; background: var(--neutral-soft); padding: 2px 6px; border-radius: 4px; display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-alert { margin-top: 14px; padding: 10px 14px; background: var(--bad-soft); color: var(--bad); border-radius: 6px; font-size: 14px; }
+</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/runs" class="nav-link active">Runs</a>
+        <a href="/comparisons" class="nav-link ">Comparisons</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Runs</h1>
+        <span style="font-size:13px;color:var(--muted)">2 total</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Namespace</th>
+              <th>Phase</th>
+              <th>Tasks</th>
+              <th>Samples</th>
+              <th>Rates</th>
+              <th>Commit</th>
+              <th>Age</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+            <tr>
+              <td><a href="/runs/eval-runner/docs-eval-cand-05ce4d8" class="mono" style="font-weight:600">docs-eval-cand-05ce4d8</a></td>
+              <td><span class="mono" style="font-size:13px">eval-runner</span></td>
+              <td><span class="chip good"><span class="dot"></span>Completed</span></td>
+              <td class="num">1/1</td>
+              <td class="num">48</td>
+              <td class="mono" style="font-size:13px">triage/runbook_lookup=0.84[0.71,0.92]</td>
+              <td><span class="mono" style="font-size:13px">05ce4d8</span></td>
+              <td style="color:var(--muted);font-size:13px">10m</td>
+            </tr>
+            
+            <tr>
+              <td><a href="/runs/eval-runner/docs-eval-base-05ce4d8" class="mono" style="font-weight:600">docs-eval-base-05ce4d8</a></td>
+              <td><span class="mono" style="font-size:13px">eval-runner</span></td>
+              <td><span class="chip good"><span class="dot"></span>Completed</span></td>
+              <td class="num">1/1</td>
+              <td class="num">48</td>
+              <td class="mono" style="font-size:13px">triage/runbook_lookup=0.61[0.46,0.74]</td>
+              <td><span class="mono" style="font-size:13px">a81d0c4</span></td>
+              <td style="color:var(--muted);font-size:13px">15m</td>
+            </tr>
+            
+          </tbody>
+        </table>
+      </div>
+      
+    </div>
+  </main>
+</body>
+</html>

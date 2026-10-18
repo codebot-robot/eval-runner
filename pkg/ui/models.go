@@ -16,7 +16,6 @@ package ui
 
 import (
 	"fmt"
-	"html/template"
 	"math"
 	"time"
 
@@ -48,9 +47,17 @@ type RunListItem struct {
 
 // RunsListView is the view model for the /runs list page.
 type RunsListView struct {
-	ActiveTab NavTab
-	Namespace string
-	Runs      []RunListItem
+	ActiveTab    NavTab
+	Namespace    string
+	Runs         []RunListItem
+	TotalCount   int
+	Offset       int
+	Limit        int
+	HasMore      bool
+	NextLink     string
+	HasPrev      bool
+	PrevLink     string
+	ShowingRange string
 }
 
 // RunTaskRow represents a single eval task in the /runs/<ns>/<name> detail view.
@@ -115,24 +122,37 @@ type ComparisonListItem struct {
 
 // ComparisonsListView is the view model for the /comparisons list page.
 type ComparisonsListView struct {
-	ActiveTab   NavTab
-	Namespace   string
-	Comparisons []ComparisonListItem
+	ActiveTab    NavTab
+	Namespace    string
+	Comparisons  []ComparisonListItem
+	TotalCount   int
+	Offset       int
+	Limit        int
+	HasMore      bool
+	NextLink     string
+	HasPrev      bool
+	PrevLink     string
+	ShowingRange string
+}
+
+// ComparisonTableView is the view model for rendering the comparison table sub-template.
+type ComparisonTableView struct {
+	Tasks []ComparisonTaskRow
 }
 
 // ComparisonTaskRow represents a single task row in the PR-comment table.
 type ComparisonTaskRow struct {
 	ID          string
-	BaseRate    string        // e.g. "0.61"
-	CandRate    string        // e.g. "0.84"
-	Delta       template.HTML // e.g. "+0.23"
+	BaseRate    string // e.g. "0.61"
+	CandRate    string // e.g. "0.84"
+	Delta       string // e.g. "+0.23"
 	HasCI       bool
 	CILeftPx    float64
 	CIWidthPx   float64
 	CIDotPx     float64
-	CILabel     template.HTML // e.g. "[+0.11, +0.35]"
-	StatusClass string        // good, bad, warn, neutral, pending
-	Label       string        // improved, regressed, unchanged, inconclusive, running
+	CILabel     string // e.g. "[+0.11, +0.35]"
+	StatusClass string // good, bad, warn, neutral, pending
+	Label       string // improved, regressed, unchanged, inconclusive, running
 	Pairs       int
 	DroppedCand int
 	DroppedBase int

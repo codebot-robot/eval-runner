@@ -16,12 +16,45 @@ package ui
 
 import (
 	"bytes"
+	"flag"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/pmezard/go-difflib/difflib"
 )
+
+var update = flag.Bool("update", false, "update golden files")
+
+func assertGolden(t *testing.T, filename string, actual string) {
+	t.Helper()
+	goldenPath := filepath.Join("testdata", filename)
+	if *update {
+		if err := os.WriteFile(goldenPath, []byte(actual), 0644); err != nil {
+			t.Fatalf("failed to update golden file %s: %v", goldenPath, err)
+		}
+		return
+	}
+
+	expected, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden file %s: %v (run with -update to generate)", goldenPath, err)
+	}
+
+	if string(expected) != actual {
+		diff, _ := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
+			A:        difflib.SplitLines(string(expected)),
+			B:        difflib.SplitLines(actual),
+			FromFile: "Expected",
+			ToFile:   "Actual",
+			Context:  3,
+		})
+		t.Errorf("rendered HTML does not match golden file %s:\n%s", goldenPath, diff)
+	}
+}
 
 func TestCalculateComparisonBarGeometry(t *testing.T) {
 	barWidth := 340.0
@@ -155,8 +188,47 @@ func TestCalculateRunBarGeometry(t *testing.T) {
 	})
 }
 
-func TestTemplateRenderingComparisonGolden(t *testing.T) {
-	view := ComparisonDetailView{
+func sampleRunDetailView() RunDetailView {
+	return RunDetailView{
+		ActiveTab:       NavTabRuns,
+		Name:            "docs-eval-cand-05ce4d8",
+		Namespace:       "eval-runner",
+		Phase:           v1alpha1.RunPhaseCompleted,
+		PhaseChip:       "good",
+		RepoURL:         "https://github.com/gke-labs/eval-runner.git",
+		Commit:          "05ce4d8222222222222222222222222222222222",
+		CommitShort:     "05ce4d8",
+		Model:           "google/gemini-3.5-flash-lite",
+		Age:             "10m",
+		ArtifactsPrefix: "gs://eval-bucket/runs/05ce4d8/",
+		TasksSummary:    "1/1",
+		TasksCompleted:  1,
+		TasksFailed:     0,
+		TasksTotal:      1,
+		TotalSamples:    48,
+		MeanSuccessRate: "0.84",
+		Tasks: []RunTaskRow{
+			{
+				ID:        "triage/runbook_lookup",
+				Phase:     v1alpha1.TaskPhaseCompleted,
+				PhaseChip: "good",
+				RateStr:   "0.84",
+				HasCI:     true,
+				CILeftPx:  170.4,
+				CIWidthPx: 50.4,
+				CIDotPx:   194.6,
+				CILabel:   "[0.71, 0.92]",
+				Samples:   48,
+				Successes: 40,
+				Method:    "wilson",
+				LogPath:   "gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json",
+			},
+		},
+	}
+}
+
+func sampleComparisonDetailView() ComparisonDetailView {
+	return ComparisonDetailView{
 		ActiveTab:    NavTabComparisons,
 		Name:         "docs-eval-same-commit",
 		Namespace:    "eval-runner",
@@ -189,107 +261,276 @@ func TestTemplateRenderingComparisonGolden(t *testing.T) {
 		TotalSamples:    96,
 		TotalPairs:      48,
 	}
+}
 
-	var buf bytes.Buffer
-	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
-		t.Fatalf("failed to execute comparison detail template: %v", err)
-	}
-
-	html := buf.String()
-
-	// Verify golden elements
-	goldenSnippets := []string{
-		`<span class="chip good" style="font-size:16px;padding:4px 14px"><span class="dot"></span>IMPROVED</span>`,
-		`<span class="verdict-headline">05ce4d8 vs a81d0c4 · P(improvement) = 0.98</span>`,
-		`<th colspan="2">Δ (95% CI)</th>`,
-		`<td class="mono" style="font-weight:600">triage/runbook_lookup</td>`,
-		`<td class="num">0.61</td>`,
-		`<td class="num">0.84</td>`,
-		`<td class="num">+0.23</td>`,
-		`<div class="zero" style="left:170px"></div>`,
-		`<div class="range good-c" style="left:207.4px; width:81.6px"></div>`,
-		`<div class="pt good-c" style="left:241.2px"></div>`,
-		`<span class="chip good"><span class="dot"></span>improved</span>`,
-		`<td class="num">`,
-		`48`,
-		`<b>Base:</b> commit <span class="mono">a81d0c4</span> (<a href="/runs/eval-runner/docs-eval-base-05ce4d8">docs-eval-base-05ce4d8</a>)`,
-		`<b>Candidate:</b> commit <span class="mono">05ce4d8</span> (<a href="/runs/eval-runner/docs-eval-cand-05ce4d8">docs-eval-cand-05ce4d8</a>)`,
-		`96 run · 48 paired`,
-	}
-
-	for _, snippet := range goldenSnippets {
-		if !strings.Contains(html, snippet) {
-			t.Errorf("missing golden snippet in rendered HTML:\nSnippet: %s\nFull HTML:\n%s", snippet, html)
-		}
+func sampleRunsListView() RunsListView {
+	return RunsListView{
+		ActiveTab: NavTabRuns,
+		Namespace: "eval-runner",
+		Runs: []RunListItem{
+			{
+				Name:      "docs-eval-cand-05ce4d8",
+				Namespace: "eval-runner",
+				Phase:     v1alpha1.RunPhaseCompleted,
+				PhaseChip: "good",
+				Tasks:     "1/1",
+				Samples:   48,
+				Rates:     "triage/runbook_lookup=0.84[0.71,0.92]",
+				Commit:    "05ce4d8",
+				Age:       "10m",
+				Link:      "/runs/eval-runner/docs-eval-cand-05ce4d8",
+			},
+			{
+				Name:      "docs-eval-base-05ce4d8",
+				Namespace: "eval-runner",
+				Phase:     v1alpha1.RunPhaseCompleted,
+				PhaseChip: "good",
+				Tasks:     "1/1",
+				Samples:   48,
+				Rates:     "triage/runbook_lookup=0.61[0.46,0.74]",
+				Commit:    "a81d0c4",
+				Age:       "15m",
+				Link:      "/runs/eval-runner/docs-eval-base-05ce4d8",
+			},
+		},
+		TotalCount:   2,
+		Offset:       0,
+		Limit:        100,
+		HasMore:      false,
+		HasPrev:      false,
+		ShowingRange: "Showing 1–2 of 2",
 	}
 }
 
-func TestTemplateRenderingRunGolden(t *testing.T) {
-	view := RunDetailView{
-		ActiveTab:       NavTabRuns,
-		Name:            "docs-eval-cand-05ce4d8",
-		Namespace:       "eval-runner",
-		Phase:           v1alpha1.RunPhaseCompleted,
-		PhaseChip:       "good",
-		RepoURL:         "https://github.com/gke-labs/eval-runner.git",
-		CommitShort:     "05ce4d8",
-		Model:           "google/gemini-3.5-flash-lite",
-		Age:             "10m",
-		ArtifactsPrefix: "gs://eval-bucket/runs/05ce4d8/",
-		TasksSummary:    "1/1",
-		TasksCompleted:  1,
-		TasksTotal:      1,
-		TotalSamples:    48,
-		MeanSuccessRate: "0.84",
-		Tasks: []RunTaskRow{
+func sampleComparisonsListView() ComparisonsListView {
+	return ComparisonsListView{
+		ActiveTab: NavTabComparisons,
+		Namespace: "eval-runner",
+		Comparisons: []ComparisonListItem{
 			{
-				ID:        "triage/runbook_lookup",
-				Phase:     v1alpha1.TaskPhaseCompleted,
-				PhaseChip: "good",
-				RateStr:   "0.84",
-				HasCI:     true,
-				CILeftPx:  170.4,
-				CIWidthPx: 50.4,
-				CIDotPx:   194.6,
-				CILabel:   "[0.71, 0.92]",
-				Samples:   48,
-				Successes: 40,
-				Method:    "wilson",
-				LogPath:   "gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json",
+				Name:         "docs-eval-same-commit",
+				Namespace:    "eval-runner",
+				Verdict:      v1alpha1.ComparisonVerdictImproved,
+				VerdictChip:  "good",
+				PImprovement: "0.98",
+				Tasks:        "1/1",
+				BaselineRun:  "docs-eval-base-05ce4d8",
+				CandidateRun: "docs-eval-cand-05ce4d8",
+				Age:          "5m",
+				Link:         "/comparisons/eval-runner/docs-eval-same-commit",
 			},
 		},
+		TotalCount:   1,
+		Offset:       0,
+		Limit:        100,
+		HasMore:      false,
+		HasPrev:      false,
+		ShowingRange: "Showing 1–1 of 1",
 	}
+}
+
+func TestTemplateRenderingRunDetailGolden(t *testing.T) {
+	view := sampleRunDetailView()
 
 	var buf bytes.Buffer
 	if err := tmplRunDetail.Execute(&buf, view); err != nil {
 		t.Fatalf("failed to execute run detail template: %v", err)
 	}
 
-	html := buf.String()
+	assertGolden(t, "run_detail.golden.html", buf.String())
+}
 
-	goldenSnippets := []string{
-		`<span class="mono">docs-eval-cand-05ce4d8</span>`,
-		`<span class="chip good"><span class="dot"></span>Completed</span>`,
-		`google/gemini-3.5-flash-lite`,
-		`gs://eval-bucket/runs/05ce4d8/`,
-		`<th colspan="2">95% CI (0-1 axis)</th>`,
-		`<td class="mono" style="font-weight:600">triage/runbook_lookup</td>`,
-		`<td class="num">0.84</td>`,
-		`[0.71, 0.92]`,
-		`<div class="cibar-01"`,
-		`<div class="tick-0"></div>`,
-		`<div class="tick-50"></div>`,
-		`<div class="tick-100"></div>`,
-		`<div class="range" style="left:170.4px; width:50.4px"></div>`,
-		`<div class="pt" style="left:194.6px"></div>`,
-		`40/48`,
-		`wilson`,
-		`<span class="log-path mono" title="gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json">gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json</span>`,
+func TestTemplateRenderingComparisonDetailGolden(t *testing.T) {
+	view := sampleComparisonDetailView()
+
+	var buf bytes.Buffer
+	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute comparison detail template: %v", err)
 	}
 
-	for _, snippet := range goldenSnippets {
-		if !strings.Contains(html, snippet) {
-			t.Errorf("missing golden snippet in rendered HTML:\nSnippet: %s", snippet)
+	assertGolden(t, "comparison_detail.golden.html", buf.String())
+}
+
+func TestTemplateRenderingRunsListGolden(t *testing.T) {
+	view := sampleRunsListView()
+
+	var buf bytes.Buffer
+	if err := tmplRunsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute runs list template: %v", err)
+	}
+
+	assertGolden(t, "runs_list.golden.html", buf.String())
+}
+
+func TestTemplateRenderingComparisonsListGolden(t *testing.T) {
+	view := sampleComparisonsListView()
+
+	var buf bytes.Buffer
+	if err := tmplComparisonsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute comparisons list template: %v", err)
+	}
+
+	assertGolden(t, "comparisons_list.golden.html", buf.String())
+}
+
+func TestTemplateRenderingComparisonTableGolden(t *testing.T) {
+	tasks := sampleComparisonDetailView().Tasks
+
+	var buf bytes.Buffer
+	if err := RenderComparisonTable(&buf, tasks); err != nil {
+		t.Fatalf("failed to execute comparison table sub-template: %v", err)
+	}
+
+	assertGolden(t, "comparison_table.golden.html", buf.String())
+}
+
+func TestEscapingHostileFixtures(t *testing.T) {
+	const (
+		hostileScript = `<script>alert('pwned')</script>`
+		hostileImg    = `'"><img src=x onerror=alert('img')>`
+		hostileIframe = `"><iframe src="javascript:alert('frame')"></iframe>`
+	)
+
+	t.Run("RunDetailEscaping", func(t *testing.T) {
+		view := RunDetailView{
+			ActiveTab:       NavTabRuns,
+			Name:            "hostile-run",
+			Namespace:       "eval-runner",
+			Phase:           v1alpha1.RunPhaseFailed,
+			PhaseChip:       "bad",
+			RepoURL:         "https://github.com/evil/repo" + hostileImg,
+			Commit:          "commit" + hostileScript,
+			CommitShort:     "c" + hostileScript,
+			Model:           "model" + hostileIframe,
+			Age:             "1m",
+			ArtifactsPrefix: "gs://bucket/" + hostileScript,
+			Message:         "run failed: " + hostileScript + hostileImg,
+			Tasks: []RunTaskRow{
+				{
+					ID:        "task/" + hostileScript,
+					Phase:     v1alpha1.TaskPhaseFailed,
+					PhaseChip: "bad",
+					RateStr:   "0.00",
+					Samples:   10,
+					Successes: 0,
+					Method:    hostileScript,
+					LogPath:   "gs://bucket/" + hostileImg,
+					Message:   "task message: " + hostileScript,
+				},
+			},
 		}
-	}
+
+		var buf bytes.Buffer
+		if err := tmplRunDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("template render error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous tag found in RunDetail HTML: %q", dangerous)
+			}
+		}
+
+		// Ensure escaped entities exist
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in HTML")
+		}
+		if !strings.Contains(html, "&lt;img") {
+			t.Errorf("expected escaped &lt;img in HTML")
+		}
+		if !strings.Contains(html, "&lt;iframe") {
+			t.Errorf("expected escaped &lt;iframe in HTML")
+		}
+	})
+
+	t.Run("ComparisonDetailEscaping", func(t *testing.T) {
+		view := ComparisonDetailView{
+			ActiveTab:    NavTabComparisons,
+			Name:         "hostile-comp",
+			Namespace:    "eval-runner",
+			Verdict:      v1alpha1.ComparisonVerdictRegressed,
+			VerdictChip:  "bad",
+			Headline:     "headline " + hostileScript,
+			PImprovement: "0.00",
+			SummaryPath:  "gs://bucket/" + hostileImg,
+			Message:      "status: " + hostileIframe,
+			Tasks: []ComparisonTaskRow{
+				{
+					ID:          "task/" + hostileScript,
+					BaseRate:    "0.50",
+					CandRate:    "0.20",
+					Delta:       "-0.30" + hostileScript,
+					HasCI:       true,
+					CILeftPx:    50.0,
+					CIWidthPx:   30.0,
+					CIDotPx:     60.0,
+					CILabel:     "[-0.40, -0.20]" + hostileImg,
+					StatusClass: "bad",
+					Label:       "regressed",
+					Pairs:       20,
+				},
+			},
+			BaseRun:         "base" + hostileScript,
+			BaseCommitShort: "b" + hostileScript,
+			CandRun:         "cand" + hostileScript,
+			CandCommitShort: "c" + hostileScript,
+		}
+
+		var buf bytes.Buffer
+		if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("template render error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous tag found in ComparisonDetail HTML: %q", dangerous)
+			}
+		}
+
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in HTML")
+		}
+		if !strings.Contains(html, "&lt;img") {
+			t.Errorf("expected escaped &lt;img in HTML")
+		}
+		if !strings.Contains(html, "&lt;iframe") {
+			t.Errorf("expected escaped &lt;iframe in HTML")
+		}
+	})
+
+	t.Run("ComparisonTableSubTemplateEscaping", func(t *testing.T) {
+		tasks := []ComparisonTaskRow{
+			{
+				ID:          "hostile/" + hostileScript,
+				BaseRate:    "0.60",
+				CandRate:    "0.40",
+				Delta:       "-0.20" + hostileScript,
+				HasCI:       true,
+				CILeftPx:    100.0,
+				CIWidthPx:   40.0,
+				CIDotPx:     120.0,
+				CILabel:     "[-0.30, -0.10]" + hostileImg,
+				StatusClass: "bad",
+				Label:       "regressed",
+				Pairs:       15,
+			},
+		}
+
+		var buf bytes.Buffer
+		if err := RenderComparisonTable(&buf, tasks); err != nil {
+			t.Fatalf("RenderComparisonTable error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous content in comparison table sub-template: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in sub-template HTML")
+		}
+	})
 }
