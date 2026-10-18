@@ -26,6 +26,11 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 )
 
+// ReporterOptions holds options for configuring a Reporter.
+type ReporterOptions struct {
+	UIBaseURL string
+}
+
 // Reporter handles posting Comparison results to a GitHub pull request and check run.
 type Reporter struct {
 	Client    Client
@@ -33,8 +38,11 @@ type Reporter struct {
 }
 
 // NewReporter creates a new GitHub Reporter.
-func NewReporter(client Client) *Reporter {
-	return &Reporter{Client: client}
+func NewReporter(client Client, opts ReporterOptions) *Reporter {
+	return &Reporter{
+		Client:    client,
+		UIBaseURL: opts.UIBaseURL,
+	}
 }
 
 // HashContent computes an idempotency SHA-256 hash across markdown content and check run state.

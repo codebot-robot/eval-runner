@@ -216,22 +216,12 @@ func (r *ComparisonReconciler) reportToGitHub(
 
 		// App credentials are preferred over token
 		if appID != "" && installationID != "" && len(privKey) > 0 {
-			var appAuth *github.AppTokenProvider
-			if r.GitHubClientFactory == nil {
-				var err error
-				appAuth, err = r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
-				if err != nil {
-					comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
-						Message: fmt.Sprintf("invalid app credentials: %v", err),
-					}
-					return nil
+			appAuth, err := r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
+			if err != nil {
+				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
+					Message: fmt.Sprintf("invalid app credentials: %v", err),
 				}
-			} else {
-				var err error
-				appAuth, err = r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
-				if err != nil {
-					_ = err
-				}
+				return nil
 			}
 
 			creds := GitHubCredentials{
@@ -273,8 +263,9 @@ func (r *ComparisonReconciler) reportToGitHub(
 		return nil
 	}
 
-	reporter := github.NewReporter(ghClient)
-	reporter.UIBaseURL = r.UIBaseURL
+	reporter := github.NewReporter(ghClient, github.ReporterOptions{
+		UIBaseURL: r.UIBaseURL,
+	})
 	repStatus, err := reporter.Report(ctx, comp, baseRun, candRun)
 	if repStatus != nil {
 		comp.Status.Reporting = repStatus

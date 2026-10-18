@@ -281,7 +281,7 @@ func TestReporter_LifecycleAndErrors(t *testing.T) {
 	defer server.Close()
 
 	client := server.Client("test-token")
-	reporter := NewReporter(client)
+	reporter := NewReporter(client, ReporterOptions{})
 
 	comp, baseRun, candRun := sameCommitComparisonFixture()
 
@@ -474,7 +474,7 @@ func TestReporter_CheckRun403_PartialStatus(t *testing.T) {
 	defer server.Close()
 
 	client := server.Client("pat-token")
-	reporter := NewReporter(client)
+	reporter := NewReporter(client, ReporterOptions{})
 
 	comp, baseRun, candRun := sameCommitComparisonFixture()
 
@@ -613,7 +613,7 @@ func TestAppAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create AppClient: %v", err)
 	}
-	reporter := NewReporter(appClient)
+	reporter := NewReporter(appClient, ReporterOptions{})
 	comp, baseRun, candRun := sameCommitComparisonFixture()
 
 	status, err := reporter.Report(ctx, comp, baseRun, candRun)
@@ -663,7 +663,7 @@ func TestListIssueComments_Pagination(t *testing.T) {
 	comp, baseRun, candRun := sameCommitComparisonFixture()
 	comp.Spec.PullRequest.Number = 42
 
-	reporter := NewReporter(client)
+	reporter := NewReporter(client, ReporterOptions{})
 	status, err := reporter.Report(ctx, comp, baseRun, candRun)
 	if err != nil {
 		t.Fatalf("Report failed: %v", err)
@@ -693,7 +693,7 @@ func TestReporter_AuthorCheck(t *testing.T) {
 	foreignCommentID := server.AddCommentWithAuthor("gke-labs", "eval-runner", 10, marker+"\nForeign hijack comment", "malicious-user")
 
 	client := server.Client("bot-token")
-	reporter := NewReporter(client)
+	reporter := NewReporter(client, ReporterOptions{})
 
 	// Report must NOT match malicious-user's comment and must create its own comment
 	status, err := reporter.Report(ctx, comp, baseRun, candRun)
@@ -754,8 +754,9 @@ func TestRenderComparisonMarkdown_UIBaseURL(t *testing.T) {
 	server := NewFakeGitHubServer()
 	defer server.Close()
 	client := server.Client("token")
-	reporter := NewReporter(client)
-	reporter.UIBaseURL = "https://eval.example.com"
+	reporter := NewReporter(client, ReporterOptions{
+		UIBaseURL: "https://eval.example.com",
+	})
 
 	status, err := reporter.Report(t.Context(), comp, baseRun, candRun)
 	if err != nil {
@@ -777,7 +778,7 @@ func TestReporter_CheckRunRetryableError_HashGateNotSwallowed(t *testing.T) {
 	defer server.Close()
 
 	client := server.Client("token")
-	reporter := NewReporter(client)
+	reporter := NewReporter(client, ReporterOptions{})
 
 	comp, baseRun, candRun := sameCommitComparisonFixture()
 
@@ -867,6 +868,9 @@ func TestAppAuthentication_NoSlugError(t *testing.T) {
 	_, err = provider.Identity(ctx)
 	if err == nil {
 		t.Fatalf("expected error when /app returns empty slug, got nil")
+	}
+	if !IsPermanent(err) {
+		t.Errorf("expected PermanentError when /app returns empty slug, got %T: %v", err, err)
 	}
 	if !strings.Contains(err.Error(), "did not contain an app slug") {
 		t.Errorf("expected error message mentioning 'did not contain an app slug', got: %v", err)

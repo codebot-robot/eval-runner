@@ -1721,4 +1721,68 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			t.Errorf("expected 2 access_tokens requests after secret changed, got %d", got)
 		}
 	})
+
+	t.Run("app auth identity failure surfaces in status.reporting.message", func(t *testing.T) {
+		ctx := t.Context()
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetAppSlug("") // /app returns no slug
+
+		privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("failed to generate test RSA key: %v", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+		})
+
+		appSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "github-token",
+				Namespace: "eval-runner",
+			},
+			Data: map[string][]byte{
+				"app-id":          []byte("12345"),
+				"installation-id": []byte("67890"),
+				"private-key":     pemBytes,
+			},
+		}
+
+		comp := makeComp("comp-no-slug")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, appSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubBaseURL:       server.URL(),
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-no-slug"}}
+		res, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("expected nil error for permanent identity failure, got: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("expected no requeue for permanent identity failure")
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if !strings.Contains(updated.Status.Reporting.Message, "did not contain an app slug") {
+			t.Errorf("expected reporting.message to contain 'did not contain an app slug', got: %q", updated.Status.Reporting.Message)
+		}
+	})
 }

@@ -244,7 +244,7 @@ func (a *AppTokenProvider) Identity(ctx context.Context) (string, error) {
 	now := a.nowFunc()
 	jwt, err := GenerateAppJWT(a.appID, a.privateKey, now)
 	if err != nil {
-		return "", fmt.Errorf("failed to generate app JWT: %w", err)
+		return "", &PermanentError{StatusCode: http.StatusBadRequest, Message: fmt.Sprintf("failed to generate app JWT: %v", err)}
 	}
 
 	url := fmt.Sprintf("%s/app", a.baseURL)
@@ -285,11 +285,11 @@ func (a *AppTokenProvider) Identity(ctx context.Context) (string, error) {
 
 	var appResp appInfoResponse
 	if err := json.Unmarshal(bodyBytes, &appResp); err != nil {
-		return "", fmt.Errorf("failed to parse app info response: %w", err)
+		return "", &PermanentError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("failed to parse app info response: %v", err)}
 	}
 
 	if appResp.Slug == "" {
-		return "", errors.New("github /app response did not contain an app slug")
+		return "", &PermanentError{StatusCode: http.StatusUnprocessableEntity, Message: "github /app response did not contain an app slug"}
 	}
 	a.resolvedSlug = appResp.Slug
 
