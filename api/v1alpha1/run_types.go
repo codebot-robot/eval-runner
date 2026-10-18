@@ -124,6 +124,22 @@ type TaskStatus struct {
 	// LogPath is the path or URI where the Inspect log was stored by the artifact sink.
 	// +optional
 	LogPath string `json:"logPath,omitempty"`
+
+	// SampleRange is the sample window evaluated for this task.
+	// +optional
+	SampleRange *SampleRange `json:"sampleRange,omitempty"`
+}
+
+// SampleRange specifies a 1-based, inclusive window of samples to evaluate.
+// +kubebuilder:validation:XValidation:rule="self.end >= self.start",message="end must be greater than or equal to start"
+type SampleRange struct {
+	// Start is the 1-based inclusive start index in the dataset.
+	// +kubebuilder:validation:Minimum=1
+	Start int `json:"start"`
+
+	// End is the 1-based inclusive end index in the dataset.
+	// +kubebuilder:validation:Minimum=1
+	End int `json:"end"`
 }
 
 // ConditionTypeDiscovered is the condition type reporting whether discovery succeeded.
@@ -145,6 +161,7 @@ type RepoSpec struct {
 }
 
 // RunSpec defines the desired state of Run.
+// +kubebuilder:validation:XValidation:rule="!(has(self.limit) && has(self.sampleRange))",message="limit and sampleRange are mutually exclusive"
 type RunSpec struct {
 	// Repo specifies the repository and commit to run.
 	// +kubebuilder:validation:Required
@@ -161,8 +178,15 @@ type RunSpec struct {
 	Tasks []string `json:"tasks,omitempty"`
 
 	// Limit is an optional per-task cap on samples (passed to Inspect as --limit).
+	// Mutually exclusive with SampleRange.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Limit *int `json:"limit,omitempty"`
+
+	// SampleRange is an optional 1-based inclusive window of samples to evaluate (e.g. {start: 1, end: 5}).
+	// Passed to Inspect as --limit START-END. Mutually exclusive with Limit.
+	// +optional
+	SampleRange *SampleRange `json:"sampleRange,omitempty"`
 }
 
 // ManifestResource describes a resource needed by an eval task.

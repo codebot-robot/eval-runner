@@ -73,8 +73,10 @@ spec:
             description: RunSpec defines the desired state of Run.
             properties:
               limit:
-                description: Limit is an optional per-task cap on samples (passed
-                  to Inspect as --limit).
+                description: |-
+                  Limit is an optional per-task cap on samples (passed to Inspect as --limit).
+                  Mutually exclusive with SampleRange.
+                minimum: 1
                 type: integer
               model:
                 description: |-
@@ -96,6 +98,27 @@ spec:
                 - commit
                 - url
                 type: object
+              sampleRange:
+                description: |-
+                  SampleRange is an optional 1-based inclusive window of samples to evaluate (e.g. {start: 1, end: 5}).
+                  Passed to Inspect as --limit START-END. Mutually exclusive with Limit.
+                properties:
+                  end:
+                    description: End is the 1-based inclusive end index in the dataset.
+                    minimum: 1
+                    type: integer
+                  start:
+                    description: Start is the 1-based inclusive start index in the
+                      dataset.
+                    minimum: 1
+                    type: integer
+                required:
+                - end
+                - start
+                type: object
+                x-kubernetes-validations:
+                - message: end must be greater than or equal to start
+                  rule: self.end >= self.start
               tasks:
                 description: |-
                   Tasks is an optional allow-list of task IDs to run.
@@ -106,6 +129,9 @@ spec:
             required:
             - repo
             type: object
+            x-kubernetes-validations:
+            - message: limit and sampleRange are mutually exclusive
+              rule: '!(has(self.limit) && has(self.sampleRange))'
           status:
             description: RunStatus defines the observed state of Run.
             properties:
@@ -305,6 +331,27 @@ spec:
                       - Completed
                       - Failed
                       type: string
+                    sampleRange:
+                      description: SampleRange is the sample window evaluated for
+                        this task.
+                      properties:
+                        end:
+                          description: End is the 1-based inclusive end index in the
+                            dataset.
+                          minimum: 1
+                          type: integer
+                        start:
+                          description: Start is the 1-based inclusive start index
+                            in the dataset.
+                          minimum: 1
+                          type: integer
+                      required:
+                      - end
+                      - start
+                      type: object
+                      x-kubernetes-validations:
+                      - message: end must be greater than or equal to start
+                        rule: self.end >= self.start
                     samples:
                       description: Samples is the number of samples scored.
                       type: integer
