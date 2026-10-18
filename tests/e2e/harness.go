@@ -501,6 +501,10 @@ func (h *Harness) WaitForRunPhase(namespace, runName, expectedPhase string, time
 			h.t.Fatalf("Timeout waiting for Run %s/%s to reach %s; last phase: %s, message: %s, lastErr: %v",
 				namespace, runName, expectedPhase, lastRun.Status.Phase, lastRun.Status.Message, lastErr)
 		}
+		if int(time.Since(start).Seconds()) > 0 && int(time.Since(start).Seconds())%10 == 0 {
+			h.t.Logf("Still waiting for Run %s/%s to reach %s (elapsed %v, current phase: %s, message: %s)",
+				namespace, runName, expectedPhase, time.Since(start).Round(time.Second), lastRun.Status.Phase, lastRun.Status.Message)
+		}
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -575,8 +579,16 @@ func (h *Harness) WaitForComparisonPhase(namespace, compName, expectedPhase stri
 		}
 
 		if time.Since(start) > timeout {
-			h.t.Fatalf("Timeout waiting for Comparison %s/%s to reach phase %s; last verdict: %s, phase: %s, message: %s, lastErr: %v",
-				namespace, compName, expectedPhase, lastComp.Status.Verdict, lastComp.Status.Phase, lastComp.Status.Message, lastErr)
+			logsCmd := exec.Command("kubectl", "logs", "deployment/eval-runner-controller", "-n", namespace, "--tail=100")
+			ctrlLogs, _ := logsCmd.CombinedOutput()
+			h.t.Fatalf("Timeout waiting for Comparison %s/%s to reach phase %s; last verdict: %s, phase: %s, message: %s, lastErr: %v\nController Logs:\n%s",
+				namespace, compName, expectedPhase, lastComp.Status.Verdict, lastComp.Status.Phase, lastComp.Status.Message, lastErr, string(ctrlLogs))
+		}
+		if int(time.Since(start).Seconds()) > 0 && int(time.Since(start).Seconds())%10 == 0 {
+			cmdRuns := exec.Command("kubectl", "get", "runs", "-n", namespace, "-o", "custom-columns=NAME:.metadata.name,PHASE:.status.phase,TASKS:.status.summary.tasks")
+			runsOut, _ := cmdRuns.Output()
+			h.t.Logf("Still waiting for Comparison %s/%s to reach phase %s (elapsed %v, current verdict: %s, phase: %s, message: %s, batches: %d)\nRuns:\n%s",
+				namespace, compName, expectedPhase, time.Since(start).Round(time.Second), lastComp.Status.Verdict, lastComp.Status.Phase, lastComp.Status.Message, len(lastComp.Status.Batches), string(runsOut))
 		}
 		time.Sleep(2 * time.Second)
 	}
