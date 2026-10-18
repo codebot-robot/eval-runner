@@ -275,7 +275,7 @@ All artifacts are persisted to the configured `ArtifactSink` (Google Cloud Stora
 - `runs/<commit>/manifest.json`: Discovered task manifest produced by `.evals/list`.
 - `runs/<commit>/<task>/<inspect-log>.json`: Full Inspect evaluation log containing sample outputs and trajectories.
 - `runs/<commit>/<task>/summary.json`: Task execution summary with sample window, scores, and token breakdown.
-- `comparisons/<name>.json`: Complete paired comparison table, per-task deltas, confidence intervals, and aggregate verdict.
+- `comparisons/<name>.json`: Complete paired comparison table, per-task deltas, confidence intervals, aggregate verdict, and full lists of skipped, unexecuted, and candidate-failed task IDs.
 
 ### GitHub Reporting and Check Run State Mapping
 
