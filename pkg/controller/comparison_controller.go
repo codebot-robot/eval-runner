@@ -16,11 +16,13 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -78,17 +80,31 @@ type ComparisonArtifact struct {
 	CreatedAt    time.Time                `json:"createdAt"`
 }
 
+// GitHubCredentials holds credentials extracted from a Secret for factory injection.
+type GitHubCredentials struct {
+	Token          string
+	AppID          string
+	InstallationID string
+	PrivateKey     []byte
+	AppSlug        string
+	AppAuth        *github.AppTokenProvider
+}
+
 // ComparisonReconciler reconciles a Comparison object.
 type ComparisonReconciler struct {
 	client.Client
-	Scheme                 *runtime.Scheme
-	ArtifactSink           artifacts.ArtifactSink
-	ControllerNamespace    string
-	GitHubTokenSecret      string
-	GitHubAppSecret        string
-	UIBaseURL              string
-	GitHubClientFactory    func(token string) github.Client
-	GitHubAppClientFactory func(appID, instID string, privKey []byte) github.Client
+	Scheme              *runtime.Scheme
+	ArtifactSink        artifacts.ArtifactSink
+	ControllerNamespace string
+	GitHubTokenSecret   string
+	GitHubAppSecret     string
+	UIBaseURL           string
+	GitHubBaseURL       string
+	GitHubClientFactory func(creds GitHubCredentials) github.Client
+
+	cachedAppMu   sync.Mutex
+	cachedAppKey  string
+	cachedAppAuth *github.AppTokenProvider
 }
 
 func (r *ComparisonReconciler) artifactSink() artifacts.ArtifactSink {
@@ -107,6 +123,36 @@ func (r *ComparisonReconciler) controllerNamespace() string {
 
 func (r *ComparisonReconciler) gitHubTokenSecret() string {
 	return r.GitHubTokenSecret
+}
+
+func (r *ComparisonReconciler) getOrCreateAppAuth(secret *corev1.Secret, appID, installationID, appSlug string, privKey []byte) (*github.AppTokenProvider, error) {
+	cacheKey := fmt.Sprintf("%s/%s:%s", secret.Namespace, secret.Name, secret.ResourceVersion)
+	if secret.ResourceVersion == "" {
+		h := sha256.Sum256(append([]byte(appID+":"+installationID+":"), privKey...))
+		cacheKey = fmt.Sprintf("%s/%s:%x", secret.Namespace, secret.Name, h)
+	}
+
+	r.cachedAppMu.Lock()
+	defer r.cachedAppMu.Unlock()
+
+	if r.cachedAppKey == cacheKey && r.cachedAppAuth != nil {
+		return r.cachedAppAuth, nil
+	}
+
+	appAuth, err := github.NewAppTokenProvider(github.AppConfig{
+		AppID:          appID,
+		InstallationID: installationID,
+		PrivateKeyPEM:  privKey,
+		AppSlug:        appSlug,
+		BaseURL:        r.GitHubBaseURL,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	r.cachedAppKey = cacheKey
+	r.cachedAppAuth = appAuth
+	return appAuth, nil
 }
 
 func (r *ComparisonReconciler) reportToGitHub(
@@ -170,33 +216,51 @@ func (r *ComparisonReconciler) reportToGitHub(
 
 		// App credentials are preferred over token
 		if appID != "" && installationID != "" && len(privKey) > 0 {
-			if r.GitHubAppClientFactory != nil {
-				ghClient = r.GitHubAppClientFactory(appID, installationID, privKey)
-				break
+			var appAuth *github.AppTokenProvider
+			if r.GitHubClientFactory == nil {
+				var err error
+				appAuth, err = r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
+				if err != nil {
+					comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
+						Message: fmt.Sprintf("invalid app credentials: %v", err),
+					}
+					return nil
+				}
+			} else {
+				var err error
+				appAuth, err = r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
+				if err != nil {
+					_ = err
+				}
 			}
-			if r.GitHubClientFactory != nil {
-				ghClient = r.GitHubClientFactory(token)
-				break
-			}
-			appAuth, err := github.NewAppTokenProvider(github.AppConfig{
+
+			creds := GitHubCredentials{
 				AppID:          appID,
 				InstallationID: installationID,
-				PrivateKeyPEM:  privKey,
+				PrivateKey:     privKey,
 				AppSlug:        appSlug,
-			})
-			if err != nil {
-				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
-					Message: fmt.Sprintf("invalid app credentials: %v", err),
-				}
-				return nil
+				AppAuth:        appAuth,
 			}
-			ghClient = github.NewHTTPClient(github.HTTPClientConfig{AppAuth: appAuth})
+			if r.GitHubClientFactory != nil {
+				ghClient = r.GitHubClientFactory(creds)
+			} else {
+				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
+					AppAuth: appAuth,
+					BaseURL: r.GitHubBaseURL,
+				})
+			}
 			break
 		} else if token != "" {
+			creds := GitHubCredentials{
+				Token: token,
+			}
 			if r.GitHubClientFactory != nil {
-				ghClient = r.GitHubClientFactory(token)
+				ghClient = r.GitHubClientFactory(creds)
 			} else {
-				ghClient = github.NewHTTPClient(github.HTTPClientConfig{Token: token})
+				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
+					Token:   token,
+					BaseURL: r.GitHubBaseURL,
+				})
 			}
 			break
 		}
