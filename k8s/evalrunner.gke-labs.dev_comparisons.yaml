@@ -100,6 +100,12 @@ spec:
                 maximum: 0.5
                 minimum: 0
                 type: number
+              extraSamples:
+                description: ExtraSamples requests evaluating N additional samples
+                  per undecided task (or per all tasks if all are decided) beyond
+                  the stopping rule.
+                minimum: 0
+                type: integer
               pullRequest:
                 description: PullRequest references an optional GitHub pull request
                   to report results to.
@@ -209,6 +215,10 @@ spec:
                   - index
                   type: object
                 type: array
+              extraSamplesApplied:
+                description: ExtraSamplesApplied records the number of extra samples
+                  that have been consumed into extension batches.
+                type: integer
               message:
                 description: Message is human-readable detail on failure or current
                   status.
@@ -359,10 +369,31 @@ spec:
                       description: SamplesRun is the total number of samples evaluated
                         for this task across all batches.
                       type: integer
+                    suggestedNext:
+                      description: SuggestedNext is the suggested number of additional
+                        samples to run if undecided.
+                      type: integer
                     ties:
                       description: Ties is the number of paired samples where candidate
                         and baseline scored equally.
                       type: integer
+                    tokens:
+                      description: Tokens is the token usage breakdown consumed for
+                        this task across evaluated runs, when present in Inspect logs.
+                      properties:
+                        input:
+                          description: Input is the number of input/prompt tokens
+                            consumed.
+                          type: integer
+                        output:
+                          description: Output is the number of output/completion tokens
+                            consumed.
+                          type: integer
+                        total:
+                          description: Total is the total number of tokens consumed
+                            (input + output).
+                          type: integer
+                      type: object
                     wins:
                       description: Wins is the number of paired samples where the
                         candidate scored higher than baseline.
