@@ -158,6 +158,49 @@ $$N_{\text{total}} \approx n_{\text{current}} \cdot \left(\frac{W_{\text{current
 
 This powers the UI action: `▶ run 32 more samples (~$1.40)`.
 
+### 3.1 Adaptive Paired Batch Loop and Controller Architecture
+
+The Comparison controller implements adaptive paired sampling across a sequence of discrete, immutable Run pairs:
+
+1. **Configuration**:
+   - `Comparison.spec.sampling`:
+     - `initialBatch` (default: 8): sample count evaluated in batch 1.
+     - `batchSize` (default: 8): sample count evaluated in each extension batch.
+     - `maxSamplesPerTask` (default: 96): maximum sample count evaluated per task across all batches.
+   - `Comparison.spec.extraSamples` (int, default: 0): requests evaluating $N$ additional samples per task past the stopping rule.
+
+2. **Batch 1 Initialization**:
+   - Batch 1 corresponds to the seed runs referenced in `spec.candidate.run` and `spec.baseline.run`.
+   - The sample range for batch 1 is derived from `EffectiveSampleRange(spec)`, `status.tasks[].sampleRange`, or defaults to `[1, initialBatch]`.
+
+3. **Reconciliation Loop**:
+   - When all batch Runs reach a terminal phase (`Completed` or `Failed`), the controller loads Inspect JSON logs from the artifact sink across all completed batches where each task was evaluated.
+   - Per-sample scores are extracted and combined across batches. For each task, candidate and baseline scores are paired by sample ID and evaluated via `stats.ComparePaired` and `stats.Decide`.
+   - Token usage from Inspect logs (`stats.model_usage` or sample-level `model_usage`) is accumulated per task and recorded in `status.tasks[].tokens` and `summary.json`.
+   - If any task evaluates to `continue`:
+     - If the dataset is exhausted (detected when a completed batch task returns fewer scored samples than the window size, or fails with "no scored samples"), the task stops and transitions to `inconclusive` (`reason: "dataset exhausted"`).
+     - Otherwise, if `samplesRun < maxSamplesPerTask`, the task continues into the next batch.
+
+4. **Batch Scheduling & Task Restriction**:
+   - The controller creates a new paired batch $k$ windowed to `[lastEnd + 1, lastEnd + batchSize]` (clamped to `maxSamplesPerTask`).
+   - Cloned candidate and baseline Runs are named `<comparison>-b<k>-cand` and `<comparison>-b<k>-base`.
+   - `spec.tasks` is restricted strictly to tasks that are still `continue`. Tasks that have already been decided are omitted, saving execution budget and time.
+   - Cloned Runs are owner-referenced to the Comparison for automatic garbage collection on deletion.
+
+5. **Baseline Batch Reuse & Invalidation**:
+   - Before creating `<comparison>-b<k>-base`, the controller computes a deterministic batch key:
+     $$\text{hash} = \text{SHA256}(\text{repoURL} + \text{commit} + \text{model} + \text{sortedTasks} + \text{sampleRange})$$
+   - It searches for an existing `Completed` Run in the namespace labeled with `evalrunner.gke-labs.dev/batch-key=<hash>`.
+   - If found, the existing Run is referenced directly in `status.batches[].baselineRun`, eliminating redundant baseline computation.
+   - **Cache Invalidation**: Because the key incorporates the base commit SHA, when the merge target branch advances, the key changes automatically, invalidating the previous cache and evaluating the new commit.
+
+6. **Extra Samples Beyond Stopping Rule**:
+   - When all tasks have reached a decision (`improved`, `regressed`, `unchanged`, or `inconclusive`), the controller checks if `spec.extraSamples > status.extraSamplesApplied`.
+   - If requested, an additional batch is scheduled for non-exhausted tasks, and `status.extraSamplesApplied` is updated to consume the request once.
+
+7. **PR Comment Actions**:
+   - For inconclusive tasks where `suggestedNext > 0`, the PR comment displays action text: `run N more samples`.
+
 ---
 
 ## 4. Run-Level Verdict & Decisions for [Open] Items

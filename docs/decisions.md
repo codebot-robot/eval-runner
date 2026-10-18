@@ -234,6 +234,35 @@ Future pull requests that introduce an architectural decision should append an e
   - **Baseline Reuse at Batch Granularity**: Baseline runs evaluated on window `1-8` or `9-16` can be reused by multiple candidate runs or PRs without re-evaluation.
   - **No Sandbox Re-attachment**: Sandboxes are cleanly provisioned and deleted per Run lifecycle, eliminating persistent pod leakage and complicated re-attachment protocols.
 
+### ADR-026: Adaptive Paired Batch Sampling, Stopping Rule Loop, ExtraSamples, and Baseline Batch Reuse
+- **Date**: 2026-10-18
+- **Status**: Accepted
+- **Decision**:
+  1. **Sampling Configuration in ComparisonSpec**: Add `spec.sampling {initialBatch, batchSize, maxSamplesPerTask}` (defaults 8, 8, 96) and `spec.extraSamples` (int, default 0) to `ComparisonSpec`.
+  2. **Batch Tracking in ComparisonStatus**: Add `status.batches[] {index, sampleRange, candidateRun, baselineRun, phase}` and `status.extraSamplesApplied`. Record `samplesRun`, `decision`, `suggestedNext`, and `tokens` in `status.tasks[]`.
+  3. **Batch Lifecycle & Cloning Loop**:
+     - Batch 1 is initialized from `spec.candidate.run` and `spec.baseline.run`.
+     - When all batch Runs reach a terminal phase (`Completed` or `Failed`), the controller loads per-sample scores from every batch where each task was evaluated, pairs samples by ID, and evaluates `stats.ComparePaired` and `stats.Decide`.
+     - Tasks that evaluate to `continue` (and have not exhausted the dataset or hit `maxSamplesPerTask`) are scheduled into the next paired batch. Cloned Runs are created with `spec.tasks` restricted strictly to tasks still continuing, windowed to the next contiguous sample range `[lastEnd + 1, lastEnd + batchSize]`, and owner-referenced to the Comparison as `<comparison>-b<k>-cand` and `<comparison>-b<k>-base`.
+  4. **Dataset Exhaustion Handling**:
+     - Exhaustion is detected when a completed task returns fewer sample scores than the requested window size (`len(scores) < end - start + 1`) or when a batch task fails with zero samples / `no scored samples`.
+     - When exhausted, a task that would otherwise `continue` is capped as `inconclusive` (`reason: "dataset exhausted"`), preventing subsequent batches from attempting out-of-bounds evaluations.
+  5. **ExtraSamples Past Stopping Rule**:
+     - `spec.extraSamples` allows users to request $N$ additional samples per undecided task beyond the stopping rule.
+     - When all tasks have reached a decision, if `spec.extraSamples > status.extraSamplesApplied`, an extra batch is scheduled for non-exhausted tasks, and `status.extraSamplesApplied` is updated to consume the request once.
+  6. **Baseline Batch Reuse via Deterministic Batch Keys**:
+     - Before creating a baseline batch Run, the controller computes a deterministic SHA-256 hash of the repo URL, base commit, model, sorted active task set, and sample range.
+     - Baseline clone Runs are labeled with `evalrunner.gke-labs.dev/batch-key=<hash>`.
+     - The controller queries completed Runs in the namespace matching the key; if found, it references the existing Run instead of creating a redundant clone.
+     - Invalidation is automatic: when the base commit changes, the hash key changes, preventing stale baseline reuse.
+  7. **Per-Task Cost Accounting & PR Actions**:
+     - Record `samplesRun` (and `samples`) per task in status and `summary.json`.
+     - When Inspect logs include model usage (`stats.model_usage` or sample `model_usage`), total token counts are extracted and recorded in `status.tasks[].tokens` and `summary.json`.
+     - For inconclusive tasks with `suggestedNext > 0`, the PR comment displays action text `run N more samples`.
+- **Rationale**:
+  Implements concept §4.2 and §4.5 ("bound the confidence interval, not the budget"). Early stopping on clear improvements, clear regressions, or equivalence within ±margin saves substantial LLM inference costs and turnaround latency. Disjoint immutable batch runs maintain declarative safety and enable fine-grained baseline caching. Restricting batch clones to continuing tasks ensures compute is spent only on undecided tasks.
+
+
 
 
 

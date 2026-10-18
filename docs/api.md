@@ -278,6 +278,12 @@ spec:
 | `candidate` | `ComparisonRunRef` | **Required.** Reference to the candidate (e.g. PR) `Run` resource in the same namespace (`spec.candidate.run`). |
 | `equivalenceMargin` | `*float64` | Statistical equivalence margin $\delta$ (default: `0.05` for $\pm 0.05$). |
 | `tasks` | `[]string` | Optional allow-list of task IDs to evaluate. When omitted, all tasks present in both runs are compared. |
+| `pullRequest` | `*PullRequestSpec` | Optional GitHub PR configuration for automated comment and check run reporting. |
+| `sampling` | `*SamplingSpec` | Adaptive paired sampling parameters (`initialBatch`, `batchSize`, `maxSamplesPerTask`). |
+| `sampling.initialBatch` | `*int` | Number of samples evaluated in batch 1 (default: `8`, minimum: `1`). |
+| `sampling.batchSize` | `*int` | Number of samples evaluated in each subsequent batch (default: `8`, minimum: `1`). |
+| `sampling.maxSamplesPerTask` | `*int` | Maximum samples evaluated per task across all batches (default: `96`, minimum: `1`). |
+| `extraSamples` | `int` | Requests evaluating $N$ additional samples per undecided task beyond the stopping rule (default: `0`). |
 
 ## Status (`status`)
 
@@ -286,6 +292,13 @@ spec:
 | `phase` | `ComparisonPhase` | High-level comparison lifecycle phase: `Running`, `Completed`. |
 | `verdict` | `ComparisonVerdict` | Aggregate run-level verdict: `IMPROVED`, `REGRESSED`, `UNCHANGED`, `INCONCLUSIVE`, `RUNNING`. |
 | `pImprovement` | `*float64` | Posterior probability that the candidate is a net improvement across evaluated tasks (range `[0, 1]`). |
+| `batches` | `[]ComparisonBatchStatus` | Sequence of evaluated paired batches (`index`, `sampleRange`, `candidateRun`, `baselineRun`, `phase`). |
+| `batches[].index` | `int` | 1-based index of this batch (1, 2, ...). |
+| `batches[].sampleRange` | `SampleRange` | Contiguous sample window evaluated in this batch (`start`, `end`). |
+| `batches[].candidateRun` | `string` | Name of candidate `Run` resource for this batch. |
+| `batches[].baselineRun` | `string` | Name of baseline `Run` resource for this batch (may reference a reused completed run). |
+| `batches[].phase` | `ComparisonBatchPhase` | Lifecycle phase of this batch: `Running`, `Completed`, `Failed`. |
+| `extraSamplesApplied` | `int` | Number of extra samples that have been consumed into extension batches. |
 | `tasks` | `[]ComparisonTaskStatus` | Per-task paired comparison statistics and labels. |
 | `tasks[].id` | `string` | Unique task identifier (e.g. `triage/runbook_lookup`). |
 | `tasks[].baseRate` | `*float64` | Mean score or success rate on baseline samples. |
@@ -298,6 +311,10 @@ spec:
 | `tasks[].ties` | `int` | Number of pairs where candidate and baseline scored equally. |
 | `tasks[].dropped` | `ComparisonDropped` | Samples dropped without matches (`candidate`, `baseline`). |
 | `tasks[].label` | `ComparisonTaskLabel` | Decision outcome: `improved`, `regressed`, `unchanged`, `inconclusive`, `running`. |
+| `tasks[].samplesRun` | `int` | Cumulative samples evaluated for this task across batches. |
+| `tasks[].decision` | `string` | Stopping rule decision string (`improved`, `regressed`, `unchanged`, `inconclusive`, `continue`). |
+| `tasks[].suggestedNext` | `int` | Suggested next sample count if undecided. |
+| `tasks[].tokens` | `*int` | Total tokens consumed across evaluated task runs when present in Inspect logs. |
 | `summaryPath` | `string` | Storage path or URI where the complete paired table was stored (`comparisons/<name>.json`). |
 | `message` | `string` | Human-readable explanation of the aggregate verdict or failure. |
 

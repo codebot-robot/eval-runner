@@ -580,13 +580,19 @@ func (h *Harness) WaitForComparisonPhase(namespace, compName, expectedPhase stri
 
 		if time.Since(start) > timeout {
 			logsCmd := exec.Command("kubectl", "logs", "deployment/eval-runner-controller", "-n", namespace, "--tail=100")
-			ctrlLogs, _ := logsCmd.CombinedOutput()
+			ctrlLogs, errLogs := logsCmd.CombinedOutput()
+			if errLogs != nil {
+				ctrlLogs = []byte(fmt.Sprintf("failed getting controller logs: %v", errLogs))
+			}
 			h.t.Fatalf("Timeout waiting for Comparison %s/%s to reach phase %s; last verdict: %s, phase: %s, message: %s, lastErr: %v\nController Logs:\n%s",
 				namespace, compName, expectedPhase, lastComp.Status.Verdict, lastComp.Status.Phase, lastComp.Status.Message, lastErr, string(ctrlLogs))
 		}
 		if int(time.Since(start).Seconds()) > 0 && int(time.Since(start).Seconds())%10 == 0 {
 			cmdRuns := exec.Command("kubectl", "get", "runs", "-n", namespace, "-o", "custom-columns=NAME:.metadata.name,PHASE:.status.phase,TASKS:.status.summary.tasks")
-			runsOut, _ := cmdRuns.Output()
+			runsOut, errRuns := cmdRuns.Output()
+			if errRuns != nil {
+				runsOut = []byte(fmt.Sprintf("failed listing runs: %v", errRuns))
+			}
 			h.t.Logf("Still waiting for Comparison %s/%s to reach phase %s (elapsed %v, current verdict: %s, phase: %s, message: %s, batches: %d)\nRuns:\n%s",
 				namespace, compName, expectedPhase, time.Since(start).Round(time.Second), lastComp.Status.Verdict, lastComp.Status.Phase, lastComp.Status.Message, len(lastComp.Status.Batches), string(runsOut))
 		}
