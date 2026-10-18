@@ -187,6 +187,25 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Kubernetes custom resources (CRDs) in etcd are designed for declarative state, progress reporting, and synchronization pointers, not durable, unbounded storage of data records. A repository with hundreds of evaluation tasks serializes tens or hundreds of kilobytes into `Run.status.manifest`, inflating etcd storage, increasing apiserver watch bandwidth, and risking etcd's 1.5 MiB request limit. Moving the full manifest to the object store (`runs/<commit>/manifest.json`) bounds CRD status size while treating the artifact store as the authoritative source of records. Writing discovery output to `/workspace/out/manifest.json` decouples discovery execution from stdout buffer limits. In-memory caching avoids repetitive object-store reads, while hash verification prevents cache poisoning or silent drift. Robust error classification and deadline clearing ensure restarts—even after the original discovery deadline—seamlessly re-discover without failing Runs or deleting task sandboxes on temporary network blips.
 
+### ADR-023: GitHub Webhook Integration for Automated PR Evaluation and Baseline Reuse
+- **Date**: 2026-10-18
+- **Status**: Accepted
+- **Decision**:
+  1. **Dedicated Webhook Component**: Implement a standalone binary `cmd/eval-runner-webhook` packaged as a minimal distroless image (`eval-runner-webhook`) and deployed in namespace `eval-runner` with a ClusterIP Service on port 80 (targetPort 8080).
+  2. **Signature Verification & Zero-Trust Boundary**: Validate the `X-Hub-Signature-256` HMAC-SHA256 signature on every incoming request against a secret stored in Secret `eval-runner/github-webhook` (key `secret`, configurable via `githubWebhookSecret`). Reject missing, malformed, or invalid signatures immediately with HTTP 401. The webhook holds exclusively the webhook HMAC secret, preserving strict zero-trust separation: it has no access to GitHub personal access tokens, model credentials, or cloud storage buckets.
+  3. **Asynchronous Bounded Execution**: Fast acknowledgment to GitHub is mandatory (<10s). The HTTP handler verifies signatures, filters by repository allow-list (`webhookRepositories` in ConfigMap) and action, enqueues actionable events into a bounded in-memory worker queue, and immediately returns HTTP 200 OK. Background worker goroutines perform Kubernetes API operations.
+  4. **Deterministic Naming & Idempotency**:
+     - Candidate Run: `pr-<number>-<headSHA7>` with PR head commit and `defaultModel`/`defaultLimit` from cluster configuration.
+     - Baseline Run: `base-<baseSHA7>` with merge target commit.
+     - Comparison: `pr-<number>` linking candidate and baseline runs with `spec.pullRequest` configured.
+     - Redelivered webhook events are idempotent: resources are queried before creation and updated cleanly without generating duplicate runs.
+  5. **Baseline Cache Reuse (Concept §4.1)**: When handling a `pull_request` event, before creating a new baseline run, the worker checks if any Run in the namespace targeting the base commit and model has already reached `Completed` phase. If found, the existing Run is reused as the comparison baseline, avoiding redundant evaluations on shared base commits.
+  6. **Handling `synchronize` Events**: When new commits are pushed to a PR, the candidate Run `pr-<number>-<newHead7>` is created and the existing Comparison `pr-<number>` is updated to point its `spec.candidate.run` and `spec.pullRequest.headSHA` to the new candidate run, triggering re-evaluation and reporting.
+  7. **Warming Baseline on Default-Branch Push**: On `push` events to the default branch, `base-<sha7>` is created to pre-warm the baseline cache before PRs are opened.
+  8. **Labels**: Created resources are labeled with `evalrunner.gke-labs.dev/pr`, `evalrunner.gke-labs.dev/repo` (sanitized for label value syntax), and `evalrunner.gke-labs.dev/head-sha`.
+- **Rationale**:
+  Closes the automated evaluation loop described in concept §5.1, transitioning eval-runner from manual CR creation to fully automated PR-driven execution. Running the webhook in its own container with least-privilege RBAC isolates public HTTP exposure from the controller core and enforces defense-in-depth: compromising the webhook reveals only the webhook HMAC secret, not repository tokens or model keys. Bounded asynchronous workers prevent request timeouts and shield the Kubernetes apiserver from webhook bursts. Baseline cache reuse significantly optimizes compute budget and turnaround time by running merge target evaluations only once per base commit.
+
 
 
 

@@ -178,3 +178,61 @@ subjects:
 - kind: ServiceAccount
   name: eval-runner-ui
   namespace: eval-runner
+---
+# Least-privilege RBAC for eval-runner-webhook.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eval-runner-webhook
+  namespace: eval-runner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: eval-runner-webhook
+  namespace: eval-runner
+rules:
+- apiGroups:
+  - evalrunner.gke-labs.dev
+  resources:
+  - runs
+  - comparisons
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  resourceNames:
+  - github-webhook
+  - github-token
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  resourceNames:
+  - eval-runner-config
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: eval-runner-webhook
+  namespace: eval-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: eval-runner-webhook
+subjects:
+- kind: ServiceAccount
+  name: eval-runner-webhook
+  namespace: eval-runner
+

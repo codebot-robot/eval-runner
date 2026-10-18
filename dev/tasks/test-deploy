@@ -127,6 +127,7 @@ VALID_DRY_RUN="deploy-eval-runner
   port-forward-build-images
     build-images
       docker-build-eval-runner-ui
+      docker-build-eval-runner-webhook
       docker-build-eval-runner
       docker-build-git-server
       docker-build-sample-runner
@@ -137,7 +138,8 @@ VALID_DRY_RUN="deploy-eval-runner
     kubectl-apply-rbac.yaml
     kubectl-apply-runner-deployment.yaml
     kubectl-apply-sandbox-networkpolicy.yaml
-    kubectl-apply-ui-deployment.yaml"
+    kubectl-apply-ui-deployment.yaml
+    kubectl-apply-webhook-deployment.yaml"
 
 if ! verify_deploy_manifests_output "${VALID_DRY_RUN}"; then
   echo "FAIL: Expected valid dry-run output to pass verification." >&2
