@@ -44,17 +44,8 @@ rules:
   - ""
   resources:
   - secrets
-  resourceNames:
-  - sandbox-ca
-  - github-token
-  - github-webhook
   verbs:
   - get
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
   - create
   - delete
 - apiGroups:
