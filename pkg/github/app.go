@@ -288,11 +288,10 @@ func (a *AppTokenProvider) Identity(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to parse app info response: %w", err)
 	}
 
-	if appResp.Slug != "" {
-		a.resolvedSlug = appResp.Slug
-	} else {
-		a.resolvedSlug = a.appID
+	if appResp.Slug == "" {
+		return "", errors.New("github /app response did not contain an app slug")
 	}
+	a.resolvedSlug = appResp.Slug
 
 	return a.resolvedSlug + "[bot]", nil
 }

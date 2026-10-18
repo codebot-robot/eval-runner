@@ -294,7 +294,15 @@ func (c *HTTPClient) ListIssueComments(ctx context.Context, owner, repo string, 
 			return nil, err
 		}
 		allComments = append(allComments, pageComments...)
-		path = parseNextLink(headers.Get("Link"))
+		next := parseNextLink(headers.Get("Link"))
+		if next != "" {
+			if strings.HasPrefix(next, "http://") || strings.HasPrefix(next, "https://") {
+				if !strings.HasPrefix(next, c.baseURL) {
+					return nil, fmt.Errorf("refusing to follow link header outside base URL %q: %s", c.baseURL, next)
+				}
+			}
+		}
+		path = next
 	}
 	return allComments, nil
 }

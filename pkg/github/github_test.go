@@ -139,7 +139,7 @@ func sameCommitComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alph
 
 func TestRenderComparisonMarkdown_Golden(t *testing.T) {
 	comp, baseRun, candRun := sameCommitComparisonFixture()
-	got := RenderComparisonMarkdown(comp, baseRun, candRun)
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
 
 	goldenPath := "testdata/same_commit_comparison.golden.md"
 	wantBytes, err := os.ReadFile(goldenPath)
@@ -427,7 +427,7 @@ func TestRenderComparisonMarkdown_HostileID(t *testing.T) {
 		},
 	}
 
-	got := RenderComparisonMarkdown(comp, nil, nil)
+	got := RenderComparisonMarkdown(comp, nil, nil, "")
 
 	// 1. Genuine marker for this comparison must be present
 	if !HasComparisonMarker(got, "eval-runner", "my-comp") {
@@ -728,7 +728,7 @@ func TestRenderComparisonMarkdown_UIBaseURL(t *testing.T) {
 	comp, baseRun, candRun := sameCommitComparisonFixture()
 
 	// 1. Without uiBaseURL: link is rendered as code text
-	gotDefault := RenderComparisonMarkdown(comp, baseRun, candRun)
+	gotDefault := RenderComparisonMarkdown(comp, baseRun, candRun, "")
 	if !strings.Contains(gotDefault, "`/comparisons/eval-runner/docs-eval-same-commit`") {
 		t.Errorf("expected code-text path when uiBaseURL is empty, got:\n%s", gotDefault)
 	}
@@ -834,6 +834,62 @@ func TestReporter_CheckRunRetryableError_HashGateNotSwallowed(t *testing.T) {
 	}
 	if len(server.RequestLog()) != reqCountBefore {
 		t.Errorf("expected 0 new requests on idempotent call, got %d", len(server.RequestLog())-reqCountBefore)
+	}
+}
+
+func TestAppAuthentication_NoSlugError(t *testing.T) {
+	ctx := t.Context()
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate test RSA key: %v", err)
+	}
+
+	pkcs1PEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+	})
+
+	server := NewFakeGitHubServer()
+	defer server.Close()
+	server.SetAppSlug("") // empty slug
+
+	provider, err := NewAppTokenProvider(AppConfig{
+		AppID:          "123456",
+		InstallationID: "987654",
+		PrivateKeyPEM:  pkcs1PEM,
+		BaseURL:        server.URL(),
+		HTTPClient:     server.server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create AppTokenProvider: %v", err)
+	}
+
+	_, err = provider.Identity(ctx)
+	if err == nil {
+		t.Fatalf("expected error when /app returns empty slug, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not contain an app slug") {
+		t.Errorf("expected error message mentioning 'did not contain an app slug', got: %v", err)
+	}
+}
+
+func TestListIssueComments_RejectsExternalLink(t *testing.T) {
+	ctx := t.Context()
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	// Inject external Link header pointing outside server.URL
+	server.InjectPathError("GET", "/repos/gke-labs/eval-runner/issues/1/comments", http.StatusOK, `[]`, map[string]string{
+		"Link": `<https://evil.example.com/comments?page=2>; rel="next"`,
+	})
+
+	client := server.Client("test-token")
+	_, err := client.ListIssueComments(ctx, "gke-labs", "eval-runner", 1)
+	if err == nil {
+		t.Fatalf("expected error following external link, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to follow link header outside base URL") {
+		t.Errorf("expected error message to mention 'refusing to follow link header outside base URL', got: %v", err)
 	}
 }
 
