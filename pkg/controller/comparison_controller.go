@@ -828,9 +828,35 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	// If any batch Run is not terminal, the Comparison is RUNNING and re-evaluates on Run updates
 	if !allBatchesTerminal {
 		taskIDs := determineRunningTaskIDs(&comp, &baselineRun, &candidateRun)
+		runningTasks := make(map[string]bool)
+		var runningBatchIndex int
+		for i, b := range batches {
+			if b.Phase == v1alpha1.ComparisonPhaseRunning {
+				runningBatchIndex = b.Index
+				bCand := batchRuns[i].candRun
+				if bCand != nil && len(bCand.Spec.Tasks) > 0 {
+					for _, t := range bCand.Spec.Tasks {
+						runningTasks[t] = true
+					}
+				} else {
+					for _, id := range taskIDs {
+						runningTasks[id] = true
+					}
+				}
+			}
+		}
+
 		var tasks []v1alpha1.ComparisonTaskStatus
 		if len(comp.Status.Tasks) > 0 {
-			tasks = comp.Status.Tasks
+			tasks = make([]v1alpha1.ComparisonTaskStatus, len(comp.Status.Tasks))
+			copy(tasks, comp.Status.Tasks)
+			for i := range tasks {
+				if runningTasks[tasks[i].ID] {
+					tasks[i].Label = v1alpha1.ComparisonTaskLabelRunning
+				} else if tasks[i].Decision != "" && tasks[i].Decision != v1alpha1.ComparisonTaskLabelContinue {
+					tasks[i].Label = tasks[i].Decision
+				}
+			}
 		} else {
 			for _, id := range taskIDs {
 				tasks = append(tasks, v1alpha1.ComparisonTaskStatus{
@@ -840,14 +866,28 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				})
 			}
 		}
+
+		completedTasks := 0
+		for _, t := range tasks {
+			if t.Label != v1alpha1.ComparisonTaskLabelRunning {
+				completedTasks++
+			}
+		}
+
 		msg := "Runs are still executing"
+		if comp.Status.Message != "" && (strings.HasPrefix(comp.Status.Message, "Running batch") || strings.HasPrefix(comp.Status.Message, "Running extra batch")) {
+			msg = comp.Status.Message
+		} else if len(batches) > 1 && runningBatchIndex > 0 {
+			msg = fmt.Sprintf("Running batch %d (%d tasks continuing)", runningBatchIndex, len(runningTasks))
+		}
+
 		return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 			status.Phase = v1alpha1.ComparisonPhaseRunning
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
 			status.Batches = batches
 			status.Tasks = tasks
 			status.Summary = &v1alpha1.ComparisonSummary{
-				Tasks: fmt.Sprintf("0/%d", len(taskIDs)),
+				Tasks: fmt.Sprintf("%d/%d", completedTasks, len(tasks)),
 			}
 			status.Message = msg
 		})
