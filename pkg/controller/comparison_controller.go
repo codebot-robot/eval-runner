@@ -384,11 +384,11 @@ func getRunPlannedTaskIDs(run *v1alpha1.Run) map[string]bool {
 	return nil
 }
 
-// determineCompletedTaskIDs returns only tasks executed by both Runs with phase Completed,
-// filtered by comp.Spec.Tasks if specified. It also returns unexecuted tasks: any task
-// specified in comp.Spec.Tasks or attempted by either Run that was not Completed by both,
-// so they can be surfaced in status.message.
-func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) (taskIDs []string, unexecuted []string) {
+// determineCompletedTaskIDs returns:
+// - taskIDs: only tasks executed by both Runs with phase Completed, filtered by comp.Spec.Tasks if specified.
+// - unexecuted: tasks in scope that were not executed by both runs.
+// - candFailed: tasks that completed in baselineRun but failed in candRun.
+func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) (taskIDs []string, unexecuted []string, candFailed []string) {
 	candCompleted := make(map[string]bool)
 	for i := range candRun.Status.Tasks {
 		if candRun.Status.Tasks[i].Phase == v1alpha1.TaskPhaseCompleted {
@@ -403,37 +403,94 @@ func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1al
 		}
 	}
 
+	var scopeTasks []string
 	if len(comp.Spec.Tasks) > 0 {
-		for _, id := range comp.Spec.Tasks {
-			if candCompleted[id] && baseCompleted[id] {
-				taskIDs = append(taskIDs, id)
-			} else {
-				unexecuted = append(unexecuted, id)
-			}
+		scopeTasks = comp.Spec.Tasks
+	} else {
+		scopeSet := make(map[string]bool)
+		for _, t := range candRun.Status.Tasks {
+			scopeSet[t.ID] = true
 		}
-		return taskIDs, unexecuted
+		for _, t := range baseRun.Status.Tasks {
+			scopeSet[t.ID] = true
+		}
+		for _, id := range candRun.Spec.Tasks {
+			scopeSet[id] = true
+		}
+		for _, id := range baseRun.Spec.Tasks {
+			scopeSet[id] = true
+		}
+		for id := range scopeSet {
+			scopeTasks = append(scopeTasks, id)
+		}
+		sort.Strings(scopeTasks)
 	}
 
-	for id := range candCompleted {
-		if baseCompleted[id] {
+	for _, id := range scopeTasks {
+		if candCompleted[id] && baseCompleted[id] {
 			taskIDs = append(taskIDs, id)
-		}
-	}
-
-	seen := map[string]bool{}
-	for _, run := range []*v1alpha1.Run{candRun, baseRun} {
-		for i := range run.Status.Tasks {
-			id := run.Status.Tasks[i].ID
-			if !seen[id] && !(candCompleted[id] && baseCompleted[id]) {
-				seen[id] = true
-				unexecuted = append(unexecuted, id)
+		} else {
+			unexecuted = append(unexecuted, id)
+			candTask := findTaskStatus(candRun.Status.Tasks, id)
+			if candTask != nil && candTask.Phase == v1alpha1.TaskPhaseFailed && baseCompleted[id] {
+				candFailed = append(candFailed, id)
 			}
 		}
 	}
+	return taskIDs, unexecuted, candFailed
+}
 
-	sort.Strings(taskIDs)
-	sort.Strings(unexecuted)
-	return taskIDs, unexecuted
+func determineSkippedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) []string {
+	discovered := make(map[string]bool)
+	if candRun.Status.Discovery != nil {
+		for _, id := range candRun.Status.Discovery.TaskIDs {
+			discovered[id] = true
+		}
+	}
+	if baseRun.Status.Discovery != nil {
+		for _, id := range baseRun.Status.Discovery.TaskIDs {
+			discovered[id] = true
+		}
+	}
+
+	var skipped []string
+	for id := range discovered {
+		if taskInRunSpecOrStatus(candRun, id) || taskInRunSpecOrStatus(baseRun, id) {
+			continue
+		}
+		if len(comp.Spec.Tasks) > 0 && containsTask(comp.Spec.Tasks, id) {
+			continue
+		}
+		skipped = append(skipped, id)
+	}
+	sort.Strings(skipped)
+	return skipped
+}
+
+func taskInRunSpecOrStatus(run *v1alpha1.Run, taskID string) bool {
+	if run == nil {
+		return false
+	}
+	for _, id := range run.Spec.Tasks {
+		if id == taskID {
+			return true
+		}
+	}
+	for _, t := range run.Status.Tasks {
+		if t.ID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTask(tasks []string, taskID string) bool {
+	for _, t := range tasks {
+		if t == taskID {
+			return true
+		}
+	}
+	return false
 }
 
 func findTaskStatus(tasks []v1alpha1.TaskStatus, taskID string) *v1alpha1.TaskStatus {
@@ -534,7 +591,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	// Both Runs are terminal; perform pairing and comparison
-	taskIDs, unexecuted := determineCompletedTaskIDs(&comp, &baselineRun, &candidateRun)
+	taskIDs, unexecuted, candFailed := determineCompletedTaskIDs(&comp, &baselineRun, &candidateRun)
+	skippedNotPlanned := determineSkippedTaskIDs(&comp, &baselineRun, &candidateRun)
 	margin := stats.DefaultEquivalenceMargin
 	if comp.Spec.EquivalenceMargin != nil {
 		margin = *comp.Spec.EquivalenceMargin
@@ -745,11 +803,38 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	runVerdict := stats.AggregateVerdict(reports)
 	pImp := runVerdict.PImprovement
 
+	capped := false
+	if len(candFailed) > 0 {
+		if runVerdict.Verdict == stats.VerdictUnchanged || runVerdict.Verdict == stats.VerdictImproved {
+			capped = true
+			runVerdict.Verdict = stats.VerdictInconclusive
+			taskWord := "task"
+			if len(candFailed) > 1 {
+				taskWord = "tasks"
+			}
+			runVerdict.Summary = fmt.Sprintf("INCONCLUSIVE: candidate %s failed: %s; otherwise %s", taskWord, strings.Join(candFailed, ", "), runVerdict.Summary)
+			if pImp > 0.50 {
+				pImp = 0.50
+				runVerdict.PImprovement = 0.50
+			}
+		}
+	}
+
 	var unexecutedNotes []string
+	if len(candFailed) > 0 && !capped {
+		taskWord := "task"
+		if len(candFailed) > 1 {
+			taskWord = "tasks"
+		}
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, strings.Join(candFailed, ", ")))
+	}
 	if len(unexecuted) > 0 {
 		var neitherExecuted []string
 		var notBothExecuted []string
 		for _, id := range unexecuted {
+			if containsTask(candFailed, id) {
+				continue
+			}
 			candTask := findTaskStatus(candidateRun.Status.Tasks, id)
 			baseTask := findTaskStatus(baselineRun.Status.Tasks, id)
 			candRan := candTask != nil && candTask.Phase == v1alpha1.TaskPhaseCompleted
@@ -766,6 +851,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		if len(notBothExecuted) > 0 {
 			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed by both runs: %s", strings.Join(notBothExecuted, ", ")))
 		}
+	}
+	if len(skippedNotPlanned) > 0 {
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("skipped (not planned): %s", strings.Join(skippedNotPlanned, ", ")))
 	}
 
 	message := runVerdict.Summary
@@ -822,7 +910,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		status.PImprovement = &pImp
 		status.Tasks = taskStatuses
 		status.Summary = &v1alpha1.ComparisonSummary{
-			Tasks: fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)),
+			Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)),
+			Skipped: len(skippedNotPlanned),
 		}
 		status.SummaryPath = summaryPath
 		status.Message = message
