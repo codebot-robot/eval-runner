@@ -631,15 +631,6 @@ var (
 )
 
 // RenderComparisonTable renders the comparison table sub-template to the given writer.
-func RenderComparisonTable(w io.Writer, data any) error {
-	switch v := data.(type) {
-	case []ComparisonTaskRow:
-		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", ComparisonTableView{Tasks: v})
-	case ComparisonTableView:
-		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", v)
-	case ComparisonDetailView:
-		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", v)
-	default:
-		return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", data)
-	}
+func RenderComparisonTable(w io.Writer, view ComparisonTableView) error {
+	return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", view)
 }

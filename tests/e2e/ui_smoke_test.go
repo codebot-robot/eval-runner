@@ -25,37 +25,9 @@ import (
 	"time"
 )
 
-func TestUISmoke(t *testing.T) {
-	if os.Getenv("RUN_E2E") == "" {
-		t.Skip("skipping e2e test: RUN_E2E is not set")
-	}
-
-	clusterName := os.Getenv("KIND_CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "kind"
-	}
-
-	harness := NewHarness(t, clusterName)
-	harness.Setup()
-	harness.DeployEvalRunner()
-	harness.DeployEvalRunnerUI()
-
-	// Create a dummy run so we can test a run page
-	runName := "smoke-ui-run"
-	manifest := fmt.Sprintf(`
-apiVersion: evalrunner.gke-labs.dev/v1alpha1
-kind: Run
-metadata:
-  name: %s
-  namespace: eval-runner
-spec:
-  repo:
-    url: https://github.com/gke-labs/eval-runner.git
-    commit: a81d0c4
-  model: test-model
-`, runName)
-	harness.KubectlApplyContent(manifest)
-
+// runUISmoke verifies that the eval-runner-ui service is up and serving both
+// the /healthz endpoint and a Run detail page.
+func runUISmoke(t *testing.T, harness *Harness, runName string) {
 	// Port forward to the UI service on local port
 	cmd := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-ui", "18088:80")
 	if err := cmd.Start(); err != nil {
@@ -109,4 +81,15 @@ spec:
 	if !strings.Contains(string(bodyRun), runName) {
 		t.Errorf("expected run name %q in run detail HTML", runName)
 	}
+}
+
+// TestUISmoke is retained for backwards compatibility with `go test -run TestUISmoke`.
+// When running the full E2E suite, the smoke test is run as a subtest of TestRunDiscovery
+// (TestRunDiscovery/UISmoke) to avoid redundant cluster setup and image building.
+func TestUISmoke(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("skipping e2e test: RUN_E2E is not set")
+	}
+
+	t.Skip("TestUISmoke is now run as a subtest of TestRunDiscovery (TestRunDiscovery/UISmoke) to avoid redundant deploy overhead")
 }
