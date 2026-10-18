@@ -418,12 +418,16 @@ data:
 
 Supported ConfigMap keys include:
 - `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
+- `defaultLimit`: Default sample limit for webhook-created Runs (e.g. `10`).
+- `defaultModel`: Default model identifier for webhook-created Runs (e.g. `mockllm/model`).
 - `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).
 - `executionDeadline`: Overall deadline for sample execution to complete (default `30m`).
 - `githubTokenSecret`: Name of Secret in controller namespace containing GitHub token (default `github-token`).
+- `githubWebhookSecret`: Name of Secret in controller namespace containing GitHub webhook secret (default `github-webhook`).
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
 - `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
+- `webhookRepositories`: Comma-separated list of allowed repositories (`owner/name`). If unset, all repositories are accepted.
 
 Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the ConfigMap is absent, all built-in defaults are used.
 
@@ -539,6 +543,68 @@ The `summary.json` contains:
 Upload sizes are bounded to 10 MiB; if a log exceeds this limit, the log is uploaded in full up to the cap, and `"capped": true` along with `"capBytes"` are recorded in `summary.json`.
 
 On the `Run` custom resource, `status.artifacts` records the run-level prefix (e.g. `gs://<bucket>/runs/<commit>/`), and `status.tasks[].logPath` points directly to the `gs://` URI of each task's log.
+
+## GitHub Webhook Automation
+
+The `eval-runner-webhook` service receives GitHub webhook events (`pull_request` and `push`), creates candidate and baseline `Run` custom resources, and automatically creates a `Comparison` linked to the PR.
+
+### Creating the Webhook Secret
+
+The webhook verifies incoming payloads using HMAC-SHA256 (`X-Hub-Signature-256`). Create a Kubernetes Secret containing your shared webhook secret in the `eval-runner` namespace:
+
+```bash
+kubectl create secret generic github-webhook \
+  --namespace=eval-runner \
+  --from-literal=secret=YOUR_WEBHOOK_SECRET
+```
+
+*(Note: To use a secret name other than `github-webhook`, set `githubWebhookSecret` in the `eval-runner-config` ConfigMap or pass `--github-webhook-secret=<name>`.)*
+
+### Configuring the GitHub Webhook
+
+In your GitHub repository settings under **Settings -> Webhooks -> Add webhook**:
+1. **Payload URL**: `https://<your-domain-or-tunnel>/webhook` (or `/`)
+2. **Content type**: `application/json`
+3. **Secret**: `YOUR_WEBHOOK_SECRET` (matching the value stored in the Secret)
+4. **SSL verification**: Enable SSL verification
+5. **Which events would you like to trigger this webhook?**:
+   - Select **Let me select individual events**:
+     - Check **Pull requests**
+     - Check **Pushes**
+6. Click **Add webhook**.
+
+### Exposing the Service
+
+`eval-runner-webhook` runs in namespace `eval-runner` and exposes a ClusterIP Service on port 80 (targetPort 8080):
+- **Production Ingress**: Configure your cluster's ingress controller or Gateway API (e.g. GKE Gateway or Ingress with a managed TLS certificate) routing traffic to `eval-runner-webhook.eval-runner.svc.cluster.local:80`.
+- **Development / Local Testing**: Use a secure tunnel (e.g. Cloudflare Tunnel `cloudflared` or `ngrok`), or port-forward for local testing:
+  ```bash
+  kubectl port-forward -n eval-runner svc/eval-runner-webhook 8080:80
+  ```
+
+### What Gets Created
+
+When an event arrives:
+1. **On `pull_request` (`opened`, `synchronize`, `reopened`)**:
+   - **Candidate Run**: `pr-<number>-<headSHA7>` (evaluates PR head commit with `defaultModel` and `defaultLimit`).
+   - **Baseline Run**: `base-<baseSHA7>` (evaluates merge target commit). If an already `Completed` Run with that commit and model exists, it is reused immediately (baseline cache from concept §4.1).
+   - **Comparison**: `pr-<number>` linking candidate and baseline runs with `spec.pullRequest` configured.
+   - **Redelivery & Synchronize**: Redelivery of the same event is idempotent and makes no duplicate objects. A `synchronize` event creates the new candidate Run `pr-<number>-<newHead7>`, keeps previous candidate Runs in place (they are not deleted, preserving execution history), and updates `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing Comparison.
+2. **On `push` to the default branch**:
+   - **Warm Baseline Run**: `base-<sha7>` is created so the baseline run is pre-warmed before PRs arrive.
+3. **Labels**:
+   All created resources are labeled with:
+   - `evalrunner.gke-labs.dev/pr`: PR number (for PR runs and comparisons)
+   - `evalrunner.gke-labs.dev/repo`: Sanitized repository identifier (e.g. `owner_name`)
+   - `evalrunner.gke-labs.dev/head-sha`: Commit SHA
+
+### Operational Notes
+
+- **Queue Saturation & 503 Responses**: If event volume fills the bounded in-memory worker queue, the webhook responds with HTTP 503 (`worker queue full`). Note that GitHub does not automatically retry failed deliveries on 5xx responses; operators can trigger manual redeliveries from the repository's Webhooks settings under **Recent Deliveries**.
+- **ConfigMap Startup Loading**: The `eval-runner-config` ConfigMap is read at process startup. After modifying settings such as `defaultModel`, `defaultLimit`, or `webhookRepositories`, restart the webhook deployment to pick up changes:
+  ```bash
+  kubectl rollout restart deployment/eval-runner-webhook -n eval-runner
+  ```
 
 ## Running Unit Tests
 

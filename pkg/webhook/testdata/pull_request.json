@@ -1,0 +1,43 @@
+{
+  "action": "opened",
+  "number": 305,
+  "pull_request": {
+    "number": 305,
+    "state": "open",
+    "head": {
+      "sha": "aaaaaaa111111111111111111111111111111111",
+      "ref": "feature-branch",
+      "repo": {
+        "name": "eval-runner",
+        "full_name": "contributor-fork/eval-runner",
+        "clone_url": "https://github.com/contributor-fork/eval-runner.git",
+        "default_branch": "main",
+        "owner": {
+          "login": "contributor-fork"
+        }
+      }
+    },
+    "base": {
+      "sha": "bbbbbbb222222222222222222222222222222222",
+      "ref": "main",
+      "repo": {
+        "name": "eval-runner",
+        "full_name": "gke-labs/eval-runner",
+        "clone_url": "https://github.com/gke-labs/eval-runner.git",
+        "default_branch": "main",
+        "owner": {
+          "login": "gke-labs"
+        }
+      }
+    }
+  },
+  "repository": {
+    "name": "eval-runner",
+    "full_name": "gke-labs/eval-runner",
+    "clone_url": "https://github.com/gke-labs/eval-runner.git",
+    "default_branch": "main",
+    "owner": {
+      "login": "gke-labs"
+    }
+  }
+}
