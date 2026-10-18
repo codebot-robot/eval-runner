@@ -200,7 +200,7 @@ func TestGCSSink_PathValidationAndTraversal(t *testing.T) {
 		t.Fatalf("Failed to create GCSSink: %v", err)
 	}
 
-	for _, tt := range artifacts.ArtifactPathValidationTestCases() {
+	for _, tt := range fakes.ArtifactPathValidationTestCases() {
 		t.Run(tt.Name, func(t *testing.T) {
 			_, err := sink.StoreArtifact(t.Context(), tt.Meta, tt.Filename, []byte("data"))
 			if err == nil {
