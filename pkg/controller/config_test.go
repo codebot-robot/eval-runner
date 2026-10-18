@@ -31,8 +31,8 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
-	"github.com/gke-labs/eval-runner/pkg/webhook"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -849,22 +849,22 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 	// 3. all recognized keys
 	cmRecognized := &corev1.ConfigMap{
 		Data: map[string]string{
-			ConfigMapKeyArtifactBucket:              "gs://b",
-			ConfigMapKeyArtifactDir:                 "/tmp",
-			ConfigMapKeyArtifactMaxUploadBytes:      "10485760",
-			ConfigMapKeyDiscoveryDeadline:           "10m",
-			ConfigMapKeyExecutionDeadline:           "30m",
-			ConfigMapKeyMaxParallelTasks:            "4",
-			ConfigMapKeyModelSecret:                 "sec",
-			ConfigMapKeySandboxdImage:               "img:tag",
-			ConfigMapKeyTaskGracePeriod:             "30s",
-			ConfigMapKeyGitHubTokenSecret:           "gh-token",
-			ConfigMapKeyGitHubAppSecret:             "gh-app",
-			ConfigMapKeyUIBaseURL:                   "https://ui",
-			webhook.ConfigMapKeyGitHubWebhookSecret: "gh-wh",
-			webhook.ConfigMapKeyWebhookRepositories: "org/repo",
-			webhook.ConfigMapKeyDefaultModel:        "model",
-			webhook.ConfigMapKeyDefaultLimit:        "5",
+			ConfigMapKeyArtifactBucket:                 "gs://b",
+			ConfigMapKeyArtifactDir:                    "/tmp",
+			ConfigMapKeyArtifactMaxUploadBytes:         "10485760",
+			ConfigMapKeyDiscoveryDeadline:              "10m",
+			ConfigMapKeyExecutionDeadline:              "30m",
+			ConfigMapKeyMaxParallelTasks:               "4",
+			ConfigMapKeyModelSecret:                    "sec",
+			ConfigMapKeySandboxdImage:                  "img:tag",
+			ConfigMapKeyTaskGracePeriod:                "30s",
+			ConfigMapKeyGitHubTokenSecret:              "gh-token",
+			ConfigMapKeyGitHubAppSecret:                "gh-app",
+			ConfigMapKeyUIBaseURL:                      "https://ui",
+			configkeys.ConfigMapKeyGitHubWebhookSecret: "gh-wh",
+			configkeys.ConfigMapKeyWebhookRepositories: "org/repo",
+			configkeys.ConfigMapKeyDefaultModel:        "model",
+			configkeys.ConfigMapKeyDefaultLimit:        "5",
 		},
 	}
 	if unknown := UnknownConfigMapKeys(cmRecognized); unknown != nil {
@@ -1233,6 +1233,7 @@ func TestResolveConfig_ArtifactMaxUploadBytes(t *testing.T) {
 // TestKnownConfigMapKeys_AllConstantsRegistered ensures that every constant whose identifier
 // starts with "ConfigMapKey" in any package in the repository appears in KnownConfigMapKeys.
 // This prevents adding a new ConfigMapKey constant without registering it in KnownConfigMapKeys.
+// It resolves both string literals and identifier / selector RHS values (e.g. ConfigMapKeyX = otherConst or pkg.Const).
 func TestKnownConfigMapKeys_AllConstantsRegistered(t *testing.T) {
 	// Find repository root
 	repoRoot := ""
@@ -1249,7 +1250,15 @@ func TestKnownConfigMapKeys_AllConstantsRegistered(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	foundConstants := make(map[string]string) // constName -> constValue
+
+	type constDecl struct {
+		pkgName string
+		name    string
+		expr    ast.Expr
+		path    string
+	}
+	var allDecls []constDecl
+	resolved := make(map[string]string) // "pkgName.Name" -> value AND "Name" -> value
 
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -1274,26 +1283,38 @@ func TestKnownConfigMapKeys_AllConstantsRegistered(t *testing.T) {
 			return fmt.Errorf("failed to parse %s: %w", path, err)
 		}
 
+		pkgName := node.Name.Name
 		for _, decl := range node.Decls {
 			genDecl, ok := decl.(*ast.GenDecl)
 			if !ok || genDecl.Tok != token.CONST {
 				continue
 			}
+			var lastExpr ast.Expr
 			for _, spec := range genDecl.Specs {
 				valSpec, ok := spec.(*ast.ValueSpec)
 				if !ok {
 					continue
 				}
 				for i, name := range valSpec.Names {
-					if strings.HasPrefix(name.Name, "ConfigMapKey") {
-						if i < len(valSpec.Values) {
-							if lit, ok := valSpec.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-								val, err := strconv.Unquote(lit.Value)
-								if err != nil {
-									t.Errorf("failed to unquote value for %s in %s: %v", name.Name, path, err)
-									continue
-								}
-								foundConstants[name.Name] = val
+					if i < len(valSpec.Values) {
+						lastExpr = valSpec.Values[i]
+					}
+					expr := lastExpr
+					if expr == nil {
+						continue
+					}
+					allDecls = append(allDecls, constDecl{
+						pkgName: pkgName,
+						name:    name.Name,
+						expr:    expr,
+						path:    path,
+					})
+					if lit, ok := expr.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						val, err := strconv.Unquote(lit.Value)
+						if err == nil {
+							resolved[pkgName+"."+name.Name] = val
+							if _, exists := resolved[name.Name]; !exists {
+								resolved[name.Name] = val
 							}
 						}
 					}
@@ -1304,6 +1325,57 @@ func TestKnownConfigMapKeys_AllConstantsRegistered(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("failed walking repository files: %v", err)
+	}
+
+	// Iteratively resolve identifier and selector RHS expressions (e.g. ConfigMapKeyX = otherConst or pkg.Const)
+	for pass := 0; pass < 10; pass++ {
+		progress := false
+		for _, d := range allDecls {
+			if _, ok := resolved[d.pkgName+"."+d.name]; ok {
+				continue
+			}
+			var val string
+			var found bool
+			switch e := d.expr.(type) {
+			case *ast.Ident:
+				if v, ok := resolved[d.pkgName+"."+e.Name]; ok {
+					val, found = v, true
+				} else if v, ok := resolved[e.Name]; ok {
+					val, found = v, true
+				}
+			case *ast.SelectorExpr:
+				if xIdent, ok := e.X.(*ast.Ident); ok {
+					if v, ok := resolved[xIdent.Name+"."+e.Sel.Name]; ok {
+						val, found = v, true
+					}
+				}
+			}
+			if found {
+				resolved[d.pkgName+"."+d.name] = val
+				if _, ok := resolved[d.name]; !ok {
+					resolved[d.name] = val
+				}
+				progress = true
+			}
+		}
+		if !progress {
+			break
+		}
+	}
+
+	foundConstants := make(map[string]string) // constName -> constValue
+	for _, d := range allDecls {
+		if strings.HasPrefix(d.name, "ConfigMapKey") {
+			val, ok := resolved[d.pkgName+"."+d.name]
+			if !ok {
+				t.Errorf("could not resolve string value for constant %s in %s", d.name, d.path)
+				continue
+			}
+			if existing, exists := foundConstants[d.name]; exists && existing != val {
+				t.Errorf("conflicting values for constant %s: %q in %s vs %q", d.name, val, d.path, existing)
+			}
+			foundConstants[d.name] = val
+		}
 	}
 
 	if len(foundConstants) == 0 {

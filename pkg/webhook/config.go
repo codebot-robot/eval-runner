@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,7 +32,7 @@ const (
 	DefaultNamespace = "eval-runner"
 
 	// DefaultConfigMapName is the cluster ConfigMap name.
-	DefaultConfigMapName = "eval-runner-config"
+	DefaultConfigMapName = configkeys.DefaultConfigMapName
 
 	// DefaultGitHubWebhookSecret is the default Secret name containing the webhook HMAC secret.
 	DefaultGitHubWebhookSecret = "github-webhook"
@@ -46,20 +47,20 @@ const (
 	DefaultQueueSize = 100
 
 	// ConfigMapKeyDefaultModel is the ConfigMap key for the default model.
-	ConfigMapKeyDefaultModel = "defaultModel"
+	ConfigMapKeyDefaultModel = configkeys.ConfigMapKeyDefaultModel
 
 	// ConfigMapKeyDefaultLimit is the ConfigMap key for the default sample limit.
-	ConfigMapKeyDefaultLimit = "defaultLimit"
+	ConfigMapKeyDefaultLimit = configkeys.ConfigMapKeyDefaultLimit
 
 	// ConfigMapKeyGitHubWebhookSecret is the ConfigMap key for the webhook secret name.
-	ConfigMapKeyGitHubWebhookSecret = "githubWebhookSecret"
+	ConfigMapKeyGitHubWebhookSecret = configkeys.ConfigMapKeyGitHubWebhookSecret
 
 	// ConfigMapKeyWebhookRepositories is the ConfigMap key for repository allow-list.
-	ConfigMapKeyWebhookRepositories = "webhookRepositories"
+	ConfigMapKeyWebhookRepositories = configkeys.ConfigMapKeyWebhookRepositories
 
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
 	// a credential or feature that otherwise has a non-empty built-in default.
-	ConfigSentinelDisabled = "none"
+	ConfigSentinelDisabled = configkeys.ConfigSentinelDisabled
 )
 
 // Config holds settings for the eval-runner-webhook service.

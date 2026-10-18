@@ -24,8 +24,8 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
-	"github.com/gke-labs/eval-runner/pkg/webhook"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,36 +36,36 @@ import (
 
 const (
 	// DefaultConfigMapName is the fixed name of the per-cluster configuration ConfigMap.
-	DefaultConfigMapName = "eval-runner-config"
+	DefaultConfigMapName = configkeys.DefaultConfigMapName
 
 	// ConfigMapKeyArtifactBucket is the ConfigMap key for the GCS artifact bucket.
-	ConfigMapKeyArtifactBucket = "artifactBucket"
+	ConfigMapKeyArtifactBucket = configkeys.ConfigMapKeyArtifactBucket
 	// ConfigMapKeyArtifactDir is the ConfigMap key for the local artifact directory.
-	ConfigMapKeyArtifactDir = "artifactDir"
+	ConfigMapKeyArtifactDir = configkeys.ConfigMapKeyArtifactDir
 	// ConfigMapKeyArtifactMaxUploadBytes is the ConfigMap key for the maximum artifact upload byte limit.
-	ConfigMapKeyArtifactMaxUploadBytes = "artifactMaxUploadBytes"
+	ConfigMapKeyArtifactMaxUploadBytes = configkeys.ConfigMapKeyArtifactMaxUploadBytes
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.
-	ConfigMapKeyDiscoveryDeadline = "discoveryDeadline"
+	ConfigMapKeyDiscoveryDeadline = configkeys.ConfigMapKeyDiscoveryDeadline
 	// ConfigMapKeyExecutionDeadline is the ConfigMap key for sample execution deadline.
-	ConfigMapKeyExecutionDeadline = "executionDeadline"
+	ConfigMapKeyExecutionDeadline = configkeys.ConfigMapKeyExecutionDeadline
 	// ConfigMapKeyMaxParallelTasks is the ConfigMap key for maximum parallel task sandboxes.
-	ConfigMapKeyMaxParallelTasks = "maxParallelTasks"
+	ConfigMapKeyMaxParallelTasks = configkeys.ConfigMapKeyMaxParallelTasks
 	// ConfigMapKeyModelSecret is the ConfigMap key for default model credentials Secret name.
-	ConfigMapKeyModelSecret = "modelSecret"
+	ConfigMapKeyModelSecret = configkeys.ConfigMapKeyModelSecret
 	// ConfigMapKeySandboxdImage is the ConfigMap key for sandboxd init container image.
-	ConfigMapKeySandboxdImage = "sandboxdImage"
+	ConfigMapKeySandboxdImage = configkeys.ConfigMapKeySandboxdImage
 	// ConfigMapKeyTaskGracePeriod is the ConfigMap key for task sandbox cache grace period.
-	ConfigMapKeyTaskGracePeriod = "taskGracePeriod"
+	ConfigMapKeyTaskGracePeriod = configkeys.ConfigMapKeyTaskGracePeriod
 	// ConfigMapKeyGitHubTokenSecret is the ConfigMap key for GitHub token Secret name.
-	ConfigMapKeyGitHubTokenSecret = "githubTokenSecret"
+	ConfigMapKeyGitHubTokenSecret = configkeys.ConfigMapKeyGitHubTokenSecret
 	// ConfigMapKeyGitHubAppSecret is the ConfigMap key for GitHub App credentials Secret name.
-	ConfigMapKeyGitHubAppSecret = "githubAppSecret"
+	ConfigMapKeyGitHubAppSecret = configkeys.ConfigMapKeyGitHubAppSecret
 	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
-	ConfigMapKeyUIBaseURL = "uiBaseURL"
+	ConfigMapKeyUIBaseURL = configkeys.ConfigMapKeyUIBaseURL
 
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
 	// a credential or feature that otherwise has a non-empty built-in default.
-	ConfigSentinelDisabled = "none"
+	ConfigSentinelDisabled = configkeys.ConfigSentinelDisabled
 
 	// DefaultGitHubTokenSecret is the default Secret name for GitHub credentials in controller namespace.
 	DefaultGitHubTokenSecret = "github-token"
@@ -74,22 +74,22 @@ const (
 // KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
 // covering both eval-runner controller and eval-runner-webhook keys.
 var KnownConfigMapKeys = map[string]struct{}{
-	ConfigMapKeyArtifactBucket:              {},
-	ConfigMapKeyArtifactDir:                 {},
-	ConfigMapKeyArtifactMaxUploadBytes:      {},
-	ConfigMapKeyDiscoveryDeadline:           {},
-	ConfigMapKeyExecutionDeadline:           {},
-	ConfigMapKeyMaxParallelTasks:            {},
-	ConfigMapKeyModelSecret:                 {},
-	ConfigMapKeySandboxdImage:               {},
-	ConfigMapKeyTaskGracePeriod:             {},
-	ConfigMapKeyGitHubTokenSecret:           {},
-	ConfigMapKeyGitHubAppSecret:             {},
-	ConfigMapKeyUIBaseURL:                   {},
-	webhook.ConfigMapKeyGitHubWebhookSecret: {},
-	webhook.ConfigMapKeyWebhookRepositories: {},
-	webhook.ConfigMapKeyDefaultModel:        {},
-	webhook.ConfigMapKeyDefaultLimit:        {},
+	configkeys.ConfigMapKeyArtifactBucket:         {},
+	configkeys.ConfigMapKeyArtifactDir:            {},
+	configkeys.ConfigMapKeyArtifactMaxUploadBytes: {},
+	configkeys.ConfigMapKeyDiscoveryDeadline:      {},
+	configkeys.ConfigMapKeyExecutionDeadline:      {},
+	configkeys.ConfigMapKeyMaxParallelTasks:       {},
+	configkeys.ConfigMapKeyModelSecret:            {},
+	configkeys.ConfigMapKeySandboxdImage:          {},
+	configkeys.ConfigMapKeyTaskGracePeriod:        {},
+	configkeys.ConfigMapKeyGitHubTokenSecret:      {},
+	configkeys.ConfigMapKeyGitHubAppSecret:        {},
+	configkeys.ConfigMapKeyUIBaseURL:              {},
+	configkeys.ConfigMapKeyGitHubWebhookSecret:    {},
+	configkeys.ConfigMapKeyWebhookRepositories:    {},
+	configkeys.ConfigMapKeyDefaultModel:           {},
+	configkeys.ConfigMapKeyDefaultLimit:           {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
