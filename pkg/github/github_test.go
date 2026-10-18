@@ -137,6 +137,187 @@ func sameCommitComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alph
 	return comp, baseRun, candRun
 }
 
+func candidateFailedComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
+	pImp := 0.50
+	rateBase := 0.20
+	rateCand := 1.00
+	delta := 0.80
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-candidate-failed",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "docs-eval-base-05ce4d8",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "docs-eval-cand-05ce4d8",
+			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     98,
+				HeadSHA:    "05ce4d8222222222222222222222222222222222",
+				BaseSHA:    "05ce4d8111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			Verdict:      v1alpha1.ComparisonVerdictInconclusive,
+			PImprovement: &pImp,
+			SummaryPath:  "gs://eval-bucket/comparisons/docs-eval-candidate-failed.json",
+			Summary: &v1alpha1.ComparisonSummary{
+				Tasks: "1/1",
+			},
+			Message: "INCONCLUSIVE: candidate task failed: docs/readme_comprehension_blind; otherwise IMPROVED: 1 task(s) improved, 0 unchanged",
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "docs/readme_comprehension",
+					BaseRate:      &rateBase,
+					CandidateRate: &rateCand,
+					Delta:         &delta,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: 0.60,
+						Upper: 1.00,
+					},
+					Label:  v1alpha1.ComparisonTaskLabelImproved,
+					Pairs:  20,
+					Wins:   16,
+					Losses: 0,
+					Ties:   4,
+				},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-base-05ce4d8",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: "05ce4d8111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Summary: &v1alpha1.RunSummary{
+				TotalSamples: 40,
+			},
+		},
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-cand-05ce4d8",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: "05ce4d8222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Summary: &v1alpha1.RunSummary{
+				TotalSamples: 40,
+			},
+		},
+	}
+	return comp, baseRun, candRun
+}
+
+func skippedTaskComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
+	pImp := 0.98
+	rateBase := 0.20
+	rateCand := 1.00
+	delta := 0.80
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-skipped-task",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "docs-eval-base-05ce4d8",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "docs-eval-cand-05ce4d8",
+			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     98,
+				HeadSHA:    "05ce4d8222222222222222222222222222222222",
+				BaseSHA:    "05ce4d8111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			Verdict:      v1alpha1.ComparisonVerdictImproved,
+			PImprovement: &pImp,
+			SummaryPath:  "gs://eval-bucket/comparisons/docs-eval-skipped-task.json",
+			Summary: &v1alpha1.ComparisonSummary{
+				Tasks:   "1/1",
+				Skipped: 1,
+			},
+			Message: "IMPROVED: 1 task(s) improved, 0 unchanged; skipped (not planned): docs/readme_comprehension_blind",
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "docs/readme_comprehension",
+					BaseRate:      &rateBase,
+					CandidateRate: &rateCand,
+					Delta:         &delta,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: 0.60,
+						Upper: 1.00,
+					},
+					Label:  v1alpha1.ComparisonTaskLabelImproved,
+					Pairs:  20,
+					Wins:   16,
+					Losses: 0,
+					Ties:   4,
+				},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-base-05ce4d8",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: "05ce4d8111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Summary: &v1alpha1.RunSummary{
+				TotalSamples: 40,
+			},
+		},
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-cand-05ce4d8",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: "05ce4d8222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Summary: &v1alpha1.RunSummary{
+				TotalSamples: 40,
+			},
+		},
+	}
+	return comp, baseRun, candRun
+}
+
 func TestRenderComparisonMarkdown_Golden(t *testing.T) {
 	comp, baseRun, candRun := sameCommitComparisonFixture()
 	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
@@ -150,6 +331,181 @@ func TestRenderComparisonMarkdown_Golden(t *testing.T) {
 
 	if got != want {
 		t.Errorf("RenderComparisonMarkdown mismatch (-got +want):\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
+func TestRenderComparisonMarkdown_Golden_CandidateTaskFailed(t *testing.T) {
+	comp, baseRun, candRun := candidateFailedComparisonFixture()
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+
+	goldenPath := "testdata/candidate_failed_comparison.golden.md"
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden file: %v", err)
+	}
+	want := string(wantBytes)
+
+	if got != want {
+		t.Errorf("RenderComparisonMarkdown mismatch (-got +want):\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
+func TestRenderComparisonMarkdown_Golden_SkippedTask(t *testing.T) {
+	comp, baseRun, candRun := skippedTaskComparisonFixture()
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+
+	goldenPath := "testdata/skipped_task_comparison.golden.md"
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden file: %v", err)
+	}
+	want := string(wantBytes)
+
+	if got != want {
+		t.Errorf("RenderComparisonMarkdown mismatch (-got +want):\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
+func TestComparisonNotes(t *testing.T) {
+	tests := []struct {
+		name string
+		comp *v1alpha1.Comparison
+		want string
+	}{
+		{
+			name: "nil comparison",
+			comp: nil,
+			want: "",
+		},
+		{
+			name: "empty message",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictInconclusive,
+					Message: "",
+				},
+			},
+			want: "",
+		},
+		{
+			name: "inconclusive with candidate task failed capped",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictInconclusive,
+					Message: "INCONCLUSIVE: candidate task failed: docs/task_two; otherwise IMPROVED: 1 task(s) improved, 0 unchanged",
+				},
+			},
+			want: "INCONCLUSIVE: candidate task failed: docs/task_two; otherwise IMPROVED: 1 task(s) improved, 0 unchanged",
+		},
+		{
+			name: "inconclusive standard summary",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictInconclusive,
+					Message: "INCONCLUSIVE: 1 task(s) inconclusive; more samples recommended",
+				},
+			},
+			want: "INCONCLUSIVE: 1 task(s) inconclusive; more samples recommended",
+		},
+		{
+			name: "inconclusive with skipped tasks",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictInconclusive,
+					Message: "INCONCLUSIVE: 1 task(s) inconclusive; more samples recommended; skipped (not planned): docs/task_three",
+				},
+			},
+			want: "INCONCLUSIVE: 1 task(s) inconclusive; more samples recommended; skipped (not planned): docs/task_three",
+		},
+		{
+			name: "regressed with candidate task failed",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictRegressed,
+					Message: "REGRESSED: 1 task(s) regressed; candidate task failed: docs/task_two",
+				},
+			},
+			want: "REGRESSED: 1 task(s) regressed; candidate task failed: docs/task_two",
+		},
+		{
+			name: "regressed standard summary",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictRegressed,
+					Message: "REGRESSED: 1 task(s) regressed",
+				},
+			},
+			want: "REGRESSED: 1 task(s) regressed",
+		},
+		{
+			name: "improved with no notes returns empty",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictImproved,
+					Message: "IMPROVED: 1 task(s) improved, 0 unchanged",
+				},
+			},
+			want: "",
+		},
+		{
+			name: "improved with skipped tasks returns suffix",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictImproved,
+					Message: "IMPROVED: 1 task(s) improved, 0 unchanged; skipped (not planned): docs/task_three",
+				},
+			},
+			want: "skipped (not planned): docs/task_three",
+		},
+		{
+			name: "unchanged with no notes returns empty",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictUnchanged,
+					Message: "UNCHANGED: all 2 task(s) unchanged",
+				},
+			},
+			want: "",
+		},
+		{
+			name: "unchanged with unexecuted notes returns suffix",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictUnchanged,
+					Message: "UNCHANGED: all 1 task(s) unchanged; tasks not executed: docs/task_two; skipped (not planned): docs/task_three",
+				},
+			},
+			want: "tasks not executed: docs/task_two; skipped (not planned): docs/task_three",
+		},
+		{
+			name: "running with standard summary returns empty",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictRunning,
+					Message: "RUNNING: 1 task(s) in progress",
+				},
+			},
+			want: "",
+		},
+		{
+			name: "running with batch info returns message",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictRunning,
+					Message: "Running batch 2 (1 tasks continuing)",
+				},
+			},
+			want: "Running batch 2 (1 tasks continuing)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComparisonNotes(tt.comp)
+			if got != tt.want {
+				t.Errorf("ComparisonNotes() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
