@@ -1178,6 +1178,35 @@ func TestRenderComparisonMarkdown_RunMoreSamples(t *testing.T) {
 	}
 }
 
+func TestRenderComparisonMarkdown_Tokens(t *testing.T) {
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	// Set explicit tokens on task 0, nil on task 1
+	comp.Status.Tasks[0].Tokens = &v1alpha1.TaskTokens{
+		Input:  600,
+		Output: 200,
+		Total:  800,
+	}
+	comp.Status.Tasks[1].Tokens = nil
+
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(got, "| eval | base | this PR | Δ (95% CI) | label | samples | tokens |") {
+		t.Errorf("expected markdown table to include tokens header when tokens non-nil, got:\n%s", got)
+	}
+	if !strings.Contains(got, "| docs/readme\\_comprehension | 1.00 | 1.00 | +0.00 [+0.00, +0.00] | unchanged | 20 | 800 |") {
+		t.Errorf("expected markdown to display 800 tokens for task 0, got:\n%s", got)
+	}
+	if !strings.Contains(got, "| docs/readme\\_comprehension\\_blind | 0.20 | 0.15 | -0.05 [-0.15, +0.00] | inconclusive | 20 | — |") {
+		t.Errorf("expected markdown to display '—' tokens for task 1, got:\n%s", got)
+	}
+
+	// Without tokens, tokens column is omitted
+	compNoTokens, baseRun2, candRun2 := sameCommitComparisonFixture()
+	gotNoTokens := RenderComparisonMarkdown(compNoTokens, baseRun2, candRun2, "")
+	if strings.Contains(gotNoTokens, "| tokens |") {
+		t.Errorf("expected markdown table to omit tokens column when tokens nil, got:\n%s", gotNoTokens)
+	}
+}
+
 func TestReporter_CheckRunRetryableError_HashGateNotSwallowed(t *testing.T) {
 	ctx := t.Context()
 	server := NewFakeGitHubServer()

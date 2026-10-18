@@ -962,3 +962,133 @@ func TestTemplateRendering_SampleRange(t *testing.T) {
 		}
 	})
 }
+
+func TestComparisonTable_Tokens(t *testing.T) {
+	tasks := []ComparisonTaskRow{
+		{
+			ID:          "task-with-tokens",
+			BaseRate:    "0.60",
+			CandRate:    "0.80",
+			Delta:       "+0.20",
+			StatusClass: "good",
+			Label:       "improved",
+			Pairs:       16,
+			SamplesRun:  16,
+			Tokens: &v1alpha1.TaskTokens{
+				Input:  500,
+				Output: 200,
+				Total:  700,
+			},
+		},
+		{
+			ID:          "task-without-tokens",
+			BaseRate:    "0.50",
+			CandRate:    "0.50",
+			Delta:       "+0.00",
+			StatusClass: "neutral",
+			Label:       "unchanged",
+			Pairs:       16,
+			SamplesRun:  16,
+			Tokens:      nil,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := RenderComparisonTable(&buf, ComparisonTableView{Tasks: tasks}); err != nil {
+		t.Fatalf("failed to render comparison table: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "<th>tokens</th>") {
+		t.Errorf("expected <th>tokens</th> header, got:\n%s", output)
+	}
+	if !strings.Contains(output, "<th>samples</th>") {
+		t.Errorf("expected <th>samples</th> header, got:\n%s", output)
+	}
+	if !strings.Contains(output, "<td class=\"num\">700</td>") {
+		t.Errorf("expected total tokens 700 for task-with-tokens, got:\n%s", output)
+	}
+	if !strings.Contains(output, "<td class=\"num\">—</td>") {
+		t.Errorf("expected '—' tokens for task-without-tokens, got:\n%s", output)
+	}
+}
+
+func TestComparisonDetail_BatchesAndActions(t *testing.T) {
+	view := ComparisonDetailView{
+		ActiveTab:   NavTabComparisons,
+		Name:        "comp-batches-test",
+		Namespace:   "eval-runner",
+		Verdict:     v1alpha1.ComparisonVerdictRunning,
+		VerdictChip: "pending",
+		Headline:    "Running batch 2 (1 tasks continuing)",
+		Tasks: []ComparisonTaskRow{
+			{
+				ID:          "task-decided",
+				BaseRate:    "0.20",
+				CandRate:    "0.90",
+				Delta:       "+0.70",
+				StatusClass: "good",
+				Label:       "improved",
+				Pairs:       8,
+				SamplesRun:  8,
+			},
+			{
+				ID:            "task-continuing",
+				BaseRate:      "0.50",
+				CandRate:      "0.50",
+				Delta:         "+0.00",
+				StatusClass:   "pending",
+				Label:         "running",
+				Pairs:         8,
+				SamplesRun:    8,
+				SuggestedNext: 16,
+			},
+		},
+		Batches: []ComparisonBatchRow{
+			{
+				Index:        1,
+				Phase:        v1alpha1.ComparisonPhaseCompleted,
+				PhaseChip:    "good",
+				SampleRange:  "1-8",
+				CandidateRun: "cand-b1-run",
+				BaselineRun:  "base-b1-run",
+			},
+			{
+				Index:        2,
+				Phase:        v1alpha1.ComparisonPhaseRunning,
+				PhaseChip:    "pending",
+				SampleRange:  "9-16",
+				CandidateRun: "cand-b2-run",
+				BaselineRun:  "base-b2-run",
+			},
+		},
+		Actions: []string{
+			"- run 16 more samples (task-continuing)",
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute comparison detail template: %v", err)
+	}
+	output := buf.String()
+
+	// Assert Batches section
+	if !strings.Contains(output, "Batches</h2>") {
+		t.Errorf("expected Batches heading, got:\n%s", output)
+	}
+	if !strings.Contains(output, "batch 1") || !strings.Contains(output, "batch 2") {
+		t.Errorf("expected batch 1 and batch 2 in table, got:\n%s", output)
+	}
+	if !strings.Contains(output, "/runs/eval-runner/cand-b1-run") || !strings.Contains(output, "/runs/eval-runner/base-b1-run") {
+		t.Errorf("expected batch run links, got:\n%s", output)
+	}
+	if !strings.Contains(output, "<span><b>Batches:</b> 2</span>") {
+		t.Errorf("expected Batches footer count, got:\n%s", output)
+	}
+
+	// Assert Actions (extraSamples hint)
+	if !strings.Contains(output, "- run 16 more samples (task-continuing)") {
+		t.Errorf("expected action hint in detail view, got:\n%s", output)
+	}
+}

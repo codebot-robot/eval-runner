@@ -141,7 +141,8 @@ type ComparisonsListView struct {
 
 // ComparisonTableView is the view model for rendering the comparison table sub-template.
 type ComparisonTableView struct {
-	Tasks []ComparisonTaskRow
+	Tasks     []ComparisonTaskRow
+	HasTokens bool
 }
 
 // ComparisonTaskRow represents a single task row in the PR-comment table.
@@ -377,6 +378,16 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 	}
 }
 
+// ComparisonBatchRow represents a single batch execution row in the comparison detail view.
+type ComparisonBatchRow struct {
+	Index        int
+	Phase        v1alpha1.ComparisonPhase
+	PhaseChip    string // e.g. "good", "pending", "bad", "neutral"
+	SampleRange  string // e.g. "1-8" or "—"
+	CandidateRun string
+	BaselineRun  string
+}
+
 // ComparisonDetailView is the view model for the /comparisons/<ns>/<name> detail page.
 type ComparisonDetailView struct {
 	ActiveTab    NavTab
@@ -389,7 +400,11 @@ type ComparisonDetailView struct {
 	SummaryPath  string
 	Message      string
 
-	Tasks []ComparisonTaskRow
+	Tasks     []ComparisonTaskRow
+	HasTokens bool
+
+	Batches []ComparisonBatchRow
+	Actions []string
 
 	// Summary contains aggregate comparison headline and footer data.
 	Summary ComparisonSummaryData
@@ -409,6 +424,17 @@ type ComparisonDetailView struct {
 }
 
 // Helpers for CSS status classes
+
+func comparisonPhaseChipClass(phase v1alpha1.ComparisonPhase) string {
+	switch phase {
+	case v1alpha1.ComparisonPhaseCompleted:
+		return "good"
+	case v1alpha1.ComparisonPhaseRunning:
+		return "pending"
+	default:
+		return "neutral"
+	}
+}
 
 func phaseChipClass(phase v1alpha1.RunPhase) string {
 	switch phase {

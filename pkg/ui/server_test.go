@@ -347,7 +347,7 @@ func TestServerComparisonDetail(t *testing.T) {
 	}
 
 	// Check PR-comment table headers
-	expectedHeaders := []string{"eval", "base", "this PR", "Δ (95% CI)", "label", "runs"}
+	expectedHeaders := []string{"eval", "base", "this PR", "Δ (95% CI)", "label", "samples"}
 	for _, h := range expectedHeaders {
 		if !strings.Contains(body, h) {
 			t.Errorf("expected PR-comment header %q in table", h)
@@ -402,6 +402,76 @@ func TestServerComparisonDetail(t *testing.T) {
 	server.ServeHTTP(wNotFound, reqNotFound)
 	if wNotFound.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing comparison, got %d", wNotFound.Code)
+	}
+}
+
+func TestServerComparisonDetail_BatchesAndTokens(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+
+	// Add batches and tokens to comp status
+	comp.Name = "comp-batches-tokens"
+	comp.Status.Batches = []v1alpha1.ComparisonBatchStatus{
+		{
+			Index:        1,
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			SampleRange:  &v1alpha1.SampleRange{Start: 1, End: 8},
+			CandidateRun: "cand-b1-run",
+			BaselineRun:  "base-b1-run",
+		},
+		{
+			Index:        2,
+			Phase:        v1alpha1.ComparisonPhaseRunning,
+			SampleRange:  &v1alpha1.SampleRange{Start: 9, End: 16},
+			CandidateRun: "cand-b2-run",
+			BaselineRun:  "base-b2-run",
+		},
+	}
+	comp.Status.Tasks[0].Tokens = &v1alpha1.TaskTokens{
+		Input:  600,
+		Output: 250,
+		Total:  850,
+	}
+	comp.Status.Tasks[0].Label = v1alpha1.ComparisonTaskLabelInconclusive
+	comp.Status.Tasks[0].SuggestedNext = 16
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-batches-tokens", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// Check table headers have tokens and samples
+	if !strings.Contains(body, "<th>tokens</th>") {
+		t.Errorf("expected <th>tokens</th> header in table")
+	}
+	if !strings.Contains(body, "<th>samples</th>") {
+		t.Errorf("expected <th>samples</th> header in table")
+	}
+	if !strings.Contains(body, "850") {
+		t.Errorf("expected 850 tokens in table")
+	}
+
+	// Check Batches section rendered
+	if !strings.Contains(body, "Batches</h2>") {
+		t.Errorf("expected Batches section in detail view")
+	}
+	if !strings.Contains(body, "cand-b1-run") || !strings.Contains(body, "base-b1-run") {
+		t.Errorf("expected batch run links in detail view")
+	}
+	if !strings.Contains(body, "<span><b>Batches:</b> 2</span>") {
+		t.Errorf("expected Batches: 2 in footer")
+	}
+
+	// Check action hint
+	if !strings.Contains(body, "- run 16 more samples") {
+		t.Errorf("expected extraSamples hint in detail view")
 	}
 }
 
