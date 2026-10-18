@@ -163,6 +163,51 @@ func TestDecideStoppingRuleTableDriven(t *testing.T) {
 			expectedLabel: TaskLabelContinue,
 			expectedStop:  false,
 		},
+		{
+			name: "explicit margin 0 - CI within default 0.05 margin but outside 0 margin reaches sample cap -> inconclusive",
+			est: PairedEstimate{
+				NumPairs:  20,
+				MeanDelta: 0.0,
+				CI:        Interval{Lower: -0.02, Upper: 0.02},
+			},
+			margin:        0.0,
+			samplesRun:    20,
+			sampleCap:     20,
+			spent:         1.00,
+			budget:        10.0,
+			expectedLabel: TaskLabelInconclusive,
+			expectedStop:  true,
+		},
+		{
+			name: "explicit margin 0 - exact zero width CI [0, 0] is unchanged",
+			est: PairedEstimate{
+				NumPairs:  20,
+				MeanDelta: 0.0,
+				CI:        Interval{Lower: 0.0, Upper: 0.0},
+			},
+			margin:        0.0,
+			samplesRun:    20,
+			sampleCap:     20,
+			spent:         1.00,
+			budget:        10.0,
+			expectedLabel: TaskLabelUnchanged,
+			expectedStop:  true,
+		},
+		{
+			name: "negative margin falls back to default margin 0.05 -> unchanged",
+			est: PairedEstimate{
+				NumPairs:  20,
+				MeanDelta: 0.0,
+				CI:        Interval{Lower: -0.02, Upper: 0.02},
+			},
+			margin:        -0.01,
+			samplesRun:    20,
+			sampleCap:     20,
+			spent:         1.00,
+			budget:        10.0,
+			expectedLabel: TaskLabelUnchanged,
+			expectedStop:  true,
+		},
 	}
 
 	for _, tc := range tests {
