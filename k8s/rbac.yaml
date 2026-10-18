@@ -200,17 +200,14 @@ rules:
   verbs:
   - get
   - list
-  - watch
   - create
   - update
-  - patch
 - apiGroups:
   - ""
   resources:
   - secrets
   resourceNames:
   - github-webhook
-  - github-token
   verbs:
   - get
 - apiGroups:
