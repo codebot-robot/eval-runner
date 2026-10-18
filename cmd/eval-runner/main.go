@@ -267,7 +267,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	var sink artifacts.ArtifactSink = &artifacts.NoopSink{}
+	var sink artifacts.ArtifactSink
 	if clusterConfig.ArtifactBucket != "" {
 		gcsSink, err := gcs.New(context.Background(), clusterConfig.ArtifactBucket)
 		if err != nil {
@@ -277,6 +277,9 @@ func main() {
 		sink = gcsSink
 	} else if clusterConfig.ArtifactDir != "" {
 		sink = &artifacts.LocalDirSink{BaseDir: clusterConfig.ArtifactDir}
+	} else {
+		setupLog.Info("neither artifactBucket nor artifactDir configured; using default in-memory sink (non-durable: controller restarts reset Runs to Pending to re-discover)")
+		sink = artifacts.NewInMemorySink()
 	}
 
 	reconciler := &controller.RunReconciler{

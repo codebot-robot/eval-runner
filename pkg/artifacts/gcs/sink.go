@@ -15,11 +15,13 @@
 package gcs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"cloud.google.com/go/storage"
@@ -34,6 +36,7 @@ const (
 // StorageClient defines the interface for interacting with GCS.
 type StorageClient interface {
 	WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error
+	WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, metadata map[string]string, data []byte) error
 	ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error)
 	Close() error
 }
@@ -43,9 +46,16 @@ type realStorageClient struct {
 }
 
 func (c *realStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
+	return c.WriteObjectWithMetadata(ctx, bucket, object, contentType, nil, data)
+}
+
+func (c *realStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, metadata map[string]string, data []byte) error {
 	w := c.client.Bucket(bucket).Object(object).NewWriter(ctx)
 	if contentType != "" {
 		w.ContentType = contentType
+	}
+	if len(metadata) > 0 {
+		w.Metadata = metadata
 	}
 	if _, err := w.Write(data); err != nil {
 		return errors.Join(err, w.Close())
@@ -150,12 +160,62 @@ func (s *GCSSink) Close() error {
 	return nil
 }
 
+// IsDurable implements artifacts.ArtifactSink for GCSSink.
+func (s *GCSSink) IsDurable() bool {
+	return true
+}
+
 // ArtifactPrefix returns the run-level storage prefix for a given commit.
 func (s *GCSSink) ArtifactPrefix(commit string) string {
 	if s.bucket == "" || strings.TrimSpace(commit) == "" {
 		return ""
 	}
 	return fmt.Sprintf("gs://%s/runs/%s/", s.bucket, commit)
+}
+
+// StoreManifest persists the discovered manifest JSON as runs/<commit>/manifest.json with run/commit/task-count metadata.
+// GCS must error, not truncate, above the cap.
+// Writing the same object twice for the same commit is a no-op when the hash matches.
+func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
+	if err := validateSafeComponent("commit", meta.Commit); err != nil {
+		return "", err
+	}
+	if s.bucket == "" {
+		return "", fmt.Errorf("bucket name is empty")
+	}
+
+	capLimit := s.maxUploadBytes
+	if capLimit <= 0 {
+		capLimit = DefaultMaxUploadBytes
+	}
+
+	if int64(len(data)) > capLimit {
+		return "", fmt.Errorf("manifest size %d exceeds maximum upload size of %d bytes", len(data), capLimit)
+	}
+
+	manifestObject := fmt.Sprintf("runs/%s/manifest.json", meta.Commit)
+
+	// Idempotency: writing the same object twice for the same commit is a no-op when the hash matches.
+	existing, err := s.client.ReadObject(ctx, s.bucket, manifestObject, capLimit)
+	if err == nil {
+		if bytes.Equal(existing, data) {
+			return fmt.Sprintf("gs://%s/%s", s.bucket, manifestObject), nil
+		}
+	} else if !artifacts.IsNotFound(err) {
+		return "", fmt.Errorf("failed to check existing manifest at gs://%s/%s: %w", s.bucket, manifestObject, err)
+	}
+
+	metaMap := map[string]string{
+		"run":        meta.RunName,
+		"commit":     meta.Commit,
+		"task-count": strconv.Itoa(meta.TaskCount),
+	}
+
+	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, manifestObject, "application/json", metaMap, data); err != nil {
+		return "", fmt.Errorf("failed to upload manifest to gs://%s/%s: %w", s.bucket, manifestObject, err)
+	}
+
+	return fmt.Sprintf("gs://%s/%s", s.bucket, manifestObject), nil
 }
 
 // StoreComparison persists comparison summary data as comparisons/<comparisonName>.json and returns the gs:// URI.
@@ -225,6 +285,9 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 
 	data, err := s.client.ReadObject(ctx, bucket, object, capLimit)
 	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "does not exist") {
+			return nil, fmt.Errorf("%w: failed to read artifact from gs://%s/%s: %v", artifacts.ErrNotFound, bucket, object, err)
+		}
 		return nil, fmt.Errorf("failed to read artifact from gs://%s/%s: %w", bucket, object, err)
 	}
 

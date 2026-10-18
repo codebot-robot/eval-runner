@@ -213,6 +213,29 @@ type Manifest struct {
 	Tasks []ManifestTask `json:"tasks"`
 }
 
+// RunDiscoveryStatus records pointers, counts, and checksum from eval discovery.
+type RunDiscoveryStatus struct {
+	// ManifestPath is the URI or path where the discovered manifest is stored in the artifact store.
+	// +optional
+	ManifestPath string `json:"manifestPath,omitempty"`
+
+	// ManifestHash is the sha256 checksum (in sha256:<hex> format) of the stored manifest.
+	// +optional
+	ManifestHash string `json:"manifestHash,omitempty"`
+
+	// TaskCount is the total number of tasks in the discovered manifest.
+	// +optional
+	TaskCount int `json:"taskCount,omitempty"`
+
+	// EligibleTaskCount is the number of tasks in the manifest eligible for evaluation.
+	// +optional
+	EligibleTaskCount int `json:"eligibleTaskCount,omitempty"`
+
+	// TaskIDs is a list of discovered task IDs, capped at 50 to bound status size.
+	// +optional
+	TaskIDs []string `json:"taskIDs,omitempty"`
+}
+
 // ScoreRange represents the minimum and maximum values of a score or rate.
 type ScoreRange struct {
 	// Min is the minimum value in the range.
@@ -269,9 +292,9 @@ type RunStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Manifest is the parsed output of .evals/list once discovery completes.
+	// Discovery records pointers, hash, and counts for the discovered manifest.
 	// +optional
-	Manifest *Manifest `json:"manifest,omitempty"`
+	Discovery *RunDiscoveryStatus `json:"discovery,omitempty"`
 
 	// DiscoveryDeadline is the deadline by which discovery must complete.
 	// +optional

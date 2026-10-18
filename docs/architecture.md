@@ -75,11 +75,12 @@ The `Run` custom resource represents an evaluation request against a specific co
   - `repo.url`: The git clone URL for the repository under test.
   - `repo.commit`: The exact git commit SHA, strictly validated by the regex `^[0-9a-fA-F]{7,64}$`. Branch and tag names are rejected by CRD validation.
 - **Status (`status`)**:
-  - `phase`: Lifecycle phase: `Pending`, `Discovering`, `Discovered`, or `Failed`.
+  - `phase`: Lifecycle phase: `Pending`, `Discovering`, `Discovered`, `Running`, `Completed`, or `Failed`.
   - `message`: Human-readable status or bounded error description.
   - `conditions`: Kubernetes conditions, including condition `Discovered` (`True` or `False`).
-  - `manifest`: Parsed manifest (`*Manifest`) populated when discovery succeeds, listing declared container images and eval tasks (`id`, `workdir`, `spec`, `resources`, `images`).
+  - `discovery`: Pointers, hash, and counts for the discovered manifest (`manifestPath`, `manifestHash`, `taskCount`, `eligibleTaskCount`, and up to 50 `taskIDs`).
   - `discoveryDeadline`: Overall deadline (`metav1.Time`) by which discovery must complete, set at `Pending` -> `Discovering` and back-filled for in-flight Runs.
+  - `artifacts`: Base URI or path prefix for stored artifacts (`runs/<commit>/`).
 - **Finalizer**: `evalrunner.gke-labs.dev/discovery-sandbox` ensures discovery sandboxes in `eval-runner-sandbox` are cleaned up if a Run is deleted.
 
 ### Two Namespaces
@@ -138,27 +139,29 @@ The reconciliation loop in `pkg/controller/run_controller.go` operates as a stat
    - Once the pod is ready, the controller dials the pod IP directly on `:9090` using `pkg/sandboxclient` and executes discovery through discrete steps:
      - **Step 1 (`git clone`)**: `git clone -- <url> repo`. If the clone exits non-zero, it retries up to N times (default: 5, configured via `--max-discovery-attempts`) with backoff (5s, 10s, 20s, 40s), cleaning up any partial directory before retrying. All attempts are bounded by the discovery deadline. If all attempts are exhausted, the Run fails and the attempt count is recorded in `status.message`.
      - **Step 2 (`git checkout`)**: `git checkout <commit>` with working directory `repo`. If checkout exits non-zero, the Run fails immediately without retry (commit not found is permanent).
-     - **Step 3 (`./.evals/list`)**: Executed inside `repo` without retries. Outcomes are typed into distinct failure messages:
+     - **Step 3 (`./.evals/list` to file)**: Executes `sh -c "mkdir -p /workspace/out && ./.evals/list > /workspace/out/manifest.json"` inside `repo` without retries. Outcomes are typed into distinct failure messages:
        - Missing executable (`codes.NotFound` / not found)
        - Non-executable permissions (`codes.PermissionDenied` / permission denied)
        - Non-zero exit code
        - Output limit exceeded
        - Invalid JSON
    - **Timeout**: The per-step execution context timeout is derived from the remaining discovery deadline budget (capped at `5*time.Minute`).
-4. **Output Capture and Limits**:
-   - Exec streams from sandboxd are captured through `LimitWriter` instances (`pkg/discovery/limit_writer.go`).
-   - If stdout exceeds 1 MiB (`MaxStdoutBytes`), output beyond the cap is discarded and the step fails with a `LimitError`.
-   - If stderr exceeds 64 KiB (`MaxStderrBytes`), output beyond the cap is discarded and the step fails with a `LimitError`.
-5. **Manifest Parsing and Validation**:
-   - The stdout output of step 3 is parsed as a JSON `Manifest` (`pkg/discovery/manifest.go`).
+4. **Manifest Retrieval and Limits**:
+   - The controller pulls the written manifest file via sandboxd REST `ReadFile` (`/out/manifest.json`).
+   - Sandboxd resolves paths relative to `--root-dir=/workspace`, mapping `/out/manifest.json` directly to `/workspace/out/manifest.json`.
+   - The read is bounded by the sandboxclient read limit (10 MiB) and checked controller-side against the 1 MiB manifest size cap (`MaxManifestBytes`).
+5. **Manifest Parsing, Validation, and Storage**:
+   - The manifest bytes are parsed into a JSON `Manifest` (`pkg/discovery/manifest.go`).
    - Validation enforces:
      - Manifest must not be nil.
      - `tasks` list must not be empty.
      - `tasks` count must not exceed 1,000 (`MaxTasks`).
      - Each task must have a non-empty, unique `id`.
      - Each task must have a non-empty `spec`.
+   - The raw manifest JSON is persisted to the configured `ArtifactSink` under `runs/<commit>/manifest.json` with metadata.
+   - The parsed manifest is cached in the controller's per-Run in-memory cache.
 6. **Completion**:
-   - **On Success**: `status.phase` is set to `Discovered`, condition `Discovered=True` is recorded (recording attempt count if retried), `status.manifest` is populated, and the sandbox CR is deleted.
+   - **On Success**: `status.phase` is set to `Discovered` (or `Running` if `spec.model` is set), condition `Discovered=True` is recorded (recording attempt count if retried), `status.discovery` is populated (`manifestPath`, `manifestHash`, `taskCount`, `eligibleTaskCount`, and up to 50 `taskIDs`), and the discovery sandbox CR is deleted.
    - **On Failure**: `status.phase` is set to `Failed`, condition `Discovered=False` (reason `DiscoveryFailed`) is recorded, `status.message` is populated with the failed step name, attempt count, error description, pod phase, container waiting reasons/messages (e.g. `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`), and `PodScheduled=False` reason for unschedulable pods, appended to any bounded stderr tail (up to 10 lines / 3 KiB; total message bounded to 4 KiB), and the sandbox CR is deleted.
 
 ### Finalizer-Based Cleanup
@@ -214,11 +217,14 @@ sequenceDiagram
     Pod->>Git: git clone repo.url
     Git-->>Pod: Repository data
     Ctrl->>Pod: gRPC Execute: git checkout repo.commit (cwd=repo)
-    Ctrl->>Pod: gRPC Execute: ./.evals/list (cwd=repo)
-    Pod-->>Ctrl: gRPC ExecuteResponse (exit_code, stdout, stderr)
-    Ctrl->>Ctrl: Enforce stream limits (1 MiB stdout, 64 KiB stderr)
-    Ctrl->>Ctrl: Parse and validate manifest (unique IDs, at most 1000 tasks)
-    Ctrl->>API: Update Run status: phase=Discovered, status.manifest populated
+    Ctrl->>Pod: gRPC Execute: mkdir -p /workspace/out && ./.evals/list > /workspace/out/manifest.json (cwd=repo)
+    Pod-->>Ctrl: gRPC ExecuteResponse (exit_code, stderr)
+    Ctrl->>Pod: REST ReadFile: /out/manifest.json (10 MiB limit)
+    Pod-->>Ctrl: Raw manifest.json bytes
+    Ctrl->>Ctrl: Verify size <= 1 MiB, parse and validate manifest (unique IDs, at most 1000 tasks)
+    Ctrl->>Storage: Store manifest in artifact store (runs/<commit>/manifest.json)
+    Storage-->>Ctrl: manifestURI
+    Ctrl->>API: Update Run status: phase=Discovered, status.discovery populated
     Ctrl->>API: Delete Sandbox CR in eval-runner-sandbox
     API-->>SB: Watch event: Sandbox deleted
     SB->>API: Delete Pod

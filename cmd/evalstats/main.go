@@ -77,10 +77,11 @@ type SingleRunTaskSummary struct {
 
 // SingleRunOutput encapsulates the Run output in JSON mode.
 type SingleRunOutput struct {
-	Run     string                 `json:"run"`
-	Phase   string                 `json:"phase"`
-	Tasks   []SingleRunTaskSummary `json:"tasks"`
-	Summary *v1alpha1.RunSummary   `json:"summary,omitempty"`
+	Run       string                       `json:"run"`
+	Phase     string                       `json:"phase"`
+	Tasks     []SingleRunTaskSummary       `json:"tasks"`
+	Summary   *v1alpha1.RunSummary         `json:"summary,omitempty"`
+	Discovery *v1alpha1.RunDiscoveryStatus `json:"discovery,omitempty"`
 }
 
 func main() {
@@ -363,6 +364,32 @@ func printTable(summaries []TaskSummary) error {
 
 // PrintRunTable writes a formatted table of tasks with success rates and confidence intervals from a Run.
 func PrintRunTable(w io.Writer, run *v1alpha1.Run) error {
+	if len(run.Status.Tasks) == 0 && run.Status.Discovery != nil {
+		if _, err := fmt.Fprintf(w, "Discovery: %d tasks (%d eligible)\n", run.Status.Discovery.TaskCount, run.Status.Discovery.EligibleTaskCount); err != nil {
+			return err
+		}
+		if run.Status.Discovery.ManifestPath != "" {
+			if _, err := fmt.Fprintf(w, "Manifest: %s\n", run.Status.Discovery.ManifestPath); err != nil {
+				return err
+			}
+		}
+		tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+		if _, err := fmt.Fprintln(tw, "TASK\tSTATUS"); err != nil {
+			return err
+		}
+		for _, id := range run.Status.Discovery.TaskIDs {
+			if _, err := fmt.Fprintf(tw, "%s\tdiscovered\n", id); err != nil {
+				return err
+			}
+		}
+		if run.Status.Discovery.TaskCount > len(run.Status.Discovery.TaskIDs) {
+			if _, err := fmt.Fprintf(tw, "... (%d more tasks in manifest)\n", run.Status.Discovery.TaskCount-len(run.Status.Discovery.TaskIDs)); err != nil {
+				return err
+			}
+		}
+		return tw.Flush()
+	}
+
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "TASK\tRATE (95% CI)\tN\tMETHOD"); err != nil {
 		return err
@@ -445,10 +472,11 @@ func PrintRunJSON(w io.Writer, run *v1alpha1.Run) error {
 		})
 	}
 	out := SingleRunOutput{
-		Run:     run.Name,
-		Phase:   string(run.Status.Phase),
-		Tasks:   taskSummaries,
-		Summary: run.Status.Summary,
+		Run:       run.Name,
+		Phase:     string(run.Status.Phase),
+		Tasks:     taskSummaries,
+		Summary:   run.Status.Summary,
+		Discovery: run.Status.Discovery,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

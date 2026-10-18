@@ -15,6 +15,7 @@
 package discovery
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -193,5 +194,28 @@ func TestValidateManifest(t *testing.T) {
 				t.Errorf("ValidateManifest unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestDiscoveryPathsAgreement(t *testing.T) {
+	// Sandboxd starts with --root-dir=/workspace.
+	// REST ReadFile paths are interpreted relative to /workspace.
+	// Therefore, joining /workspace with DiscoveryManifestReadPath must exactly yield DiscoveryManifestWritePath.
+	resolvedPath := filepath.Clean(filepath.Join("/workspace", DiscoveryManifestReadPath))
+	if resolvedPath != DiscoveryManifestWritePath {
+		t.Errorf("Read path %q under /workspace resolved to %q, but write path is %q",
+			DiscoveryManifestReadPath, resolvedPath, DiscoveryManifestWritePath)
+	}
+
+	// Verify that DiscoveryCommand creates the parent directory and writes to DiscoveryManifestWritePath
+	expectedCmd := "mkdir -p " + DiscoveryManifestWorkspaceDir + " && ./.evals/list > " + DiscoveryManifestWritePath
+	if DiscoveryCommand != expectedCmd {
+		t.Errorf("DiscoveryCommand mismatch: got %q, want %q", DiscoveryCommand, expectedCmd)
+	}
+
+	// Verify directory and filename match write path
+	expectedWritePath := filepath.Join(DiscoveryManifestWorkspaceDir, DiscoveryManifestFilename)
+	if DiscoveryManifestWritePath != expectedWritePath {
+		t.Errorf("DiscoveryManifestWritePath %q does not match %q", DiscoveryManifestWritePath, expectedWritePath)
 	}
 }

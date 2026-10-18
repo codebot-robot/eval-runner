@@ -23,6 +23,28 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 )
 
+const (
+	// MaxManifestBytes is the maximum allowed size of a manifest JSON file (1 MiB).
+	MaxManifestBytes int64 = 1 * 1024 * 1024
+
+	// DiscoveryManifestWorkspaceDir is the directory in the sandbox pod where discovery writes the manifest.
+	DiscoveryManifestWorkspaceDir = "/workspace/out"
+
+	// DiscoveryManifestFilename is the filename of the discovered manifest JSON.
+	DiscoveryManifestFilename = "manifest.json"
+
+	// DiscoveryManifestWritePath is the absolute path inside the sandbox where discovery writes manifest.json.
+	// The discovery step executes: mkdir -p /workspace/out && ./.evals/list > /workspace/out/manifest.json
+	DiscoveryManifestWritePath = "/workspace/out/manifest.json"
+
+	// DiscoveryManifestReadPath is the relative path from sandboxd's root-dir (/workspace) used by REST ReadFile.
+	// Since sandboxd runs with --root-dir=/workspace, requesting /out/manifest.json resolves to /workspace/out/manifest.json.
+	DiscoveryManifestReadPath = "/out/manifest.json"
+
+	// DiscoveryCommand is the shell command used to discover tasks and write the manifest file.
+	DiscoveryCommand = "mkdir -p /workspace/out && ./.evals/list > /workspace/out/manifest.json"
+)
+
 // ParseManifest unmarshals raw JSON bytes into a Manifest.
 func ParseManifest(data []byte) (*v1alpha1.Manifest, error) {
 	var m v1alpha1.Manifest
