@@ -171,7 +171,10 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 				Commit: headSHA,
 			},
 			Model: wp.cfg.DefaultModel,
-			Limit: wp.cfg.DefaultLimit,
+			SampleRange: &v1alpha1.SampleRange{
+				Start: 1,
+				End:   wp.cfg.DefaultBatchSize,
+			},
 		},
 	}
 	if err := wp.createOrUpdateRun(ctx, candRun); err != nil {
@@ -205,7 +208,10 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 					Commit: baseSHA,
 				},
 				Model: wp.cfg.DefaultModel,
-				Limit: wp.cfg.DefaultLimit,
+				SampleRange: &v1alpha1.SampleRange{
+					Start: 1,
+					End:   wp.cfg.DefaultBatchSize,
+				},
 			},
 		}
 		if err := wp.createOrUpdateRun(ctx, baseRun); err != nil {
@@ -230,6 +236,10 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 			},
 			Candidate: v1alpha1.ComparisonRunRef{
 				Run: candRunName,
+			},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         wp.cfg.DefaultBatchSize,
+				MaxSamplesPerTask: wp.cfg.DefaultMaxSamplesPerTask,
 			},
 			PullRequest: &v1alpha1.PullRequestSpec{
 				Repository: item.TargetRepo,
@@ -273,7 +283,10 @@ func (wp *WorkerPool) ProcessPush(ctx context.Context, item *PushWorkItem) error
 				Commit: commitSHA,
 			},
 			Model: wp.cfg.DefaultModel,
-			Limit: wp.cfg.DefaultLimit,
+			SampleRange: &v1alpha1.SampleRange{
+				Start: 1,
+				End:   wp.cfg.DefaultBatchSize,
+			},
 		},
 	}
 
@@ -407,6 +420,15 @@ func (wp *WorkerPool) createOrUpdateComparison(ctx context.Context, comp *v1alph
 			existing.Spec.PullRequest.HeadSHA != comp.Spec.PullRequest.HeadSHA ||
 			existing.Spec.PullRequest.BaseSHA != comp.Spec.PullRequest.BaseSHA {
 			existing.Spec.PullRequest = comp.Spec.PullRequest.DeepCopy()
+			needsUpdate = true
+		}
+	}
+
+	if comp.Spec.Sampling != nil {
+		if existing.Spec.Sampling == nil ||
+			existing.Spec.Sampling.BatchSize != comp.Spec.Sampling.BatchSize ||
+			existing.Spec.Sampling.MaxSamplesPerTask != comp.Spec.Sampling.MaxSamplesPerTask {
+			existing.Spec.Sampling = comp.Spec.Sampling.DeepCopy()
 			needsUpdate = true
 		}
 	}

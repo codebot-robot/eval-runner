@@ -1,0 +1,30 @@
+{
+  "action": "created",
+  "issue": {
+    "number": 305,
+    "state": "open",
+    "pull_request": {
+      "url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/305",
+      "html_url": "https://github.com/gke-labs/eval-runner/pull/305"
+    }
+  },
+  "comment": {
+    "id": 88889999,
+    "body": "/eval more 8",
+    "user": {
+      "login": "reviewer"
+    }
+  },
+  "repository": {
+    "name": "eval-runner",
+    "full_name": "gke-labs/eval-runner",
+    "clone_url": "https://github.com/gke-labs/eval-runner.git",
+    "default_branch": "main",
+    "owner": {
+      "login": "gke-labs"
+    }
+  },
+  "sender": {
+    "login": "reviewer"
+  }
+}

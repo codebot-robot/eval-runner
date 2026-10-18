@@ -53,6 +53,11 @@ func main() {
 	var webhookSecretName string
 	var defaultModel string
 	var defaultLimit int
+	var defaultBatchSize int
+	var defaultMaxSamplesPerTask int
+	var commandUsers string
+	var githubTokenSecret string
+	var githubAppSecret string
 	var webhookRepositories string
 	var workers int
 	var queueSize int
@@ -63,6 +68,11 @@ func main() {
 	flag.StringVar(&webhookSecretName, "github-webhook-secret", webhook.DefaultGitHubWebhookSecret, "Name of Secret containing GitHub webhook secret")
 	flag.StringVar(&defaultModel, "default-model", "", "Default model identifier for created Runs (e.g. mockllm/model)")
 	flag.IntVar(&defaultLimit, "default-limit", 0, "Default sample limit for created Runs (0 = unlimited)")
+	flag.IntVar(&defaultBatchSize, "default-batch-size", webhook.DefaultBatchSize, "Default batch size for paired adaptive sampling")
+	flag.IntVar(&defaultMaxSamplesPerTask, "default-max-samples-per-task", webhook.DefaultMaxSamplesPerTask, "Default maximum samples per task across batches")
+	flag.StringVar(&commandUsers, "command-users", "", "Comma-separated allow-list of GitHub usernames permitted to run comment commands")
+	flag.StringVar(&githubTokenSecret, "github-token-secret", "github-token", "Name of Secret containing GitHub token")
+	flag.StringVar(&githubAppSecret, "github-app-secret", "github-app", "Name of Secret containing GitHub App credentials")
 	flag.StringVar(&webhookRepositories, "webhook-repositories", "", "Comma-separated allow-list of repositories (owner/repo)")
 	flag.IntVar(&workers, "workers", webhook.DefaultWorkers, "Number of concurrent worker goroutines")
 	flag.IntVar(&queueSize, "queue-size", webhook.DefaultQueueSize, "Queue buffer size for incoming webhook events")
@@ -77,18 +87,31 @@ func main() {
 	if explicit["default-limit"] && defaultLimit > 0 {
 		limitPtr = &defaultLimit
 	}
+	var batchSizePtr *int
+	if explicit["default-batch-size"] && defaultBatchSize > 0 {
+		batchSizePtr = &defaultBatchSize
+	}
+	var maxSamplesPtr *int
+	if explicit["default-max-samples-per-task"] && defaultMaxSamplesPerTask > 0 {
+		maxSamplesPtr = &defaultMaxSamplesPerTask
+	}
 
 	rawFlags := webhook.RawWebhookFlags{
-		Namespace:           namespace,
-		ConfigMapName:       configMapName,
-		ListenAddr:          listenAddr,
-		GitHubWebhookSecret: webhookSecretName,
-		DefaultModel:        defaultModel,
-		DefaultLimit:        limitPtr,
-		WebhookRepositories: webhookRepositories,
-		Workers:             workers,
-		QueueSize:           queueSize,
-		Explicit:            explicit,
+		Namespace:                namespace,
+		ConfigMapName:            configMapName,
+		ListenAddr:               listenAddr,
+		GitHubWebhookSecret:      webhookSecretName,
+		DefaultModel:             defaultModel,
+		DefaultLimit:             limitPtr,
+		DefaultBatchSize:         batchSizePtr,
+		DefaultMaxSamplesPerTask: maxSamplesPtr,
+		CommandUsers:             commandUsers,
+		GitHubTokenSecret:        githubTokenSecret,
+		GitHubAppSecret:          githubAppSecret,
+		WebhookRepositories:      webhookRepositories,
+		Workers:                  workers,
+		QueueSize:                queueSize,
+		Explicit:                 explicit,
 	}
 
 	restCfg, err := config.GetConfig()

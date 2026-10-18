@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/github"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -445,12 +446,12 @@ func TestProcessPullRequest_CreateAndIdempotency(t *testing.T) {
 	scheme := newTestScheme()
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	limit := 15
 	cfg := Config{
-		Namespace:    "eval-runner",
-		DefaultModel: "mockllm/model",
-		DefaultLimit: &limit,
-		Client:       cl,
+		Namespace:                "eval-runner",
+		DefaultModel:             "mockllm/model",
+		DefaultBatchSize:         8,
+		DefaultMaxSamplesPerTask: 64,
+		Client:                   cl,
 	}
 	worker := NewWorkerPool(cfg)
 
@@ -487,8 +488,11 @@ func TestProcessPullRequest_CreateAndIdempotency(t *testing.T) {
 	if candRun.Spec.Model != "mockllm/model" {
 		t.Errorf("expected model mockllm/model, got %s", candRun.Spec.Model)
 	}
-	if candRun.Spec.Limit == nil || *candRun.Spec.Limit != 15 {
-		t.Errorf("expected limit 15, got %v", candRun.Spec.Limit)
+	if candRun.Spec.SampleRange == nil || candRun.Spec.SampleRange.Start != 1 || candRun.Spec.SampleRange.End != 8 {
+		t.Errorf("expected candidate sampleRange {1, 8}, got %+v", candRun.Spec.SampleRange)
+	}
+	if candRun.Spec.Limit != nil {
+		t.Errorf("expected candidate limit nil, got %v", candRun.Spec.Limit)
 	}
 	if candRun.Labels[LabelPR] != "105" {
 		t.Errorf("expected label pr=105, got %s", candRun.Labels[LabelPR])
@@ -512,12 +516,21 @@ func TestProcessPullRequest_CreateAndIdempotency(t *testing.T) {
 	if baseRun.Spec.Repo.Commit != item.BaseSHA {
 		t.Errorf("expected commit %s, got %s", item.BaseSHA, baseRun.Spec.Repo.Commit)
 	}
+	if baseRun.Spec.SampleRange == nil || baseRun.Spec.SampleRange.Start != 1 || baseRun.Spec.SampleRange.End != 8 {
+		t.Errorf("expected baseline sampleRange {1, 8}, got %+v", baseRun.Spec.SampleRange)
+	}
+	if baseRun.Spec.Limit != nil {
+		t.Errorf("expected baseline limit nil, got %v", baseRun.Spec.Limit)
+	}
 
 	// Verify Comparison
 	compName := "pr-105"
 	var comp v1alpha1.Comparison
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: compName}, &comp); err != nil {
 		t.Fatalf("Comparison %s not found: %v", compName, err)
+	}
+	if comp.Spec.Sampling == nil || comp.Spec.Sampling.BatchSize != 8 || comp.Spec.Sampling.MaxSamplesPerTask != 64 {
+		t.Errorf("expected Comparison sampling {8, 64}, got %+v", comp.Spec.Sampling)
 	}
 	if comp.Spec.Candidate.Run != candRunName {
 		t.Errorf("expected Candidate.Run %s, got %s", candRunName, comp.Spec.Candidate.Run)
@@ -1148,5 +1161,848 @@ func TestHandler_FailClosedEmptyAllowList(t *testing.T) {
 	}
 	if !strings.Contains(rrWildcard.Body.String(), "ok: enqueued pull_request") {
 		t.Errorf("expected response body to contain 'ok: enqueued pull_request', got: %s", rrWildcard.Body.String())
+	}
+}
+
+func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "eval-runner-config",
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyDefaultBatchSize:         "16",
+			ConfigMapKeyDefaultMaxSamplesPerTask: "48",
+			ConfigMapKeyCommandUsers:             "alice, bob, CHARLIE",
+		},
+	}
+
+	cfg, err := ResolveWebhookConfig(cm, RawWebhookFlags{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error resolving config: %v", err)
+	}
+	if cfg.DefaultBatchSize != 16 {
+		t.Errorf("expected DefaultBatchSize 16, got %d", cfg.DefaultBatchSize)
+	}
+	if cfg.DefaultMaxSamplesPerTask != 48 {
+		t.Errorf("expected DefaultMaxSamplesPerTask 48, got %d", cfg.DefaultMaxSamplesPerTask)
+	}
+	if len(cfg.CommandUsers) != 3 || cfg.CommandUsers[0] != "alice" || cfg.CommandUsers[1] != "bob" || cfg.CommandUsers[2] != "CHARLIE" {
+		t.Errorf("expected CommandUsers [alice bob CHARLIE], got %v", cfg.CommandUsers)
+	}
+
+	// Verify case-insensitive user check and no wildcard support
+	if !IsUserAllowed("Alice", cfg.CommandUsers) {
+		t.Errorf("expected Alice to be allowed")
+	}
+	if !IsUserAllowed("charlie", cfg.CommandUsers) {
+		t.Errorf("expected charlie to be allowed")
+	}
+	if IsUserAllowed("eve", cfg.CommandUsers) {
+		t.Errorf("expected eve to not be allowed")
+	}
+	// Wildcard "*" in allow-list must NOT match arbitrary users
+	if IsUserAllowed("eve", []string{"*"}) {
+		t.Errorf("expected '*' to NOT act as a wildcard in commandUsers")
+	}
+
+	// Malformed batch size
+	badCM := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyDefaultBatchSize: "-5",
+		},
+	}
+	if _, err := ResolveWebhookConfig(badCM, RawWebhookFlags{}, nil); err == nil {
+		t.Errorf("expected error for negative defaultBatchSize")
+	}
+
+	// Malformed max samples
+	badCM2 := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyDefaultMaxSamplesPerTask: "not-int",
+		},
+	}
+	if _, err := ResolveWebhookConfig(badCM2, RawWebhookFlags{}, nil); err == nil {
+		t.Errorf("expected error for non-integer defaultMaxSamplesPerTask")
+	}
+
+	// Explicit flags override
+	bs := 32
+	ms := 128
+	flags := RawWebhookFlags{
+		DefaultBatchSize:         &bs,
+		DefaultMaxSamplesPerTask: &ms,
+		CommandUsers:             "david",
+		Explicit: map[string]bool{
+			"default-batch-size":           true,
+			"default-max-samples-per-task": true,
+			"command-users":                true,
+		},
+	}
+	cfgFlags, err := ResolveWebhookConfig(cm, flags, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgFlags.DefaultBatchSize != 32 {
+		t.Errorf("expected explicit flag DefaultBatchSize 32, got %d", cfgFlags.DefaultBatchSize)
+	}
+	if cfgFlags.DefaultMaxSamplesPerTask != 128 {
+		t.Errorf("expected explicit flag DefaultMaxSamplesPerTask 128, got %d", cfgFlags.DefaultMaxSamplesPerTask)
+	}
+	if len(cfgFlags.CommandUsers) != 1 || cfgFlags.CommandUsers[0] != "david" {
+		t.Errorf("expected CommandUsers [david], got %v", cfgFlags.CommandUsers)
+	}
+}
+
+func TestWorker_SetsSamplingFromConfigMap(t *testing.T) {
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := Config{
+		Namespace:                "eval-runner",
+		DefaultModel:             "mockllm/model",
+		DefaultBatchSize:         12,
+		DefaultMaxSamplesPerTask: 48,
+		Client:                   cl,
+	}
+	worker := NewWorkerPool(cfg)
+	ctx := t.Context()
+
+	item := &PullRequestWorkItem{
+		PRNumber:          200,
+		HeadSHA:           "1111111111111111111111111111111111111111",
+		BaseSHA:           "2222222222222222222222222222222222222222",
+		CandidateCloneURL: "https://github.com/contributor/eval-runner.git",
+		CandidateRepo:     "contributor/eval-runner",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+		BaselineRepo:      "gke-labs/eval-runner",
+		TargetRepo:        "gke-labs/eval-runner",
+	}
+
+	if err := worker.ProcessPullRequest(ctx, item); err != nil {
+		t.Fatalf("ProcessPullRequest failed: %v", err)
+	}
+
+	var candRun v1alpha1.Run
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-200-1111111"}, &candRun); err != nil {
+		t.Fatalf("candidate Run not found: %v", err)
+	}
+	if candRun.Spec.SampleRange == nil || candRun.Spec.SampleRange.Start != 1 || candRun.Spec.SampleRange.End != 12 {
+		t.Errorf("expected candidate SampleRange {1, 12}, got %+v", candRun.Spec.SampleRange)
+	}
+	if candRun.Spec.Limit != nil {
+		t.Errorf("expected candidate Limit nil, got %v", candRun.Spec.Limit)
+	}
+
+	var baseRun v1alpha1.Run
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "base-2222222"}, &baseRun); err != nil {
+		t.Fatalf("base Run not found: %v", err)
+	}
+	if baseRun.Spec.SampleRange == nil || baseRun.Spec.SampleRange.Start != 1 || baseRun.Spec.SampleRange.End != 12 {
+		t.Errorf("expected base SampleRange {1, 12}, got %+v", baseRun.Spec.SampleRange)
+	}
+	if baseRun.Spec.Limit != nil {
+		t.Errorf("expected base Limit nil, got %v", baseRun.Spec.Limit)
+	}
+
+	var comp v1alpha1.Comparison
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-200"}, &comp); err != nil {
+		t.Fatalf("Comparison not found: %v", err)
+	}
+	if comp.Spec.Sampling == nil {
+		t.Fatalf("expected comp.Spec.Sampling to be non-nil")
+	}
+	if comp.Spec.Sampling.BatchSize != 12 || comp.Spec.Sampling.MaxSamplesPerTask != 48 {
+		t.Errorf("expected Sampling {12, 48}, got %+v", comp.Spec.Sampling)
+	}
+
+	// Test push warm baseline run gets sampleRange {1, defaultBatchSize}
+	pushItem := &PushWorkItem{
+		CommitSHA: "3333333333333333333333333333333333333333",
+		CloneURL:  "https://github.com/gke-labs/eval-runner.git",
+		Repo:      "gke-labs/eval-runner",
+	}
+	if err := worker.ProcessPush(ctx, pushItem); err != nil {
+		t.Fatalf("ProcessPush failed: %v", err)
+	}
+	var pushBaseRun v1alpha1.Run
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "base-3333333"}, &pushBaseRun); err != nil {
+		t.Fatalf("push base Run not found: %v", err)
+	}
+	if pushBaseRun.Spec.SampleRange == nil || pushBaseRun.Spec.SampleRange.Start != 1 || pushBaseRun.Spec.SampleRange.End != 12 {
+		t.Errorf("expected push base SampleRange {1, 12}, got %+v", pushBaseRun.Spec.SampleRange)
+	}
+}
+
+func TestParseEvalMoreCommand(t *testing.T) {
+	tests := []struct {
+		name              string
+		body              string
+		maxSamplesPerTask int
+		wantN             int
+		wantOK            bool
+	}{
+		{
+			name:              "simple /eval more 8",
+			body:              "/eval more 8",
+			maxSamplesPerTask: 64,
+			wantN:             8,
+			wantOK:            true,
+		},
+		{
+			name:              "bounded by maxSamplesPerTask",
+			body:              "/eval more 100",
+			maxSamplesPerTask: 64,
+			wantN:             64,
+			wantOK:            true,
+		},
+		{
+			name:              "case insensitive and extra whitespace",
+			body:              "   /EVAL   MORE   16   ",
+			maxSamplesPerTask: 64,
+			wantN:             16,
+			wantOK:            true,
+		},
+		{
+			name:              "multiline comment containing command",
+			body:              "Looks promising, let's get higher statistical confidence:\n/eval more 24\nThanks!",
+			maxSamplesPerTask: 64,
+			wantN:             24,
+			wantOK:            true,
+		},
+		{
+			name:              "zero samples is rejected",
+			body:              "/eval more 0",
+			maxSamplesPerTask: 64,
+			wantN:             0,
+			wantOK:            false,
+		},
+		{
+			name:              "/eval rerun is out of scope",
+			body:              "/eval rerun",
+			maxSamplesPerTask: 64,
+			wantN:             0,
+			wantOK:            false,
+		},
+		{
+			name:              "missing number",
+			body:              "/eval more",
+			maxSamplesPerTask: 64,
+			wantN:             0,
+			wantOK:            false,
+		},
+		{
+			name:              "non-numeric",
+			body:              "/eval more abc",
+			maxSamplesPerTask: 64,
+			wantN:             0,
+			wantOK:            false,
+		},
+		{
+			name:              "general comment",
+			body:              "LGTM!",
+			maxSamplesPerTask: 64,
+			wantN:             0,
+			wantOK:            false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotN, gotOK := ParseEvalMoreCommand(tc.body, tc.maxSamplesPerTask)
+			if gotOK != tc.wantOK || gotN != tc.wantN {
+				t.Errorf("ParseEvalMoreCommand(%q, %d) = (%d, %v), want (%d, %v)",
+					tc.body, tc.maxSamplesPerTask, gotN, gotOK, tc.wantN, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestHandler_IssueComment_ParseAndBound(t *testing.T) {
+	secretKey := []byte("comment-secret")
+	scheme := newTestScheme()
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-42",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     42,
+			},
+			ExtraSamples: 4,
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
+
+	cfg := Config{
+		Namespace:                "eval-runner",
+		StaticWebhookSecret:      secretKey,
+		WebhookRepositories:      []string{"gke-labs/eval-runner"},
+		CommandUsers:             []string{"allowed-user"},
+		DefaultMaxSamplesPerTask: 64,
+		Client:                   cl,
+	}
+	server := NewServer(cfg)
+	server.Start()
+	defer server.Stop()
+
+	// 1. Post /eval more 8
+	payload1 := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 42,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/42"}
+		},
+		"comment": {
+			"id": 1001,
+			"body": "/eval more 8",
+			"user": {"login": "allowed-user"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sig1 := ComputeSignature(payload1, secretKey)
+	req1 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload1))
+	req1.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	req1.Header.Set(HeaderHubSignature256, sig1)
+	rr1 := httptest.NewRecorder()
+
+	server.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+
+	var updatedComp v1alpha1.Comparison
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-42"}, &updatedComp); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	// Initial was 4, added 8 -> 12
+	if updatedComp.Spec.ExtraSamples != 12 {
+		t.Errorf("expected ExtraSamples 12, got %d", updatedComp.Spec.ExtraSamples)
+	}
+	if !isCommentHandled(updatedComp.Annotations, 1001) {
+		t.Errorf("expected comment 1001 to be recorded in annotations")
+	}
+
+	// 2. Post /eval more 100 (should be bounded by defaultMaxSamplesPerTask=64)
+	payload2 := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 42,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/42"}
+		},
+		"comment": {
+			"id": 1002,
+			"body": "/eval more 100",
+			"user": {"login": "allowed-user"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sig2 := ComputeSignature(payload2, secretKey)
+	req2 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload2))
+	req2.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	req2.Header.Set(HeaderHubSignature256, sig2)
+	rr2 := httptest.NewRecorder()
+
+	server.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-42"}, &updatedComp); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	// Previous was 12, added bounded 64 -> 76
+	if updatedComp.Spec.ExtraSamples != 76 {
+		t.Errorf("expected ExtraSamples 76 (12 + 64 bounded), got %d", updatedComp.Spec.ExtraSamples)
+	}
+
+	// 3. /eval rerun is ignored
+	payloadRerun := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 42,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/42"}
+		},
+		"comment": {
+			"id": 1003,
+			"body": "/eval rerun",
+			"user": {"login": "allowed-user"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigRerun := ComputeSignature(payloadRerun, secretKey)
+	reqRerun := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadRerun))
+	reqRerun.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqRerun.Header.Set(HeaderHubSignature256, sigRerun)
+	rrRerun := httptest.NewRecorder()
+
+	server.ServeHTTP(rrRerun, reqRerun)
+	if rrRerun.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for ignored command, got %d", rrRerun.Code)
+	}
+	if !strings.Contains(rrRerun.Body.String(), "ignored: no supported command") {
+		t.Errorf("expected ignored response, got: %s", rrRerun.Body.String())
+	}
+
+	// 4. Issue comment on non-PR issue is ignored
+	payloadNonPR := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 42
+		},
+		"comment": {
+			"id": 1004,
+			"body": "/eval more 8",
+			"user": {"login": "allowed-user"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigNonPR := ComputeSignature(payloadNonPR, secretKey)
+	reqNonPR := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadNonPR))
+	reqNonPR.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqNonPR.Header.Set(HeaderHubSignature256, sigNonPR)
+	rrNonPR := httptest.NewRecorder()
+
+	server.ServeHTTP(rrNonPR, reqNonPR)
+	if rrNonPR.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for non-PR issue, got %d", rrNonPR.Code)
+	}
+	if !strings.Contains(rrNonPR.Body.String(), "ignored: not a pull request") {
+		t.Errorf("expected ignored: not a pull request, got: %s", rrNonPR.Body.String())
+	}
+
+	// 5. Bot comment is ignored
+	payloadBot := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 42,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/42"}
+		},
+		"comment": {
+			"id": 1005,
+			"body": "/eval more 8",
+			"user": {"login": "bot-user", "type": "Bot"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigBot := ComputeSignature(payloadBot, secretKey)
+	reqBot := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadBot))
+	reqBot.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqBot.Header.Set(HeaderHubSignature256, sigBot)
+	rrBot := httptest.NewRecorder()
+
+	server.ServeHTTP(rrBot, reqBot)
+	if rrBot.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for bot comment, got %d", rrBot.Code)
+	}
+	if !strings.Contains(rrBot.Body.String(), "ignored: bot comment") {
+		t.Errorf("expected ignored: bot comment, got: %s", rrBot.Body.String())
+	}
+
+	// 6. Repository mismatch is ignored like not found (Blocking 3)
+	// Comparison pr-42 belongs to gke-labs/eval-runner; incoming comment is for other-org/other-repo#42
+	cfgWithTwoRepos := cfg
+	cfgWithTwoRepos.WebhookRepositories = []string{"gke-labs/eval-runner", "other-org/other-repo"}
+	serverMultiRepo := NewServer(cfgWithTwoRepos)
+	serverMultiRepo.Start()
+	defer serverMultiRepo.Stop()
+
+	payloadRepoMismatch := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 42,
+			"pull_request": {"url": "https://api.github.com/repos/other-org/other-repo/pulls/42"}
+		},
+		"comment": {
+			"id": 1006,
+			"body": "/eval more 8",
+			"user": {"login": "allowed-user"}
+		},
+		"repository": {
+			"full_name": "other-org/other-repo",
+			"name": "other-repo",
+			"owner": {"login": "other-org"}
+		}
+	}`)
+	sigMismatch := ComputeSignature(payloadRepoMismatch, secretKey)
+	reqMismatch := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadRepoMismatch))
+	reqMismatch.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqMismatch.Header.Set(HeaderHubSignature256, sigMismatch)
+	rrMismatch := httptest.NewRecorder()
+
+	serverMultiRepo.ServeHTTP(rrMismatch, reqMismatch)
+	if rrMismatch.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for mismatched repo, got %d", rrMismatch.Code)
+	}
+	if !strings.Contains(rrMismatch.Body.String(), "ignored: comparison not found") {
+		t.Errorf("expected ignored: comparison not found, got: %s", rrMismatch.Body.String())
+	}
+	// Verify pr-42 ExtraSamples was NOT bumped
+	var compAfterMismatch v1alpha1.Comparison
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-42"}, &compAfterMismatch); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if compAfterMismatch.Spec.ExtraSamples != 76 {
+		t.Errorf("expected ExtraSamples to remain 76 after mismatched repo attempt, got %d", compAfterMismatch.Spec.ExtraSamples)
+	}
+
+	// 7. Comparison with custom spec.sampling.maxSamplesPerTask bounds n
+	compCustomCap := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-70",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     70,
+			},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         4,
+				MaxSamplesPerTask: 16,
+			},
+			ExtraSamples: 0,
+		},
+	}
+	if err := cl.Create(t.Context(), compCustomCap); err != nil {
+		t.Fatalf("failed to create custom cap comparison: %v", err)
+	}
+
+	payloadCustomCap := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 70,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/70"}
+		},
+		"comment": {
+			"id": 1007,
+			"body": "/eval more 64",
+			"user": {"login": "allowed-user"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigCustomCap := ComputeSignature(payloadCustomCap, secretKey)
+	reqCustomCap := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadCustomCap))
+	reqCustomCap.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqCustomCap.Header.Set(HeaderHubSignature256, sigCustomCap)
+	rrCustomCap := httptest.NewRecorder()
+
+	server.ServeHTTP(rrCustomCap, reqCustomCap)
+	if rrCustomCap.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for custom cap comparison, got %d", rrCustomCap.Code)
+	}
+	var compAfterCustomCap v1alpha1.Comparison
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-70"}, &compAfterCustomCap); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	// Bounded by comp.Spec.Sampling.EffectiveMaxSamplesPerTask() = 16
+	if compAfterCustomCap.Spec.ExtraSamples != 16 {
+		t.Errorf("expected ExtraSamples 16 (bounded by Comparison custom cap), got %d", compAfterCustomCap.Spec.ExtraSamples)
+	}
+}
+
+func TestHandler_IssueComment_RejectsUnauthorized(t *testing.T) {
+	secretKey := []byte("comment-auth-secret")
+	scheme := newTestScheme()
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-50",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     50,
+			},
+			ExtraSamples: 0,
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
+
+	fakeGH := github.NewFakeGitHubServer()
+	defer fakeGH.Close()
+
+	// Configure collaborator permissions in fake GitHub
+	fakeGH.SetUserPermission("gke-labs", "eval-runner", "writer", "write")
+	fakeGH.SetUserPermission("gke-labs", "eval-runner", "reader", "read")
+	// "outsider" is not added, will return 404 from GitHub API
+
+	ghClient := fakeGH.Client("test-token")
+
+	cfg := Config{
+		Namespace:                "eval-runner",
+		StaticWebhookSecret:      secretKey,
+		WebhookRepositories:      []string{"gke-labs/eval-runner"},
+		CommandUsers:             []string{"allowlisted-user"},
+		DefaultMaxSamplesPerTask: 64,
+		GitHubClient:             ghClient,
+		Client:                   cl,
+	}
+	server := NewServer(cfg)
+	server.Start()
+	defer server.Stop()
+
+	// 1. Outsider author (not in allow-list, not a collaborator) -> 403 Forbidden
+	payloadOutsider := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 50,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
+		},
+		"comment": {
+			"id": 2001,
+			"body": "/eval more 8",
+			"user": {"login": "outsider"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigOutsider := ComputeSignature(payloadOutsider, secretKey)
+	reqOutsider := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadOutsider))
+	reqOutsider.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqOutsider.Header.Set(HeaderHubSignature256, sigOutsider)
+	rrOutsider := httptest.NewRecorder()
+
+	server.ServeHTTP(rrOutsider, reqOutsider)
+	if rrOutsider.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for outsider, got %d: %s", rrOutsider.Code, rrOutsider.Body.String())
+	}
+
+	// 2. Read-only collaborator -> 403 Forbidden
+	payloadReader := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 50,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
+		},
+		"comment": {
+			"id": 2002,
+			"body": "/eval more 8",
+			"user": {"login": "reader"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigReader := ComputeSignature(payloadReader, secretKey)
+	reqReader := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadReader))
+	reqReader.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqReader.Header.Set(HeaderHubSignature256, sigReader)
+	rrReader := httptest.NewRecorder()
+
+	server.ServeHTTP(rrReader, reqReader)
+	if rrReader.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for reader, got %d: %s", rrReader.Code, rrReader.Body.String())
+	}
+
+	// 3. Allow-listed user without write permission on GitHub -> 200 OK
+	payloadAllowlisted := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 50,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
+		},
+		"comment": {
+			"id": 2003,
+			"body": "/eval more 8",
+			"user": {"login": "allowlisted-user"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigAllowlisted := ComputeSignature(payloadAllowlisted, secretKey)
+	reqAllowlisted := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadAllowlisted))
+	reqAllowlisted.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqAllowlisted.Header.Set(HeaderHubSignature256, sigAllowlisted)
+	rrAllowlisted := httptest.NewRecorder()
+
+	server.ServeHTTP(rrAllowlisted, reqAllowlisted)
+	if rrAllowlisted.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for allowlisted user, got %d: %s", rrAllowlisted.Code, rrAllowlisted.Body.String())
+	}
+
+	// 4. Collaborator with write access -> 200 OK and reacts with "eyes"
+	payloadWriter := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 50,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
+		},
+		"comment": {
+			"id": 2004,
+			"body": "/eval more 16",
+			"user": {"login": "writer"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigWriter := ComputeSignature(payloadWriter, secretKey)
+	reqWriter := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadWriter))
+	reqWriter.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqWriter.Header.Set(HeaderHubSignature256, sigWriter)
+	rrWriter := httptest.NewRecorder()
+
+	server.ServeHTTP(rrWriter, reqWriter)
+	if rrWriter.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for writer, got %d: %s", rrWriter.Code, rrWriter.Body.String())
+	}
+
+	// Verify reaction "eyes" recorded on fake GitHub server
+	reactions := fakeGH.CommentReactions(2004)
+	if len(reactions) != 1 || reactions[0] != "eyes" {
+		t.Errorf("expected comment 2004 to have reaction ['eyes'], got %v", reactions)
+	}
+
+	// Verify ExtraSamples was incremented (0 + 8 from allowlisted + 16 from writer = 24)
+	var finalComp v1alpha1.Comparison
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-50"}, &finalComp); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if finalComp.Spec.ExtraSamples != 24 {
+		t.Errorf("expected ExtraSamples 24, got %d", finalComp.Spec.ExtraSamples)
+	}
+}
+
+func TestHandler_IssueComment_IdempotentOnRedelivery(t *testing.T) {
+	secretKey := []byte("comment-idempotent-secret")
+	scheme := newTestScheme()
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-60",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     60,
+			},
+			ExtraSamples: 0,
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
+
+	fakeGH := github.NewFakeGitHubServer()
+	defer fakeGH.Close()
+	fakeGH.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
+	ghClient := fakeGH.Client("test-token")
+
+	cfg := Config{
+		Namespace:                "eval-runner",
+		StaticWebhookSecret:      secretKey,
+		WebhookRepositories:      []string{"gke-labs/eval-runner"},
+		DefaultMaxSamplesPerTask: 64,
+		GitHubClient:             ghClient,
+		Client:                   cl,
+	}
+	server := NewServer(cfg)
+	server.Start()
+	defer server.Stop()
+
+	payload := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 60,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/60"}
+		},
+		"comment": {
+			"id": 3001,
+			"body": "/eval more 8",
+			"user": {"login": "reviewer"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sig := ComputeSignature(payload, secretKey)
+
+	// Delivery 1
+	req1 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload))
+	req1.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	req1.Header.Set(HeaderHubSignature256, sig)
+	rr1 := httptest.NewRecorder()
+
+	server.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first delivery failed with status %d: %s", rr1.Code, rr1.Body.String())
+	}
+
+	var compAfter1 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-60"}, &compAfter1); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if compAfter1.Spec.ExtraSamples != 8 {
+		t.Errorf("expected ExtraSamples 8 after first delivery, got %d", compAfter1.Spec.ExtraSamples)
+	}
+	if len(fakeGH.CommentReactions(3001)) != 1 {
+		t.Errorf("expected 1 reaction after first delivery, got %d", len(fakeGH.CommentReactions(3001)))
+	}
+
+	// Delivery 2 (redelivery of identical comment payload)
+	req2 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload))
+	req2.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	req2.Header.Set(HeaderHubSignature256, sig)
+	rr2 := httptest.NewRecorder()
+
+	server.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("redelivery failed with status %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if !strings.Contains(rr2.Body.String(), "ok: comment already handled") {
+		t.Errorf("expected body to contain 'ok: comment already handled', got %s", rr2.Body.String())
+	}
+
+	var compAfter2 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-60"}, &compAfter2); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	// ExtraSamples must remain 8 (NOT bumped again)
+	if compAfter2.Spec.ExtraSamples != 8 {
+		t.Errorf("expected ExtraSamples to remain 8 on redelivery, got %d", compAfter2.Spec.ExtraSamples)
+	}
+	// Reactions must remain 1 (NOT reacted again)
+	if len(fakeGH.CommentReactions(3001)) != 1 {
+		t.Errorf("expected reactions count to remain 1 on redelivery, got %d", len(fakeGH.CommentReactions(3001)))
 	}
 }

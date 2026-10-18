@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -50,6 +51,9 @@ const (
 	// EventPush is the GitHub event name for git pushes.
 	EventPush = "push"
 
+	// EventIssueComment is the GitHub event name for issue comments.
+	EventIssueComment = "issue_comment"
+
 	// EventPing is the GitHub event name for webhook ping.
 	EventPing = "ping"
 
@@ -61,6 +65,12 @@ const (
 
 	// ActionReopened is the pull_request action when a closed PR is reopened.
 	ActionReopened = "reopened"
+
+	// ActionCreated is the issue_comment action when a comment is created.
+	ActionCreated = "created"
+
+	// AnnotationHandledComments is the Comparison annotation tracking handled issue comment IDs.
+	AnnotationHandledComments = "evalrunner.gke-labs.dev/handled-comments"
 )
 
 var (
@@ -112,6 +122,58 @@ type GitHubPushEvent struct {
 	HeadCommit *struct {
 		ID string `json:"id"`
 	} `json:"head_commit"`
+}
+
+// GitHubIssueData represents the issue in an issue_comment event payload.
+type GitHubIssueData struct {
+	Number      int    `json:"number"`
+	State       string `json:"state"`
+	PullRequest *struct {
+		URL     string `json:"url"`
+		HTMLURL string `json:"html_url"`
+	} `json:"pull_request"`
+}
+
+// GitHubCommentData represents the comment in an issue_comment event payload.
+type GitHubCommentData struct {
+	ID   int64  `json:"id"`
+	Body string `json:"body"`
+	User struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"user"`
+}
+
+// GitHubIssueCommentEvent represents the payload of a GitHub issue_comment webhook event.
+type GitHubIssueCommentEvent struct {
+	Action     string            `json:"action"`
+	Issue      GitHubIssueData   `json:"issue"`
+	Comment    GitHubCommentData `json:"comment"`
+	Repository GitHubRepository  `json:"repository"`
+	Sender     struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"sender"`
+}
+
+var evalMoreRegex = regexp.MustCompile(`(?im)^\s*/eval\s+more\s+(\d+)\s*$`)
+
+// ParseEvalMoreCommand parses a comment body for an `/eval more <n>` command.
+// If found, it returns the number of extra samples (bounded by maxSamplesPerTask if > 0)
+// and true. If not found or if n <= 0, it returns 0 and false.
+func ParseEvalMoreCommand(body string, maxSamplesPerTask int) (int, bool) {
+	matches := evalMoreRegex.FindStringSubmatch(body)
+	if len(matches) < 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(matches[1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	if maxSamplesPerTask > 0 && n > maxSamplesPerTask {
+		n = maxSamplesPerTask
+	}
+	return n, true
 }
 
 // PullRequestWorkItem contains pre-validated fields for PR reconciliation in the worker.
