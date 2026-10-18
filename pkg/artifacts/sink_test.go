@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package artifacts
+package artifacts_test
 
 import (
 	"encoding/json"
@@ -21,11 +21,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gke-labs/eval-runner/internal/fakes"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 )
 
 func TestNoopSink(t *testing.T) {
-	sink := &NoopSink{}
-	meta := RunMetadata{
+	sink := &artifacts.NoopSink{}
+	meta := artifacts.RunMetadata{
 		RunName:      "test-run",
 		RunNamespace: "eval-runner",
 		TaskID:       "docs/readme_comprehension",
@@ -47,15 +50,15 @@ func TestLocalDirSink(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	sink := &LocalDirSink{BaseDir: tempDir}
-	meta := RunMetadata{
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+	meta := artifacts.RunMetadata{
 		RunName:      "run-123",
 		RunNamespace: "test-ns",
 		TaskID:       "docs/readme_comprehension",
 		Model:        "mockllm/model",
 		Commit:       "abc1234",
 		Samples:      11,
-		SampleRange:  &SampleRange{Start: 5, End: 15},
+		SampleRange:  &artifacts.SampleRange{Start: 5, End: 15},
 	}
 
 	payload := []byte(`{"version": 2}`)
@@ -83,7 +86,7 @@ func TestLocalDirSink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read summary.json: %v", err)
 	}
-	var summary TaskSummary
+	var summary artifacts.TaskSummary
 	if err := json.Unmarshal(summaryBytes, &summary); err != nil {
 		t.Fatalf("Failed to unmarshal summary.json: %v", err)
 	}
@@ -93,15 +96,23 @@ func TestLocalDirSink(t *testing.T) {
 }
 
 func TestLocalDirSink_DirectoryTraversalRejected(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "artifacts-traversal-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+
+	for _, tt := range fakes.ArtifactPathValidationTestCases() {
+		t.Run(tt.Name, func(t *testing.T) {
+			_, err := sink.StoreArtifact(t.Context(), tt.Meta, tt.Filename, []byte("data"))
+			if err == nil {
+				t.Errorf("Expected error for %s, got nil", tt.Name)
+			}
+		})
 	}
-	defer os.RemoveAll(tempDir)
+}
 
-	sink := &LocalDirSink{BaseDir: tempDir}
+func TestInMemorySink_DirectoryTraversalRejected(t *testing.T) {
+	sink := artifacts.NewInMemorySink()
 
-	for _, tt := range ArtifactPathValidationTestCases() {
+	for _, tt := range fakes.ArtifactPathValidationTestCases() {
 		t.Run(tt.Name, func(t *testing.T) {
 			_, err := sink.StoreArtifact(t.Context(), tt.Meta, tt.Filename, []byte("data"))
 			if err == nil {
@@ -112,7 +123,7 @@ func TestLocalDirSink_DirectoryTraversalRejected(t *testing.T) {
 }
 
 func TestNoopSink_StoreComparisonAndLoad(t *testing.T) {
-	sink := &NoopSink{}
+	sink := &artifacts.NoopSink{}
 	path, err := sink.StoreComparison(t.Context(), "my-comp", []byte("{}"))
 	if err != nil {
 		t.Fatalf("StoreComparison returned error: %v", err)
@@ -133,7 +144,7 @@ func TestLocalDirSink_StoreComparisonAndLoad(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	sink := &LocalDirSink{BaseDir: tempDir}
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
 	payload := []byte(`{"comparison": "comp-1"}`)
 
 	savedPath, err := sink.StoreComparison(t.Context(), "comp-1", payload)
@@ -171,7 +182,7 @@ func TestLocalDirSink_StoreComparisonAndLoad(t *testing.T) {
 	}
 
 	// Test empty BaseDir in Load
-	emptySink := &LocalDirSink{BaseDir: ""}
+	emptySink := &artifacts.LocalDirSink{BaseDir: ""}
 	if _, err := emptySink.Load(t.Context(), runPath); err == nil {
 		t.Errorf("Expected error on empty BaseDir in Load")
 	}
@@ -194,12 +205,12 @@ func TestLocalDirSink_StoreManifest(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	sink := &LocalDirSink{BaseDir: tempDir}
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
 	if !sink.IsDurable() {
 		t.Errorf("Expected LocalDirSink to be durable")
 	}
 
-	meta := RunMetadata{
+	meta := artifacts.RunMetadata{
 		RunName:   "run-1",
 		Commit:    "abcd123",
 		TaskCount: 3,
@@ -236,13 +247,13 @@ func TestLocalDirSink_StoreManifest(t *testing.T) {
 
 	// Missing file returns ErrNotFound
 	_, err = sink.Load(t.Context(), filepath.Join(tempDir, "runs", "abcd123", "missing.json"))
-	if !IsNotFound(err) {
+	if !artifacts.IsNotFound(err) {
 		t.Errorf("Expected IsNotFound(err) to be true for missing file, got: %v", err)
 	}
 }
 
 func TestInMemorySink(t *testing.T) {
-	sink := NewInMemorySink()
+	sink := artifacts.NewInMemorySink()
 	if sink.IsDurable() {
 		t.Errorf("Expected InMemorySink to be non-durable")
 	}
@@ -253,7 +264,7 @@ func TestInMemorySink(t *testing.T) {
 		t.Errorf("Expected prefix mem://runs/abcde123/, got %q", prefix)
 	}
 
-	meta := RunMetadata{
+	meta := artifacts.RunMetadata{
 		RunName:      "run-inmem",
 		RunNamespace: "eval-runner",
 		Commit:       commit,
@@ -299,7 +310,7 @@ func TestInMemorySink(t *testing.T) {
 
 	// Missing object returns ErrNotFound
 	_, err = sink.Load(t.Context(), "mem://runs/abcde123/notfound.json")
-	if !IsNotFound(err) {
+	if !artifacts.IsNotFound(err) {
 		t.Errorf("Expected IsNotFound(err) to be true for missing object, got: %v", err)
 	}
 
@@ -331,28 +342,28 @@ func TestInMemorySink(t *testing.T) {
 }
 
 func TestIsNotFound_ErrorsIsOnly(t *testing.T) {
-	if IsNotFound(nil) {
+	if artifacts.IsNotFound(nil) {
 		t.Errorf("Expected IsNotFound(nil) to be false")
 	}
 
-	notFoundErr := fmt.Errorf("wrapped error: %w", ErrNotFound)
-	if !IsNotFound(notFoundErr) {
+	notFoundErr := fmt.Errorf("wrapped error: %w", artifacts.ErrNotFound)
+	if !artifacts.IsNotFound(notFoundErr) {
 		t.Errorf("Expected IsNotFound(wrapped ErrNotFound) to be true")
 	}
 
 	// Transient error on a commit whose hex contains 404
 	transientErrWith404 := errors.New("rpc error: code = Unavailable desc = connection error for runs/c0404ab/manifest.json: 404")
-	if IsNotFound(transientErrWith404) {
+	if artifacts.IsNotFound(transientErrWith404) {
 		t.Errorf("Expected transient error containing 404 in commit hex to NOT be classified as not-found")
 	}
 
 	transientErrWithNotFoundString := errors.New("network transient failure: host not found")
-	if IsNotFound(transientErrWithNotFoundString) {
+	if artifacts.IsNotFound(transientErrWithNotFoundString) {
 		t.Errorf("Expected transient error containing 'not found' text to NOT be classified as not-found")
 	}
 
 	transientErrNoSuchFile := errors.New("temporary failure: no such file or directory (transient mount blip)")
-	if IsNotFound(transientErrNoSuchFile) {
+	if artifacts.IsNotFound(transientErrNoSuchFile) {
 		t.Errorf("Expected transient error containing 'no such file or directory' to NOT be classified as not-found")
 	}
 }
@@ -360,11 +371,11 @@ func TestIsNotFound_ErrorsIsOnly(t *testing.T) {
 func TestSinkClose(t *testing.T) {
 	sinks := []struct {
 		name string
-		sink ArtifactSink
+		sink artifacts.ArtifactSink
 	}{
-		{"NoopSink", &NoopSink{}},
-		{"LocalDirSink", &LocalDirSink{BaseDir: t.TempDir()}},
-		{"InMemorySink", NewInMemorySink()},
+		{"NoopSink", &artifacts.NoopSink{}},
+		{"LocalDirSink", &artifacts.LocalDirSink{BaseDir: t.TempDir()}},
+		{"InMemorySink", artifacts.NewInMemorySink()},
 	}
 
 	for _, tc := range sinks {
