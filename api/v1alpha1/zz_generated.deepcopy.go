@@ -117,6 +117,11 @@ func (in *ComparisonSpec) DeepCopyInto(out *ComparisonSpec) {
 	*out = *in
 	out.Baseline = in.Baseline
 	out.Candidate = in.Candidate
+	if in.EquivalenceMargin != nil {
+		in, out := &in.EquivalenceMargin, &out.EquivalenceMargin
+		*out = new(float64)
+		**out = **in
+	}
 	if in.Tasks != nil {
 		in, out := &in.Tasks, &out.Tasks
 		*out = make([]string, len(*in))

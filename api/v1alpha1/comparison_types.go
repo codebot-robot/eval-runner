@@ -19,21 +19,15 @@ import (
 )
 
 // ComparisonPhase represents the lifecycle phase of a Comparison.
-// +kubebuilder:validation:Enum=Pending;Running;Completed;Failed
+// +kubebuilder:validation:Enum=Running;Completed
 type ComparisonPhase string
 
 const (
-	// ComparisonPhasePending means the comparison has been accepted but evaluation has not started.
-	ComparisonPhasePending ComparisonPhase = "Pending"
-
 	// ComparisonPhaseRunning means one or both runs are still running or pairing is in progress.
 	ComparisonPhaseRunning ComparisonPhase = "Running"
 
 	// ComparisonPhaseCompleted means both runs are terminal and the paired comparison is complete.
 	ComparisonPhaseCompleted ComparisonPhase = "Completed"
-
-	// ComparisonPhaseFailed means comparison failed due to missing runs, unrecoverable errors, etc.
-	ComparisonPhaseFailed ComparisonPhase = "Failed"
 )
 
 // ComparisonTaskLabel represents the statistical decision label for a single task.
@@ -82,7 +76,7 @@ type ComparisonSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=0.5
 	// +optional
-	EquivalenceMargin float64 `json:"equivalenceMargin,omitempty"`
+	EquivalenceMargin *float64 `json:"equivalenceMargin,omitempty"`
 
 	// Tasks is an optional allow-list of task IDs to compare.
 	// If empty, all tasks present in both candidate and baseline runs are compared.

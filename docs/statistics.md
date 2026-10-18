@@ -327,20 +327,20 @@ Summary: UNCHANGED: all 2 task(s) statistically equivalent within margin ±0.05
 
 ### Real Example: Same-Commit Comparison on GKE (`docs-eval-same-commit`)
 
-On a live cluster, comparing two runs of the same commit (`05ce4d8`) evaluated 20 pairs per task:
+On a live cluster, Comparison `docs-eval-same-commit` in namespace `eval-runner` evaluated two runs of the same commit `05ce4d8` (baseline `docs-eval-base-05ce4d8`, candidate `docs-eval-cand-05ce4d8`, 20 pairs per task):
 
 ```text
 eval                              base   this PR   Δ (95% CI)             label          runs   wins/losses/ties
 docs/readme_comprehension         1.00   1.00      +0.00 [+0.00, +0.00]   unchanged      20     0/0/20
 docs/readme_comprehension_blind   0.20   0.15      -0.05 [-0.15, +0.00]   inconclusive   20     0/1/19
 
-Verdict: INCONCLUSIVE · P(improvement) = 0.25
+Verdict: INCONCLUSIVE · P(improvement) = 0.26
 Summary: INCONCLUSIVE: 0 task(s) improved, 1 task(s) unchanged, 1 task(s) inconclusive; net improvement unproven
 ```
 
 In this real run:
 1. `docs/readme_comprehension` had 20 identical pairs (all ties, `0/0/20`), reporting $P = 0.50$ matching the `unchanged` label.
-2. `docs/readme_comprehension_blind` had 19 ties and 1 loss (`0/1/19`). With the Bayesian bootstrap regularised by a uniform prior ($+1, -1$ pseudo-observations), $P(\text{improvement}) = 0.25$ (matching the exact Beta posterior $P(\text{Beta}(1, 2) > 0.5) = 0.25$ for 0 wins and 1 loss).
-3. Because the run contains only `{unchanged, inconclusive}` tasks, `AggregateVerdict` caps the arithmetic mean by $\min_k P(\text{not\_reg}_k)$: $\min(0.375, 0.25) = 0.25$. With $P(\text{not\_reg}) = P(\text{imp})$ for inconclusive tasks (no floor), capping prevents the regression risk of the weak task from being diluted by unchanged tasks. At small $n$, the categorical label and verdict are authoritative and $P$ is a summary.
+2. `docs/readme_comprehension_blind` had 19 ties and 1 loss (`0/1/19`). With the Bayesian bootstrap regularised by a uniform prior ($+1, -1$ pseudo-observations), $P(\text{improvement}) = 0.26$ (near the theoretical Beta posterior $P(\text{Beta}(1, 2) > 0.5) = 0.25$ for 0 wins and 1 loss).
+3. Because the run contains only `{unchanged, inconclusive}` tasks, `AggregateVerdict` caps the arithmetic mean by $\min_k P(\text{not\_reg}_k)$: $\min(0.38, 0.26) = 0.26$. With $P(\text{not\_reg}) = P(\text{imp})$ for inconclusive tasks (no floor), capping prevents the regression risk of the weak task from being diluted by unchanged tasks. At small $n$, the categorical label and verdict are authoritative and $P$ is a summary.
 4. Surfacing `wins/losses/ties` (`0/1/19`) immediately explains to readers why the confidence interval $[-0.15, +0.00]$ is wide: 19 out of 20 evaluations were ties, so uncertainty stems from the high proportion of tied samples rather than extreme variance.
 

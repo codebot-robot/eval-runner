@@ -39,7 +39,7 @@ const MinPairsToDecide = 8
 // 2. Cap or budget reached -> inconclusive.
 // 3. Otherwise -> continue, with suggested next batch size and estimated samples to resolve.
 func Decide(est PairedEstimate, margin float64, samplesRun, sampleCap int, spent, budget float64) Decision {
-	if margin <= 0 {
+	if margin < 0 {
 		margin = DefaultEquivalenceMargin
 	}
 

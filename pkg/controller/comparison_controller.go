@@ -78,7 +78,6 @@ type ComparisonArtifact struct {
 // ComparisonReconciler reconciles a Comparison object.
 type ComparisonReconciler struct {
 	client.Client
-	APIReader    client.Reader
 	Scheme       *runtime.Scheme
 	ArtifactSink artifacts.ArtifactSink
 }
@@ -255,9 +254,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	// Both Runs are terminal; perform pairing and comparison
 	taskIDs := r.determineTaskIDs(&comp, &baselineRun, &candidateRun)
-	margin := comp.Spec.EquivalenceMargin
-	if margin <= 0 {
-		margin = stats.DefaultEquivalenceMargin
+	margin := stats.DefaultEquivalenceMargin
+	if comp.Spec.EquivalenceMargin != nil {
+		margin = *comp.Spec.EquivalenceMargin
 	}
 
 	var taskStatuses []v1alpha1.ComparisonTaskStatus
