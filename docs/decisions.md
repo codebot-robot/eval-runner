@@ -261,6 +261,16 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Connects Concept §4.2 and §4.5 to the PR review lifecycle. Allows reviewers to interactively purchase additional statistical certainty directly in GitHub PR review discussions without requiring direct kubectl or Kubernetes API access.
 
+### Amendment to ADR-026: Credential-Free Webhook and Controller Command Processing (#164)
+- **Date**: 2026-10-19
+- **Status**: Accepted
+- **Decision**:
+  1. **Credential-Free Webhook**: The `eval-runner-webhook` component remains strictly credential-free. It holds exclusively the webhook HMAC secret (`eval-runner/github-webhook`) and has no access to GitHub tokens or App credentials (`github-token` / `github-app`). It makes no outbound GitHub API calls.
+  2. **Bounded Command Enqueueing**: Upon verifying the webhook HMAC signature, repository allow-list, and `/eval more <n>` command syntax, the webhook appends `{commentId, login, requested, receivedAt}` to a bounded `status.pendingCommands` list on the repository-matched Comparison. The operation is idempotent per `commentId` against both pending and handled commands. The webhook Role drops the two secret grants and gains `comparisons/status` update.
+  3. **Controller Authorization and Acknowledgement**: The controller (which already holds credentials for PR reporting) asynchronously processes `status.pendingCommands`: it verifies write or admin access via GitHub's collaborator permissions API or checks exact matches in `commandUsers`, failing closed on API error. For authorized commands, it clamps and bumps `spec.extraSamples`, posts a GitHub acknowledgement (`eyes` reaction or fallback reply comment), and moves the entry to a bounded `status.handledCommands` list with the outcome.
+- **Rationale**:
+  Preserves the zero-trust credential isolation model by eliminating GitHub credentials and outbound calls from the internet-facing webhook pod. Authorization and GitHub interactions are centralized in the controller alongside reporting.
+
 
 
 

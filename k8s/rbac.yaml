@@ -224,13 +224,19 @@ rules:
   - update
   - delete
 - apiGroups:
+  - evalrunner.gke-labs.dev
+  resources:
+  - comparisons/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
   - ""
   resources:
   - secrets
   resourceNames:
   - github-webhook
-  - github-token
-  - github-app
   verbs:
   - get
 - apiGroups:

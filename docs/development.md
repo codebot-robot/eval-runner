@@ -666,10 +666,8 @@ When an event arrives:
    - **Warm Baseline Run**: `base-<sha7>` is created with initial `sampleRange {1, defaultBatchSize}` so the baseline run is pre-warmed before PRs arrive.
 4. **On `issue_comment` (`created`)**:
    - **More Samples Command**: Comments of the form `/eval more <n>` on a pull request trigger evaluation of additional samples.
-   - **Authorization**: The author must have write or admin access per the GitHub collaborator permission API, or be listed in the `commandUsers` ConfigMap allow-list. Unauthorized authors receive HTTP 403 Forbidden.
-   - **Bounding**: The requested sample count $n$ is bounded by `defaultMaxSamplesPerTask`.
-   - **Action**: Increments `spec.extraSamples` on the existing PR Comparison by $n$, scheduling additional adaptive paired batches.
-   - **Acknowledgment & Idempotency**: Acknowledges the comment with a GitHub reaction (`eyes` or `+1`) or short comment. Comment IDs are stored in the Comparison annotation `evalrunner.gke-labs.dev/handled-comments`, ensuring redeliveries are strictly idempotent.
+   - **Credential-Free Webhook**: After verifying HMAC and the repository allow-list, the webhook appends `{commentId, login, requested, receivedAt}` to a bounded `status.pendingCommands` on the Comparison (idempotent per comment ID against pending and handled commands). The webhook holds no GitHub tokens and makes no outbound GitHub calls.
+   - **Controller Processing**: The controller asynchronously processes pending commands: it verifies write or admin permission via the GitHub collaborator permissions API or the `commandUsers` allow-list, failing closed on API error. For authorized commands, it clamps and increments `spec.extraSamples` on the Comparison, acknowledges the comment via reaction (`eyes`) or fallback comment reply, and records the outcome in a bounded `status.handledCommands`.
 5. **Labels**:
    All created resources are labeled with:
    - `evalrunner.gke-labs.dev/pr`: PR number (for PR runs and comparisons)
