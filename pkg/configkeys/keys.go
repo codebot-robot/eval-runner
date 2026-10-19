@@ -53,6 +53,8 @@ const (
 	ConfigMapKeyGitHubAppSecret = "githubAppSecret"
 	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
 	ConfigMapKeyUIBaseURL = "uiBaseURL"
+	// ConfigMapKeyComparisonTTL is the ConfigMap key for completed comparison TTL duration.
+	ConfigMapKeyComparisonTTL = "comparisonTTL"
 
 	// Webhook keys
 

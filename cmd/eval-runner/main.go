@@ -89,6 +89,7 @@ func main() {
 	var gitHubAppSecret string
 	var uiBaseURL string
 	var strictConfig bool
+	var comparisonTTL time.Duration
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -110,6 +111,7 @@ func main() {
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Local filesystem directory for storing evaluation artifacts")
 	flag.BoolVar(&strictConfig, "strict-config", false, "Fail startup if eval-runner-config contains unrecognised keys")
 	flag.Int64Var(&artifactMaxUploadBytes, "artifact-max-upload-bytes", gcs.DefaultMaxUploadBytes, "Maximum size in bytes of an uploaded Inspect log before truncation (sets capped in summary.json if exceeded)")
+	flag.DurationVar(&comparisonTTL, "comparison-ttl", 0, "TTL duration for retaining Completed Comparisons (default 0 = disabled)")
 
 	opts := zap.Options{
 		Development: true,
@@ -134,6 +136,7 @@ func main() {
 		maxParallelTasks,
 		strictConfig,
 		artifactMaxUploadBytes,
+		comparisonTTL,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -336,6 +339,7 @@ func main() {
 		GitHubTokenSecret:   clusterConfig.GitHubTokenSecret,
 		GitHubAppSecret:     clusterConfig.GitHubAppSecret,
 		UIBaseURL:           clusterConfig.UIBaseURL,
+		ComparisonTTL:       clusterConfig.ComparisonTTL,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {
