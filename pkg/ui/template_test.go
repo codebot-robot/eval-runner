@@ -1043,6 +1043,111 @@ func TestComparisonSummary(t *testing.T) {
 			t.Errorf("expected headline '2222222 vs 1111111', got %q", sum.Headline)
 		}
 	})
+
+	t.Run("CostAndPossibleSamples", func(t *testing.T) {
+		cost := 4.10
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				CostUSD:         &cost,
+				PossibleSamples: 3200,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task-1",
+						Pairs:      48,
+						SamplesRun: 48,
+					},
+				},
+			},
+		}
+		baseRun := &v1alpha1.Run{
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 48},
+			},
+		}
+		candRun := &v1alpha1.Run{
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 48},
+			},
+		}
+		sum := ComparisonSummary(comp, baseRun, candRun)
+		expected := "$4.10 spent, 48 of 3200 possible samples"
+		if sum.SamplesSummary != expected {
+			t.Errorf("expected SamplesSummary %q, got %q", expected, sum.SamplesSummary)
+		}
+	})
+
+	t.Run("CostOnlyWithDropped", func(t *testing.T) {
+		cost := 0.05
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				CostUSD: &cost,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:    "task-1",
+						Pairs: 10,
+						Dropped: v1alpha1.ComparisonDropped{
+							Candidate: 1,
+							Baseline:  2,
+						},
+					},
+				},
+			},
+		}
+		sum := ComparisonSummary(comp, nil, nil)
+		expected := "$0.05 spent, 23 run · 10 paired · dropped: 1 cand, 2 base"
+		if sum.SamplesSummary != expected {
+			t.Errorf("expected SamplesSummary %q, got %q", expected, sum.SamplesSummary)
+		}
+	})
+
+	t.Run("PossibleSamplesOnly", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				PossibleSamples: 100,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task-1",
+						Pairs:      10,
+						SamplesRun: 10,
+					},
+				},
+			},
+		}
+		sum := ComparisonSummary(comp, nil, nil)
+		expected := "10 of 100 possible samples"
+		if sum.SamplesSummary != expected {
+			t.Errorf("expected SamplesSummary %q, got %q", expected, sum.SamplesSummary)
+		}
+	})
+
+	t.Run("StatusCostNilDoesNotResumTasks", func(t *testing.T) {
+		taskCost := 0.50
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				CostUSD: nil, // Controller omitted total on purpose because another task had no price
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:      "task-1",
+						Pairs:   10,
+						CostUSD: &taskCost,
+					},
+					{
+						ID:      "task-2",
+						Pairs:   10,
+						CostUSD: nil,
+					},
+				},
+			},
+		}
+		sum := ComparisonSummary(comp, nil, nil)
+		expected := "40 run · 20 paired"
+		if sum.SamplesSummary != expected {
+			t.Errorf("expected SamplesSummary %q without partial spent, got %q", expected, sum.SamplesSummary)
+		}
+		if sum.CostUSD != nil {
+			t.Errorf("expected nil sum.CostUSD when status.CostUSD is nil, got %v", sum.CostUSD)
+		}
+	})
 }
 
 func TestTemplateRendering_SampleRange(t *testing.T) {

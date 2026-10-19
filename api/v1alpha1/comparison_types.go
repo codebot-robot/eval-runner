@@ -241,6 +241,18 @@ type ComparisonTaskStatus struct {
 	// Tokens is the token usage breakdown consumed for this task across evaluated runs, when present in Inspect logs.
 	// +optional
 	Tokens *TaskTokens `json:"tokens,omitempty"`
+
+	// Latency records sample latency percentiles (p50 and p95 in seconds) aggregated across evaluated samples.
+	// +optional
+	Latency *TaskLatency `json:"latency,omitempty"`
+
+	// CostUSD is the estimated task evaluation cost in USD from model prices across candidate and baseline.
+	// +optional
+	CostUSD *float64 `json:"costUSD,omitempty"`
+
+	// PossibleSamples is the total dataset size (possible samples) for this task when known from the Inspect log.
+	// +optional
+	PossibleSamples int `json:"possibleSamples,omitempty"`
 }
 
 // ComparisonBatchStatus records the execution state of one paired batch of Runs.
@@ -330,7 +342,15 @@ type ComparisonStatus struct {
 	// +optional
 	SummaryPath string `json:"summaryPath,omitempty"`
 
-	// Message is human-readable detail on failure or current status.
+	// CostUSD is the total estimated evaluation cost in USD across all tasks in this Comparison.
+	// +optional
+	CostUSD *float64 `json:"costUSD,omitempty"`
+
+	// PossibleSamples is the total possible samples across tasks when known from the Inspect log.
+	// +optional
+	PossibleSamples int `json:"possibleSamples,omitempty"`
+
+	// Message is human-readable detail on failure, notes, or current status.
 	// +optional
 	Message string `json:"message,omitempty"`
 

@@ -38,13 +38,22 @@ type RunMetadata struct {
 	TaskCount    int
 
 	// Task execution aggregates and timestamps for summary.json
-	Samples     int
-	Successes   int
-	MeanScore   *float64
-	StartedAt   *time.Time
-	FinishedAt  *time.Time
-	SampleRange *SampleRange
-	Tokens      *TaskTokens
+	Samples         int
+	Successes       int
+	MeanScore       *float64
+	StartedAt       *time.Time
+	FinishedAt      *time.Time
+	SampleRange     *SampleRange
+	Tokens          *TaskTokens
+	Latency         *TaskLatency
+	CostUSD         *float64
+	PossibleSamples int
+}
+
+// TaskLatency records latency percentiles aggregated across evaluated samples.
+type TaskLatency struct {
+	P50 float64 `json:"p50"`
+	P95 float64 `json:"p95"`
 }
 
 // TaskTokens records token usage breakdown for an evaluation task.
@@ -66,18 +75,21 @@ type SampleRange struct {
 
 // TaskSummary records per-task aggregates and execution metadata written alongside the Inspect log.
 type TaskSummary struct {
-	TaskID      string       `json:"taskId"`
-	Model       string       `json:"model"`
-	Commit      string       `json:"commit"`
-	Samples     int          `json:"samples"`
-	Successes   int          `json:"successes"`
-	MeanScore   *float64     `json:"meanScore"`
-	StartedAt   *time.Time   `json:"startedAt,omitempty"`
-	FinishedAt  *time.Time   `json:"finishedAt,omitempty"`
-	Capped      bool         `json:"capped"`
-	CapBytes    int64        `json:"capBytes,omitempty"`
-	SampleRange *SampleRange `json:"sampleRange,omitempty"`
-	Tokens      *TaskTokens  `json:"tokens,omitempty"`
+	TaskID          string       `json:"taskId"`
+	Model           string       `json:"model"`
+	Commit          string       `json:"commit"`
+	Samples         int          `json:"samples"`
+	Successes       int          `json:"successes"`
+	MeanScore       *float64     `json:"meanScore"`
+	StartedAt       *time.Time   `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time   `json:"finishedAt,omitempty"`
+	Capped          bool         `json:"capped"`
+	CapBytes        int64        `json:"capBytes,omitempty"`
+	SampleRange     *SampleRange `json:"sampleRange,omitempty"`
+	Tokens          *TaskTokens  `json:"tokens,omitempty"`
+	Latency         *TaskLatency `json:"latency,omitempty"`
+	CostUSD         *float64     `json:"costUSD,omitempty"`
+	PossibleSamples int          `json:"possibleSamples,omitempty"`
 }
 
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.

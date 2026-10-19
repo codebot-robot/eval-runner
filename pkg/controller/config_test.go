@@ -50,7 +50,7 @@ func TestResolveConfig_Precedence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg != builtInDefaults {
+		if !reflect.DeepEqual(cfg, builtInDefaults) {
 			t.Errorf("expected %+v, got %+v", builtInDefaults, cfg)
 		}
 	})
@@ -65,7 +65,7 @@ func TestResolveConfig_Precedence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg != builtInDefaults {
+		if !reflect.DeepEqual(cfg, builtInDefaults) {
 			t.Errorf("expected %+v, got %+v", builtInDefaults, cfg)
 		}
 	})
@@ -411,7 +411,7 @@ func TestLoadAndResolveClusterConfig_MissingConfigMap(t *testing.T) {
 	}
 
 	expected := DefaultClusterConfig()
-	if cfg != expected {
+	if !reflect.DeepEqual(cfg, expected) {
 		t.Errorf("expected default config %+v, got %+v", expected, cfg)
 	}
 }
@@ -1095,7 +1095,7 @@ func TestLoadAndResolveClusterConfig_UnknownKeyWarning(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Verify built-in defaults applied
-	if cfg != DefaultClusterConfig() {
+	if !reflect.DeepEqual(cfg, DefaultClusterConfig()) {
 		t.Errorf("expected default cluster config, got %+v", cfg)
 	}
 
@@ -1191,7 +1191,7 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg != defaults {
+		if !reflect.DeepEqual(cfg, defaults) {
 			t.Errorf("expected empty strings to retain defaults %+v, got %+v", defaults, cfg)
 		}
 	})
@@ -1629,4 +1629,85 @@ func TestKnownConfigMapKeys_AllConstantsRegistered(t *testing.T) {
 			t.Errorf("KnownConfigMapKeys contains key %q which has no corresponding ConfigMapKey* constant", key)
 		}
 	}
+}
+
+func TestResolveConfig_ModelPrices(t *testing.T) {
+	t.Run("valid modelPrices json", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				ConfigMapKeyModelPrices: `{"google/gemini-3.5-flash-lite":{"inputPer1M":0.15,"outputPer1M":0.60},"mockllm/model":{"inputPer1M":1.0,"outputPer1M":2.0}}`,
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(cfg.ModelPrices) != 2 {
+			t.Fatalf("expected 2 model prices, got %d", len(cfg.ModelPrices))
+		}
+		p1, ok := cfg.ModelPrices["google/gemini-3.5-flash-lite"]
+		if !ok || p1.InputPer1M != 0.15 || p1.OutputPer1M != 0.60 {
+			t.Errorf("unexpected price for gemini: %+v", p1)
+		}
+		p2, ok := cfg.ModelPrices["mockllm/model"]
+		if !ok || p2.InputPer1M != 1.0 || p2.OutputPer1M != 2.0 {
+			t.Errorf("unexpected price for mockllm: %+v", p2)
+		}
+	})
+
+	t.Run("malformed json returns error", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				ConfigMapKeyModelPrices: `not-valid-json`,
+			},
+		}
+		_, err := ResolveConfig(cm, RawFlags{})
+		if err == nil {
+			t.Fatalf("expected error for malformed json, got nil")
+		}
+	})
+
+	t.Run("negative price returns error", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				ConfigMapKeyModelPrices: `{"model":{"inputPer1M":-0.5,"outputPer1M":1.0}}`,
+			},
+		}
+		_, err := ResolveConfig(cm, RawFlags{})
+		if err == nil {
+			t.Fatalf("expected error for negative price, got nil")
+		}
+	})
+
+	t.Run("unknown field returns error", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				ConfigMapKeyModelPrices: `{"model":{"inputPerM":0.15,"outputPer1M":0.60}}`,
+			},
+		}
+		_, err := ResolveConfig(cm, RawFlags{})
+		if err == nil {
+			t.Fatalf("expected error for unknown field in modelPrices, got nil")
+		}
+	})
+
+	t.Run("disabled sentinel clears prices", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				ConfigMapKeyModelPrices: "none",
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ModelPrices != nil {
+			t.Errorf("expected nil ModelPrices with sentinel none, got %+v", cfg.ModelPrices)
+		}
+	})
 }

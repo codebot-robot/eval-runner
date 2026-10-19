@@ -57,6 +57,8 @@ const (
 	ConfigMapKeyInconclusivePolicy = "inconclusivePolicy"
 	// ConfigMapKeyComparisonTTL is the ConfigMap key for completed comparison TTL duration.
 	ConfigMapKeyComparisonTTL = "comparisonTTL"
+	// ConfigMapKeyModelPrices is the ConfigMap key for model pricing table (JSON map model -> {inputPer1M, outputPer1M} in USD).
+	ConfigMapKeyModelPrices = "modelPrices"
 
 	// Webhook keys
 

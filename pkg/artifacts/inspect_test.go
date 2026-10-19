@@ -457,3 +457,145 @@ func TestExtractInspectTokens(t *testing.T) {
 		}
 	})
 }
+
+func TestExtractInspectLatency(t *testing.T) {
+	t.Run("ValidTimestampsComputesP50AndP95", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"samples": [
+				{
+					"id": 1,
+					"started_at": "2026-10-19T02:00:00.000Z",
+					"completed_at": "2026-10-19T02:00:01.000Z"
+				},
+				{
+					"id": 2,
+					"started_at": "2026-10-19T02:00:00.000Z",
+					"completed_at": "2026-10-19T02:00:02.000Z"
+				},
+				{
+					"id": 3,
+					"started_at": "2026-10-19T02:00:00.000Z",
+					"completed_at": "2026-10-19T02:00:03.000Z"
+				},
+				{
+					"id": 4,
+					"started_at": "2026-10-19T02:00:00.000Z",
+					"completed_at": "2026-10-19T02:00:04.000Z"
+				},
+				{
+					"id": 5,
+					"started_at": "2026-10-19T02:00:00.000Z",
+					"completed_at": "2026-10-19T02:00:05.000Z"
+				}
+			]
+		}`
+		lat, err := ExtractInspectLatency([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if lat == nil {
+			t.Fatalf("expected non-nil latency")
+		}
+		if math.Abs(lat.P50-3.0) > 1e-9 {
+			t.Errorf("expected P50=3.0, got %f", lat.P50)
+		}
+		if math.Abs(lat.P95-4.8) > 1e-9 {
+			t.Errorf("expected P95=4.8, got %f", lat.P95)
+		}
+	})
+
+	t.Run("FallbackTotalTime", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"samples": [
+				{"id": 1, "total_time": 0.5},
+				{"id": 2, "total_time": 1.5}
+			]
+		}`
+		lat, err := ExtractInspectLatency([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if lat == nil {
+			t.Fatalf("expected non-nil latency")
+		}
+		if math.Abs(lat.P50-1.0) > 1e-9 {
+			t.Errorf("expected P50=1.0, got %f", lat.P50)
+		}
+	})
+
+	t.Run("NoTimestampsReturnsNil", func(t *testing.T) {
+		raw := `{"version": 2, "status": "success", "samples": [{"id": 1}]}`
+		lat, err := ExtractInspectLatency([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if lat != nil {
+			t.Errorf("expected nil latency, got %+v", lat)
+		}
+	})
+
+	t.Run("InvalidOrEmptyLog", func(t *testing.T) {
+		if _, err := ExtractInspectLatency([]byte("")); err == nil {
+			t.Errorf("expected error for empty data")
+		}
+		if _, err := ExtractInspectLatency([]byte("{invalid")); err == nil {
+			t.Errorf("expected error for invalid json")
+		}
+	})
+}
+
+func TestExtractInspectDatasetSamples(t *testing.T) {
+	t.Run("DatasetSamplesPresent", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"eval": {
+				"task": "docs/readme_comprehension",
+				"model": "mockllm/model",
+				"dataset": {
+					"name": "readme_questions",
+					"samples": 21
+				}
+			}
+		}`
+		n, err := ExtractInspectDatasetSamples([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != 21 {
+			t.Errorf("expected dataset samples 21, got %d", n)
+		}
+	})
+
+	t.Run("DatasetOmittedOrString", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"eval": {
+				"task": "docs/readme_comprehension",
+				"model": "mockllm/model",
+				"dataset": "readme_questions"
+			}
+		}`
+		n, err := ExtractInspectDatasetSamples([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("expected 0 for string dataset, got %d", n)
+		}
+	})
+
+	t.Run("InvalidOrEmptyLog", func(t *testing.T) {
+		if _, err := ExtractInspectDatasetSamples([]byte("")); err == nil {
+			t.Errorf("expected error for empty data")
+		}
+		if _, err := ExtractInspectDatasetSamples([]byte("{invalid")); err == nil {
+			t.Errorf("expected error for invalid json")
+		}
+	})
+}

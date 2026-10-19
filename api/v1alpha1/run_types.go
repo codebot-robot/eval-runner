@@ -132,6 +132,29 @@ type TaskStatus struct {
 	// Tokens is the token usage breakdown consumed for this task, when present in Inspect logs.
 	// +optional
 	Tokens *TaskTokens `json:"tokens,omitempty"`
+
+	// Latency records sample latency percentiles (p50 and p95 in seconds) aggregated across evaluated samples.
+	// +optional
+	Latency *TaskLatency `json:"latency,omitempty"`
+
+	// CostUSD is the estimated task evaluation cost in USD from model prices.
+	// +optional
+	CostUSD *float64 `json:"costUSD,omitempty"`
+
+	// PossibleSamples is the total dataset size (possible samples) when known from the Inspect log.
+	// +optional
+	PossibleSamples int `json:"possibleSamples,omitempty"`
+}
+
+// TaskLatency records latency percentiles (in seconds) aggregated across evaluated samples.
+type TaskLatency struct {
+	// P50 is the 50th percentile sample latency in seconds.
+	// +optional
+	P50 float64 `json:"p50,omitempty"`
+
+	// P95 is the 95th percentile sample latency in seconds.
+	// +optional
+	P95 float64 `json:"p95,omitempty"`
 }
 
 // TaskTokens records token usage breakdown for an evaluation task.
@@ -370,6 +393,10 @@ type RunStatus struct {
 	// Summary provides aggregate statistics across tasks in the Run.
 	// +optional
 	Summary *RunSummary `json:"summary,omitempty"`
+
+	// CostUSD is the estimated total evaluation cost in USD for this Run.
+	// +optional
+	CostUSD *float64 `json:"costUSD,omitempty"`
 }
 
 // +kubebuilder:object:root=true

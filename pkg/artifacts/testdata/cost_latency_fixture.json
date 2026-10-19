@@ -1,0 +1,65 @@
+{
+  "version": 2,
+  "status": "success",
+  "eval": {
+    "task": "docs/readme_comprehension",
+    "model": "mockllm/model",
+    "dataset": {
+      "name": "readme_questions",
+      "samples": 21
+    },
+    "scorers": [
+      {
+        "name": "choice"
+      }
+    ]
+  },
+  "stats": {
+    "model_usage": {
+      "mockllm/model": {
+        "input_tokens": 100000,
+        "output_tokens": 20000,
+        "total_tokens": 120000
+      }
+    }
+  },
+  "results": {
+    "total_samples": 2,
+    "completed_samples": 2,
+    "scores": [
+      {
+        "name": "choice",
+        "scorer": "choice",
+        "scored_samples": 2,
+        "metrics": {
+          "accuracy": {
+            "name": "accuracy",
+            "value": 1.0
+          }
+        }
+      }
+    ]
+  },
+  "samples": [
+    {
+      "id": "readme-tagline",
+      "started_at": "2026-10-19T02:00:00.000Z",
+      "completed_at": "2026-10-19T02:00:01.000Z",
+      "scores": {
+        "choice": {
+          "value": "C"
+        }
+      }
+    },
+    {
+      "id": "readme-unit",
+      "started_at": "2026-10-19T02:00:00.000Z",
+      "completed_at": "2026-10-19T02:00:03.000Z",
+      "scores": {
+        "choice": {
+          "value": "C"
+        }
+      }
+    }
+  ]
+}

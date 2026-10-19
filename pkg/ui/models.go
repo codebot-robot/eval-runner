@@ -236,7 +236,9 @@ type ComparisonSummaryData struct {
 	TotalPairs       int
 	TotalDroppedCand int
 	TotalDroppedBase int
-	SamplesSummary   string // e.g. "96 run · 48 paired" or "96 run · 48 paired · dropped: 2 cand, 1 base"
+	CostUSD          *float64
+	PossibleSamples  int
+	SamplesSummary   string // e.g. "96 run · 48 paired" or "$4.10 spent, 96 of 3,200 possible samples"
 	BaseSummary      string // e.g. "commit a81d0c4 (docs-eval-base-05ce4d8)"
 	CandSummary      string // e.g. "commit 05ce4d8 (docs-eval-cand-05ce4d8)"
 }
@@ -327,9 +329,41 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 	}
 	headline := strings.Join(headlineParts, " · ")
 
-	samplesSummary := fmt.Sprintf("%d run · %d paired", totalSamples, totalPairs)
+	costUSD := comp.Status.CostUSD
+	possibleSamples := comp.Status.PossibleSamples
+
+	var spentStr string
+	if costUSD != nil {
+		spentStr = fmt.Sprintf("$%.2f spent", *costUSD)
+	}
+
+	samplesRunTotal := 0
+	for _, task := range comp.Status.Tasks {
+		if task.SamplesRun > 0 {
+			samplesRunTotal += task.SamplesRun
+		} else {
+			samplesRunTotal += task.Pairs
+		}
+	}
+	if samplesRunTotal == 0 && totalPairs > 0 {
+		samplesRunTotal = totalPairs
+	}
+
+	var samplesStr string
+	if possibleSamples > 0 {
+		samplesStr = fmt.Sprintf("%d of %d possible samples", samplesRunTotal, possibleSamples)
+	} else {
+		samplesStr = fmt.Sprintf("%d run · %d paired", totalSamples, totalPairs)
+	}
 	if totalDroppedCand > 0 || totalDroppedBase > 0 {
-		samplesSummary += fmt.Sprintf(" · dropped: %d cand, %d base", totalDroppedCand, totalDroppedBase)
+		samplesStr += fmt.Sprintf(" · dropped: %d cand, %d base", totalDroppedCand, totalDroppedBase)
+	}
+
+	var samplesSummary string
+	if spentStr != "" {
+		samplesSummary = fmt.Sprintf("%s, %s", spentStr, samplesStr)
+	} else {
+		samplesSummary = samplesStr
 	}
 
 	baseRunName := comp.Spec.Baseline.Run
@@ -372,6 +406,8 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 		TotalPairs:       totalPairs,
 		TotalDroppedCand: totalDroppedCand,
 		TotalDroppedBase: totalDroppedBase,
+		CostUSD:          costUSD,
+		PossibleSamples:  possibleSamples,
 		SamplesSummary:   samplesSummary,
 		BaseSummary:      baseSummary,
 		CandSummary:      candSummary,
@@ -469,6 +505,8 @@ type ComparisonDetailView struct {
 	TotalPairs       int
 	TotalDroppedCand int
 	TotalDroppedBase int
+	CostUSD          *float64
+	PossibleSamples  int
 	SamplesSummary   string
 }
 
@@ -513,6 +551,8 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 		TotalPairs:       summary.TotalPairs,
 		TotalDroppedCand: summary.TotalDroppedCand,
 		TotalDroppedBase: summary.TotalDroppedBase,
+		CostUSD:          summary.CostUSD,
+		PossibleSamples:  summary.PossibleSamples,
 		SamplesSummary:   summary.SamplesSummary,
 	}
 }

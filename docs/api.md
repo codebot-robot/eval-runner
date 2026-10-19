@@ -127,6 +127,7 @@ status:
 | `tasks` | `[]TaskStatus` | Per-task execution results and score aggregates. See [Tasks](#taskstatus). |
 | `artifacts` | `string` | Storage base URI or prefix where artifacts for this Run are persisted (e.g. `gs://<bucket>/runs/<commit>/`). |
 | `summary` | `*RunSummary` | Aggregate execution counts and success rate range across tasks. See [Summary](#runsummary). |
+| `costUSD` | `*float64` | Total estimated evaluation cost in USD for this Run from model prices when known (omitted otherwise). |
 
 ### Phases
 
@@ -155,6 +156,16 @@ status:
 | `logPath` | `string` | Storage path or URI where the raw Inspect log was stored by the artifact sink. |
 | `sampleRange` | `*SampleRange` | Sample window evaluated for this task (`{start, end}`). |
 | `tokens` | `*TaskTokens` | Token usage breakdown consumed for this task when present in Inspect logs. |
+| `latency` | `*TaskLatency` | Sample latency percentiles (`p50`, `p95` in seconds) aggregated across evaluated samples. |
+| `costUSD` | `*float64` | Estimated task evaluation cost in USD from model prices when known (omitted otherwise). |
+| `possibleSamples` | `int` | Total dataset size (possible samples) when known from the Inspect log (`eval.dataset.samples`). |
+
+### TaskLatency
+
+| Field | Type | Description |
+|---|---|---|
+| `p50` | `float64` | 50th percentile sample latency in seconds. |
+| `p95` | `float64` | 95th percentile sample latency in seconds. |
 
 ### ConfidenceInterval
 
@@ -239,6 +250,7 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Execution deadline | `--execution-deadline` / ConfigMap `executionDeadline` | `30m` | Overall sample execution deadline exceeded; Run marked `Failed` and sandboxes deleted. |
 | Max parallel tasks | `--max-parallel-tasks` / ConfigMap `maxParallelTasks` | `4` | Caps concurrent task sandboxes executing at one time. |
 | Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` or `"none"` to disable). |
+| Model pricing | ConfigMap `modelPrices` | `"{}"` | JSON map model -> `{inputPer1M, outputPer1M}` in USD for computing task and comparison evaluation costs (exact, case-sensitive string match on `Run.spec.model`; unknown JSON fields rejected). |
 | Default batch size | `--default-batch-size` / ConfigMap `defaultBatchSize` | `8` | Default batch size for paired adaptive sampling in webhook-created Comparisons and seed Run sampleRange. |
 | Default max samples | `--default-max-samples-per-task` / ConfigMap `defaultMaxSamplesPerTask` | `64` | Maximum total samples per task across batches in webhook-created Comparisons; bounds `/eval more <n>`. |
 | Command users | `--command-users` / ConfigMap `commandUsers` | `""` | Comma-separated list of GitHub logins allowed to execute `/eval more <n>` PR comment commands without checking GitHub permissions. |
@@ -313,6 +325,11 @@ spec:
 | `tasks[].decision` | `ComparisonTaskLabel` | Stopping rule decision: `improved`, `regressed`, `unchanged`, `inconclusive`, `continue`. |
 | `tasks[].suggestedNext` | `int` | Suggested number of additional samples to evaluate if undecided (0 when dataset is exhausted). |
 | `tasks[].tokens` | `*TaskTokens` | Token counts (`input`, `output`, `total`) consumed across evaluated task runs when present in Inspect logs. |
+| `tasks[].latency` | `*TaskLatency` | Sample latency percentiles (`p50`, `p95` in seconds) aggregated across evaluated samples. |
+| `tasks[].costUSD` | `*float64` | Estimated task evaluation cost in USD from model prices across candidate and baseline runs when known. |
+| `tasks[].possibleSamples` | `int` | Total dataset size (possible samples) for this task when known from the Inspect log. |
+| `costUSD` | `*float64` | Total estimated evaluation cost in USD across all tasks in this Comparison when prices are known. |
+| `possibleSamples` | `int` | Total possible samples across tasks when known from Inspect logs. |
 | `summary` | `*ComparisonSummary` | Aggregate statistics across tasks in the Comparison. |
 | `summary.tasks` | `string` | Compact string representing completed vs total tasks (e.g. `2/2`). |
 | `summary.skipped` | `int` | Count of tasks discovered in the manifest but not planned by either Run. |
@@ -326,14 +343,14 @@ spec:
 
 $$\text{total} = \text{input} + \text{output}$$
 
-Inspect log provider-specific totals are dropped so that `total` is strictly and deterministically reproducible from the exposed components. Reasoning tokens (`reasoning`) and prompt cache token counts (`cacheRead`, `cacheWrite`) are recorded as separate optional fields and are not folded into `total` because token billing differs per provider (e.g. Gemini and Anthropic bill reasoning as output tokens; cost mapping belongs to #155).
+Inspect log provider-specific totals are dropped so that `total` is strictly and deterministically reproducible from the exposed components. Reasoning tokens (`reasoning`) and prompt cache token counts (`cacheRead`, `cacheWrite`) are recorded as separate optional fields and are not folded into `total` because token billing differs per provider (e.g. Gemini and Anthropic bill reasoning as output tokens; cost mapping is configured via `modelPrices`).
 
 | Field | Type | Description |
 |---|---|---|
 | `input` | `int` | Input/prompt tokens consumed by models for this task. |
 | `output` | `int` | Output/completion tokens consumed by models for this task. |
 | `total` | `int` | Total tokens consumed for this task (`input + output`). |
-| `reasoning` | `int` | Reasoning/thinking tokens consumed by models for this task (reported separately; billing differs per provider, see #155). |
+| `reasoning` | `int` | Reasoning/thinking tokens consumed by models for this task (reported separately). |
 | `cacheRead` | `int` | Cached input tokens read by models for this task. |
 | `cacheWrite` | `int` | Tokens written to cache by models for this task. |
 

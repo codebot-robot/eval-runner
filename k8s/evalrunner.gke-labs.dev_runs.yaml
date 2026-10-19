@@ -200,6 +200,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              costUSD:
+                description: CostUSD is the estimated total evaluation cost in USD
+                  for this Run.
+                type: number
               discovery:
                 description: Discovery records pointers, hash, and counts for the
                   discovered manifest.
@@ -308,9 +312,26 @@ spec:
                   description: TaskStatus records the execution status and scores
                     for a single eval task.
                   properties:
+                    costUSD:
+                      description: CostUSD is the estimated task evaluation cost in
+                        USD from model prices.
+                      type: number
                     id:
                       description: ID is the unique identifier of the task (e.g. docs/readme_comprehension).
                       type: string
+                    latency:
+                      description: Latency records sample latency percentiles (p50
+                        and p95 in seconds) aggregated across evaluated samples.
+                      properties:
+                        p50:
+                          description: P50 is the 50th percentile sample latency in
+                            seconds.
+                          type: number
+                        p95:
+                          description: P95 is the 95th percentile sample latency in
+                            seconds.
+                          type: number
+                      type: object
                     logPath:
                       description: LogPath is the path or URI where the Inspect log
                         was stored by the artifact sink.
@@ -331,6 +352,10 @@ spec:
                       - Completed
                       - Failed
                       type: string
+                    possibleSamples:
+                      description: PossibleSamples is the total dataset size (possible
+                        samples) when known from the Inspect log.
+                      type: integer
                     sampleRange:
                       description: SampleRange is the sample window evaluated for
                         this task.

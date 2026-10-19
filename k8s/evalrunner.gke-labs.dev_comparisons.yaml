@@ -215,13 +215,17 @@ spec:
                   - index
                   type: object
                 type: array
+              costUSD:
+                description: CostUSD is the total estimated evaluation cost in USD
+                  across all tasks in this Comparison.
+                type: number
               extraSamplesApplied:
                 description: ExtraSamplesApplied records the number of extra samples
                   that have been consumed into extension batches.
                 type: integer
               message:
-                description: Message is human-readable detail on failure or current
-                  status.
+                description: Message is human-readable detail on failure, notes, or
+                  current status.
                 type: string
               pImprovement:
                 description: PImprovement is the posterior probability that the candidate
@@ -236,6 +240,10 @@ spec:
                 - Running
                 - Completed
                 type: string
+              possibleSamples:
+                description: PossibleSamples is the total possible samples across
+                  tasks when known from the Inspect log.
+                type: integer
               reporting:
                 description: Reporting records the status of GitHub PR comment and
                   check run reporting.
@@ -294,6 +302,10 @@ spec:
                         of candidate samples.
                       maximum: 1
                       minimum: 0
+                      type: number
+                    costUSD:
+                      description: CostUSD is the estimated task evaluation cost in
+                        USD from model prices across candidate and baseline.
                       type: number
                     decision:
                       description: 'Decision is the stopping rule decision: improved,
@@ -357,6 +369,19 @@ spec:
                       - running
                       - continue
                       type: string
+                    latency:
+                      description: Latency records sample latency percentiles (p50
+                        and p95 in seconds) aggregated across evaluated samples.
+                      properties:
+                        p50:
+                          description: P50 is the 50th percentile sample latency in
+                            seconds.
+                          type: number
+                        p95:
+                          description: P95 is the 95th percentile sample latency in
+                            seconds.
+                          type: number
+                      type: object
                     losses:
                       description: Losses is the number of paired samples where the
                         candidate scored lower than baseline.
@@ -364,6 +389,10 @@ spec:
                     pairs:
                       description: Pairs is the number of matched (paired) sample
                         pairs.
+                      type: integer
+                    possibleSamples:
+                      description: PossibleSamples is the total dataset size (possible
+                        samples) for this task when known from the Inspect log.
                       type: integer
                     samplesRun:
                       description: SamplesRun is the total number of samples evaluated

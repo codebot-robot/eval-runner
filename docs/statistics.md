@@ -430,14 +430,36 @@ To avoid redundant evaluation when multiple pull requests or extra sample reques
 - **Multiple Owner References**: Reused baseline Runs are updated to include owner references for each consuming Comparison (`controller: false`, `blockOwnerDeletion: true`), preventing garbage collection from deleting a shared baseline Run when an earlier Comparison is deleted.
 - **Cache Invalidation**: Any change in commit, model, task set, or sample range alters the batch key, automatically triggering creation of a fresh baseline Run.
 
-### 5.6 Cost Accounting & Token Usage
+### 5.6 Cost Accounting & Token Pricing
 
-Per-task sample counts (`samplesRun`) and model token usage are tracked across all evaluation batches:
+Per-task sample counts (`samplesRun`), model token usage, and costs are tracked across all evaluation batches:
 
 - **Token Extraction & Invariant**: When Inspect logs contain `stats.model_usage` or sample-level `model_usage` (`input_tokens`, `output_tokens`, `total_tokens`), token usage is extracted via `ExtractInspectTokens` as a structured `{input, output, total, reasoning, cacheRead, cacheWrite}` object. Inspect AI logs may include provider-specific token fields in `stats.model_usage` (such as `input_tokens_cache_read`, `input_tokens_cache_write`, `reasoning_tokens`, or provider-specific `total_tokens` calculations that include cached or unexposed fields). Eval-runner enforces the strict token accounting invariant:
   $$\text{total} = \text{input} + \text{output}$$
-  Inspect's reported `total_tokens` is dropped in favor of this invariant, ensuring `total` is always reproducible from the parts. Reasoning tokens (`reasoning`) and cache counts (`cacheRead`, `cacheWrite`) are recorded as separate optional fields rather than folded into `total` because billing models differ across providers (cost mapping belongs to #155).
-- **Status & Summary**: Evaluated token counts are accumulated across candidate and baseline runs for each task, recorded in `Run.status.tasks[].tokens`, `Comparison.status.tasks[].tokens`, and written to `summary.json` alongside task execution metadata. The invariant $\text{total} = \text{input} + \text{output}$ is preserved across all reporting surfaces and Comparison artifacts.
+  Inspect's reported `total_tokens` is dropped in favor of this invariant, ensuring `total` is always reproducible from the parts. Reasoning tokens (`reasoning`) and cache counts (`cacheRead`, `cacheWrite`) are recorded as separate optional fields rather than folded into `total` because billing models differ across providers.
+- **Model Pricing Table (`modelPrices`)**: ConfigMap key `modelPrices` in `eval-runner-config` specifies a JSON pricing map from model identifier to pricing rates in USD per 1M tokens:
+  ```json
+  {
+    "google/gemini-3.5-flash-lite": { "inputPer1M": 0.15, "outputPer1M": 0.60 },
+    "mockllm/model": { "inputPer1M": 1.00, "outputPer1M": 2.00 }
+  }
+  ```
+  The pricing map key is an exact, case-sensitive string match on `Run.spec.model`. Unknown JSON fields are rejected at startup.
+- **Cost Calculation**: When pricing is configured for a model, eval-runner computes per-task evaluation cost:
+  $$\text{costUSD} = \frac{\text{inputTokens} \times \text{inputPer1M} + \text{outputTokens} \times \text{outputPer1M}}{1{,}000{,}000}$$
+  Cost is omitted when no price is known for the model rather than reporting zero. Under this pricing model, `reasoning` tokens are not priced separately because Inspect's reported `output_tokens` already includes reasoning tokens for the major providers (e.g. Gemini and Anthropic), so the output price covers them. Prompt cache counts (`cacheRead`, `cacheWrite`) are tracked for operational visibility but not priced.
+- **Aggregation**: Evaluated token counts and costs are accumulated across candidate and baseline runs for each task, recorded in `Run.status.tasks[]` (`tokens`, `costUSD`), `Comparison.status.tasks[]` (`tokens`, `costUSD`), and written to `summary.json` alongside task execution metadata. For Comparisons, task costs are summed into `Comparison.status.costUSD` and the comparison artifact when all tasks with tokens have known prices.
+
+### 5.7 Latency Percentiles & Footer Reporting
+
+Sample latency and dataset progress metrics provide operational observability across task runs:
+
+- **Latency Extraction**: Sample start and completion timestamps (`started_at`, `completed_at` RFC3339 timestamps) from Inspect evaluation logs are extracted to compute individual sample latencies in seconds ($\text{latency} = \text{completed\_at} - \text{started\_at}$).
+- **Percentile Calculation**: Sample latencies for a task are aggregated and sorted to compute $p50$ and $p95$ percentiles using standard linear interpolation (Type 7 quantile). Latency percentiles are recorded on `Run.status.tasks[].latency`, `summary.json`, `Comparison.status.tasks[].latency`, and in comparison artifacts.
+- **Dataset Size & PR Comment Footer**: When Inspect logs declare total dataset size in `eval.dataset.samples`, it is recorded as `possibleSamples`. The GitHub PR comment footer and UI Comparison view report overall spend and progress:
+  $$\text{"\$X.XX spent, } N \text{ of } M \text{ possible samples"}$$
+  where $N$ is the count of evaluated pairs ($\sum \text{tasks}[].\text{samplesRun}$) to align with the dataset unit $M$, $M$ is omitted when unknown from the log (falling back to "$N\text{ run} \cdot P\text{ paired}$"), and cost is omitted when no price is known.
+
 
 
 

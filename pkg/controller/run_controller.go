@@ -190,6 +190,9 @@ type RunReconciler struct {
 	// SandboxdImage is the container image used for the sandboxd initContainer.
 	SandboxdImage string
 
+	// ModelPrices maps model identifier to token pricing in USD per 1M tokens.
+	ModelPrices map[string]ModelPrice
+
 	pkiMu sync.Mutex
 
 	manifestCacheLock sync.RWMutex
@@ -1877,6 +1880,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].Message = res.message
 				status.Tasks[i].LogPath = res.logPath
 				status.Tasks[i].Tokens = res.tokens
+				status.Tasks[i].Latency = res.latency
+				status.Tasks[i].CostUSD = res.costUSD
+				status.Tasks[i].PossibleSamples = res.possibleSamples
 				if res.sampleRange != nil {
 					status.Tasks[i].SampleRange = res.sampleRange
 				} else if status.Tasks[i].SampleRange == nil {
@@ -1885,6 +1891,18 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			}
 		}
 		status.Summary = ComputeRunSummary(status.Tasks)
+
+		var totalCost float64
+		hasCost := false
+		for i := range status.Tasks {
+			if status.Tasks[i].CostUSD != nil {
+				totalCost += *status.Tasks[i].CostUSD
+				hasCost = true
+			}
+		}
+		if hasCost {
+			status.CostUSD = &totalCost
+		}
 	})
 	if err != nil {
 		return ctrl.Result{}, err
@@ -1905,17 +1923,20 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 }
 
 type taskExecutionResult struct {
-	taskID        string
-	phase         v1alpha1.TaskPhase
-	samples       int
-	successes     int
-	meanScore     *float64
-	successRate   *float64
-	successRateCI *v1alpha1.ConfidenceInterval
-	tokens        *v1alpha1.TaskTokens
-	message       string
-	logPath       string
-	sampleRange   *v1alpha1.SampleRange
+	taskID          string
+	phase           v1alpha1.TaskPhase
+	samples         int
+	successes       int
+	meanScore       *float64
+	successRate     *float64
+	successRateCI   *v1alpha1.ConfidenceInterval
+	tokens          *v1alpha1.TaskTokens
+	latency         *v1alpha1.TaskLatency
+	costUSD         *float64
+	possibleSamples int
+	message         string
+	logPath         string
+	sampleRange     *v1alpha1.SampleRange
 }
 
 func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) taskExecutionResult {
@@ -2223,36 +2244,58 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	if err != nil {
 		logger.V(1).Info("failed to extract tokens from inspect log", "task", taskID, "error", err)
 	}
+	latency, err := artifacts.ExtractInspectLatency(logBytes)
+	if err != nil {
+		logger.V(1).Info("failed to extract latency from inspect log", "task", taskID, "error", err)
+	}
+	datasetSamples, err := artifacts.ExtractInspectDatasetSamples(logBytes)
+	if err != nil {
+		logger.V(1).Info("failed to extract dataset samples from inspect log", "task", taskID, "error", err)
+	}
+
+	var costUSD *float64
+	if tokens != nil {
+		prices := r.ModelPrices
+		if price, ok := prices[run.Spec.Model]; ok {
+			cost := (float64(tokens.Input)*price.InputPer1M + float64(tokens.Output)*price.OutputPer1M) / 1_000_000.0
+			costUSD = &cost
+		}
+	}
+
 	finishTime := r.now()
 	var artifactSampleRange *artifacts.SampleRange
 	if effRange != nil {
 		artifactSampleRange = &artifacts.SampleRange{Start: effRange.Start, End: effRange.End}
 	}
 	meta := artifacts.RunMetadata{
-		RunName:      run.Name,
-		RunNamespace: run.Namespace,
-		TaskID:       taskID,
-		Model:        run.Spec.Model,
-		Commit:       run.Spec.Repo.Commit,
-		Samples:      agg.Samples,
-		Successes:    agg.Successes,
-		MeanScore:    agg.MeanScore,
-		StartedAt:    &startTime,
-		FinishedAt:   &finishTime,
-		SampleRange:  artifactSampleRange,
-		Tokens:       tokens,
+		RunName:         run.Name,
+		RunNamespace:    run.Namespace,
+		TaskID:          taskID,
+		Model:           run.Spec.Model,
+		Commit:          run.Spec.Repo.Commit,
+		Samples:         agg.Samples,
+		Successes:       agg.Successes,
+		MeanScore:       agg.MeanScore,
+		StartedAt:       &startTime,
+		FinishedAt:      &finishTime,
+		SampleRange:     artifactSampleRange,
+		Tokens:          tokens,
+		Latency:         latency,
+		CostUSD:         costUSD,
+		PossibleSamples: datasetSamples,
 	}
 	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
 	if storeErr != nil {
 		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			samples:     agg.Samples,
-			successes:   agg.Successes,
-			meanScore:   agg.MeanScore,
-			message:     fmt.Sprintf("failed to store artifact: %v", storeErr),
-			sampleRange: effRange,
+			taskID:          taskID,
+			phase:           v1alpha1.TaskPhaseFailed,
+			samples:         agg.Samples,
+			successes:       agg.Successes,
+			meanScore:       agg.MeanScore,
+			message:         fmt.Sprintf("failed to store artifact: %v", storeErr),
+			sampleRange:     effRange,
+			possibleSamples: datasetSamples,
 		}
 	}
 
@@ -2260,11 +2303,12 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		msg := "no scored samples"
 		logger.Error(errors.New(msg), "Task completed without scored samples", "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
-			logPath:     logPath,
-			sampleRange: effRange,
+			taskID:          taskID,
+			phase:           v1alpha1.TaskPhaseFailed,
+			message:         msg,
+			logPath:         logPath,
+			sampleRange:     effRange,
+			possibleSamples: datasetSamples,
 		}
 	}
 
@@ -2305,17 +2349,28 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}
 
+	var v1Latency *v1alpha1.TaskLatency
+	if latency != nil {
+		v1Latency = &v1alpha1.TaskLatency{
+			P50: latency.P50,
+			P95: latency.P95,
+		}
+	}
+
 	return taskExecutionResult{
-		taskID:        taskID,
-		phase:         v1alpha1.TaskPhaseCompleted,
-		samples:       agg.Samples,
-		successes:     agg.Successes,
-		meanScore:     agg.MeanScore,
-		successRate:   successRate,
-		successRateCI: successRateCI,
-		tokens:        v1Tokens,
-		logPath:       logPath,
-		sampleRange:   effRange,
+		taskID:          taskID,
+		phase:           v1alpha1.TaskPhaseCompleted,
+		samples:         agg.Samples,
+		successes:       agg.Successes,
+		meanScore:       agg.MeanScore,
+		successRate:     successRate,
+		successRateCI:   successRateCI,
+		tokens:          v1Tokens,
+		latency:         v1Latency,
+		costUSD:         costUSD,
+		possibleSamples: datasetSamples,
+		logPath:         logPath,
+		sampleRange:     effRange,
 	}
 }
 

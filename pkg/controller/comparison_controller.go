@@ -66,25 +66,32 @@ type PairedSampleScore struct {
 
 // ComparisonTaskArtifact records paired comparison details for a single task in the artifact JSON.
 type ComparisonTaskArtifact struct {
-	ID              string                           `json:"id"`
-	BaseRate        float64                          `json:"baseRate"`
-	CandidateRate   float64                          `json:"candidateRate"`
-	Delta           float64                          `json:"delta"`
-	DeltaCI         v1alpha1.DeltaConfidenceInterval `json:"deltaCI"`
-	Pairs           int                              `json:"pairs"`
-	Wins            int                              `json:"wins"`
-	Losses          int                              `json:"losses"`
-	Ties            int                              `json:"ties"`
-	Dropped         v1alpha1.ComparisonDropped       `json:"dropped"`
-	Label           string                           `json:"label"`
-	PImprovement    float64                          `json:"pImprovement"`
-	SamplesRun      int                              `json:"samplesRun,omitempty"`
-	Decision        string                           `json:"decision,omitempty"`
-	SuggestedNext   int                              `json:"suggestedNext,omitempty"`
-	Tokens          *v1alpha1.TaskTokens             `json:"tokens,omitempty"`
-	CandidateTokens *v1alpha1.TaskTokens             `json:"candidateTokens,omitempty"`
-	BaseTokens      *v1alpha1.TaskTokens             `json:"baseTokens,omitempty"`
-	PairsTable      []PairedSampleScore              `json:"pairsTable,omitempty"`
+	ID               string                           `json:"id"`
+	BaseRate         float64                          `json:"baseRate"`
+	CandidateRate    float64                          `json:"candidateRate"`
+	Delta            float64                          `json:"delta"`
+	DeltaCI          v1alpha1.DeltaConfidenceInterval `json:"deltaCI"`
+	Pairs            int                              `json:"pairs"`
+	Wins             int                              `json:"wins"`
+	Losses           int                              `json:"losses"`
+	Ties             int                              `json:"ties"`
+	Dropped          v1alpha1.ComparisonDropped       `json:"dropped"`
+	Label            string                           `json:"label"`
+	PImprovement     float64                          `json:"pImprovement"`
+	SamplesRun       int                              `json:"samplesRun,omitempty"`
+	Decision         string                           `json:"decision,omitempty"`
+	SuggestedNext    int                              `json:"suggestedNext,omitempty"`
+	Tokens           *v1alpha1.TaskTokens             `json:"tokens,omitempty"`
+	CandidateTokens  *v1alpha1.TaskTokens             `json:"candidateTokens,omitempty"`
+	BaseTokens       *v1alpha1.TaskTokens             `json:"baseTokens,omitempty"`
+	Latency          *v1alpha1.TaskLatency            `json:"latency,omitempty"`
+	CandidateLatency *v1alpha1.TaskLatency            `json:"candidateLatency,omitempty"`
+	BaseLatency      *v1alpha1.TaskLatency            `json:"baseLatency,omitempty"`
+	CostUSD          *float64                         `json:"costUSD,omitempty"`
+	CandidateCostUSD *float64                         `json:"candidateCostUSD,omitempty"`
+	BaseCostUSD      *float64                         `json:"baseCostUSD,omitempty"`
+	PossibleSamples  int                              `json:"possibleSamples,omitempty"`
+	PairsTable       []PairedSampleScore              `json:"pairsTable,omitempty"`
 }
 
 // ComparisonArtifact is the schema stored as comparisons/<name>.json in the artifact sink.
@@ -95,6 +102,8 @@ type ComparisonArtifact struct {
 	Candidate             string                           `json:"candidate"`
 	Verdict               string                           `json:"verdict"`
 	PImprovement          float64                          `json:"pImprovement"`
+	CostUSD               *float64                         `json:"costUSD,omitempty"`
+	PossibleSamples       int                              `json:"possibleSamples,omitempty"`
 	Summary               string                           `json:"summary,omitempty"`
 	Tasks                 []ComparisonTaskArtifact         `json:"tasks"`
 	Batches               []v1alpha1.ComparisonBatchStatus `json:"batches,omitempty"`
@@ -129,6 +138,7 @@ type ComparisonReconciler struct {
 	GitHubClientFactory func(creds GitHubCredentials) github.Client
 	ComparisonTTL       time.Duration
 	Now                 func() time.Time
+	ModelPrices         map[string]ModelPrice
 
 	cachedAppMu   sync.Mutex
 	cachedAppKey  string
@@ -954,18 +964,25 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	type taskEval struct {
-		taskID        string
-		candScores    []stats.SampleScore
-		baseScores    []stats.SampleScore
-		candTokens    *v1alpha1.TaskTokens
-		baseTokens    *v1alpha1.TaskTokens
-		tokens        *v1alpha1.TaskTokens
-		exhausted     bool
-		failed        bool
-		est           stats.PairedEstimate
-		dec           stats.Decision
-		suggestedNext int
-		samplesRun    int
+		taskID          string
+		candScores      []stats.SampleScore
+		baseScores      []stats.SampleScore
+		candTokens      *v1alpha1.TaskTokens
+		baseTokens      *v1alpha1.TaskTokens
+		tokens          *v1alpha1.TaskTokens
+		latency         *v1alpha1.TaskLatency
+		candLatency     *v1alpha1.TaskLatency
+		baseLatency     *v1alpha1.TaskLatency
+		costUSD         *float64
+		candCostUSD     *float64
+		baseCostUSD     *float64
+		possibleSamples int
+		exhausted       bool
+		failed          bool
+		est             stats.PairedEstimate
+		dec             stats.Decision
+		suggestedNext   int
+		samplesRun      int
 	}
 
 	var taskEvals []taskEval
@@ -973,6 +990,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	for _, taskID := range taskIDs {
 		var allCandScores []stats.SampleScore
 		var allBaseScores []stats.SampleScore
+		var allCandLatencies []float64
+		var allBaseLatencies []float64
+		var allTaskLatencies []float64
+		taskPossibleSamples := 0
 		candInputSum, candOutputSum := 0, 0
 		candReasoningSum, candCacheReadSum, candCacheWriteSum := 0, 0, 0
 		hasCandTokens := false
@@ -1109,6 +1130,22 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				hasBaseTokens = true
 			}
 
+			if candLats, err := artifacts.ExtractInspectSampleLatencies(candData); err == nil && len(candLats) > 0 {
+				allCandLatencies = append(allCandLatencies, candLats...)
+				allTaskLatencies = append(allTaskLatencies, candLats...)
+			}
+			if baseLats, err := artifacts.ExtractInspectSampleLatencies(baseData); err == nil && len(baseLats) > 0 {
+				allBaseLatencies = append(allBaseLatencies, baseLats...)
+				allTaskLatencies = append(allTaskLatencies, baseLats...)
+			}
+
+			if ds, err := artifacts.ExtractInspectDatasetSamples(candData); err == nil && ds > taskPossibleSamples {
+				taskPossibleSamples = ds
+			}
+			if ds, err := artifacts.ExtractInspectDatasetSamples(baseData); err == nil && ds > taskPossibleSamples {
+				taskPossibleSamples = ds
+			}
+
 			// Check window length for dataset exhaustion:
 			// If seeds had no window, batch 1 is the whole dataset: treat as exhausted and do not batch past end.
 			if batchIdx == 0 && !seedHasWindow {
@@ -1163,6 +1200,47 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 		}
 
+		var taskLatency *v1alpha1.TaskLatency
+		if lat := artifacts.CalculateLatencyPercentiles(allTaskLatencies); lat != nil {
+			taskLatency = &v1alpha1.TaskLatency{P50: lat.P50, P95: lat.P95}
+		}
+		var candLatency *v1alpha1.TaskLatency
+		if lat := artifacts.CalculateLatencyPercentiles(allCandLatencies); lat != nil {
+			candLatency = &v1alpha1.TaskLatency{P50: lat.P50, P95: lat.P95}
+		}
+		var baseLatency *v1alpha1.TaskLatency
+		if lat := artifacts.CalculateLatencyPercentiles(allBaseLatencies); lat != nil {
+			baseLatency = &v1alpha1.TaskLatency{P50: lat.P50, P95: lat.P95}
+		}
+
+		prices := r.ModelPrices
+		candPrice, candPriceKnown := prices[candidateRun.Spec.Model]
+		basePrice, basePriceKnown := prices[baselineRun.Spec.Model]
+
+		var candCost *float64
+		if hasCandTokens && candPriceKnown {
+			c := (float64(candInputSum)*candPrice.InputPer1M + float64(candOutputSum)*candPrice.OutputPer1M) / 1_000_000.0
+			candCost = &c
+		}
+		var baseCost *float64
+		if hasBaseTokens && basePriceKnown {
+			b := (float64(baseInputSum)*basePrice.InputPer1M + float64(baseOutputSum)*basePrice.OutputPer1M) / 1_000_000.0
+			baseCost = &b
+		}
+		var taskCost *float64
+		if (hasCandTokens || hasBaseTokens) &&
+			(!hasCandTokens || candCost != nil) &&
+			(!hasBaseTokens || baseCost != nil) {
+			tot := 0.0
+			if candCost != nil {
+				tot += *candCost
+			}
+			if baseCost != nil {
+				tot += *baseCost
+			}
+			taskCost = &tot
+		}
+
 		est := stats.ComparePaired(allCandScores, allBaseScores, 0.95)
 		samplesRun := est.NumPairs
 		if samplesRun == 0 && len(allCandScores) > 0 {
@@ -1210,18 +1288,25 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 
 		taskEvals = append(taskEvals, taskEval{
-			taskID:        taskID,
-			candScores:    allCandScores,
-			baseScores:    allBaseScores,
-			candTokens:    totalCandTokens,
-			baseTokens:    totalBaseTokens,
-			tokens:        totalTokens,
-			exhausted:     taskExhausted,
-			failed:        taskFailed,
-			est:           est,
-			dec:           dec,
-			suggestedNext: suggestedNext,
-			samplesRun:    samplesRun,
+			taskID:          taskID,
+			candScores:      allCandScores,
+			baseScores:      allBaseScores,
+			candTokens:      totalCandTokens,
+			baseTokens:      totalBaseTokens,
+			tokens:          totalTokens,
+			latency:         taskLatency,
+			candLatency:     candLatency,
+			baseLatency:     baseLatency,
+			costUSD:         taskCost,
+			candCostUSD:     candCost,
+			baseCostUSD:     baseCost,
+			possibleSamples: taskPossibleSamples,
+			exhausted:       taskExhausted,
+			failed:          taskFailed,
+			est:             est,
+			dec:             dec,
+			suggestedNext:   suggestedNext,
+			samplesRun:      samplesRun,
 		})
 	}
 
@@ -1387,12 +1472,35 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						Candidate: te.est.DroppedCandidate,
 						Baseline:  te.est.DroppedBaseline,
 					},
-					Label:         toComparisonTaskLabel(te.dec.Label),
-					SamplesRun:    te.samplesRun,
-					Decision:      v1alpha1.ComparisonTaskLabel(te.dec.Label),
-					SuggestedNext: te.suggestedNext,
-					Tokens:        te.tokens,
+					Label:           toComparisonTaskLabel(te.dec.Label),
+					SamplesRun:      te.samplesRun,
+					Decision:        v1alpha1.ComparisonTaskLabel(te.dec.Label),
+					SuggestedNext:   te.suggestedNext,
+					Tokens:          te.tokens,
+					Latency:         te.latency,
+					CostUSD:         te.costUSD,
+					PossibleSamples: te.possibleSamples,
 				})
+			}
+
+			var partialCompCost *float64
+			partialTotalCompCost := 0.0
+			hasAnyPartialCost := false
+			allPartialTasksWithTokensHaveCost := true
+			partialPossibleSamples := 0
+			for _, te := range taskEvals {
+				if te.tokens != nil {
+					if te.costUSD != nil {
+						partialTotalCompCost += *te.costUSD
+						hasAnyPartialCost = true
+					} else {
+						allPartialTasksWithTokensHaveCost = false
+					}
+				}
+				partialPossibleSamples += te.possibleSamples
+			}
+			if hasAnyPartialCost && allPartialTasksWithTokensHaveCost {
+				partialCompCost = &partialTotalCompCost
 			}
 
 			return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
@@ -1400,6 +1508,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				status.Verdict = v1alpha1.ComparisonVerdictRunning
 				status.Batches = batches
 				status.Tasks = partialStatuses
+				status.CostUSD = partialCompCost
+				if partialPossibleSamples > 0 {
+					status.PossibleSamples = partialPossibleSamples
+				}
 				status.Summary = &v1alpha1.ComparisonSummary{
 					Tasks: fmt.Sprintf("%d/%d", len(taskIDs)-len(continueTasks), len(taskIDs)),
 				}
@@ -1568,12 +1680,35 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						Candidate: te.est.DroppedCandidate,
 						Baseline:  te.est.DroppedBaseline,
 					},
-					Label:         toComparisonTaskLabel(te.dec.Label),
-					SamplesRun:    te.samplesRun,
-					Decision:      v1alpha1.ComparisonTaskLabel(te.dec.Label),
-					SuggestedNext: te.suggestedNext,
-					Tokens:        te.tokens,
+					Label:           toComparisonTaskLabel(te.dec.Label),
+					SamplesRun:      te.samplesRun,
+					Decision:        v1alpha1.ComparisonTaskLabel(te.dec.Label),
+					SuggestedNext:   te.suggestedNext,
+					Tokens:          te.tokens,
+					Latency:         te.latency,
+					CostUSD:         te.costUSD,
+					PossibleSamples: te.possibleSamples,
 				})
+			}
+
+			var partialCompCost *float64
+			partialTotalCompCost := 0.0
+			hasAnyPartialCost := false
+			allPartialTasksWithTokensHaveCost := true
+			partialPossibleSamples := 0
+			for _, te := range taskEvals {
+				if te.tokens != nil {
+					if te.costUSD != nil {
+						partialTotalCompCost += *te.costUSD
+						hasAnyPartialCost = true
+					} else {
+						allPartialTasksWithTokensHaveCost = false
+					}
+				}
+				partialPossibleSamples += te.possibleSamples
+			}
+			if hasAnyPartialCost && allPartialTasksWithTokensHaveCost {
+				partialCompCost = &partialTotalCompCost
 			}
 
 			return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
@@ -1582,6 +1717,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				status.Batches = batches
 				status.Tasks = partialStatuses
 				status.ExtraSamplesApplied = newExtraApplied
+				status.CostUSD = partialCompCost
+				if partialPossibleSamples > 0 {
+					status.PossibleSamples = partialPossibleSamples
+				}
 				status.Summary = &v1alpha1.ComparisonSummary{
 					Tasks: fmt.Sprintf("%d/%d", len(taskIDs)-len(extraTasks), len(taskIDs)),
 				}
@@ -1613,11 +1752,14 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				Candidate: te.est.DroppedCandidate,
 				Baseline:  te.est.DroppedBaseline,
 			},
-			Label:         toComparisonTaskLabel(te.dec.Label),
-			SamplesRun:    te.samplesRun,
-			Decision:      v1alpha1.ComparisonTaskLabel(te.dec.Label),
-			SuggestedNext: te.suggestedNext,
-			Tokens:        te.tokens,
+			Label:           toComparisonTaskLabel(te.dec.Label),
+			SamplesRun:      te.samplesRun,
+			Decision:        v1alpha1.ComparisonTaskLabel(te.dec.Label),
+			SuggestedNext:   te.suggestedNext,
+			Tokens:          te.tokens,
+			Latency:         te.latency,
+			CostUSD:         te.costUSD,
+			PossibleSamples: te.possibleSamples,
 		}
 		taskStatuses = append(taskStatuses, taskStatus)
 
@@ -1674,16 +1816,44 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				Candidate: te.est.DroppedCandidate,
 				Baseline:  te.est.DroppedBaseline,
 			},
-			Label:           string(te.dec.Label),
-			PImprovement:    te.est.PImprovement,
-			SamplesRun:      te.samplesRun,
-			Decision:        string(te.dec.Label),
-			SuggestedNext:   te.suggestedNext,
-			Tokens:          te.tokens,
-			CandidateTokens: te.candTokens,
-			BaseTokens:      te.baseTokens,
-			PairsTable:      pairsTable,
+			Label:            string(te.dec.Label),
+			PImprovement:     te.est.PImprovement,
+			SamplesRun:       te.samplesRun,
+			Decision:         string(te.dec.Label),
+			SuggestedNext:    te.suggestedNext,
+			Tokens:           te.tokens,
+			CandidateTokens:  te.candTokens,
+			BaseTokens:       te.baseTokens,
+			Latency:          te.latency,
+			CandidateLatency: te.candLatency,
+			BaseLatency:      te.baseLatency,
+			CostUSD:          te.costUSD,
+			CandidateCostUSD: te.candCostUSD,
+			BaseCostUSD:      te.baseCostUSD,
+			PossibleSamples:  te.possibleSamples,
+			PairsTable:       pairsTable,
 		})
+	}
+
+	var compCost *float64
+	totalCompCost := 0.0
+	hasAnyTaskCost := false
+	allTasksWithTokensHaveCost := true
+	totalPossibleSamples := 0
+
+	for _, te := range taskEvals {
+		if te.tokens != nil {
+			if te.costUSD != nil {
+				totalCompCost += *te.costUSD
+				hasAnyTaskCost = true
+			} else {
+				allTasksWithTokensHaveCost = false
+			}
+		}
+		totalPossibleSamples += te.possibleSamples
+	}
+	if hasAnyTaskCost && allTasksWithTokensHaveCost {
+		compCost = &totalCompCost
 	}
 
 	runVerdict := stats.AggregateVerdict(reports)
@@ -1765,6 +1935,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		Candidate:             comp.Spec.Candidate.Run,
 		Verdict:               string(runVerdict.Verdict),
 		PImprovement:          runVerdict.PImprovement,
+		CostUSD:               compCost,
+		PossibleSamples:       totalPossibleSamples,
 		Summary:               message,
 		Tasks:                 taskArtifacts,
 		Batches:               batches,
@@ -1806,6 +1978,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		status.PImprovement = &pImp
 		status.Batches = batches
 		status.Tasks = taskStatuses
+		status.CostUSD = compCost
+		if totalPossibleSamples > 0 {
+			status.PossibleSamples = totalPossibleSamples
+		}
 		status.ExtraSamplesApplied = comp.Status.ExtraSamplesApplied
 		status.Summary = &v1alpha1.ComparisonSummary{
 			Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)),

@@ -250,16 +250,19 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 	}
 
 	summary := TaskSummary{
-		TaskID:      meta.TaskID,
-		Model:       meta.Model,
-		Commit:      meta.Commit,
-		Samples:     meta.Samples,
-		Successes:   meta.Successes,
-		MeanScore:   meta.MeanScore,
-		StartedAt:   meta.StartedAt,
-		FinishedAt:  meta.FinishedAt,
-		SampleRange: meta.SampleRange,
-		Tokens:      meta.Tokens,
+		TaskID:          meta.TaskID,
+		Model:           meta.Model,
+		Commit:          meta.Commit,
+		Samples:         meta.Samples,
+		Successes:       meta.Successes,
+		MeanScore:       meta.MeanScore,
+		StartedAt:       meta.StartedAt,
+		FinishedAt:      meta.FinishedAt,
+		SampleRange:     meta.SampleRange,
+		Tokens:          meta.Tokens,
+		Latency:         meta.Latency,
+		CostUSD:         meta.CostUSD,
+		PossibleSamples: meta.PossibleSamples,
 	}
 	summaryBytes, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
