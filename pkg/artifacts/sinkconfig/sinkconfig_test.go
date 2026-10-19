@@ -81,13 +81,15 @@ func TestNewArtifactSink(t *testing.T) {
 	})
 
 	t.Run("gcs bucket sink", func(t *testing.T) {
+		// Point the storage client at an emulator so no ADC lookup happens; nothing is dialed at construction time.
+		t.Setenv("STORAGE_EMULATOR_HOST", "127.0.0.1:1")
 		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", 1024*1024)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		gcsSink, ok := sink.(*gcs.GCSSink)
 		if !ok {
-			t.Fatalf("expected *gcs.Sink, got %T", sink)
+			t.Fatalf("expected *gcs.GCSSink, got %T", sink)
 		}
 		if prefix := gcsSink.ArtifactPrefix("abc"); prefix != "gs://my-eval-bucket/runs/abc/" {
 			t.Errorf("expected prefix gs://my-eval-bucket/runs/abc/, got %q", prefix)
