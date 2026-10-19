@@ -16,6 +16,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -29,7 +30,6 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
-	"github.com/gke-labs/eval-runner/pkg/discovery"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -379,8 +379,8 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			if loadErr != nil {
 				// Fall back to capped taskIDs
 			} else {
-				m, parseErr := discovery.ParseManifest(manifestBytes)
-				if parseErr != nil || m == nil {
+				var m v1alpha1.Manifest
+				if parseErr := json.Unmarshal(manifestBytes, &m); parseErr != nil {
 					// Fall back
 				} else {
 					var allIDs []string
