@@ -71,15 +71,22 @@ const (
 
 	// ActionCreated is the issue_comment action when a comment is created.
 	ActionCreated = "created"
-
-	// AnnotationHandledComments is the Comparison annotation tracking handled issue comment IDs.
-	AnnotationHandledComments = "evalrunner.gke-labs.dev/handled-comments"
 )
 
 var (
-	repoPartRegex  = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-	commitSHARegex = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+	repoPartRegex    = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	commitSHARegex   = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+	gitHubLoginRegex = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9])*$`)
 )
+
+// IsValidGitHubLogin checks whether login matches the GitHub username shape:
+// 1 to 39 characters, alphanumeric and single hyphens, cannot start or end with a hyphen.
+func IsValidGitHubLogin(login string) bool {
+	if len(login) == 0 || len(login) > 39 {
+		return false
+	}
+	return gitHubLoginRegex.MatchString(login)
+}
 
 // GitHubRepository represents repository metadata in GitHub webhook payloads.
 type GitHubRepository struct {

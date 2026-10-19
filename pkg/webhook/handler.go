@@ -21,16 +21,16 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
-	"github.com/gke-labs/eval-runner/pkg/github"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -48,9 +48,6 @@ type Server struct {
 	mu              sync.RWMutex
 	cachedSecret    []byte
 	lastSecretFetch time.Time
-
-	ghClientMu     sync.Mutex
-	cachedGHClient github.Client
 }
 
 // NewServer creates a new webhook Server and initializes endpoints.
@@ -452,21 +449,15 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 		author = event.Sender.Login
 	}
 
-	if strings.EqualFold(event.Comment.User.Type, "Bot") || strings.EqualFold(event.Sender.Type, "Bot") {
-		log.Printf("ignoring issue_comment from bot %q on PR #%d (delivery %s)", author, event.Issue.Number, deliveryID)
-		writeResponse(w, http.StatusOK, "ignored: bot comment\n")
+	if !IsValidGitHubLogin(author) {
+		log.Printf("ignoring issue_comment from invalid author login %q on PR #%d (delivery %s)", author, event.Issue.Number, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: invalid author login\n")
 		return
 	}
 
-	authorized, err := s.isAuthorAuthorized(r.Context(), repoOwner, repoName, author)
-	if err != nil {
-		log.Printf("error checking authorization for user %q on %s: %v", author, repoFullName, err)
-		http.Error(w, fmt.Sprintf("Authorization check failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if !authorized {
-		log.Printf("unauthorized user %q attempted /eval more command on %s#%d", author, repoFullName, event.Issue.Number)
-		http.Error(w, "Forbidden: user not authorized to execute command", http.StatusForbidden)
+	if strings.EqualFold(event.Comment.User.Type, "Bot") || strings.EqualFold(event.Sender.Type, "Bot") {
+		log.Printf("ignoring issue_comment from bot %q on PR #%d (delivery %s)", author, event.Issue.Number, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: bot comment\n")
 		return
 	}
 
@@ -484,8 +475,17 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 
 	var comp v1alpha1.Comparison
 	alreadyHandled := false
+	queueFull := false
 	repoMismatch := false
-	err = retry.OnError(retry.DefaultBackoff, apierrors.IsConflict, func() error {
+
+	backoff := wait.Backoff{
+		Steps:    10,
+		Duration: 10 * time.Millisecond,
+		Factor:   1.5,
+		Jitter:   0.1,
+	}
+
+	err = retry.OnError(backoff, apierrors.IsConflict, func() error {
 		if getErr := s.cfg.Client.Get(r.Context(), key, &comp); getErr != nil {
 			return getErr
 		}
@@ -495,23 +495,34 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 			return nil
 		}
 
-		if isCommentHandled(comp.Annotations, event.Comment.ID) {
-			alreadyHandled = true
-			return nil
+		for _, cmd := range comp.Status.PendingCommands {
+			if cmd.CommentID == event.Comment.ID {
+				alreadyHandled = true
+				return nil
+			}
 		}
-
-		samplesToBump := n
-		if comp.Spec.Sampling != nil {
-			maxPerTask := comp.Spec.Sampling.EffectiveMaxSamplesPerTask()
-			if maxPerTask > 0 && samplesToBump > maxPerTask {
-				samplesToBump = maxPerTask
+		for _, cmd := range comp.Status.HandledCommands {
+			if cmd.CommentID == event.Comment.ID {
+				alreadyHandled = true
+				return nil
 			}
 		}
 
-		comp.Spec.ExtraSamples += samplesToBump
-		recordHandledComment(&comp, event.Comment.ID)
+		if len(comp.Status.PendingCommands) >= v1alpha1.MaxPendingCommands {
+			queueFull = true
+			return nil
+		}
 
-		return s.cfg.Client.Update(r.Context(), &comp)
+		newCmd := v1alpha1.ComparisonPendingCommand{
+			CommentID:  event.Comment.ID,
+			Login:      author,
+			Requested:  n,
+			ReceivedAt: metav1.Now(),
+		}
+
+		comp.Status.PendingCommands = append(comp.Status.PendingCommands, newCmd)
+
+		return s.cfg.Client.Status().Update(r.Context(), &comp)
 	})
 
 	if err != nil {
@@ -537,163 +548,12 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// React to the comment (eyes or +1) or reply with an acknowledgement
-	ghClient, err := s.getGitHubClient(r.Context())
-	if err != nil {
-		log.Printf("warning: error obtaining github client for reaction: %v", err)
-	}
-	if ghClient != nil {
-		if reactErr := ghClient.CreateCommentReaction(r.Context(), repoOwner, repoName, event.Comment.ID, "eyes"); reactErr != nil {
-			log.Printf("warning: failed to react to comment %d: %v; falling back to acknowledgement comment", event.Comment.ID, reactErr)
-			msg := fmt.Sprintf("Evaluating %d more sample(s) for PR #%d (extraSamples=%d).", n, prNum, comp.Spec.ExtraSamples)
-			if _, replyErr := ghClient.CreateIssueComment(r.Context(), repoOwner, repoName, prNum, msg); replyErr != nil {
-				log.Printf("warning: failed to reply to PR #%d: %v", prNum, replyErr)
-			}
-		}
+	if queueFull {
+		log.Printf("pending commands queue full on Comparison %s/%s for PR #%d; dropping command %d (delivery %s)", s.cfg.Namespace, compName, prNum, event.Comment.ID, deliveryID)
+		writeResponse(w, http.StatusOK, "ignored: pending commands queue full\n")
+		return
 	}
 
-	log.Printf("successfully processed /eval more %d on PR #%d for delivery %s", n, prNum, deliveryID)
-	writeResponse(w, http.StatusOK, "ok: extraSamples updated\n")
-}
-
-func (s *Server) isAuthorAuthorized(ctx context.Context, owner, repo, username string) (bool, error) {
-	if username == "" {
-		return false, nil
-	}
-	// 1. Allow-list key commandUsers
-	if IsUserAllowed(username, s.cfg.CommandUsers) {
-		return true, nil
-	}
-
-	// 2. GitHub collaborator permission API
-	ghClient, err := s.getGitHubClient(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to get GitHub client: %w", err)
-	}
-	if ghClient == nil {
-		return false, nil
-	}
-
-	perm, err := ghClient.GetRepoPermission(ctx, owner, repo, username)
-	if err != nil {
-		return false, fmt.Errorf("failed to get repository permission: %w", err)
-	}
-
-	return github.HasWriteAccess(perm), nil
-}
-
-func (s *Server) getGitHubClient(ctx context.Context) (github.Client, error) {
-	if s.cfg.GitHubClient != nil {
-		return s.cfg.GitHubClient, nil
-	}
-
-	s.ghClientMu.Lock()
-	defer s.ghClientMu.Unlock()
-	if s.cachedGHClient != nil {
-		return s.cachedGHClient, nil
-	}
-
-	if s.cfg.Client == nil {
-		return nil, nil
-	}
-
-	var secretNames []string
-	if s.cfg.GitHubAppSecret != "" {
-		secretNames = append(secretNames, s.cfg.GitHubAppSecret)
-	}
-	if s.cfg.GitHubTokenSecret != "" {
-		secretNames = append(secretNames, s.cfg.GitHubTokenSecret)
-	}
-
-	for _, secretName := range secretNames {
-		var secret corev1.Secret
-		key := types.NamespacedName{
-			Namespace: s.cfg.Namespace,
-			Name:      secretName,
-		}
-		if err := s.cfg.Client.Get(ctx, key, &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("failed to get github credentials secret %q: %w", secretName, err)
-		}
-
-		appID := strings.TrimSpace(string(secret.Data["app-id"]))
-		if appID == "" {
-			appID = strings.TrimSpace(string(secret.Data["app_id"]))
-		}
-		installationID := strings.TrimSpace(string(secret.Data["installation-id"]))
-		if installationID == "" {
-			installationID = strings.TrimSpace(string(secret.Data["installation_id"]))
-		}
-		privKey := secret.Data["private-key"]
-		if len(privKey) == 0 {
-			privKey = secret.Data["private_key"]
-		}
-		token := strings.TrimSpace(string(secret.Data["token"]))
-
-		if appID != "" && installationID != "" && len(privKey) > 0 {
-			appAuth, err := github.NewAppTokenProvider(github.AppConfig{
-				AppID:          appID,
-				InstallationID: installationID,
-				PrivateKeyPEM:  privKey,
-				BaseURL:        s.cfg.GitHubBaseURL,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("invalid app credentials in %s: %w", secretName, err)
-			}
-			s.cachedGHClient = github.NewHTTPClient(github.HTTPClientConfig{
-				AppAuth: appAuth,
-				BaseURL: s.cfg.GitHubBaseURL,
-			})
-			return s.cachedGHClient, nil
-		} else if token != "" {
-			s.cachedGHClient = github.NewHTTPClient(github.HTTPClientConfig{
-				Token:   token,
-				BaseURL: s.cfg.GitHubBaseURL,
-			})
-			return s.cachedGHClient, nil
-		}
-	}
-
-	return nil, nil
-}
-
-func isCommentHandled(annotations map[string]string, commentID int64) bool {
-	if annotations == nil {
-		return false
-	}
-	raw, ok := annotations[AnnotationHandledComments]
-	if !ok || strings.TrimSpace(raw) == "" {
-		return false
-	}
-	idStr := strconv.FormatInt(commentID, 10)
-	for _, part := range strings.Split(raw, ",") {
-		if strings.TrimSpace(part) == idStr {
-			return true
-		}
-	}
-	return false
-}
-
-func recordHandledComment(comp *v1alpha1.Comparison, commentID int64) {
-	if comp.Annotations == nil {
-		comp.Annotations = make(map[string]string)
-	}
-	idStr := strconv.FormatInt(commentID, 10)
-	raw := comp.Annotations[AnnotationHandledComments]
-	var ids []string
-	if strings.TrimSpace(raw) != "" {
-		for _, part := range strings.Split(raw, ",") {
-			trimmed := strings.TrimSpace(part)
-			if trimmed != "" && trimmed != idStr {
-				ids = append(ids, trimmed)
-			}
-		}
-	}
-	ids = append(ids, idStr)
-	if len(ids) > 100 {
-		ids = ids[len(ids)-100:]
-	}
-	comp.Annotations[AnnotationHandledComments] = strings.Join(ids, ",")
+	log.Printf("successfully recorded /eval more %d on PR #%d for delivery %s", n, prNum, deliveryID)
+	writeResponse(w, http.StatusOK, "ok: pending command recorded\n")
 }

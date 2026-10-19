@@ -55,9 +55,6 @@ func main() {
 	var defaultLimit int
 	var defaultBatchSize int
 	var defaultMaxSamplesPerTask int
-	var commandUsers string
-	var githubTokenSecret string
-	var githubAppSecret string
 	var webhookRepositories string
 	var workers int
 	var queueSize int
@@ -70,9 +67,6 @@ func main() {
 	flag.IntVar(&defaultLimit, "default-limit", 0, "Default sample limit for created Runs (0 = unlimited)")
 	flag.IntVar(&defaultBatchSize, "default-batch-size", webhook.DefaultBatchSize, "Default batch size for paired adaptive sampling")
 	flag.IntVar(&defaultMaxSamplesPerTask, "default-max-samples-per-task", webhook.DefaultMaxSamplesPerTask, "Default maximum samples per task across batches")
-	flag.StringVar(&commandUsers, "command-users", "", "Comma-separated allow-list of GitHub usernames permitted to run comment commands")
-	flag.StringVar(&githubTokenSecret, "github-token-secret", "github-token", "Name of Secret containing GitHub token")
-	flag.StringVar(&githubAppSecret, "github-app-secret", "github-app", "Name of Secret containing GitHub App credentials")
 	flag.StringVar(&webhookRepositories, "webhook-repositories", "", "Comma-separated allow-list of repositories (owner/repo)")
 	flag.IntVar(&workers, "workers", webhook.DefaultWorkers, "Number of concurrent worker goroutines")
 	flag.IntVar(&queueSize, "queue-size", webhook.DefaultQueueSize, "Queue buffer size for incoming webhook events")
@@ -105,9 +99,6 @@ func main() {
 		DefaultLimit:             limitPtr,
 		DefaultBatchSize:         batchSizePtr,
 		DefaultMaxSamplesPerTask: maxSamplesPtr,
-		CommandUsers:             commandUsers,
-		GitHubTokenSecret:        githubTokenSecret,
-		GitHubAppSecret:          githubAppSecret,
 		WebhookRepositories:      webhookRepositories,
 		Workers:                  workers,
 		QueueSize:                queueSize,
