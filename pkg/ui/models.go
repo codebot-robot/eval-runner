@@ -70,22 +70,26 @@ type RunsListView struct {
 
 // RunTaskRow represents a single eval task in the /runs/<ns>/<name> detail view.
 type RunTaskRow struct {
-	ID          string
-	Phase       v1alpha1.TaskPhase
-	PhaseChip   string // good, bad, warn, neutral, pending
-	RateStr     string // e.g. "0.84"
-	HasCI       bool
-	CILeftPx    float64
-	CIWidthPx   float64
-	CIDotPx     float64
-	CILabel     string // e.g. "[0.72, 0.95]"
-	Samples     int
-	Successes   int
-	Method      string // e.g. "wilson", "t"
-	LogPath     string // text path or URI
-	SamplesLink string // e.g. "/runs/<ns>/<name>/tasks/<task>/samples"
-	Message     string
-	SampleRange string // e.g. "samples 9-16"
+	ID             string
+	Phase          v1alpha1.TaskPhase
+	PhaseChip      string // good, bad, warn, neutral, pending
+	RateStr        string // e.g. "0.84"
+	HasCI          bool
+	CILeftPx       float64
+	CIWidthPx      float64
+	CIDotPx        float64
+	CILabel        string // e.g. "[0.72, 0.95]"
+	Samples        int
+	Successes      int
+	Method         string // e.g. "wilson", "t"
+	LogPath        string // text path or URI
+	SamplesLink    string // e.g. "/runs/<ns>/<name>/tasks/<task>/samples"
+	Message        string
+	SampleRange    string // e.g. "samples 9-16"
+	SamplesDone    int
+	SamplesPlanned int
+	ProgressPct    float64
+	ProgressText   string // e.g. "8 of 96 samples"
 }
 
 // RunDetailView is the view model for the /runs/<ns>/<name> detail page.

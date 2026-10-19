@@ -309,6 +309,171 @@ func TestServerRunDetail(t *testing.T) {
 	}
 }
 
+func TestServerRunsList_RunningRunTasksRunningString(t *testing.T) {
+	scheme := newTestScheme(t)
+	runningRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-running-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:    "task-1",
+					Phase: v1alpha1.TaskPhaseRunning,
+				},
+				{
+					ID:    "task-2",
+					Phase: v1alpha1.TaskPhasePending,
+				},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runningRun).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "1/2 tasks running") {
+		t.Errorf("expected '1/2 tasks running' in Runs list, got:\n%s", body)
+	}
+}
+
+func TestServerRunDetail_LiveProgressAndMetaRefresh(t *testing.T) {
+	scheme := newTestScheme(t)
+	runningRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-running-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+			Limit: func() *int { i := 50; return &i }(),
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:             "docs/readme_comprehension",
+					Phase:          v1alpha1.TaskPhaseRunning,
+					SamplesDone:    12,
+					SamplesPlanned: 50,
+				},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runningRun).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-running-run", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `<meta http-equiv="refresh" content="15">`) {
+		t.Errorf("expected meta refresh tag in running run detail page, got:\n%s", body)
+	}
+	if !strings.Contains(body, "12 of 50 samples") {
+		t.Errorf("expected '12 of 50 samples' progress bar in run detail page, got:\n%s", body)
+	}
+	if !strings.Contains(body, "progress-bar") {
+		t.Errorf("expected progress-bar in run detail page, got:\n%s", body)
+	}
+}
+
+func TestServerRunDetail_LiveProgressUnknownPlanned(t *testing.T) {
+	scheme := newTestScheme(t)
+	runningRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-running-unknown-planned",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "task-1",
+					Phase:       v1alpha1.TaskPhaseRunning,
+					SamplesDone: 3,
+				},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runningRun).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-running-unknown-planned", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "3 samples") {
+		t.Errorf("expected '3 samples' progress text, got:\n%s", body)
+	}
+	if strings.Contains(body, "3 of 0 samples") {
+		t.Errorf("expected NOT to contain '3 of 0 samples', got:\n%s", body)
+	}
+}
+
+func TestServerRunDetail_LiveProgressClampsToPossibleSamples(t *testing.T) {
+	scheme := newTestScheme(t)
+	limit := 50
+	runningRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-running-clamp",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+			Limit: &limit,
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:              "task-1",
+					Phase:           v1alpha1.TaskPhaseRunning,
+					SamplesDone:     10,
+					PossibleSamples: 21,
+				},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runningRun).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-running-clamp", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "10 of 21 samples") {
+		t.Errorf("expected '10 of 21 samples' progress text clamped to dataset size, got:\n%s", body)
+	}
+}
+
 func TestServerComparisonsList(t *testing.T) {
 	scheme := newTestScheme(t)
 	baseRun, candRun, comp := sampleFixtures()
