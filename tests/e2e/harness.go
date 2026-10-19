@@ -19,6 +19,8 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -336,6 +338,10 @@ spec:
         - http
         - -port
         - "4443"
+        - -public-host
+        - fake-gcs-server.eval-runner.svc:4443
+        - -external-url
+        - http://fake-gcs-server.eval-runner.svc:4443
         - -backend
         - memory
         securityContext:
@@ -387,6 +393,9 @@ data:
 
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST=fake-gcs-server.eval-runner.svc:4443")
 	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
+
+	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-ui", "-n", "eval-runner", "STORAGE_EMULATOR_HOST=fake-gcs-server.eval-runner.svc:4443")
+	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-ui", "--timeout=90s")
 }
 
 func (h *Harness) ConfigureLocalDirSink() {
@@ -404,11 +413,58 @@ data:
 
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST-")
 	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
+
+	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-ui", "-n", "eval-runner", "STORAGE_EMULATOR_HOST-")
+	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-ui", "--timeout=90s")
 }
 
 func (h *Harness) GetGCSObjects(namespace, bucket string) string {
 	url := fmt.Sprintf("http://localhost:4443/storage/v1/b/%s/o", bucket)
 	return h.runCmd("kubectl", "exec", "-n", namespace, "deployment/fake-gcs-server", "--", "wget", "-q", "-O-", url)
+}
+
+func (h *Harness) GetGCSObject(namespace, bucket, objectPath string) []byte {
+	url := fmt.Sprintf("http://localhost:4443/storage/v1/b/%s/o/%s?alt=media", bucket, url.PathEscape(objectPath))
+	out := h.runCmd("kubectl", "exec", "-n", namespace, "deployment/fake-gcs-server", "--", "wget", "-q", "-O-", url)
+	return []byte(out)
+}
+
+func (h *Harness) PortForwardUI(port int) (baseURL string, cleanup func()) {
+	cmd := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-ui", fmt.Sprintf("%d:80", port))
+	if err := cmd.Start(); err != nil {
+		h.t.Fatalf("failed to start eval-runner-ui port-forward: %v", err)
+	}
+	cleanup = func() {
+		if cmd.Process != nil {
+			if err := cmd.Process.Kill(); err != nil {
+				h.t.Logf("warning: failed to kill port-forward process: %v", err)
+			}
+		}
+	}
+
+	baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	ready := false
+	for i := 0; i < 30; i++ {
+		resp, err := http.Get(baseURL + "/healthz")
+		if err == nil && resp.StatusCode == http.StatusOK {
+			ready = true
+			if err := resp.Body.Close(); err != nil {
+				h.t.Logf("warning: failed to close response body: %v", err)
+			}
+			break
+		}
+		if resp != nil {
+			if err := resp.Body.Close(); err != nil {
+				h.t.Logf("warning: failed to close response body: %v", err)
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !ready {
+		cleanup()
+		h.t.Fatalf("eval-runner-ui port-forward failed to become ready on port %d", port)
+	}
+	return baseURL, cleanup
 }
 
 func (h *Harness) WaitForSandboxExists(namespace, sandboxName string, timeout time.Duration) {
