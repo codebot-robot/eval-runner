@@ -2174,7 +2174,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, github.FormatIDList(candFailed, github.MaxIDList)))
 	}
+	var failedBoth []string
 	var neitherExecuted []string
+	var unattempted []string
 	var notBothExecuted []string
 	if len(unexecuted) > 0 {
 		for _, id := range unexecuted {
@@ -2185,16 +2187,28 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			baseTask := findTaskStatus(baselineRun.Status.Tasks, id)
 			candRan := candTask != nil && candTask.Phase == v1alpha1.TaskPhaseCompleted
 			baseRan := baseTask != nil && baseTask.Phase == v1alpha1.TaskPhaseCompleted
+			candFailedBoth := candTask != nil && candTask.Phase == v1alpha1.TaskPhaseFailed
+			baseFailedBoth := baseTask != nil && baseTask.Phase == v1alpha1.TaskPhaseFailed
 			if !candRan && !baseRan {
 				neitherExecuted = append(neitherExecuted, id)
+				if candFailedBoth && baseFailedBoth {
+					failedBoth = append(failedBoth, id)
+				} else {
+					unattempted = append(unattempted, id)
+				}
 			} else {
 				notBothExecuted = append(notBothExecuted, id)
 			}
 		}
+		sort.Strings(failedBoth)
 		sort.Strings(neitherExecuted)
+		sort.Strings(unattempted)
 		sort.Strings(notBothExecuted)
-		if len(neitherExecuted) > 0 {
-			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed: %s", github.FormatIDList(neitherExecuted, github.MaxIDList)))
+		if len(failedBoth) > 0 {
+			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("failed in both runs: %s", github.FormatIDList(failedBoth, github.MaxIDList)))
+		}
+		if len(unattempted) > 0 {
+			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed: %s", github.FormatIDList(unattempted, github.MaxIDList)))
 		}
 		if len(notBothExecuted) > 0 {
 			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("tasks not executed by both runs: %s", github.FormatIDList(notBothExecuted, github.MaxIDList)))

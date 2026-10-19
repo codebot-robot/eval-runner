@@ -666,6 +666,16 @@ func TestComparisonNotes(t *testing.T) {
 			want: "tasks not executed: docs/task_two; skipped (not planned): docs/task_three",
 		},
 		{
+			name: "unchanged with failed in both runs note returns suffix",
+			comp: &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: v1alpha1.ComparisonVerdictUnchanged,
+					Message: "UNCHANGED: all 1 task(s) unchanged; failed in both runs: docs/task_two",
+				},
+			},
+			want: "failed in both runs: docs/task_two",
+		},
+		{
 			name: "running with standard summary returns empty",
 			comp: &v1alpha1.Comparison{
 				Status: v1alpha1.ComparisonStatus{
@@ -1932,6 +1942,16 @@ func TestTruncateNoteIDLists(t *testing.T) {
 	alreadyTruncated := "skipped (not planned): task00, ... and 5 more"
 	if got := TruncateNoteIDLists(alreadyTruncated); got != alreadyTruncated {
 		t.Errorf("expected %q, got %q", alreadyTruncated, got)
+	}
+
+	// Failed in both runs with 25 items
+	longFailedBoth := "failed in both runs: " + strings.Join(tasks25, ", ")
+	gotFailedBoth := TruncateNoteIDLists(longFailedBoth)
+	if !strings.HasPrefix(gotFailedBoth, "failed in both runs: evals/task_00, ") {
+		t.Errorf("expected 'failed in both runs: evals/task_00, ', got %q", gotFailedBoth)
+	}
+	if !strings.HasSuffix(gotFailedBoth, ", ... and 5 more") {
+		t.Errorf("expected suffix ', ... and 5 more', got %q", gotFailedBoth)
 	}
 }
 

@@ -2997,7 +2997,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("task failed in both runs does not cap UNCHANGED verdict and notes task not executed", func(t *testing.T) {
+	t.Run("task failed in both runs does not cap UNCHANGED verdict and notes failed in both runs", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
 		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
 		if err != nil {
@@ -3092,8 +3092,11 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 		if updated.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
 			t.Errorf("Expected aggregate verdict %s, got %s", v1alpha1.ComparisonVerdictUnchanged, updated.Status.Verdict)
 		}
-		if !strings.Contains(updated.Status.Message, "tasks not executed: docs/task_two") {
-			t.Errorf("Expected status.message to mention 'tasks not executed: docs/task_two', got %q", updated.Status.Message)
+		if !strings.Contains(updated.Status.Message, "failed in both runs: docs/task_two") {
+			t.Errorf("Expected status.message to mention 'failed in both runs: docs/task_two', got %q", updated.Status.Message)
+		}
+		if strings.Contains(updated.Status.Message, "tasks not executed: docs/task_two") {
+			t.Errorf("Expected status.message NOT to mention 'tasks not executed: docs/task_two', got %q", updated.Status.Message)
 		}
 	})
 }

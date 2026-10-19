@@ -19,31 +19,23 @@ import (
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 	"github.com/gke-labs/eval-runner/pkg/ui"
 )
 
 const (
 	MaxCommentBytes = 60000
-	MaxIDList       = 20
+	MaxIDList       = stats.MaxIDList
 )
 
 // FormatIDList formats a slice of task IDs, truncating to maxIDs if exceeded,
-// appending an explicit "... and N more" marker.
-func FormatIDList(ids []string, maxIDs int) string {
-	if len(ids) == 0 {
-		return ""
-	}
-	if maxIDs <= 0 || len(ids) <= maxIDs {
-		return strings.Join(ids, ", ")
-	}
-	truncated := ids[:maxIDs]
-	remaining := len(ids) - maxIDs
-	return fmt.Sprintf("%s, ... and %d more", strings.Join(truncated, ", "), remaining)
-}
+// appending an explicit "... and N more" marker. Aliased from pkg/stats.
+var FormatIDList = stats.FormatIDList
 
 var idListPrefixes = []string{
 	"tasks not executed by both runs: ",
 	"tasks not executed: ",
+	"failed in both runs: ",
 	"skipped (not planned): ",
 	"candidate tasks failed: ",
 	"candidate task failed: ",
