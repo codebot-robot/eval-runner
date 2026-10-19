@@ -333,17 +333,20 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 	}
 
 	summary := artifacts.TaskSummary{
-		TaskID:      meta.TaskID,
-		Model:       meta.Model,
-		Commit:      meta.Commit,
-		Samples:     meta.Samples,
-		Successes:   meta.Successes,
-		MeanScore:   meta.MeanScore,
-		StartedAt:   meta.StartedAt,
-		FinishedAt:  meta.FinishedAt,
-		Capped:      capped,
-		SampleRange: meta.SampleRange,
-		Tokens:      meta.Tokens,
+		TaskID:          meta.TaskID,
+		Model:           meta.Model,
+		Commit:          meta.Commit,
+		Samples:         meta.Samples,
+		Successes:       meta.Successes,
+		MeanScore:       meta.MeanScore,
+		StartedAt:       meta.StartedAt,
+		FinishedAt:      meta.FinishedAt,
+		Capped:          capped,
+		SampleRange:     meta.SampleRange,
+		Tokens:          meta.Tokens,
+		Latency:         meta.Latency,
+		CostUSD:         meta.CostUSD,
+		PossibleSamples: meta.PossibleSamples,
 	}
 	if capped {
 		summary.CapBytes = capLimit

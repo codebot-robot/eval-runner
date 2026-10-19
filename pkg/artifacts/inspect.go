@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/stats"
 )
@@ -55,6 +56,28 @@ type InspectEval struct {
 	Task    string          `json:"task"`
 	Model   string          `json:"model"`
 	Scorers []InspectScorer `json:"scorers,omitempty"`
+	Dataset any             `json:"dataset,omitempty"`
+}
+
+// DatasetSamples returns the dataset sample count if eval.dataset.samples is present, or 0.
+func (e InspectEval) DatasetSamples() int {
+	if e.Dataset == nil {
+		return 0
+	}
+	switch d := e.Dataset.(type) {
+	case map[string]any:
+		if s, ok := d["samples"]; ok {
+			switch v := s.(type) {
+			case float64:
+				return int(v)
+			case int:
+				return v
+			case int64:
+				return int(v)
+			}
+		}
+	}
+	return 0
 }
 
 // InspectScorer names an evaluator used in the run.
@@ -85,10 +108,13 @@ type InspectMetric struct {
 
 // InspectSample represents an individual evaluated sample.
 type InspectSample struct {
-	ID         any                           `json:"id"`
-	Epoch      int                           `json:"epoch,omitempty"`
-	Scores     map[string]InspectSampleScore `json:"scores,omitempty"`
-	ModelUsage map[string]InspectModelUsage  `json:"model_usage,omitempty"`
+	ID          any                           `json:"id"`
+	Epoch       int                           `json:"epoch,omitempty"`
+	StartedAt   string                        `json:"started_at,omitempty"`
+	CompletedAt string                        `json:"completed_at,omitempty"`
+	TotalTime   float64                       `json:"total_time,omitempty"`
+	Scores      map[string]InspectSampleScore `json:"scores,omitempty"`
+	ModelUsage  map[string]InspectModelUsage  `json:"model_usage,omitempty"`
 }
 
 // InspectSampleScore captures the score and outcome of a scorer for one sample.
@@ -423,4 +449,80 @@ func ExtractInspectTokens(data []byte) (*TaskTokens, error) {
 		}, nil
 	}
 	return nil, nil
+}
+
+// parseSampleTime attempts to parse an RFC3339 or ISO timestamp.
+func parseSampleTime(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, s)
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	return t, true
+}
+
+// ExtractInspectSampleLatencies parses raw Inspect log JSON bytes and returns individual
+// sample latencies in seconds derived from sample start/end timestamps.
+func ExtractInspectSampleLatencies(data []byte) ([]float64, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, fmt.Errorf("empty log data")
+	}
+
+	var log InspectLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal inspect log: %w", err)
+	}
+
+	var latencies []float64
+	for _, s := range log.Samples {
+		start, okStart := parseSampleTime(s.StartedAt)
+		end, okEnd := parseSampleTime(s.CompletedAt)
+		if okStart && okEnd && !end.Before(start) {
+			latencies = append(latencies, end.Sub(start).Seconds())
+		} else if s.TotalTime > 0 {
+			latencies = append(latencies, s.TotalTime)
+		}
+	}
+	return latencies, nil
+}
+
+// CalculateLatencyPercentiles computes p50 and p95 latency in seconds from a slice of latencies.
+// Returns nil if latencies is empty.
+func CalculateLatencyPercentiles(latencies []float64) *TaskLatency {
+	if len(latencies) == 0 {
+		return nil
+	}
+	return &TaskLatency{
+		P50: stats.Percentile(latencies, 0.50),
+		P95: stats.Percentile(latencies, 0.95),
+	}
+}
+
+// ExtractInspectLatency parses raw Inspect log JSON bytes and returns the aggregated p50 and p95
+// latencies in seconds if sample timestamps are present.
+func ExtractInspectLatency(data []byte) (*TaskLatency, error) {
+	latencies, err := ExtractInspectSampleLatencies(data)
+	if err != nil {
+		return nil, err
+	}
+	return CalculateLatencyPercentiles(latencies), nil
+}
+
+// ExtractInspectDatasetSamples parses raw Inspect log JSON bytes and returns the dataset size (M)
+// from eval.dataset.samples if present, or 0 if omitted.
+func ExtractInspectDatasetSamples(data []byte) (int, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return 0, fmt.Errorf("empty log data")
+	}
+
+	var log InspectLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		return 0, fmt.Errorf("failed to unmarshal inspect log: %w", err)
+	}
+	return log.Eval.DatasetSamples(), nil
 }

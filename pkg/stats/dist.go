@@ -16,7 +16,39 @@ package stats
 
 import (
 	"math"
+	"sort"
 )
+
+// Percentile computes the p-th percentile (p in [0, 1]) from a slice of values
+// using linear interpolation (Type 7).
+func Percentile(values []float64, p float64) float64 {
+	n := len(values)
+	if n == 0 {
+		return 0.0
+	}
+	if n == 1 {
+		return values[0]
+	}
+	sorted := make([]float64, n)
+	copy(sorted, values)
+	sort.Float64s(sorted)
+
+	if p <= 0 {
+		return sorted[0]
+	}
+	if p >= 1 {
+		return sorted[n-1]
+	}
+
+	idx := p * float64(n-1)
+	i0 := int(math.Floor(idx))
+	i1 := int(math.Ceil(idx))
+	if i0 == i1 {
+		return sorted[i0]
+	}
+	frac := idx - float64(i0)
+	return sorted[i0]*(1.0-frac) + sorted[i1]*frac
+}
 
 // NormalQuantile returns the quantile (inverse cumulative distribution function)
 // of the standard normal distribution N(0, 1) for a given probability p in (0, 1).

@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"sort"
@@ -66,6 +67,8 @@ const (
 	ConfigMapKeyInconclusivePolicy = configkeys.ConfigMapKeyInconclusivePolicy
 	// ConfigMapKeyComparisonTTL is the ConfigMap key for completed comparison TTL duration.
 	ConfigMapKeyComparisonTTL = configkeys.ConfigMapKeyComparisonTTL
+	// ConfigMapKeyModelPrices is the ConfigMap key for model pricing table (JSON map model -> {inputPer1M, outputPer1M} in USD).
+	ConfigMapKeyModelPrices = configkeys.ConfigMapKeyModelPrices
 	// ConfigMapKeyDefaultBatchSize is the ConfigMap key for default batch size.
 	ConfigMapKeyDefaultBatchSize = configkeys.ConfigMapKeyDefaultBatchSize
 	// ConfigMapKeyDefaultMaxSamplesPerTask is the ConfigMap key for default maximum samples per task.
@@ -101,6 +104,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyUIBaseURL:                {},
 	configkeys.ConfigMapKeyInconclusivePolicy:       {},
 	configkeys.ConfigMapKeyComparisonTTL:            {},
+	configkeys.ConfigMapKeyModelPrices:              {},
 	configkeys.ConfigMapKeyGitHubWebhookSecret:      {},
 	configkeys.ConfigMapKeyWebhookRepositories:      {},
 	configkeys.ConfigMapKeyDefaultModel:             {},
@@ -129,6 +133,12 @@ func UnknownConfigMapKeys(cm *corev1.ConfigMap) []string {
 	return unknown
 }
 
+// ModelPrice specifies token pricing in USD per 1M tokens.
+type ModelPrice struct {
+	InputPer1M  float64 `json:"inputPer1M"`
+	OutputPer1M float64 `json:"outputPer1M"`
+}
+
 // ClusterConfig holds the effective cluster-wide settings resolved with precedence:
 // explicit flag > ConfigMap key > built-in default.
 type ClusterConfig struct {
@@ -142,6 +152,7 @@ type ClusterConfig struct {
 	InconclusivePolicy     string
 	MaxParallelTasks       int
 	ModelSecret            string
+	ModelPrices            map[string]ModelPrice
 	SandboxdImage          string
 	TaskGracePeriod        time.Duration
 	UIBaseURL              string
@@ -438,7 +449,30 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			}
 		}
 
-		// 13. comparisonTTL
+		// 13. modelPrices
+		if val, ok := cm.Data[ConfigMapKeyModelPrices]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.ModelPrices = nil
+				} else {
+					var prices map[string]ModelPrice
+					dec := json.NewDecoder(strings.NewReader(trimmed))
+					dec.DisallowUnknownFields()
+					if err := dec.Decode(&prices); err != nil {
+						return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: %w", ConfigMapKeyModelPrices, ns, name, err)
+					}
+					for model, p := range prices {
+						if p.InputPer1M < 0 || p.OutputPer1M < 0 {
+							return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: price for %q cannot be negative", ConfigMapKeyModelPrices, ns, name, model)
+						}
+					}
+					cfg.ModelPrices = prices
+				}
+			}
+		}
+
+		// 14. comparisonTTL
 		if val, ok := cm.Data[ConfigMapKeyComparisonTTL]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {

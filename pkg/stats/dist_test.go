@@ -48,6 +48,38 @@ func TestNormalQuantile(t *testing.T) {
 	}
 }
 
+func TestPercentile(t *testing.T) {
+	// Empty slice
+	if got := Percentile(nil, 0.5); got != 0.0 {
+		t.Errorf("expected 0.0 for nil slice, got %f", got)
+	}
+	// Single element
+	if got := Percentile([]float64{42.0}, 0.5); got != 42.0 {
+		t.Errorf("expected 42.0 for single element, got %f", got)
+	}
+	// Two elements: 10.0 and 20.0
+	// p50 -> 0.5 * 1 = 0.5 -> 15.0
+	// p95 -> 0.95 * 1 = 0.95 -> 0.05*10 + 0.95*20 = 19.5
+	two := []float64{20.0, 10.0} // unsorted to test sorting
+	if got := Percentile(two, 0.5); math.Abs(got-15.0) > 1e-9 {
+		t.Errorf("expected 15.0, got %f", got)
+	}
+	if got := Percentile(two, 0.95); math.Abs(got-19.5) > 1e-9 {
+		t.Errorf("expected 19.5, got %f", got)
+	}
+
+	// 5 elements: 1, 2, 3, 4, 5
+	// p50 -> 0.5 * 4 = 2.0 -> 3.0
+	// p95 -> 0.95 * 4 = 3.8 -> 0.2*4 + 0.8*5 = 4.8
+	five := []float64{5.0, 1.0, 4.0, 2.0, 3.0}
+	if got := Percentile(five, 0.5); math.Abs(got-3.0) > 1e-9 {
+		t.Errorf("expected 3.0, got %f", got)
+	}
+	if got := Percentile(five, 0.95); math.Abs(got-4.8) > 1e-9 {
+		t.Errorf("expected 4.8, got %f", got)
+	}
+}
+
 func TestNormalCDF(t *testing.T) {
 	for _, p := range []float64{0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99} {
 		z := NormalQuantile(p)

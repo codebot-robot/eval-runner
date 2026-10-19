@@ -325,6 +325,7 @@ func main() {
 		MaxDiscoveryAttempts: maxDiscoveryAttempts,
 		MaxParallelTasks:     clusterConfig.MaxParallelTasks,
 		ModelSecret:          clusterConfig.ModelSecret,
+		ModelPrices:          clusterConfig.ModelPrices,
 		SampleRunnerImage:    sampleRunnerImage,
 		ArtifactSink:         sink,
 	}
@@ -344,6 +345,7 @@ func main() {
 		UIBaseURL:           clusterConfig.UIBaseURL,
 		InconclusivePolicy:  clusterConfig.InconclusivePolicy,
 		ComparisonTTL:       clusterConfig.ComparisonTTL,
+		ModelPrices:         clusterConfig.ModelPrices,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {
