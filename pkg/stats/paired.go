@@ -445,7 +445,9 @@ func BayesianBootstrapPImprovement(diffs []float64, draws int, seed int64) float
 // Duplicate or non-increasing n values are ignored to ensure monotone progression.
 // If confidence <= 0 or >= 1, DefaultConfidence (0.95) is used.
 // If margin <= 0, DefaultEquivalenceMargin (0.05) is used.
-func ComputePairedCISeries(pairs []PairedSampleScore, nValues []int, confidence float64, seed int64, margin float64) []PairedCISeriesPoint {
+// If sampleCap > 0, it is passed to Decide so boundaries reaching or exceeding the cap
+// can resolve to inconclusive if unresolved.
+func ComputePairedCISeries(pairs []PairedSampleScore, nValues []int, confidence float64, seed int64, margin float64, sampleCap int) []PairedCISeriesPoint {
 	if len(pairs) < 2 {
 		return nil
 	}
@@ -473,7 +475,7 @@ func ComputePairedCISeries(pairs []PairedSampleScore, nValues []int, confidence 
 
 		est := ComparePairedWithSeed(cand, base, confidence, seed)
 		ciWidth := est.CI.Upper - est.CI.Lower
-		dec := Decide(est, margin, n, 0, 0, 0)
+		dec := Decide(est, margin, n, sampleCap, 0, 0)
 
 		series = append(series, PairedCISeriesPoint{
 			N:        n,

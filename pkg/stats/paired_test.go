@@ -355,8 +355,8 @@ func TestComputePairedCISeries_Deterministic(t *testing.T) {
 	}
 
 	nValues := []int{4, 8, 12}
-	run1 := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05)
-	run2 := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05)
+	run1 := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05, 0)
+	run2 := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05, 0)
 
 	if len(run1) != 3 {
 		t.Fatalf("expected 3 points, got %d", len(run1))
@@ -399,7 +399,7 @@ func TestComputePairedCISeries_SeriesAtGivenN(t *testing.T) {
 	}
 
 	nValues := []int{4, 8, 12}
-	series := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05)
+	series := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05, 0)
 
 	if len(series) != 3 {
 		t.Fatalf("expected 3 points, got %d", len(series))
@@ -420,13 +420,44 @@ func TestComputePairedCISeries_SeriesAtGivenN(t *testing.T) {
 	}
 }
 
+func TestComputePairedCISeries_SampleCapDecisionParity(t *testing.T) {
+	// Undecided differences: alternating wins and losses with mean near zero
+	pairs := make([]PairedSampleScore, 12)
+	for i := 0; i < 12; i++ {
+		cand := 0.5
+		if i%2 == 0 {
+			cand = 0.9
+		} else {
+			cand = 0.1
+		}
+		pairs[i] = PairedSampleScore{
+			ID:             fmt.Sprintf("sample-%d", i),
+			BaseScore:      0.5,
+			CandidateScore: cand,
+			Delta:          cand - 0.5,
+		}
+	}
+
+	// With sampleCap = 12: at n=4 and n=8 it continues, but at n=12 (reaching cap) it resolves to inconclusive
+	series := ComputePairedCISeries(pairs, []int{4, 8, 12}, 0.95, 42, 0.05, 12)
+	if len(series) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(series))
+	}
+	if series[0].Decision.Label != TaskLabelContinue {
+		t.Errorf("at n=4 before cap, expected continue, got %v", series[0].Decision.Label)
+	}
+	if series[2].Decision.Label != TaskLabelInconclusive {
+		t.Errorf("at n=12 reaching cap, expected inconclusive, got %v", series[2].Decision.Label)
+	}
+}
+
 func TestComputePairedCISeries_EdgeCases(t *testing.T) {
 	// Pairs < 2 returns nil
-	if res := ComputePairedCISeries(nil, []int{4}, 0.95, 42, 0.05); res != nil {
+	if res := ComputePairedCISeries(nil, []int{4}, 0.95, 42, 0.05, 0); res != nil {
 		t.Errorf("expected nil for nil pairs, got %v", res)
 	}
 	onePair := []PairedSampleScore{{ID: "1", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3}}
-	if res := ComputePairedCISeries(onePair, []int{1}, 0.95, 42, 0.05); res != nil {
+	if res := ComputePairedCISeries(onePair, []int{1}, 0.95, 42, 0.05, 0); res != nil {
 		t.Errorf("expected nil for single pair, got %v", res)
 	}
 
@@ -438,7 +469,7 @@ func TestComputePairedCISeries_EdgeCases(t *testing.T) {
 		{ID: "4", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3},
 	}
 	// n=1 (<2), n=3 (valid), n=2 (non-monotone), n=4 (valid), n=10 (>len)
-	res := ComputePairedCISeries(pairs, []int{1, 3, 2, 4, 10}, 0.95, 42, 0.05)
+	res := ComputePairedCISeries(pairs, []int{1, 3, 2, 4, 10}, 0.95, 42, 0.05, 0)
 	if len(res) != 2 {
 		t.Fatalf("expected 2 valid points (n=3 and n=4), got %d", len(res))
 	}
