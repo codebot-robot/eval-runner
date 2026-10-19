@@ -375,6 +375,11 @@ type ComparisonStatus struct {
 	// +optional
 	Phase ComparisonPhase `json:"phase,omitempty"`
 
+	// CompletionTime is the timestamp when the comparison reached the Completed phase.
+	// It is cleared if a later extraSamples bump moves the Comparison back to Running.
+	// +optional
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
 	// Verdict is the aggregate run-level verdict (IMPROVED, REGRESSED, UNCHANGED, INCONCLUSIVE, RUNNING).
 	// +optional
 	Verdict ComparisonVerdict `json:"verdict,omitempty"`
@@ -438,6 +443,7 @@ type ComparisonStatus struct {
 // +kubebuilder:printcolumn:name="Tasks",type="string",JSONPath=".status.summary.tasks"
 // +kubebuilder:printcolumn:name="Baseline",type="string",JSONPath=".spec.baseline.run"
 // +kubebuilder:printcolumn:name="Candidate",type="string",JSONPath=".spec.candidate.run"
+// +kubebuilder:printcolumn:name="Completed",type="date",JSONPath=".status.completionTime"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Comparison is the Schema for the comparisons API.

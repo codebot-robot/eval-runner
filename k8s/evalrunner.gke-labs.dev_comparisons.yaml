@@ -47,6 +47,9 @@ spec:
     - jsonPath: .spec.candidate.run
       name: Candidate
       type: string
+    - jsonPath: .status.completionTime
+      name: Completed
+      type: date
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -215,6 +218,12 @@ spec:
                   - index
                   type: object
                 type: array
+              completionTime:
+                description: |-
+                  CompletionTime is the timestamp when the comparison reached the Completed phase.
+                  It is cleared if a later extraSamples bump moves the Comparison back to Running.
+                format: date-time
+                type: string
               costUSD:
                 description: CostUSD is the total estimated evaluation cost in USD
                   across all tasks in this Comparison.
