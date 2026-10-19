@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -672,8 +673,15 @@ spec:
 		if !strings.Contains(compBody, "Confidence Interval History") {
 			t.Errorf("expected Comparison page to contain 'Confidence Interval History', got body:\n%s", compBody)
 		}
-		if !strings.Contains(compBody, "history-table") {
-			t.Errorf("expected Comparison page to contain 'history-table', got body:\n%s", compBody)
+		tableRegex := regexp.MustCompile(`<table class="ci history-table">[\s\S]*?</table>`)
+		historyTable := tableRegex.FindString(compBody)
+		if historyTable == "" {
+			t.Fatalf("expected Comparison page to contain 'history-table', got body:\n%s", compBody)
+		}
+		nCellRegex := regexp.MustCompile(`<td class="num">(\d+)</td>`)
+		nMatches := nCellRegex.FindAllStringSubmatch(historyTable, -1)
+		if len(nMatches) < 2 {
+			t.Errorf("expected at least 2 numeric n history table rows, got %d", len(nMatches))
 		}
 
 		// Clean up sampling runs
