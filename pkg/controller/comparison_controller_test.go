@@ -15,11 +15,13 @@
 package controller
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -40,7 +42,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func makeSyntheticInspectLog(taskID string, sampleScores []stats.SampleScore) []byte {
@@ -7264,6 +7268,459 @@ func TestAdaptivePairedSampling_DatasetExhaustion(t *testing.T) {
 			t.Errorf("expected suggestedNext 0 on dataset exhaustion, got %d", task.SuggestedNext)
 		}
 	})
+}
+
+func TestAdaptivePairedSampling_CapBySampleCountNotPosition(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	// Seed window starts at 101, End: 108 (8 samples).
+	// MaxSamplesPerTask: 16, BatchSize: 8.
+	// If clamped by absolute position (nextEnd > 16), it would fail to issue batch 2.
+	// Capping by count (maxRemaining = 16 - 8 = 8) allows batch 2 at window [109, 116].
+	b1Cand := []stats.SampleScore{
+		{ID: "101", Score: 1.0}, {ID: "102", Score: 0.0}, {ID: "103", Score: 1.0}, {ID: "104", Score: 0.0},
+		{ID: "105", Score: 1.0}, {ID: "106", Score: 0.0}, {ID: "107", Score: 1.0}, {ID: "108", Score: 0.0},
+	}
+	b1Base := []stats.SampleScore{
+		{ID: "101", Score: 0.0}, {ID: "102", Score: 1.0}, {ID: "103", Score: 0.0}, {ID: "104", Score: 1.0},
+		{ID: "105", Score: 0.0}, {ID: "106", Score: 1.0}, {ID: "107", Score: 0.0}, {ID: "108", Score: 1.0},
+	}
+	fakeGCS.Objects["test-bucket/runs/cand-commit/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b1Cand)}
+	fakeGCS.Objects["test-bucket/runs/base-commit/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b1Base)}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-offset", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 101, End: 108},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 101, End: 108}},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-offset", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 101, End: 108},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 101, End: 108}},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-count-cap", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-offset"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-offset"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         8,
+				MaxSamplesPerTask: 16,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+	// Reconcile 1: should schedule batch 2 with window [109, 116]
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile 1 failed: %v", err)
+	}
+
+	var candB2, baseB2 v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-count-cap-b2-cand"}, &candB2); err != nil {
+		t.Fatalf("expected batch 2 candidate Run: %v", err)
+	}
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-count-cap-b2-base"}, &baseB2); err != nil {
+		t.Fatalf("expected batch 2 baseline Run: %v", err)
+	}
+	if candB2.Spec.SampleRange == nil || candB2.Spec.SampleRange.Start != 109 || candB2.Spec.SampleRange.End != 116 {
+		t.Fatalf("expected batch 2 range [109, 116], got %+v", candB2.Spec.SampleRange)
+	}
+
+	// Complete batch 2 with another 8 alternating samples so total samplesRun reaches 16 == maxSamples
+	b2Cand := []stats.SampleScore{
+		{ID: "109", Score: 1.0}, {ID: "110", Score: 0.0}, {ID: "111", Score: 1.0}, {ID: "112", Score: 0.0},
+		{ID: "113", Score: 1.0}, {ID: "114", Score: 0.0}, {ID: "115", Score: 1.0}, {ID: "116", Score: 0.0},
+	}
+	b2Base := []stats.SampleScore{
+		{ID: "109", Score: 0.0}, {ID: "110", Score: 1.0}, {ID: "111", Score: 0.0}, {ID: "112", Score: 1.0},
+		{ID: "113", Score: 0.0}, {ID: "114", Score: 1.0}, {ID: "115", Score: 0.0}, {ID: "116", Score: 1.0},
+	}
+	fakeGCS.Objects["test-bucket/runs/cand-commit/b2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b2Cand)}
+	fakeGCS.Objects["test-bucket/runs/base-commit/b2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b2Base)}
+
+	candB2.Status.Phase = v1alpha1.RunPhaseCompleted
+	candB2.Status.Tasks = []v1alpha1.TaskStatus{
+		{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b2.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 109, End: 116}},
+	}
+	if err := cl.Status().Update(t.Context(), &candB2); err != nil {
+		t.Fatalf("failed to update candB2: %v", err)
+	}
+	baseB2.Status.Phase = v1alpha1.RunPhaseCompleted
+	baseB2.Status.Tasks = []v1alpha1.TaskStatus{
+		{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/b2.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 109, End: 116}},
+	}
+	if err := cl.Status().Update(t.Context(), &baseB2); err != nil {
+		t.Fatalf("failed to update baseB2: %v", err)
+	}
+
+	// Reconcile 2: cap of 16 reached by sample count, marks task as inconclusive and stops
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile 2 failed: %v", err)
+	}
+
+	var compFinal v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &compFinal); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if compFinal.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("expected comparison phase Completed, got %s", compFinal.Status.Phase)
+	}
+	if len(compFinal.Status.Tasks) != 1 {
+		t.Fatalf("expected 1 task status, got %d", len(compFinal.Status.Tasks))
+	}
+	task := compFinal.Status.Tasks[0]
+	if task.SamplesRun != 16 {
+		t.Errorf("expected samplesRun 16, got %d", task.SamplesRun)
+	}
+	if task.Decision != v1alpha1.ComparisonTaskLabelInconclusive {
+		t.Errorf("expected task decision inconclusive, got %s", task.Decision)
+	}
+}
+
+func TestAdaptivePairedSampling_TransientErrorFetchingBatchRun(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b1.json", Samples: 8},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/b1.json", Samples: 8},
+			},
+		},
+	}
+
+	candB2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-err-b2-cand", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseRunning},
+	}
+	baseB2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-err-b2-base", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseRunning},
+	}
+
+	t.Run("transient candidate batch run get error returned for retry", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-err", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+				Sampling: &v1alpha1.ComparisonSamplingSpec{
+					BatchSize:         8,
+					MaxSamplesPerTask: 32,
+				},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Batches: []v1alpha1.ComparisonBatchStatus{
+					{Index: 1, CandidateRun: "cand-run", BaselineRun: "base-run", Phase: v1alpha1.ComparisonPhaseCompleted},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, candB2, baseB2, comp).
+			WithStatusSubresource(candRun, baseRun, candB2, baseB2, comp).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if key.Name == "comp-err-b2-cand" {
+						return apierrors.NewInternalError(errors.New("transient apiserver connection error"))
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err == nil {
+			t.Fatal("expected non-nil error on transient candidate Get failure, got nil")
+		}
+		if !strings.Contains(err.Error(), "transient apiserver connection error") {
+			t.Errorf("expected error message to contain transient error, got: %v", err)
+		}
+
+		// Verify comparison was not transitioned to Completed
+		var updatedComp v1alpha1.Comparison
+		if getErr := cl.Get(t.Context(), req.NamespacedName, &updatedComp); getErr != nil {
+			t.Fatalf("failed to get comparison: %v", getErr)
+		}
+		if updatedComp.Status.Phase == v1alpha1.ComparisonPhaseCompleted {
+			t.Errorf("expected comparison not to be marked Completed on transient error, got %s", updatedComp.Status.Phase)
+		}
+	})
+
+	t.Run("transient baseline batch run get error returned for retry", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-err", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+				Sampling: &v1alpha1.ComparisonSamplingSpec{
+					BatchSize:         8,
+					MaxSamplesPerTask: 32,
+				},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Batches: []v1alpha1.ComparisonBatchStatus{
+					{Index: 1, CandidateRun: "cand-run", BaselineRun: "base-run", Phase: v1alpha1.ComparisonPhaseCompleted},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, candB2, baseB2, comp).
+			WithStatusSubresource(candRun, baseRun, candB2, baseB2, comp).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if key.Name == "comp-err-b2-base" {
+						return apierrors.NewInternalError(errors.New("transient apiserver connection error"))
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err == nil {
+			t.Fatal("expected non-nil error on transient baseline Get failure, got nil")
+		}
+		if !strings.Contains(err.Error(), "transient apiserver connection error") {
+			t.Errorf("expected error message to contain transient error, got: %v", err)
+		}
+	})
+}
+
+func TestAdaptivePairedSampling_ZeroSampleCrashNotDatasetExhausted(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	b1Cand := []stats.SampleScore{
+		{ID: "1", Score: 1.0}, {ID: "2", Score: 0.0}, {ID: "3", Score: 1.0}, {ID: "4", Score: 0.0},
+		{ID: "5", Score: 1.0}, {ID: "6", Score: 0.0}, {ID: "7", Score: 1.0}, {ID: "8", Score: 0.0},
+	}
+	b1Base := []stats.SampleScore{
+		{ID: "1", Score: 0.0}, {ID: "2", Score: 1.0}, {ID: "3", Score: 0.0}, {ID: "4", Score: 1.0},
+		{ID: "5", Score: 0.0}, {ID: "6", Score: 1.0}, {ID: "7", Score: 0.0}, {ID: "8", Score: 1.0},
+	}
+	fakeGCS.Objects["test-bucket/runs/cand-commit/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b1Cand)}
+	fakeGCS.Objects["test-bucket/runs/base-commit/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b1Base)}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-crash", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-crash", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-crash", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-crash"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-crash"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         8,
+				MaxSamplesPerTask: 32,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+	// Reconcile 1: schedules batch 2
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile 1 failed: %v", err)
+	}
+
+	var candB2, baseB2 v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-crash-b2-cand"}, &candB2); err != nil {
+		t.Fatalf("expected batch 2 candidate Run: %v", err)
+	}
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-crash-b2-base"}, &baseB2); err != nil {
+		t.Fatalf("expected batch 2 baseline Run: %v", err)
+	}
+
+	// In batch 2: candidate crashes with exit status 137 (OOM), Samples: 0. Baseline succeeds.
+	candB2.Status.Phase = v1alpha1.RunPhaseCompleted
+	candB2.Status.Tasks = []v1alpha1.TaskStatus{
+		{
+			ID:          taskID,
+			Phase:       v1alpha1.TaskPhaseFailed,
+			Message:     "container killed (exit status 137)",
+			Samples:     0,
+			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+		},
+	}
+	if err := cl.Status().Update(t.Context(), &candB2); err != nil {
+		t.Fatalf("failed to update candB2: %v", err)
+	}
+
+	b2Base := []stats.SampleScore{
+		{ID: "9", Score: 1.0}, {ID: "10", Score: 0.0}, {ID: "11", Score: 1.0}, {ID: "12", Score: 0.0},
+		{ID: "13", Score: 1.0}, {ID: "14", Score: 0.0}, {ID: "15", Score: 1.0}, {ID: "16", Score: 0.0},
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit/b2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b2Base)}
+	baseB2.Status.Phase = v1alpha1.RunPhaseCompleted
+	baseB2.Status.Tasks = []v1alpha1.TaskStatus{
+		{
+			ID:          taskID,
+			Phase:       v1alpha1.TaskPhaseCompleted,
+			LogPath:     "gs://test-bucket/runs/base-commit/b2.json",
+			Samples:     8,
+			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+		},
+	}
+	if err := cl.Status().Update(t.Context(), &baseB2); err != nil {
+		t.Fatalf("failed to update baseB2: %v", err)
+	}
+
+	// Reconcile 2: guards the #141 candidate task failed path and suggestedNext == 0 on a crash
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile 2 failed: %v", err)
+	}
+
+	var compFinal v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &compFinal); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if compFinal.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("expected comparison phase Completed, got %s", compFinal.Status.Phase)
+	}
+	if len(compFinal.Status.Tasks) != 1 {
+		t.Fatalf("expected 1 task status, got %d", len(compFinal.Status.Tasks))
+	}
+	task := compFinal.Status.Tasks[0]
+	if !strings.Contains(compFinal.Status.Message, "candidate task failed: "+taskID) {
+		t.Errorf("comparison status message should report candidate task failed per #136 policy, got: %s", compFinal.Status.Message)
+	}
+	if task.SuggestedNext != 0 {
+		t.Errorf("expected suggestedNext 0 on crash, got %d", task.SuggestedNext)
+	}
 }
 
 func findComparisonTaskStatus(tasks []v1alpha1.ComparisonTaskStatus, id string) *v1alpha1.ComparisonTaskStatus {
