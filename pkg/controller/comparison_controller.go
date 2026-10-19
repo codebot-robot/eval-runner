@@ -111,6 +111,7 @@ type ComparisonArtifact struct {
 	SkippedNotPlanned     []string                         `json:"skippedNotPlanned,omitempty"`
 	NotExecuted           []string                         `json:"notExecuted,omitempty"`
 	NotExecutedByBothRuns []string                         `json:"notExecutedByBothRuns,omitempty"`
+	FailedInBothRuns      []string                         `json:"failedInBothRuns,omitempty"`
 	CandidateFailed       []string                         `json:"candidateFailed,omitempty"`
 }
 
@@ -2175,7 +2176,6 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, github.FormatIDList(candFailed, github.MaxIDList)))
 	}
 	var failedBoth []string
-	var neitherExecuted []string
 	var unattempted []string
 	var notBothExecuted []string
 	if len(unexecuted) > 0 {
@@ -2190,7 +2190,6 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			candFailedBoth := candTask != nil && candTask.Phase == v1alpha1.TaskPhaseFailed
 			baseFailedBoth := baseTask != nil && baseTask.Phase == v1alpha1.TaskPhaseFailed
 			if !candRan && !baseRan {
-				neitherExecuted = append(neitherExecuted, id)
 				if candFailedBoth && baseFailedBoth {
 					failedBoth = append(failedBoth, id)
 				} else {
@@ -2201,7 +2200,6 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 		}
 		sort.Strings(failedBoth)
-		sort.Strings(neitherExecuted)
 		sort.Strings(unattempted)
 		sort.Strings(notBothExecuted)
 		if len(failedBoth) > 0 {
@@ -2244,8 +2242,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		Batches:               batches,
 		CreatedAt:             time.Now().UTC(),
 		SkippedNotPlanned:     skippedNotPlanned,
-		NotExecuted:           neitherExecuted,
+		NotExecuted:           unattempted,
 		NotExecutedByBothRuns: notBothExecuted,
+		FailedInBothRuns:      failedBoth,
 		CandidateFailed:       candFailed,
 	}
 
