@@ -15,12 +15,14 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,8 +73,56 @@ spec:
 
 		harness.KubectlApplyContent(manifest)
 
-		// Wait for Run to reach Completed
-		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+		// Poll the Run every 500ms until Completed; check for live samplesDone progress
+		startTime := time.Now()
+		var observedProgress bool
+		var progressObservedAt time.Duration
+		var firstSeenRunning time.Time
+		var run *v1alpha1.Run
+		for {
+			cmd := exec.Command("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "json")
+			out, err := cmd.Output()
+			if err == nil {
+				var r v1alpha1.Run
+				if json.Unmarshal(out, &r) == nil {
+					for _, task := range r.Status.Tasks {
+						if task.Phase == v1alpha1.TaskPhaseRunning {
+							if firstSeenRunning.IsZero() {
+								if task.StartedAt != nil {
+									firstSeenRunning = task.StartedAt.Time
+								} else {
+									firstSeenRunning = time.Now()
+								}
+							}
+							if task.SamplesDone > 0 && !observedProgress {
+								observedProgress = true
+								progressObservedAt = time.Since(firstSeenRunning)
+							}
+						}
+					}
+					if string(r.Status.Phase) == string(v1alpha1.RunPhaseCompleted) {
+						run = &r
+						break
+					}
+				}
+			}
+			if time.Since(startTime) > 180*time.Second {
+				t.Fatalf("Timeout waiting for Run %s to complete", runName)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		totalDuration := time.Since(startTime)
+		var taskRunningDuration time.Duration
+		if !firstSeenRunning.IsZero() {
+			taskRunningDuration = time.Since(firstSeenRunning)
+		}
+
+		t.Logf("Live progress observed: %v (progress observed after %v of task running; task running duration: %v, total run duration: %v)",
+			observedProgress, progressObservedAt, taskRunningDuration, totalDuration)
+
+		if !observedProgress && taskRunningDuration >= 60*time.Second {
+			t.Errorf("expected samplesDone > 0 while task is Running for tasks running >= 60s (task running duration %v, total run duration %v)", taskRunningDuration, totalDuration)
+		}
 
 		if run.Status.Discovery == nil {
 			t.Fatalf("Expected status.discovery to be populated")
@@ -102,6 +152,9 @@ spec:
 			}
 			if task.Samples <= 0 {
 				t.Errorf("Expected task %s to have samples > 0, got %d", task.ID, task.Samples)
+			}
+			if task.SamplesDone != task.Samples {
+				t.Errorf("Expected task %s samplesDone (%d) to equal samples (%d)", task.ID, task.SamplesDone, task.Samples)
 			}
 		}
 
@@ -544,7 +597,7 @@ spec:
 		compName := "batch-loop-comp"
 
 		// Clean up any previous runs or comparisons
-		harness.runCmd("kubectl", "delete", "run", candRunName, baseRunName, "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "run", candRunName, baseRunName, fmt.Sprintf("%s-b2-cand", compName), fmt.Sprintf("%s-b2-base", compName), "-n", "eval-runner", "--ignore-not-found")
 		harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
 
 		candManifest := fmt.Sprintf(`

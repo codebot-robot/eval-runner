@@ -601,6 +601,67 @@ func TestExtractInspectDatasetSamples(t *testing.T) {
 	})
 }
 
+func TestExtractInspectProgress(t *testing.T) {
+	t.Run("ValidProgressWithSamplesAndDataset", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "started",
+			"eval": {
+				"task": "docs/readme_comprehension",
+				"model": "mockllm/model",
+				"dataset": {
+					"name": "readme_questions",
+					"samples": 21
+				}
+			},
+			"samples": [
+				{"id": 1, "input": "q1"},
+				{"id": 2, "input": "q2"}
+			]
+		}`
+		count, datasetSamples, err := ExtractInspectProgress([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 2 {
+			t.Errorf("expected 2 samples, got %d", count)
+		}
+		if datasetSamples != 21 {
+			t.Errorf("expected dataset samples 21, got %d", datasetSamples)
+		}
+	})
+
+	t.Run("ZeroSamplesEmptyArray", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "started",
+			"eval": {
+				"dataset": {"samples": 10}
+			},
+			"samples": []
+		}`
+		count, datasetSamples, err := ExtractInspectProgress([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected 0 samples, got %d", count)
+		}
+		if datasetSamples != 10 {
+			t.Errorf("expected dataset samples 10, got %d", datasetSamples)
+		}
+	})
+
+	t.Run("InvalidOrEmptyLog", func(t *testing.T) {
+		if _, _, err := ExtractInspectProgress([]byte("")); err == nil {
+			t.Errorf("expected error for empty data")
+		}
+		if _, _, err := ExtractInspectProgress([]byte("{invalid")); err == nil {
+			t.Errorf("expected error for invalid json")
+		}
+	})
+}
+
 func TestParseInspectSamples(t *testing.T) {
 	t.Run("TrajectoryMessagesFixture", func(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join("testdata", "trajectory_messages.json"))

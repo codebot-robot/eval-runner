@@ -919,3 +919,21 @@ func ExtractInspectDatasetSamples(data []byte) (int, error) {
 	}
 	return log.Eval.DatasetSamples(), nil
 }
+
+// ExtractInspectProgress parses raw Inspect log JSON bytes and returns the count of completed
+// samples and dataset sample count from eval.dataset.samples. It decodes only the samples array
+// length and eval metadata for context and memory efficiency during live polling.
+func ExtractInspectProgress(data []byte) (samplesCount int, datasetSamples int, err error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return 0, 0, fmt.Errorf("empty log data")
+	}
+
+	var prog struct {
+		Eval    InspectEval `json:"eval"`
+		Samples []struct{}  `json:"samples"`
+	}
+	if err := json.Unmarshal(data, &prog); err != nil {
+		return 0, 0, fmt.Errorf("failed to unmarshal inspect progress: %w", err)
+	}
+	return len(prog.Samples), prog.Eval.DatasetSamples(), nil
+}
