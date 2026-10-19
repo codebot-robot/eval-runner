@@ -28,8 +28,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
-	"github.com/gke-labs/eval-runner/pkg/configkeys"
-	"github.com/gke-labs/eval-runner/pkg/controller"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/ui"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -74,21 +73,21 @@ func main() {
 
 	bucket := artifactBucket
 	dir := artifactDir
-	cm, err := controller.LoadClusterConfig(context.Background(), k8sClient, namespace, controller.DefaultConfigMapName)
+	artCfg, err := sinkconfig.LoadArtifactConfig(context.Background(), k8sClient, namespace, sinkconfig.DefaultConfigMapName)
 	if err != nil {
-		log.Printf("warning: unable to read cluster configmap %s/%s: %v", namespace, controller.DefaultConfigMapName, err)
-	} else if cm != nil && cm.Data != nil {
+		log.Printf("warning: unable to read cluster configmap %s/%s: %v", namespace, sinkconfig.DefaultConfigMapName, err)
+	} else {
 		if bucket == "" {
-			bucket = cm.Data[configkeys.ConfigMapKeyArtifactBucket]
+			bucket = artCfg.ArtifactBucket
 		}
 		if dir == "" {
-			dir = cm.Data[configkeys.ConfigMapKeyArtifactDir]
+			dir = artCfg.ArtifactDir
 		}
 	}
 
 	var sink artifacts.ArtifactSink
 	if bucket != "" || dir != "" {
-		s, err := controller.NewArtifactSink(context.Background(), bucket, dir, 0)
+		s, err := sinkconfig.NewArtifactSink(context.Background(), bucket, dir, 0)
 		if err != nil {
 			log.Printf("warning: unable to configure artifact sink (bucket=%q, dir=%q): %v", bucket, dir, err)
 		} else {

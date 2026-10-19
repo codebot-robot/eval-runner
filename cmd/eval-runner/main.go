@@ -24,6 +24,7 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/pki"
@@ -288,7 +289,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sink, err := controller.NewArtifactSink(context.Background(), clusterConfig.ArtifactBucket, clusterConfig.ArtifactDir, clusterConfig.ArtifactMaxUploadBytes)
+	sink, err := sinkconfig.NewArtifactSink(context.Background(), clusterConfig.ArtifactBucket, clusterConfig.ArtifactDir, clusterConfig.ArtifactMaxUploadBytes)
 	if err != nil {
 		setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", clusterConfig.ArtifactBucket)
 		os.Exit(1)
