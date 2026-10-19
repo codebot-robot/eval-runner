@@ -231,6 +231,7 @@ const runsListTemplate = `
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
       <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
       </nav>
@@ -309,6 +310,7 @@ const runDetailTemplate = `
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
       <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
       </nav>
@@ -453,6 +455,7 @@ const comparisonsListTemplate = `
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
       <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
       </nav>
@@ -583,6 +586,7 @@ const comparisonDetailTemplate = `
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
       <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
       </nav>
@@ -698,6 +702,7 @@ const taskSamplesListTemplate = `
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
       <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
       </nav>
@@ -795,6 +800,7 @@ const sampleTranscriptTemplate = `
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
       <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
       </nav>
@@ -858,10 +864,180 @@ var (
 	tmplComparisonDetail = template.Must(template.Must(template.New("comparison_detail").Parse(ComparisonTableTemplate)).Parse(comparisonDetailTemplate))
 	tmplTaskSamplesList  = template.Must(template.New("task_samples_list").Parse(taskSamplesListTemplate))
 	tmplSampleTranscript = template.Must(template.New("sample_transcript").Parse(sampleTranscriptTemplate))
+	tmplPullsList        = template.Must(template.New("pulls_list").Parse(pullsListTemplate))
+	tmplPullDetail       = template.Must(template.New("pull_detail").Parse(pullDetailTemplate))
 
 	// TmplComparisonTable is the parsed template for the comparison table sub-template.
 	TmplComparisonTable = tmplComparisonTable
 )
+
+const pullsListTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pull Requests · eval-runner</title>
+  <style>` + baseCSS + `</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
+        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Pull Requests</h1>
+        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Repository</th>
+              <th>PR</th>
+              <th>Head</th>
+              <th>Verdict</th>
+              <th>Samples</th>
+              <th>Batches</th>
+              <th>Completed</th>
+              <th>Comparison</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range .Pulls }}
+            <tr>
+              <td><a href="{{ .HistoryLink }}" style="font-weight:600">{{ .Repository }}</a></td>
+              <td><a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></td>
+              <td><span class="mono" style="font-size:13px">{{ .HeadSHAShort }}</span></td>
+              <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span>{{ if ne .PImprovement "—" }} <span class="mono" style="font-size:12px;color:var(--muted)">(P={{ .PImprovement }})</span>{{ end }}</td>
+              <td class="num">{{ .SamplesRun }}</td>
+              <td class="num">{{ .Batches }}</td>
+              <td style="color:var(--muted);font-size:13px">{{ .CompletionTime }}</td>
+              <td><a href="{{ .ComparisonLink }}" class="mono" style="font-size:13px">{{ .ComparisonName }}</a></td>
+            </tr>
+            {{ else }}
+            <tr>
+              <td colspan="8" class="empty-state">No pull requests found in namespace {{ .Namespace }}.</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+      {{ if or .HasPrev .HasMore }}
+      <div class="pagination" style="padding:14px 24px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;font-size:13px">
+        <div>
+          {{ if .HasPrev }}<a href="{{ .PrevLink }}">← Previous</a>{{ end }}
+        </div>
+        <div style="color:var(--muted)">{{ .ShowingRange }}</div>
+        <div>
+          {{ if .HasMore }}<a href="{{ .NextLink }}">More →</a>{{ end }}
+        </div>
+      </div>
+      {{ end }}
+    </div>
+  </main>
+</body>
+</html>
+`
+
+const pullDetailTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .Repository }} #{{ .Number }} · Pull Request · eval-runner</title>
+  <style>` + baseCSS + `</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
+        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <div style="display:flex;align-items:center;gap:12px">
+          <h1 class="card-title">{{ .Repository }} <a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></h1>
+        </div>
+        <div style="font-size:13px;color:var(--muted)"><a href="{{ .BackLink }}">← Back to Pull Requests</a></div>
+      </div>
+      <div class="card-body">
+        <div style="overflow-x:auto">
+          <table class="ci">
+            <thead>
+              <tr>
+                <th>Comparison</th>
+                <th>Head</th>
+                <th>Base</th>
+                <th>Verdict</th>
+                <th>P(imp)</th>
+                <th>Samples</th>
+                <th>Batches</th>
+                <th>Completed</th>
+                <th>Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{ range .Comparisons }}
+              <tr>
+                <td><a href="{{ .Link }}" class="mono" style="font-weight:600">{{ .Name }}</a></td>
+                <td><span class="mono" style="font-size:13px">{{ .HeadSHAShort }}</span></td>
+                <td><span class="mono" style="font-size:13px">{{ .BaseSHAShort }}</span></td>
+                <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span></td>
+                <td class="num">{{ .PImprovement }}</td>
+                <td class="num">{{ .SamplesRun }}</td>
+                <td class="num">{{ .Batches }}</td>
+                <td style="color:var(--muted);font-size:13px">{{ .CompletionTime }}</td>
+                <td style="color:var(--muted);font-size:13px">{{ .Age }}</td>
+              </tr>
+              {{ else }}
+              <tr>
+                <td colspan="9" class="empty-state">No comparisons recorded for this pull request.</td>
+              </tr>
+              {{ end }}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span><b>Repository:</b> {{ .Repository }}</span>
+        <span><b>PR:</b> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></span>
+        <span><b>Comparisons:</b> {{ .TotalCount }}</span>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+`
+
+// RenderPullsList renders the pull requests list template to the given writer.
+func RenderPullsList(w io.Writer, view PullRequestsListView) error {
+	return tmplPullsList.Execute(w, view)
+}
+
+// RenderPullDetail renders the pull request detail template to the given writer.
+func RenderPullDetail(w io.Writer, view PullRequestDetailView) error {
+	return tmplPullDetail.Execute(w, view)
+}
 
 // RenderTaskSamplesList renders the task samples list template to the given writer.
 func RenderTaskSamplesList(w io.Writer, view TaskSamplesListView) error {

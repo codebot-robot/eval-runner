@@ -332,6 +332,86 @@ func sampleComparisonsListView() ComparisonsListView {
 	}
 }
 
+func samplePullRequestsListView() PullRequestsListView {
+	return PullRequestsListView{
+		ActiveTab: NavTabPulls,
+		Namespace: "eval-runner",
+		Pulls: []PullRequestListItem{
+			{
+				Repository:     "gke-labs/eval-runner",
+				RepoHash:       RepoHash("gke-labs/eval-runner"),
+				Number:         42,
+				GitHubURL:      "https://github.com/gke-labs/eval-runner/pull/42",
+				HeadSHA:        "05ce4d8222222222222222222222222222222222",
+				HeadSHAShort:   "05ce4d8",
+				Verdict:        v1alpha1.ComparisonVerdictImproved,
+				VerdictChip:    "good",
+				PImprovement:   "0.98",
+				SamplesRun:     96,
+				Batches:        2,
+				CompletionTime: "5m",
+				ComparisonName: "pr-42",
+				ComparisonLink: "/comparisons/eval-runner/pr-42",
+				HistoryLink:    "/pulls/" + RepoHash("gke-labs/eval-runner") + "/42",
+				Namespace:      "eval-runner",
+			},
+		},
+		TotalCount:   1,
+		Offset:       0,
+		Limit:        100,
+		HasMore:      false,
+		HasPrev:      false,
+		ShowingRange: "Showing 1–1 of 1",
+	}
+}
+
+func samplePullRequestDetailView() PullRequestDetailView {
+	return PullRequestDetailView{
+		ActiveTab:  NavTabPulls,
+		Namespace:  "eval-runner",
+		Repository: "gke-labs/eval-runner",
+		RepoHash:   RepoHash("gke-labs/eval-runner"),
+		Number:     42,
+		GitHubURL:  "https://github.com/gke-labs/eval-runner/pull/42",
+		BackLink:   "/pulls",
+		TotalCount: 2,
+		Comparisons: []PullRequestHistoryItem{
+			{
+				Name:           "pr-42-head2",
+				Namespace:      "eval-runner",
+				HeadSHA:        "05ce4d8222222222222222222222222222222222",
+				HeadSHAShort:   "05ce4d8",
+				BaseSHA:        "a81d0c4111111111111111111111111111111111",
+				BaseSHAShort:   "a81d0c4",
+				Verdict:        v1alpha1.ComparisonVerdictImproved,
+				VerdictChip:    "good",
+				PImprovement:   "0.98",
+				SamplesRun:     96,
+				Batches:        2,
+				CompletionTime: "5m",
+				Age:            "10m",
+				Link:           "/comparisons/eval-runner/pr-42-head2",
+			},
+			{
+				Name:           "pr-42-head1",
+				Namespace:      "eval-runner",
+				HeadSHA:        "1111111222222222222222222222222222222222",
+				HeadSHAShort:   "1111111",
+				BaseSHA:        "a81d0c4111111111111111111111111111111111",
+				BaseSHAShort:   "a81d0c4",
+				Verdict:        v1alpha1.ComparisonVerdictInconclusive,
+				VerdictChip:    "neutral",
+				PImprovement:   "0.50",
+				SamplesRun:     48,
+				Batches:        1,
+				CompletionTime: "15m",
+				Age:            "20m",
+				Link:           "/comparisons/eval-runner/pr-42-head1",
+			},
+		},
+	}
+}
+
 func TestTemplateRenderingRunDetailGolden(t *testing.T) {
 	view := sampleRunDetailView()
 
@@ -523,6 +603,28 @@ func TestTemplateRenderingComparisonsListGolden(t *testing.T) {
 	}
 
 	assertGolden(t, "comparisons_list.golden.html", buf.String())
+}
+
+func TestTemplateRenderingPullsListGolden(t *testing.T) {
+	view := samplePullRequestsListView()
+
+	var buf bytes.Buffer
+	if err := tmplPullsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute pulls list template: %v", err)
+	}
+
+	assertGolden(t, "pulls_list.golden.html", buf.String())
+}
+
+func TestTemplateRenderingPullDetailGolden(t *testing.T) {
+	view := samplePullRequestDetailView()
+
+	var buf bytes.Buffer
+	if err := tmplPullDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute pull detail template: %v", err)
+	}
+
+	assertGolden(t, "pull_detail.golden.html", buf.String())
 }
 
 func TestTemplateRenderingComparisonTableGolden(t *testing.T) {
@@ -760,6 +862,94 @@ func TestEscapingHostileFixtures(t *testing.T) {
 		}
 		if !strings.Contains(html, "&lt;script&gt;") {
 			t.Errorf("expected escaped &lt;script&gt; in sample transcript HTML")
+		}
+	})
+
+	t.Run("PullsListEscaping", func(t *testing.T) {
+		view := PullRequestsListView{
+			ActiveTab: NavTabPulls,
+			Namespace: "eval-runner",
+			Pulls: []PullRequestListItem{
+				{
+					Repository:     "org/repo" + hostileScript,
+					RepoHash:       "badhash",
+					Number:         12,
+					GitHubURL:      "https://github.com/evil/repo" + hostileImg,
+					HeadSHA:        "head" + hostileScript,
+					HeadSHAShort:   "h" + hostileScript,
+					Verdict:        v1alpha1.ComparisonVerdictImproved,
+					VerdictChip:    "good",
+					PImprovement:   "0.99" + hostileIframe,
+					SamplesRun:     10,
+					Batches:        1,
+					CompletionTime: "1m" + hostileScript,
+					ComparisonName: "comp" + hostileScript,
+					ComparisonLink: "/comparisons/eval-runner/" + hostileImg,
+					HistoryLink:    "/pulls/badhash/12" + hostileScript,
+					Namespace:      "eval-runner",
+				},
+			},
+		}
+
+		var buf bytes.Buffer
+		if err := tmplPullsList.Execute(&buf, view); err != nil {
+			t.Fatalf("tmplPullsList error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous content in pulls list template: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in pulls list HTML")
+		}
+	})
+
+	t.Run("PullDetailEscaping", func(t *testing.T) {
+		view := PullRequestDetailView{
+			ActiveTab:  NavTabPulls,
+			Namespace:  "eval-runner",
+			Repository: "org/repo" + hostileScript,
+			RepoHash:   "badhash",
+			Number:     12,
+			GitHubURL:  "https://github.com/evil/repo" + hostileImg,
+			BackLink:   "/pulls" + hostileIframe,
+			TotalCount: 1,
+			Comparisons: []PullRequestHistoryItem{
+				{
+					Name:           "comp" + hostileScript,
+					Namespace:      "eval-runner",
+					HeadSHA:        "head" + hostileScript,
+					HeadSHAShort:   "h" + hostileScript,
+					BaseSHA:        "base" + hostileScript,
+					BaseSHAShort:   "b" + hostileScript,
+					Verdict:        v1alpha1.ComparisonVerdictImproved,
+					VerdictChip:    "good",
+					PImprovement:   "0.99" + hostileIframe,
+					SamplesRun:     10,
+					Batches:        1,
+					CompletionTime: "1m" + hostileScript,
+					Age:            "5m" + hostileImg,
+					Link:           "/comparisons/eval-runner/comp" + hostileScript,
+				},
+			},
+		}
+
+		var buf bytes.Buffer
+		if err := tmplPullDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("tmplPullDetail error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous content in pull detail template: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in pull detail HTML")
 		}
 	})
 }
