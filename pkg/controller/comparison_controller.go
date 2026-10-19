@@ -692,28 +692,9 @@ func ComputeBatchKey(repoURL, commit, model string, tasks []string, window v1alp
 	return fmt.Sprintf("%x", h)[:32]
 }
 
-func sameTaskSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	sa := make([]string, len(a))
-	copy(sa, a)
-	sort.Strings(sa)
-	sb := make([]string, len(b))
-	copy(sb, b)
-	sort.Strings(sb)
-	for i := range sa {
-		if sa[i] != sb[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func (r *ComparisonReconciler) findCompletedBaselineRun(ctx context.Context, namespace, repoURL, commit, model string, tasks []string, window v1alpha1.SampleRange) (*v1alpha1.Run, error) {
 	batchKey := ComputeBatchKey(repoURL, commit, model, tasks, window)
 
-	// 1. Label selector search
 	var runList v1alpha1.RunList
 	if err := r.List(ctx, &runList, client.InNamespace(namespace), client.MatchingLabels{
 		LabelBatchKey: batchKey,
@@ -723,24 +704,6 @@ func (r *ComparisonReconciler) findCompletedBaselineRun(ctx context.Context, nam
 	for _, run := range runList.Items {
 		if run.Status.Phase == v1alpha1.RunPhaseCompleted && run.DeletionTimestamp == nil {
 			return &run, nil
-		}
-	}
-
-	// 2. Spec-matching fallback across completed runs in namespace
-	if err := r.List(ctx, &runList, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("failed to list runs for baseline matching: %w", err)
-	}
-	for _, run := range runList.Items {
-		if run.Status.Phase != v1alpha1.RunPhaseCompleted || run.DeletionTimestamp != nil {
-			continue
-		}
-		if run.Spec.Repo.URL == repoURL && run.Spec.Repo.Commit == commit && run.Spec.Model == model {
-			effRange := EffectiveSampleRange(run.Spec)
-			if effRange != nil && effRange.Start == window.Start && effRange.End == window.End {
-				if sameTaskSet(run.Spec.Tasks, tasks) {
-					return &run, nil
-				}
-			}
 		}
 	}
 
@@ -1091,6 +1054,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		baseName := fmt.Sprintf("%s-b%d-base", comp.Name, k)
 		var cRun, bRun v1alpha1.Run
 		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: candName}, &cRun); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("failed looking up batch run %q: %w", candName, err)
+			}
 			break
 		}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseName}, &bRun); err != nil && !apierrors.IsNotFound(err) {
@@ -1336,7 +1302,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					!containsTask(candFailed, taskID) {
 					candFailed = append(candFailed, taskID)
 				}
-				taskExhausted = true
+				if (candTask != nil && candTask.Message == "no scored samples") ||
+					(baseTask != nil && baseTask.Message == "no scored samples") {
+					taskExhausted = true
+				}
 				taskFailed = true
 				continue
 			}
@@ -1578,12 +1547,16 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					dec.Label = stats.TaskLabelInconclusive
 					dec.Stop = true
 					dec.Reason = fmt.Sprintf("sample cap (%d) reached without resolving", maxSamples)
+				} else if taskFailed {
+					dec.Label = stats.TaskLabelInconclusive
+					dec.Stop = true
+					dec.Reason = "task failed"
 				}
 			}
 		}
 
 		suggestedNext := 0
-		if !taskExhausted {
+		if !taskExhausted && !taskFailed {
 			if dec.EstimatedSamples > 0 {
 				suggestedNext = dec.EstimatedSamples
 			} else if dec.NextBatchSize > 0 {
@@ -1619,7 +1592,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	maxRemaining := 0
 	if comp.Spec.Sampling != nil {
 		for _, te := range taskEvals {
-			if te.dec.Label == stats.TaskLabelContinue && !te.exhausted {
+			if te.dec.Label == stats.TaskLabelContinue && !te.exhausted && !te.failed {
 				rem := maxSamples - te.samplesRun
 				if rem > 0 {
 					continueTasks = append(continueTasks, te.taskID)
