@@ -1012,8 +1012,12 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	// Check TTL expiration for completed comparisons
 	if r.ComparisonTTL > 0 && comp.Status.Phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
-		if !comp.CreationTimestamp.IsZero() {
-			age := r.now().Sub(comp.CreationTimestamp.Time)
+		referenceTime := comp.CreationTimestamp.Time
+		if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
+			referenceTime = comp.Status.CompletionTime.Time
+		}
+		if !referenceTime.IsZero() {
+			age := r.now().Sub(referenceTime)
 			if age >= r.ComparisonTTL {
 				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
 				if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
@@ -1050,6 +1054,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		msg := fmt.Sprintf("Waiting for %s to be created", strings.Join(missing, " and "))
 		return r.updateComparisonStatus(ctx, &comp, nil, nil, func(status *v1alpha1.ComparisonStatus) {
 			status.Phase = v1alpha1.ComparisonPhaseRunning
+			status.CompletionTime = nil
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
 			status.Summary = &v1alpha1.ComparisonSummary{Tasks: "0/0"}
 			status.Message = msg
@@ -1219,6 +1224,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 		return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 			status.Phase = v1alpha1.ComparisonPhaseRunning
+			status.CompletionTime = nil
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
 			status.Batches = batches
 			status.Tasks = tasks
@@ -1802,6 +1808,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Phase = v1alpha1.ComparisonPhaseRunning
+				status.CompletionTime = nil
 				status.Verdict = v1alpha1.ComparisonVerdictRunning
 				status.Batches = batches
 				status.Tasks = partialStatuses
@@ -2010,6 +2017,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Phase = v1alpha1.ComparisonPhaseRunning
+				status.CompletionTime = nil
 				status.Verdict = v1alpha1.ComparisonVerdictRunning
 				status.Batches = batches
 				status.Tasks = partialStatuses
@@ -2269,8 +2277,20 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		phase = v1alpha1.ComparisonPhaseRunning
 	}
 
+	var compTime *metav1.Time
+	if phase == v1alpha1.ComparisonPhaseCompleted {
+		if comp.Status.CompletionTime != nil {
+			compTime = comp.Status.CompletionTime
+		} else if comp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			nowTime := metav1.NewTime(r.now())
+			compTime = &nowTime
+		}
+	}
+	comp.Status.CompletionTime = compTime
+
 	result, err := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 		status.Phase = phase
+		status.CompletionTime = compTime
 		status.Verdict = v1alpha1.ComparisonVerdict(runVerdict.Verdict)
 		status.PImprovement = &pImp
 		status.Batches = batches
@@ -2291,18 +2311,24 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		return ctrl.Result{}, err
 	}
 
-	if r.ComparisonTTL > 0 && phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 && !comp.CreationTimestamp.IsZero() {
-		age := r.now().Sub(comp.CreationTimestamp.Time)
-		if age >= r.ComparisonTTL {
-			logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
-			if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
-			}
-			return ctrl.Result{}, nil
+	if r.ComparisonTTL > 0 && phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
+		referenceTime := comp.CreationTimestamp.Time
+		if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
+			referenceTime = comp.Status.CompletionTime.Time
 		}
-		remaining := r.ComparisonTTL - age
-		if result.RequeueAfter == 0 || remaining < result.RequeueAfter {
-			result.RequeueAfter = remaining
+		if !referenceTime.IsZero() {
+			age := r.now().Sub(referenceTime)
+			if age >= r.ComparisonTTL {
+				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
+				if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
+				}
+				return ctrl.Result{}, nil
+			}
+			remaining := r.ComparisonTTL - age
+			if result.RequeueAfter == 0 || remaining < result.RequeueAfter {
+				result.RequeueAfter = remaining
+			}
 		}
 	}
 
@@ -2329,6 +2355,9 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 		return ctrl.Result{}, err
 	}
 	mutate(&latest.Status)
+	if latest.Status.Phase == v1alpha1.ComparisonPhaseRunning {
+		latest.Status.CompletionTime = nil
+	}
 
 	// 2. Perform GitHub reporting ONCE outside the RetryOnConflict loop
 	var reportErr error
@@ -2346,6 +2375,9 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 			return err
 		}
 		mutate(&current.Status)
+		if current.Status.Phase == v1alpha1.ComparisonPhaseRunning {
+			current.Status.CompletionTime = nil
+		}
 		if latest.Spec.PullRequest != nil {
 			current.Status.Reporting = reportingStatus.DeepCopy()
 		}
