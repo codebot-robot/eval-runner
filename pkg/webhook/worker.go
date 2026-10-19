@@ -153,32 +153,17 @@ func (wp *WorkerPool) ProcessPullRequestClosed(ctx context.Context, item *PullRe
 	prNumStr := strconv.Itoa(prNum)
 	targetRepo := item.TargetRepo
 
-	// 1. Label-select Comparisons for that PR and delete them.
-	// Check spec.pullRequest.repository as well as number (see #163).
-	var compList v1alpha1.ComparisonList
-	opts := []client.ListOption{client.MatchingLabels{LabelPR: prNumStr}}
-	if ns != "" {
-		opts = append(opts, client.InNamespace(ns))
-	}
-	if err := wp.cfg.Client.List(ctx, &compList, opts...); err != nil {
-		return fmt.Errorf("failed to list comparisons for PR #%d: %w", prNum, err)
+	// 1. Resolve Comparisons for that PR and target repository via FindComparisonsForPR and delete them.
+	compList, err := FindComparisonsForPR(ctx, wp.cfg.Client, ns, targetRepo, prNum)
+	if err != nil {
+		return fmt.Errorf("failed to list comparisons for PR #%d in %q: %w", prNum, targetRepo, err)
 	}
 
 	candRunNames := make(map[string]bool)
 	deletedComparisonNames := make(map[string]bool)
 	var deletedComparisons int
-	for i := range compList.Items {
-		comp := &compList.Items[i]
-		if comp.Spec.PullRequest == nil {
-			continue
-		}
-		if comp.Spec.PullRequest.Number != prNum {
-			continue
-		}
-		if targetRepo != "" && !strings.EqualFold(comp.Spec.PullRequest.Repository, targetRepo) {
-			continue
-		}
-
+	for i := range compList {
+		comp := &compList[i]
 		if comp.Spec.Candidate.Run != "" {
 			candRunNames[comp.Spec.Candidate.Run] = true
 		}
@@ -209,8 +194,12 @@ func (wp *WorkerPool) ProcessPullRequestClosed(ctx context.Context, item *PullRe
 
 	// 2. Label-select seed Runs created by the webhook for the PR head and delete them.
 	// Baseline Runs do not carry LabelPR and are preserved.
+	runListOpts := []client.ListOption{client.MatchingLabels{LabelPR: prNumStr}}
+	if ns != "" {
+		runListOpts = append(runListOpts, client.InNamespace(ns))
+	}
 	var runList v1alpha1.RunList
-	if err := wp.cfg.Client.List(ctx, &runList, opts...); err != nil {
+	if err := wp.cfg.Client.List(ctx, &runList, runListOpts...); err != nil {
 		return fmt.Errorf("failed to list runs for PR #%d: %w", prNum, err)
 	}
 
@@ -268,17 +257,34 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 	prNum := item.PRNumber
 	headSHA := item.HeadSHA
 	baseSHA := item.BaseSHA
-
-	candRunName := fmt.Sprintf("pr-%d-%s", prNum, ShortSHA(headSHA))
-	defaultBaseRunName := fmt.Sprintf("base-%s", ShortSHA(baseSHA))
-	compName := fmt.Sprintf("pr-%d", prNum)
-
 	ns := wp.cfg.Namespace
 	sanitizedCandRepo := SanitizeLabelValue(item.CandidateRepo)
 	sanitizedBaseRepo := SanitizeLabelValue(item.BaselineRepo)
 	sanitizedTargetRepo := SanitizeLabelValue(item.TargetRepo)
 
-	// 1. Create or update Candidate Run: pr-<number>-<headSHA7>
+	// Check if a Comparison already exists for this PR and target repository
+	existingComp, err := FindComparisonForPR(ctx, wp.cfg.Client, ns, item.TargetRepo, prNum)
+	if err != nil {
+		return fmt.Errorf("failed looking up comparison for PR #%d: %w", prNum, err)
+	}
+
+	var compName string
+	if existingComp != nil {
+		compName = existingComp.Name
+	} else {
+		compName = ComparisonName(item.TargetRepo, prNum, wp.cfg.IsMultiRepo())
+	}
+
+	candRunName := CandidateRunName(item.TargetRepo, prNum, headSHA, wp.cfg.IsMultiRepo())
+	if existingComp != nil && existingComp.Spec.PullRequest != nil &&
+		strings.EqualFold(existingComp.Spec.PullRequest.HeadSHA, headSHA) &&
+		existingComp.Spec.Candidate.Run != "" {
+		// Preserve candidate run name from existing Comparison on redelivery
+		candRunName = existingComp.Spec.Candidate.Run
+	}
+	defaultBaseRunName := fmt.Sprintf("base-%s", ShortSHA(baseSHA))
+
+	// 1. Create or update Candidate Run: pr-<number>-<headSHA7> or pr-<repoHash>-<number>-<headSHA7>
 	// Use CandidateCloneURL (head repo for fork PRs) so checkout succeeds (Blocking 1)
 	candRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -344,7 +350,7 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 		}
 	}
 
-	// 3. Create or update Comparison pr-<number>
+	// 3. Create or update Comparison
 	comp := &v1alpha1.Comparison{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      compName,
@@ -454,6 +460,94 @@ func (wp *WorkerPool) findCompletedBaselineRun(ctx context.Context, namespace, c
 		}
 	}
 	return "", nil
+}
+
+// FindComparisonsForPR returns all Comparisons matching the given PR number and repository.
+// It queries by the evalrunner.gke-labs.dev/pr label, and filters on evalrunner.gke-labs.dev/repo label
+// or spec.pullRequest.repository to prevent cross-repository collisions.
+// If no comparisons are found by label, it falls back to direct name lookups (pr-<number> and
+// pr-<repoHash>-<number>) for backwards compatibility with unlabelled or existing cluster objects.
+func FindComparisonsForPR(ctx context.Context, cl client.Reader, namespace, repo string, prNum int) ([]v1alpha1.Comparison, error) {
+	if cl == nil || prNum <= 0 {
+		return nil, nil
+	}
+
+	prNumStr := strconv.Itoa(prNum)
+	opts := []client.ListOption{
+		client.MatchingLabels{LabelPR: prNumStr},
+	}
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	}
+
+	var compList v1alpha1.ComparisonList
+	if err := cl.List(ctx, &compList, opts...); err != nil {
+		return nil, fmt.Errorf("failed to list comparisons for PR #%d: %w", prNum, err)
+	}
+
+	sanitizedRepo := SanitizeLabelValue(repo)
+	var matches []v1alpha1.Comparison
+	for _, comp := range compList.Items {
+		if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Number != prNum {
+			continue
+		}
+		if repo != "" {
+			isMatch := (comp.Labels != nil && comp.Labels[LabelRepo] == sanitizedRepo) ||
+				(comp.Spec.PullRequest != nil && strings.EqualFold(comp.Spec.PullRequest.Repository, repo))
+			if !isMatch {
+				continue
+			}
+		}
+		matches = append(matches, comp)
+	}
+	if len(matches) > 0 {
+		return matches, nil
+	}
+
+	// Fallback by name for backwards compatibility (e.g. unlabelled test fixtures or existing cluster objects)
+	candidateNames := []string{
+		fmt.Sprintf("pr-%d", prNum),
+	}
+	if repo != "" {
+		hashedName := fmt.Sprintf("pr-%s-%d", RepoHash(repo), prNum)
+		if hashedName != candidateNames[0] {
+			candidateNames = append(candidateNames, hashedName)
+		}
+	}
+
+	for _, name := range candidateNames {
+		var comp v1alpha1.Comparison
+		key := types.NamespacedName{Namespace: namespace, Name: name}
+		if err := cl.Get(ctx, key, &comp); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return nil, fmt.Errorf("failed to get comparison %s/%s: %w", namespace, name, err)
+			}
+			continue
+		}
+		if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Number != prNum {
+			continue
+		}
+		if repo != "" {
+			isMatch := (comp.Labels != nil && comp.Labels[LabelRepo] == sanitizedRepo) ||
+				(comp.Spec.PullRequest != nil && strings.EqualFold(comp.Spec.PullRequest.Repository, repo))
+			if !isMatch {
+				continue
+			}
+		}
+		matches = append(matches, comp)
+	}
+
+	return matches, nil
+}
+
+// FindComparisonForPR returns the primary Comparison matching the given PR number and repository,
+// or nil if none exists.
+func FindComparisonForPR(ctx context.Context, cl client.Reader, namespace, repo string, prNum int) (*v1alpha1.Comparison, error) {
+	comps, err := FindComparisonsForPR(ctx, cl, namespace, repo, prNum)
+	if err != nil || len(comps) == 0 {
+		return nil, err
+	}
+	return &comps[0], nil
 }
 
 func (wp *WorkerPool) createOrUpdateRun(ctx context.Context, run *v1alpha1.Run) error {

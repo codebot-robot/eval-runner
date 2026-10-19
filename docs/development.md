@@ -652,10 +652,17 @@ In your GitHub repository settings under **Settings -> Webhooks -> Add webhook**
 
 When an event arrives:
 1. **On `pull_request` (`opened`, `synchronize`, `reopened`)**:
-   - **Candidate Run**: `pr-<number>-<headSHA7>` (evaluates PR head commit with `defaultModel` and initial `sampleRange {1, defaultBatchSize}`).
+   - **Candidate Run**:
+     - Single repository allow-list: `pr-<number>-<headSHA7>`
+     - Multiple repositories or wildcard (`*`): `pr-<repoHash>-<number>-<headSHA7>`, where `<repoHash>` is a 7-character lowercase hexadecimal SHA-256 hash of the normalized repository name (`owner/repo`), preventing collisions across allow-listed repositories.
+     - Evaluates PR head commit with `defaultModel` and initial `sampleRange {1, defaultBatchSize}`.
    - **Baseline Run**: `base-<baseSHA7>` (evaluates merge target commit with initial `sampleRange {1, defaultBatchSize}`). If an already `Completed` Run with that commit, repo URL, and model exists, it is reused immediately (baseline cache from concept §4.1).
-   - **Comparison**: `pr-<number>` linking candidate and baseline runs with `spec.pullRequest` and `spec.sampling {batchSize: defaultBatchSize, maxSamplesPerTask: defaultMaxSamplesPerTask}` configured.
-   - **Redelivery & Synchronize**: Redelivery of the same event is idempotent and makes no duplicate objects. A `synchronize` event creates the new candidate Run `pr-<number>-<newHead7>`, keeps previous candidate Runs in place (they are not deleted, preserving execution history), and updates `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing Comparison.
+   - **Comparison**:
+     - Single repository allow-list: `pr-<number>`
+     - Multiple repositories or wildcard (`*`): `pr-<repoHash>-<number>`
+     - Links candidate and baseline runs with `spec.pullRequest` and `spec.sampling {batchSize: defaultBatchSize, maxSamplesPerTask: defaultMaxSamplesPerTask}` configured.
+   - **Lookups & Backwards Compatibility**: Comparison lookups for synchronization, `/eval more` comment commands, and PR cleanup resolve primarily by labels (`evalrunner.gke-labs.dev/pr` and `evalrunner.gke-labs.dev/repo`), falling back to direct name checks (`pr-<number>` and `pr-<repoHash>-<number>`). Already-created objects from previous deployments continue to resolve and update in-place without collision or duplication.
+   - **Redelivery & Synchronize**: Redelivery of the same event is idempotent and makes no duplicate objects. A `synchronize` event creates the new candidate Run `pr-<number>-<newHead7>` (or `pr-<repoHash>-<number>-<newHead7>`), keeps previous candidate Runs in place (they are not deleted, preserving execution history), and updates `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing Comparison.
 2. **On `pull_request` (`closed`)**:
    - **Cleanup**: Label-selects the Comparison(s) matching `evalrunner.gke-labs.dev/pr` and `spec.pullRequest.repository` and deletes them; their owned batch Runs cascade via Kubernetes owner references.
    - **Seed Runs**: Deletes seed candidate Runs for the PR head. If a seed Run carries an owner reference to a surviving live Comparison or is referenced as `spec.baseline.run` by another surviving Comparison (e.g. stacked branches or fast-forward merges), it is preserved.

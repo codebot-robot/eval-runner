@@ -372,6 +372,14 @@ Inspect log provider-specific totals are dropped so that `total` is strictly and
 
 Check run titles display per-label counts: `<VERDICT>: N improved, M unchanged, K regressed, J inconclusive` built from `status.tasks[].label` (omitting zero buckets). The check run conclusion for `INCONCLUSIVE` comparisons is governed by the `inconclusivePolicy` cluster ConfigMap key: `"neutral"` (default, non-blocking) or `"failure"` (blocks merging).
 
+## Webhook Resource Naming
+
+Comparisons and candidate Runs created automatically by `eval-runner-webhook` follow deterministic naming conventions based on the configured `webhookRepositories`:
+
+- **Single repository**: `pr-<number>` for Comparisons and `pr-<number>-<headSHA7>` for candidate Runs.
+- **Multiple repositories or wildcard (`*`)**: `pr-<repoHash>-<number>` for Comparisons and `pr-<repoHash>-<number>-<headSHA7>` for candidate Runs, where `<repoHash>` is a 7-character hexadecimal SHA-256 hash of the normalized repository name (`owner/repo`). This guarantees RFC 1123 DNS subdomain compliance and prevents collisions when multiple allow-listed repositories share the same pull request number.
+- **Label-based resolution**: Webhook lookups (synchronization, `/eval more` comment commands, and PR closure cleanup) resolve objects by labels (`evalrunner.gke-labs.dev/pr` and `evalrunner.gke-labs.dev/repo`), preserving compatibility with existing single-repo or pre-upgrade objects.
+
 ## Retention and Cleanup
 
 Eval-runner provides two complementary mechanisms to clean up Comparisons and Runs:
