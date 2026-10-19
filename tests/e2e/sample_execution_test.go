@@ -68,7 +68,7 @@ spec:
     url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
-  limit: 2
+  limit: 8
 `, runName, commit)
 
 		harness.KubectlApplyContent(manifest)
@@ -97,6 +97,8 @@ spec:
 							if task.SamplesDone > 0 && !observedProgress {
 								observedProgress = true
 								progressObservedAt = time.Since(firstSeenRunning)
+								t.Logf("Observed live task progress: task=%s, phase=%s, samplesDone=%d, samplesPlanned=%d, lastProgressAt=%v after %v",
+									task.ID, task.Phase, task.SamplesDone, task.SamplesPlanned, task.LastProgressAt, progressObservedAt)
 							}
 						}
 					}
@@ -120,8 +122,8 @@ spec:
 		t.Logf("Live progress observed: %v (progress observed after %v of task running; task running duration: %v, total run duration: %v)",
 			observedProgress, progressObservedAt, taskRunningDuration, totalDuration)
 
-		if !observedProgress && taskRunningDuration >= 60*time.Second {
-			t.Errorf("expected samplesDone > 0 while task is Running for tasks running >= 60s (task running duration %v, total run duration %v)", taskRunningDuration, totalDuration)
+		if !observedProgress {
+			t.Errorf("expected a poll to observe task with phase: Running and samplesDone > 0 (task running duration %v, total run duration %v)", taskRunningDuration, totalDuration)
 		}
 
 		if run.Status.Discovery == nil {

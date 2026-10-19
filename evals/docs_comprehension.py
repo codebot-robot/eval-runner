@@ -14,11 +14,12 @@
 
 """Documentation comprehension evaluation tasks for eval-runner."""
 
+import asyncio
 from pathlib import Path
 from inspect_ai import Task, task
 from inspect_ai.dataset import FieldSpec, json_dataset
 from inspect_ai.scorer import choice
-from inspect_ai.solver import multiple_choice, system_message
+from inspect_ai.solver import Generate, TaskState, multiple_choice, solver, system_message
 
 # Recommended default model when running with an API key
 DEFAULT_MODEL = "google/gemini-3.5-flash-lite"
@@ -26,6 +27,22 @@ DEFAULT_MODEL = "google/gemini-3.5-flash-lite"
 CURRENT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CURRENT_DIR.parent
 DATASET_PATH = CURRENT_DIR / "datasets" / "readme_questions.jsonl"
+
+_mockllm_delay_lock = asyncio.Lock()
+
+
+@solver
+def _mockllm_delay():
+    """Adds a small paced delay for mockllm so inspect eval flushes samples incrementally,
+    allowing the progress poller in e2e to reliably observe mid-task samplesDone ticks."""
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        m = _resolve_model()
+        if "mockllm" in str(m).lower():
+            async with _mockllm_delay_lock:
+                await asyncio.sleep(0.3)
+        return state
+
+    return solve
 
 
 def _resolve_model():
@@ -107,6 +124,7 @@ Answer only from the provided documents. If an answer cannot be determined from 
         model=_resolve_model(),
         dataset=_load_dataset(),
         solver=[
+            _mockllm_delay(),
             system_message(sys_prompt),
             multiple_choice(),
         ],
@@ -124,6 +142,7 @@ def readme_comprehension_blind() -> Task:
         model=_resolve_model(),
         dataset=_load_dataset(),
         solver=[
+            _mockllm_delay(),
             system_message(sys_prompt),
             multiple_choice(),
         ],

@@ -497,7 +497,7 @@ func (r *RunReconciler) minProgressWriteInterval() time.Duration {
 	if r.MinProgressWriteInterval > 0 {
 		return r.MinProgressWriteInterval
 	}
-	return DefaultMinProgressWriteInterval
+	return r.pollProgressInterval()
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {

@@ -112,7 +112,7 @@ fi
 echo "PASS: dev/tasks/deploy performs no file rewrites on runner-deployment.yaml."
 
 echo "=== 4. Testing that runner-deployment.yaml contains no deployment-specific flags ==="
-for flag in "--artifact-bucket" "--discovery-deadline" "--execution-deadline" "--max-parallel-tasks" "--model-secret" "--sample-runner-image"; do
+for flag in "--artifact-bucket" "--discovery-deadline" "--execution-deadline" "--max-parallel-tasks" "--model-secret" "--poll-progress-interval" "--sample-runner-image"; do
   if grep -q -- "${flag}" "${REPO_ROOT}/k8s/runner-deployment.yaml"; then
     echo "FAIL: k8s/runner-deployment.yaml contains deployment-specific flag '${flag}'!" >&2
     exit 1
