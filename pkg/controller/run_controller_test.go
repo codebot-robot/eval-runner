@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -6394,7 +6395,7 @@ func TestInspectEvalArgs(t *testing.T) {
 			Model: "mockllm/model",
 		}
 		args := InspectEvalArgs(task, spec)
-		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json"}
+		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json", "--log-buffer", "1"}
 		if !slices.Equal(args, expected) {
 			t.Errorf("expected %v, got %v", expected, args)
 		}
@@ -6406,7 +6407,7 @@ func TestInspectEvalArgs(t *testing.T) {
 			Limit: intPtr(10),
 		}
 		args := InspectEvalArgs(task, spec)
-		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json", "--limit", "10"}
+		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json", "--log-buffer", "1", "--limit", "10"}
 		if !slices.Equal(args, expected) {
 			t.Errorf("expected %v, got %v", expected, args)
 		}
@@ -6418,7 +6419,7 @@ func TestInspectEvalArgs(t *testing.T) {
 			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
 		}
 		args := InspectEvalArgs(task, spec)
-		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json", "--limit", "9-16"}
+		expected := []string{"inspect", "eval", "docs_comprehension.py@readme_comprehension", "--model", "mockllm/model", "--log-dir", "/out", "--log-format", "json", "--log-buffer", "1", "--limit", "9-16"}
 		if !slices.Equal(args, expected) {
 			t.Errorf("expected %v, got %v", expected, args)
 		}
@@ -6505,5 +6506,623 @@ func TestReconcileInvalidRunSpecFails(t *testing.T) {
 	}
 	if !strings.Contains(updated.Status.Message, "limit and sampleRange are mutually exclusive") {
 		t.Errorf("Expected message to contain exclusivity error, got: %s", updated.Status.Message)
+	}
+}
+
+func TestLiveTaskProgressPolling_SuccessiveSnapshots(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "progress-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+			Limit: func() *int { i := 10; return &i }(),
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:             "task-1",
+					Phase:          v1alpha1.TaskPhaseRunning,
+					SamplesPlanned: 10,
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(&v1alpha1.Run{}).
+		Build()
+
+	startTime := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	var currentTime = startTime
+	var timeMu sync.Mutex
+
+	nowFn := func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return currentTime
+	}
+
+	advanceTime := func(d time.Duration) {
+		timeMu.Lock()
+		currentTime = currentTime.Add(d)
+		timeMu.Unlock()
+	}
+
+	var currentLog []byte
+	var logMu sync.Mutex
+	setLog := func(samples int) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		var sampleItems []string
+		for i := 1; i <= samples; i++ {
+			sampleItems = append(sampleItems, fmt.Sprintf(`{"id": %d}`, i))
+		}
+		currentLog = []byte(fmt.Sprintf(`{
+			"version": 2,
+			"status": "started",
+			"eval": {"dataset": {"samples": 10}},
+			"samples": [%s]
+		}`, strings.Join(sampleItems, ",")))
+	}
+
+	// Start with 0 samples
+	setLog(0)
+
+	fc := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(config.Command) > 0 && config.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "log_20261019.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			return currentLog, nil
+		},
+	}
+
+	r := &RunReconciler{
+		Client:               cl,
+		Scheme:               scheme,
+		Now:                  nowFn,
+		PollProgressInterval: 10 * time.Millisecond,
+	}
+
+	stopCh := make(chan struct{})
+	pollerDone := make(chan struct{})
+
+	go func() {
+		defer close(pollerDone)
+		r.pollTaskProgress(t.Context(), fc, run, "task-1", nil, 10*time.Millisecond, startTime, stopCh)
+	}()
+
+	// 1. Initial snapshot with 0 samples: wait 50ms, verify no write without change
+	time.Sleep(50 * time.Millisecond)
+	var r1 v1alpha1.Run
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if r1.Status.Tasks[0].SamplesDone != 0 {
+		t.Errorf("expected 0 samplesDone initially, got %d", r1.Status.Tasks[0].SamplesDone)
+	}
+
+	// 2. Set snapshot to 2 samples, but advance time only 5 seconds (less than 10s write limit)
+	advanceTime(5 * time.Second)
+	setLog(2)
+	time.Sleep(50 * time.Millisecond)
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if r1.Status.Tasks[0].SamplesDone != 0 {
+		t.Errorf("expected at most one write per 10s: should NOT write after only 5s, got %d", r1.Status.Tasks[0].SamplesDone)
+	}
+
+	// 3. Now advance time by another 5 seconds (total 10s since start): write should happen!
+	advanceTime(5 * time.Second)
+	time.Sleep(50 * time.Millisecond)
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if r1.Status.Tasks[0].SamplesDone != 2 {
+		t.Fatalf("expected 2 samplesDone after 10s, got %d", r1.Status.Tasks[0].SamplesDone)
+	}
+	if r1.Status.Tasks[0].LastProgressAt == nil {
+		t.Fatalf("expected lastProgressAt to be set")
+	}
+
+	// 4. Leave snapshot at 2 samples, advance time by 15s. No write without change!
+	advanceTime(15 * time.Second)
+	firstProgressTime := r1.Status.Tasks[0].LastProgressAt
+	time.Sleep(50 * time.Millisecond)
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if !r1.Status.Tasks[0].LastProgressAt.Equal(firstProgressTime) {
+		t.Errorf("expected no write without change, but lastProgressAt was updated")
+	}
+
+	// 5. Test monotonicity: snapshot drops to 1 sample (e.g. truncated / rewritten). Poller must ignore it!
+	advanceTime(15 * time.Second)
+	setLog(1)
+	time.Sleep(50 * time.Millisecond)
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if r1.Status.Tasks[0].SamplesDone != 2 {
+		t.Errorf("expected monotonicity preserved (still 2), got %d", r1.Status.Tasks[0].SamplesDone)
+	}
+
+	// 6. Set snapshot to 5 samples. Total time advanced > 10s: write should happen!
+	setLog(5)
+	time.Sleep(50 * time.Millisecond)
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if r1.Status.Tasks[0].SamplesDone != 5 {
+		t.Fatalf("expected 5 samplesDone, got %d", r1.Status.Tasks[0].SamplesDone)
+	}
+
+	// 7. Verify poller exits when stopCh closed
+	close(stopCh)
+	select {
+	case <-pollerDone:
+		// Exited cleanly!
+	case <-time.After(2 * time.Second):
+		t.Fatal("poller failed to exit after stopCh closed")
+	}
+}
+
+func TestLiveTaskProgressPolling_FailureModes(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "failure-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:             "task-1",
+					Phase:          v1alpha1.TaskPhaseRunning,
+					SamplesDone:    3,
+					SamplesPlanned: 10,
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(&v1alpha1.Run{}).
+		Build()
+
+	startTime := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+
+	t.Run("404_And_ParseError_KeepLastValue", func(t *testing.T) {
+		stopCh := make(chan struct{})
+		pollerDone := make(chan struct{})
+		callCount := 0
+
+		fc := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "log.json\n"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				callCount++
+				if callCount == 1 {
+					return nil, fmt.Errorf("file %q not found (HTTP 404)", path)
+				}
+				return []byte("{invalid-json"), nil
+			},
+		}
+
+		r := &RunReconciler{
+			Client:               cl,
+			Scheme:               scheme,
+			Now:                  func() time.Time { return startTime.Add(20 * time.Second) },
+			PollProgressInterval: 10 * time.Millisecond,
+		}
+
+		go func() {
+			defer close(pollerDone)
+			r.pollTaskProgress(t.Context(), fc, run, "task-1", nil, 10*time.Millisecond, startTime, stopCh)
+		}()
+
+		time.Sleep(50 * time.Millisecond)
+		close(stopCh)
+		<-pollerDone
+
+		var updated v1alpha1.Run
+		_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &updated)
+		if updated.Status.Tasks[0].SamplesDone != 3 {
+			t.Errorf("expected samplesDone to stay at 3, got %d", updated.Status.Tasks[0].SamplesDone)
+		}
+	})
+
+	t.Run("LimitError_StopsPolling", func(t *testing.T) {
+		stopCh := make(chan struct{})
+		pollerDone := make(chan struct{})
+
+		fc := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "log.json\n"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				return nil, &discovery.LimitError{
+					Limit:  10 * 1024 * 1024,
+					Stream: "body",
+				}
+			},
+		}
+
+		r := &RunReconciler{
+			Client:               cl,
+			Scheme:               scheme,
+			Now:                  func() time.Time { return startTime.Add(20 * time.Second) },
+			PollProgressInterval: 10 * time.Millisecond,
+		}
+
+		go func() {
+			defer close(pollerDone)
+			r.pollTaskProgress(t.Context(), fc, run, "task-1", nil, 10*time.Millisecond, startTime, stopCh)
+		}()
+
+		select {
+		case <-pollerDone:
+			// Successfully stopped polling upon encountering LimitError!
+		case <-time.After(1 * time.Second):
+			close(stopCh)
+			t.Fatal("expected poller to exit on LimitError, but it kept running")
+		}
+
+		var updated v1alpha1.Run
+		_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &updated)
+		if updated.Status.Tasks[0].SamplesDone != 3 {
+			t.Errorf("expected samplesDone to keep last value 3, got %d", updated.Status.Tasks[0].SamplesDone)
+		}
+	})
+}
+
+func TestReconcileSampleExecution_LiveProgressPollerLifecycle(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-1", Spec: "eval.py@task1", Workdir: "evals"},
+		},
+	}
+
+	limit := 5
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-poller",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+			Limit: &limit,
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending, SamplesPlanned: 5},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	startTime := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	var currentTime = startTime
+	var timeMu sync.Mutex
+
+	nowFn := func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return currentTime
+	}
+
+	intermediateLog := `{
+		"version": 2,
+		"status": "started",
+		"eval": {"task": "task-1", "scorers": [{"name": "choice"}], "dataset": {"samples": 5}},
+		"samples": [
+			{"id": 1, "scores": {"choice": {"value": "C"}}},
+			{"id": 2, "scores": {"choice": {"value": "C"}}}
+		]
+	}`
+
+	finalLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "task-1", "scorers": [{"name": "choice"}], "dataset": {"samples": 5}},
+		"samples": [
+			{"id": 1, "scores": {"choice": {"value": "C"}}},
+			{"id": 2, "scores": {"choice": {"value": "C"}}},
+			{"id": 3, "scores": {"choice": {"value": "C"}}},
+			{"id": 4, "scores": {"choice": {"value": "I"}}},
+			{"id": 5, "scores": {"choice": {"value": "C"}}}
+		]
+	}`
+
+	evalExecuting := make(chan struct{})
+	continueEval := make(chan struct{})
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(config.Command) > 0 && config.Command[0] == "inspect" {
+				close(evalExecuting)
+				<-continueEval
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			if len(config.Command) > 0 && config.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "sample_log.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			select {
+			case <-continueEval:
+				return []byte(finalLog), nil
+			default:
+				return []byte(intermediateLog), nil
+			}
+		},
+	}
+
+	reconciler := &RunReconciler{
+		Client:               cl,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
+		Now:                  nowFn,
+		PollProgressInterval: 10 * time.Millisecond,
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-poller"}}
+
+	// Turn 1: Start pending task and create sandbox
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+	_ = res
+
+	var sbList sandboxv1beta1.SandboxList
+	if err := cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox")); err != nil {
+		t.Fatalf("Failed to list sandboxes: %v", err)
+	}
+	taskSB := sbList.Items[0]
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSB.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Turn 2 in background: Reconcile will block in inspect eval
+	reconcileDone := make(chan struct{})
+	go func() {
+		defer close(reconcileDone)
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Errorf("Turn 2 error: %v", err)
+		}
+	}()
+
+	// Wait until inspect eval begins
+	<-evalExecuting
+
+	// Advance time past 10s so poller can write status
+	timeMu.Lock()
+	currentTime = currentTime.Add(15 * time.Second)
+	timeMu.Unlock()
+
+	// Wait for poller to perform live status update
+	time.Sleep(50 * time.Millisecond)
+	var midRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &midRun)
+	if midRun.Status.Tasks[0].SamplesDone != 2 {
+		t.Errorf("expected live samplesDone to be 2 mid-execution, got %d", midRun.Status.Tasks[0].SamplesDone)
+	}
+	if midRun.Status.Tasks[0].SamplesPlanned != 5 {
+		t.Errorf("expected samplesPlanned to be 5, got %d", midRun.Status.Tasks[0].SamplesPlanned)
+	}
+
+	// Let inspect eval finish
+	close(continueEval)
+	<-reconcileDone
+
+	// Check final run status after execution
+	var completedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &completedRun)
+	if completedRun.Status.Tasks[0].SamplesDone != 5 {
+		t.Errorf("expected final samplesDone == samples == 5, got %d", completedRun.Status.Tasks[0].SamplesDone)
+	}
+	if completedRun.Status.Tasks[0].Samples != 5 {
+		t.Errorf("expected final samples == 5, got %d", completedRun.Status.Tasks[0].Samples)
+	}
+}
+
+func TestFailedTaskPreservesSamplesDone(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-fail", Spec: "eval.py@task_fail", Workdir: "evals"},
+		},
+	}
+
+	limit := 10
+	progressTime := metav1.NewTime(time.Date(2026, 10, 19, 12, 0, 10, 0, time.UTC))
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-fail-preserves",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+			Limit: &limit,
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-fail"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:             "task-fail",
+					Phase:          v1alpha1.TaskPhaseRunning,
+					SamplesDone:    7,
+					SamplesPlanned: 10,
+					LastProgressAt: &progressTime,
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(config.Command) > 0 && config.Command[0] == "inspect" {
+				return &sandboxclient.ExecuteResult{ExitCode: 1, Stderr: "inspect crashed mid-eval"}, nil
+			}
+			if len(config.Command) > 0 && config.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "sample_log.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return nil, fmt.Errorf("no log")
+		},
+	}
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	// Create ready pod and sandbox for running task
+	sbName := discovery.TaskSandboxNameForRun(run.Name, "task-fail")
+	sb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbName,
+			Namespace: "eval-runner-sandbox",
+			Labels: map[string]string{
+				discovery.LabelRunName:      run.Name,
+				discovery.LabelRunNamespace: run.Namespace,
+				discovery.LabelRole:         discovery.RoleSample,
+			},
+			Annotations: map[string]string{
+				discovery.AnnotationTaskID: "task-fail",
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), sb)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-fail-preserves"}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("expected task to be Failed, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+	// Assert samplesDone stays 7 (preserved from live progress) and lastProgressAt remains set!
+	if updatedRun.Status.Tasks[0].SamplesDone != 7 {
+		t.Errorf("expected failed task to preserve samplesDone=7, got %d", updatedRun.Status.Tasks[0].SamplesDone)
+	}
+	if updatedRun.Status.Tasks[0].LastProgressAt == nil || !updatedRun.Status.Tasks[0].LastProgressAt.Equal(&progressTime) {
+		t.Errorf("expected failed task to preserve lastProgressAt=%v, got %v", progressTime, updatedRun.Status.Tasks[0].LastProgressAt)
+	}
+}
+
+func TestComputeSamplesPlanned_Clamping(t *testing.T) {
+	limit50 := 50
+	limit10 := 10
+
+	// 1. Limit 50 exceeds dataset size 21 -> clamped to 21
+	if got := computeSamplesPlanned(nil, &limit50, 21); got != 21 {
+		t.Errorf("expected limit 50 clamped to dataset size 21, got %d", got)
+	}
+
+	// 2. Limit 10 within dataset size 21 -> 10
+	if got := computeSamplesPlanned(nil, &limit10, 21); got != 10 {
+		t.Errorf("expected limit 10, got %d", got)
+	}
+
+	// 3. Limit 50 with dataset size unknown (0) -> 50
+	if got := computeSamplesPlanned(nil, &limit50, 0); got != 50 {
+		t.Errorf("expected limit 50 when dataset unknown, got %d", got)
+	}
+
+	// 4. SampleRange [1, 30] (width 30) exceeds dataset size 21 -> clamped to 21
+	sr := &v1alpha1.SampleRange{Start: 1, End: 30}
+	if got := computeSamplesPlanned(sr, nil, 21); got != 21 {
+		t.Errorf("expected range width 30 clamped to dataset size 21, got %d", got)
+	}
+
+	// 5. No limit or range, dataset size 21 -> 21
+	if got := computeSamplesPlanned(nil, nil, 21); got != 21 {
+		t.Errorf("expected dataset size 21 when no limit/range, got %d", got)
 	}
 }

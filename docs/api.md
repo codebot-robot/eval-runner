@@ -159,6 +159,9 @@ status:
 | `latency` | `*TaskLatency` | Sample latency percentiles (`p50`, `p95` in seconds) aggregated across evaluated samples. |
 | `costUSD` | `*float64` | Estimated task evaluation cost in USD from model prices when known (omitted otherwise). |
 | `possibleSamples` | `int` | Total dataset size (possible samples) when known from the Inspect log (`eval.dataset.samples`). |
+| `samplesDone` | `int` | Number of samples completed so far while the task is running. |
+| `samplesPlanned` | `int` | Expected total number of samples to be evaluated for this task. |
+| `lastProgressAt` | `*metav1.Time` | Timestamp when `samplesDone` was last updated. |
 
 ### TaskLatency
 

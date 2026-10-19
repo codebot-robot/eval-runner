@@ -198,6 +198,12 @@ a:hover { text-decoration: underline; }
 .cibar-01 .range { position: absolute; top: 11px; height: 4px; border-radius: 2px; background: var(--indigo); }
 .cibar-01 .pt { position: absolute; top: 6px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-sizing: border-box; background: var(--indigo); }
 
+/* Live Task Progress */
+.progress-container { display: flex; align-items: center; gap: 8px; }
+.progress-bar { position: relative; height: 8px; width: 140px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--teal); border-radius: 999px; }
+.progress-text { font-size: 12px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+
 table.ci { width: 100%; border-collapse: collapse; font-size: 15px; }
 table.ci th { text-align: left; color: var(--muted); font-weight: 500; font-size: 13px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 table.ci td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
@@ -303,6 +309,9 @@ const runDetailTemplate = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ .Name }} · Run · eval-runner</title>
+  {{- if eq .Phase "Running" }}
+  <meta http-equiv="refresh" content="15">
+  {{- end }}
   <style>` + baseCSS + `</style>
 </head>
 <body>
@@ -400,6 +409,13 @@ const runDetailTemplate = `
                     <div class="tick-100"></div>
                     <div class="range" style="left:{{ printf "%.1f" .CILeftPx }}px; width:{{ printf "%.1f" .CIWidthPx }}px"></div>
                     <div class="pt" style="left:{{ printf "%.1f" .CIDotPx }}px"></div>
+                  </div>
+                  {{ else if eq .Phase "Running" }}
+                  <div class="progress-container">
+                    <div class="progress-bar" title="{{ .ProgressText }}">
+                      <div class="progress-fill" style="width:{{ printf "%.1f" .ProgressPct }}%"></div>
+                    </div>
+                    <span class="progress-text">{{ .ProgressText }}</span>
                   </div>
                   {{ else }}
                   <span style="color:var(--muted)">—</span>

@@ -247,7 +247,23 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		tasks := "—"
 		samples := 0
 		rates := ""
-		if run.Status.Summary != nil {
+		if run.Status.Phase == v1alpha1.RunPhaseRunning {
+			runningTasks := 0
+			for _, t := range run.Status.Tasks {
+				if t.Phase == v1alpha1.TaskPhaseRunning {
+					runningTasks++
+				}
+			}
+			totalTasks := len(run.Status.Tasks)
+			if totalTasks == 0 && run.Status.Discovery != nil {
+				totalTasks = run.Status.Discovery.TaskCount
+			}
+			tasks = fmt.Sprintf("%d/%d tasks running", runningTasks, totalTasks)
+			if run.Status.Summary != nil {
+				samples = run.Status.Summary.TotalSamples
+				rates = run.Status.Summary.Rates
+			}
+		} else if run.Status.Summary != nil {
 			if run.Status.Summary.Tasks != "" {
 				tasks = run.Status.Summary.Tasks
 			}
@@ -378,23 +394,58 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			samplesLink = BuildTaskSamplesListLink(ns, name, task.ID)
 		}
 
+		samplesDone := task.SamplesDone
+		samplesPlanned := task.SamplesPlanned
+		if samplesPlanned == 0 {
+			if task.SampleRange != nil {
+				samplesPlanned = task.SampleRange.End - task.SampleRange.Start + 1
+			} else if run.Spec.SampleRange != nil {
+				samplesPlanned = run.Spec.SampleRange.End - run.Spec.SampleRange.Start + 1
+			} else if run.Spec.Limit != nil {
+				samplesPlanned = *run.Spec.Limit
+			} else if task.PossibleSamples > 0 {
+				samplesPlanned = task.PossibleSamples
+			}
+		}
+		if task.PossibleSamples > 0 && task.PossibleSamples < samplesPlanned {
+			samplesPlanned = task.PossibleSamples
+		}
+
+		var progressText string
+		var progressPct float64
+		if task.Phase == v1alpha1.TaskPhaseRunning {
+			if samplesPlanned > 0 {
+				progressText = fmt.Sprintf("%d of %d samples", samplesDone, samplesPlanned)
+				progressPct = float64(samplesDone) / float64(samplesPlanned) * 100.0
+				if progressPct > 100.0 {
+					progressPct = 100.0
+				}
+			} else {
+				progressText = fmt.Sprintf("%d samples", samplesDone)
+			}
+		}
+
 		taskRows = append(taskRows, RunTaskRow{
-			ID:          task.ID,
-			Phase:       task.Phase,
-			PhaseChip:   taskPhaseChipClass(task.Phase),
-			RateStr:     rateStr,
-			HasCI:       hasCI,
-			CILeftPx:    leftPx,
-			CIWidthPx:   widthPx,
-			CIDotPx:     dotPx,
-			CILabel:     ciLabel,
-			Samples:     task.Samples,
-			Successes:   task.Successes,
-			Method:      method,
-			LogPath:     task.LogPath,
-			SamplesLink: samplesLink,
-			Message:     task.Message,
-			SampleRange: taskSampleRange,
+			ID:             task.ID,
+			Phase:          task.Phase,
+			PhaseChip:      taskPhaseChipClass(task.Phase),
+			RateStr:        rateStr,
+			HasCI:          hasCI,
+			CILeftPx:       leftPx,
+			CIWidthPx:      widthPx,
+			CIDotPx:        dotPx,
+			CILabel:        ciLabel,
+			Samples:        task.Samples,
+			Successes:      task.Successes,
+			Method:         method,
+			LogPath:        task.LogPath,
+			SamplesLink:    samplesLink,
+			Message:        task.Message,
+			SampleRange:    taskSampleRange,
+			SamplesDone:    samplesDone,
+			SamplesPlanned: samplesPlanned,
+			ProgressPct:    progressPct,
+			ProgressText:   progressText,
 		})
 	}
 

@@ -638,6 +638,79 @@ func TestTemplateRenderingComparisonTableGolden(t *testing.T) {
 	assertGolden(t, "comparison_table.golden.html", buf.String())
 }
 
+func TestTemplateRenderingRunDetail_RunningProgress(t *testing.T) {
+	view := sampleRunDetailView()
+	view.Phase = v1alpha1.RunPhaseRunning
+	view.Tasks = []RunTaskRow{
+		{
+			ID:             "triage/runbook_lookup",
+			Phase:          v1alpha1.TaskPhaseRunning,
+			PhaseChip:      "warn",
+			RateStr:        "—",
+			SamplesDone:    8,
+			SamplesPlanned: 96,
+			ProgressPct:    8.333333,
+			ProgressText:   "8 of 96 samples",
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmplRunDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute run detail template: %v", err)
+	}
+
+	html := buf.String()
+	if !strings.Contains(html, `<meta http-equiv="refresh" content="15">`) {
+		t.Errorf("expected meta refresh on running run page, got:\n%s", html)
+	}
+	if !strings.Contains(html, "8 of 96 samples") {
+		t.Errorf("expected '8 of 96 samples' in rendered HTML, got:\n%s", html)
+	}
+	if !strings.Contains(html, `class="progress-bar"`) {
+		t.Errorf("expected progress-bar in rendered HTML")
+	}
+	if !strings.Contains(html, `class="progress-fill"`) {
+		t.Errorf("expected progress-fill in rendered HTML")
+	}
+}
+
+func TestTemplateRenderingRunDetail_CompletedNoMetaRefresh(t *testing.T) {
+	view := sampleRunDetailView()
+	view.Phase = v1alpha1.RunPhaseCompleted
+
+	var buf bytes.Buffer
+	if err := tmplRunDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute run detail template: %v", err)
+	}
+
+	html := buf.String()
+	if strings.Contains(html, `http-equiv="refresh"`) {
+		t.Errorf("expected NO meta refresh on completed run page")
+	}
+}
+
+func TestTemplateRenderingRunsList_RunningTasks(t *testing.T) {
+	view := sampleRunsListView()
+	view.Runs = append(view.Runs, RunListItem{
+		Name:      "running-run",
+		Namespace: "eval-runner",
+		Phase:     "Running",
+		PhaseChip: "warn",
+		Tasks:     "1/2 tasks running",
+		Link:      "/runs/eval-runner/running-run",
+	})
+
+	var buf bytes.Buffer
+	if err := tmplRunsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute runs list template: %v", err)
+	}
+
+	html := buf.String()
+	if !strings.Contains(html, "1/2 tasks running") {
+		t.Errorf("expected '1/2 tasks running' in rendered HTML, got:\n%s", html)
+	}
+}
+
 func TestEscapingHostileFixtures(t *testing.T) {
 	const (
 		hostileScript = `<script>alert('pwned')</script>`

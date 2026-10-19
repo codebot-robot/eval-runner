@@ -72,6 +72,12 @@ const (
 
 	// DefaultTaskGracePeriod is the default grace period before treating absence of a running task's sandbox as a failure.
 	DefaultTaskGracePeriod = 30 * time.Second
+
+	// DefaultPollProgressInterval is the default interval between task progress polling attempts (10s).
+	DefaultPollProgressInterval = 10 * time.Second
+
+	// DefaultMinProgressWriteInterval is the minimum duration between live progress status writes for a task (10s).
+	DefaultMinProgressWriteInterval = 10 * time.Second
 )
 
 var (
@@ -83,6 +89,9 @@ var (
 
 	// ErrNeedsRediscovery indicates the manifest is missing from storage or non-durable sink lost it.
 	ErrNeedsRediscovery = errors.New("manifest missing or non-durable sink; needs rediscovery")
+
+	// logFileRegex matches valid Inspect JSON log filenames.
+	logFileRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.json$`)
 )
 
 // DefaultDiscoveryRetryBackoff defines the default backoff intervals between clone retry attempts.
@@ -157,6 +166,12 @@ type RunReconciler struct {
 	// MaxParallelTasks is the maximum number of task sandboxes to run concurrently.
 	// Defaults to DefaultMaxParallelTasks (4) if <= 0.
 	MaxParallelTasks int
+
+	// PollProgressInterval overrides the interval between task progress polling attempts (default: 10s).
+	PollProgressInterval time.Duration
+
+	// MinProgressWriteInterval overrides the minimum interval between progress status writes (default: 10s).
+	MinProgressWriteInterval time.Duration
 
 	// ModelSecret is the name of a Secret in SandboxNamespace containing model credentials.
 	ModelSecret string
@@ -469,6 +484,20 @@ func (r *RunReconciler) maxParallelTasks() int {
 		return r.MaxParallelTasks
 	}
 	return DefaultMaxParallelTasks
+}
+
+func (r *RunReconciler) pollProgressInterval() time.Duration {
+	if r.PollProgressInterval > 0 {
+		return r.PollProgressInterval
+	}
+	return DefaultPollProgressInterval
+}
+
+func (r *RunReconciler) minProgressWriteInterval() time.Duration {
+	if r.MinProgressWriteInterval > 0 {
+		return r.MinProgressWriteInterval
+	}
+	return DefaultMinProgressWriteInterval
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
@@ -1376,52 +1405,58 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 		}
 	}
 	effRange := EffectiveSampleRange(spec)
+	planned := computeSamplesPlanned(effRange, spec.Limit, 0)
 
 	if len(spec.Tasks) > 0 {
 		for _, taskID := range spec.Tasks {
 			task, exists := manifestMap[taskID]
 			if !exists {
 				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:          taskID,
-					Phase:       v1alpha1.TaskPhaseFailed,
-					Message:     "task not found in manifest",
-					SampleRange: effRange,
+					ID:             taskID,
+					Phase:          v1alpha1.TaskPhaseFailed,
+					Message:        "task not found in manifest",
+					SampleRange:    effRange,
+					SamplesPlanned: planned,
 				})
 				continue
 			}
 
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:          taskID,
-					Phase:       v1alpha1.TaskPhaseFailed,
-					Message:     "resources not supported yet",
-					SampleRange: effRange,
+					ID:             taskID,
+					Phase:          v1alpha1.TaskPhaseFailed,
+					Message:        "resources not supported yet",
+					SampleRange:    effRange,
+					SamplesPlanned: planned,
 				})
 				continue
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
-				ID:          taskID,
-				Phase:       v1alpha1.TaskPhasePending,
-				SampleRange: effRange,
+				ID:             taskID,
+				Phase:          v1alpha1.TaskPhasePending,
+				SampleRange:    effRange,
+				SamplesPlanned: planned,
 			})
 		}
 	} else if manifest != nil {
 		for _, task := range manifest.Tasks {
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:          task.ID,
-					Phase:       v1alpha1.TaskPhaseFailed,
-					Message:     "resources not supported yet",
-					SampleRange: effRange,
+					ID:             task.ID,
+					Phase:          v1alpha1.TaskPhaseFailed,
+					Message:        "resources not supported yet",
+					SampleRange:    effRange,
+					SamplesPlanned: planned,
 				})
 				continue
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
-				ID:          task.ID,
-				Phase:       v1alpha1.TaskPhasePending,
-				SampleRange: effRange,
+				ID:             task.ID,
+				Phase:          v1alpha1.TaskPhasePending,
+				SampleRange:    effRange,
+				SamplesPlanned: planned,
 			})
 		}
 	}
@@ -1883,6 +1918,21 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].Latency = res.latency
 				status.Tasks[i].CostUSD = res.costUSD
 				status.Tasks[i].PossibleSamples = res.possibleSamples
+				finalSamplesDone := res.samples
+				if res.phase != v1alpha1.TaskPhaseCompleted && status.Tasks[i].SamplesDone > finalSamplesDone {
+					finalSamplesDone = status.Tasks[i].SamplesDone
+				}
+				if finalSamplesDone > status.Tasks[i].SamplesDone {
+					nowMeta := metav1.NewTime(r.now())
+					status.Tasks[i].LastProgressAt = &nowMeta
+				}
+				status.Tasks[i].SamplesDone = finalSamplesDone
+
+				if res.samplesPlanned > 0 {
+					status.Tasks[i].SamplesPlanned = res.samplesPlanned
+				} else if status.Tasks[i].SamplesPlanned == 0 {
+					status.Tasks[i].SamplesPlanned = computeSamplesPlanned(res.sampleRange, run.Spec.Limit, res.possibleSamples)
+				}
 				if res.sampleRange != nil {
 					status.Tasks[i].SampleRange = res.sampleRange
 				} else if status.Tasks[i].SampleRange == nil {
@@ -1934,6 +1984,8 @@ type taskExecutionResult struct {
 	latency         *v1alpha1.TaskLatency
 	costUSD         *float64
 	possibleSamples int
+	samplesDone     int
+	samplesPlanned  int
 	message         string
 	logPath         string
 	sampleRange     *v1alpha1.SampleRange
@@ -2128,10 +2180,24 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	inspectCmd := InspectEvalArgs(*targetTask, run.Spec)
 
 	logger.Info("Starting task step 3: inspect eval", "command", inspectCmd, "cwd", cwd)
+
+	pollInterval := r.pollProgressInterval()
+	stopPoller := make(chan struct{})
+	var pollerWg sync.WaitGroup
+	pollerWg.Add(1)
+
+	go func() {
+		defer pollerWg.Done()
+		r.pollTaskProgress(execCtx, sbClient, run, taskID, effRange, pollInterval, startTime, stopPoller)
+	}()
+
 	inspectRes, inspectErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
 		Command: inspectCmd,
 		Cwd:     cwd,
 	})
+
+	close(stopPoller)
+	pollerWg.Wait()
 	if inspectErr != nil || inspectRes == nil || inspectRes.ExitCode != 0 {
 		if status.Code(inspectErr) == codes.Unauthenticated {
 			msg := fmt.Sprintf("step inspect eval failed: unauthenticated: %v", inspectErr)
@@ -2192,7 +2258,6 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}
 
-	logFileRegex := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.json$`)
 	var validFiles []string
 	for _, raw := range strings.Fields(lsRes.Stdout) {
 		base := filepath.Base(raw)
@@ -2357,6 +2422,8 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}
 
+	planned := computeSamplesPlanned(effRange, run.Spec.Limit, datasetSamples)
+
 	return taskExecutionResult{
 		taskID:          taskID,
 		phase:           v1alpha1.TaskPhaseCompleted,
@@ -2369,8 +2436,125 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		latency:         v1Latency,
 		costUSD:         costUSD,
 		possibleSamples: datasetSamples,
+		samplesDone:     agg.Samples,
+		samplesPlanned:  planned,
 		logPath:         logPath,
 		sampleRange:     effRange,
+	}
+}
+
+func (r *RunReconciler) pollTaskProgress(
+	ctx context.Context,
+	sbClient sandboxclient.Client,
+	run *v1alpha1.Run,
+	taskID string,
+	effRange *v1alpha1.SampleRange,
+	pollInterval time.Duration,
+	startTime time.Time,
+	stopCh <-chan struct{},
+) {
+	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	var lastWrittenSamplesDone int
+	lastWriteTime := startTime
+	for _, t := range run.Status.Tasks {
+		if t.ID == taskID {
+			lastWrittenSamplesDone = t.SamplesDone
+			if t.LastProgressAt != nil {
+				lastWriteTime = t.LastProgressAt.Time
+			}
+			break
+		}
+	}
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Step 1: ls /out via Execute
+			lsRes, lsErr := sbClient.Execute(ctx, sandboxclient.ProcessConfig{
+				Command: []string{"ls", "/out"},
+			})
+			if lsErr != nil || lsRes == nil || lsRes.ExitCode != 0 {
+				logger.V(1).Info("poller ls /out returned error or non-zero", "error", lsErr)
+				continue
+			}
+
+			// Filter for valid json log files
+			var validFiles []string
+			for _, raw := range strings.Fields(lsRes.Stdout) {
+				base := filepath.Base(raw)
+				if logFileRegex.MatchString(base) && !strings.Contains(base, "..") && !strings.Contains(base, "/") && !strings.Contains(base, "\\") {
+					validFiles = append(validFiles, base)
+				}
+			}
+			if len(validFiles) == 0 {
+				// 404 before first flush: skip
+				continue
+			}
+			sort.Sort(sort.Reverse(sort.StringSlice(validFiles)))
+			logFilename := validFiles[0]
+
+			// Step 2: ReadFile newest json log
+			logBytes, readErr := sbClient.ReadFile(ctx, filepath.Join("/out", logFilename))
+			if readErr != nil {
+				var limitErr *discovery.LimitError
+				if errors.As(readErr, &limitErr) {
+					// LimitError (over 10 MiB): stop polling and keep the last value
+					logger.V(1).Info("poller log exceeded ReadFile limit; stopping poller", "limit", limitErr.Limit)
+					return
+				}
+				// 404 or transient error: skip
+				logger.V(1).Info("poller ReadFile failed", "error", readErr)
+				continue
+			}
+
+			// Step 3: decode only samples length and eval.dataset.samples
+			samplesCount, datasetSamples, parseErr := artifacts.ExtractInspectProgress(logBytes)
+			if parseErr != nil {
+				// parse error: keep the last value
+				logger.V(1).Info("poller failed to parse log progress", "error", parseErr)
+				continue
+			}
+
+			// Monotonicity check
+			if samplesCount < lastWrittenSamplesDone {
+				continue
+			}
+
+			samplesDone := samplesCount
+			samplesPlanned := computeSamplesPlanned(effRange, run.Spec.Limit, datasetSamples)
+
+			now := r.now()
+			timeSinceLastWrite := now.Sub(lastWriteTime)
+			writeFloor := r.minProgressWriteInterval()
+			if samplesDone != lastWrittenSamplesDone && timeSinceLastWrite >= writeFloor {
+				nowMeta := metav1.NewTime(now)
+				err := r.updateRunStatus(ctx, types.NamespacedName{Namespace: run.Namespace, Name: run.Name}, func(status *v1alpha1.RunStatus, gen int64) {
+					for i := range status.Tasks {
+						if status.Tasks[i].ID == taskID {
+							status.Tasks[i].SamplesDone = samplesDone
+							if samplesPlanned > 0 {
+								status.Tasks[i].SamplesPlanned = samplesPlanned
+							}
+							status.Tasks[i].LastProgressAt = &nowMeta
+							break
+						}
+					}
+				})
+				if err != nil {
+					logger.V(1).Info("poller updateRunStatus failed", "error", err)
+				} else {
+					lastWrittenSamplesDone = samplesDone
+					lastWriteTime = now
+				}
+			}
+		}
 	}
 }
 
@@ -2582,9 +2766,29 @@ func EffectiveSampleRange(spec v1alpha1.RunSpec) *v1alpha1.SampleRange {
 	return nil
 }
 
+// computeSamplesPlanned calculates the expected number of samples to be evaluated for a task,
+// taking into account sampleRange width, limit, and clamping to datasetSamples when known.
+func computeSamplesPlanned(sampleRange *v1alpha1.SampleRange, limit *int, datasetSamples int) int {
+	planned := 0
+	if sampleRange != nil {
+		planned = sampleRange.End - sampleRange.Start + 1
+		if datasetSamples > 0 && datasetSamples < planned {
+			planned = datasetSamples
+		}
+	} else if limit != nil {
+		planned = *limit
+		if datasetSamples > 0 && datasetSamples < planned {
+			planned = datasetSamples
+		}
+	} else if datasetSamples > 0 {
+		planned = datasetSamples
+	}
+	return planned
+}
+
 // InspectEvalArgs builds the CLI arguments for inspect eval.
 func InspectEvalArgs(targetTask v1alpha1.ManifestTask, spec v1alpha1.RunSpec) []string {
-	cmd := []string{"inspect", "eval", targetTask.Spec, "--model", spec.Model, "--log-dir", "/out", "--log-format", "json"}
+	cmd := []string{"inspect", "eval", targetTask.Spec, "--model", spec.Model, "--log-dir", "/out", "--log-format", "json", "--log-buffer", "1"}
 	if spec.SampleRange != nil {
 		cmd = append(cmd, "--limit", fmt.Sprintf("%d-%d", spec.SampleRange.Start, spec.SampleRange.End))
 	} else if spec.Limit != nil {
