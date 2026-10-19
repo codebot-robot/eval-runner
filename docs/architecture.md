@@ -27,9 +27,10 @@ Where [docs/concept/functionality.md](concept/functionality.md) describes the ta
 - GitHub PR integration (in-place comment updates and check runs via GitHub App or PAT auth)
 - Automated webhook integration (`eval-runner-webhook`) handling `pull_request`, `push`, and `issue_comment` (`/eval more <n>`) events with baseline cache reuse and adaptive paired sampling
 - Web dashboard UI (`eval-runner-ui`) serving Runs and Comparisons
+- Read-only trajectory viewer UI (§6) serving per-task sample lists and sample transcripts from the artifact sink
 - Zero-trust artifact persistence (`ArtifactSink`: GCS, local directory, or in-memory) for manifests, Inspect logs, summaries, and comparison tables
 
-Future target functionality not yet started includes trajectory mining (§7), trajectory viewer UI (§6), fine-tune training loops (§8), cohorts (§9.2), and declared resources/image builds (§2.2/§3).
+Future target functionality not yet started includes trajectory mining (§7), live streaming trajectory viewer (§6), fine-tune training loops (§8), cohorts (§9.2), and declared resources/image builds (§2.2/§3).
 
 ---
 
@@ -144,8 +145,12 @@ The `eval-runner-webhook` service (image `eval-runner-webhook`) receives GitHub 
 The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboard:
 - `GET /runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
 - `GET /runs/{namespace}/{name}`: Detailed per-task breakdown for a single Run.
+- `GET /runs/{namespace}/{name}/tasks/{task}/samples`: Per-task sample list with IDs, scores, preview snippets, latency, and tokens.
+- `GET /runs/{namespace}/{name}/tasks/{task}/samples/{sample}`: Sample transcript viewer rendering multi-turn message and event streams as typed text rows.
 - `GET /comparisons`: Overview of all Comparisons with verdicts, $P(\text{improvement})$, and batch progress.
 - `GET /comparisons/{namespace}/{name}`: Complete paired comparison table mirroring the PR comment layout.
+
+The UI loads `artifactBucket` and `artifactDir` configuration from `eval-runner-config` at startup, connecting to the configured `ArtifactSink` (GCS using Application Default Credentials, or a local filesystem directory). An in-process LRU cache (bounded by byte size and TTL) caches immutable Inspect evaluation logs across page requests.
 
 ### Two Namespaces
 

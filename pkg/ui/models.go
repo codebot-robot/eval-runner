@@ -17,8 +17,11 @@ package ui
 import (
 	"fmt"
 	"math"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,6 +80,7 @@ type RunTaskRow struct {
 	Successes   int
 	Method      string // e.g. "wilson", "t"
 	LogPath     string // text path or URI
+	SamplesLink string // e.g. "/runs/<ns>/<name>/tasks/<task>/samples"
 	Message     string
 	SampleRange string // e.g. "samples 9-16"
 }
@@ -736,4 +740,151 @@ func ShortCommit(c string) string {
 		return c[:7]
 	}
 	return c
+}
+
+// TaskSampleRow represents an individual sample row in the task samples list.
+type TaskSampleRow struct {
+	ID            string
+	EscapedID     string
+	Score         string
+	Status        string // "pass", "fail", "unknown"
+	StatusClass   string // "good", "bad", "neutral"
+	InputPreview  string
+	OutputPreview string
+	LatencyStr    string
+	TokensStr     string
+	Link          string
+}
+
+// TaskSamplesListView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples.
+type TaskSamplesListView struct {
+	ActiveTab        NavTab
+	Namespace        string
+	RunName          string
+	TaskID           string
+	EscapedTaskID    string
+	Commit           string
+	Model            string
+	LogPath          string
+	Samples          []TaskSampleRow
+	TotalSamples     int
+	Page             int
+	PageSize         int
+	TotalPages       int
+	ShowingStart     int
+	ShowingEnd       int
+	HasPrev          bool
+	PrevLink         string
+	HasNext          bool
+	NextLink         string
+	IsTruncatedLog   bool
+	TruncatedMessage string
+}
+
+// TranscriptRowView represents a single rendered transcript entry row.
+type TranscriptRowView struct {
+	Kind    string // "user", "assistant", "tool_call", "tool", "system"
+	Class   string // "", "tool", "bad"
+	Content string
+}
+
+// SampleTranscriptView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples/{sample}.
+type SampleTranscriptView struct {
+	ActiveTab              NavTab
+	Namespace              string
+	RunName                string
+	TaskID                 string
+	EscapedTaskID          string
+	SampleID               string
+	EscapedSampleID        string
+	Score                  string
+	Status                 string // "pass", "fail", "unknown"
+	StatusUpper            string // "PASS", "FAIL", "UNKNOWN"
+	StatusClass            string // "good", "bad", "neutral"
+	LatencyStr             string
+	TokensStr              string
+	LogPath                string
+	Rows                   []TranscriptRowView
+	TotalEvents            int
+	IsEventsTruncated      bool
+	EventsTruncatedMessage string
+	IsTruncatedLog         bool
+	TruncatedMessage       string
+}
+
+// TruncateRunes truncates string s to maxRunes, appending "..." if truncated.
+func TruncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+// TruncateMessageBytes truncates string s to maxBytes on a valid UTF-8 rune boundary,
+// appending a truncation marker if truncated.
+func TruncateMessageBytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	if maxBytes <= 0 {
+		return "... [content truncated]"
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes] + "\n... [content truncated]"
+}
+
+// FormatTokens formats an integer token count with commas, e.g. 41200 -> "41,200", or "—" if <= 0.
+func FormatTokens(tokens int) string {
+	if tokens <= 0 {
+		return "—"
+	}
+	in := strconv.Itoa(tokens)
+	if len(in) <= 3 {
+		return in
+	}
+	var out []byte
+	rem := len(in) % 3
+	if rem > 0 {
+		out = append(out, in[:rem]...)
+		if len(in) > rem {
+			out = append(out, ',')
+		}
+	}
+	for i := rem; i < len(in); i += 3 {
+		out = append(out, in[i:i+3]...)
+		if i+3 < len(in) {
+			out = append(out, ',')
+		}
+	}
+	return string(out)
+}
+
+// FormatLatency formats a float pointer latency in seconds, e.g. 3.0 -> "3.0s", or "—" if nil.
+func FormatLatency(sec *float64) string {
+	if sec == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.1fs", *sec)
+}
+
+// BuildTaskSampleLink builds a path-escaped URL to a sample transcript page.
+func BuildTaskSampleLink(ns, runName, taskID, sampleID string) string {
+	return fmt.Sprintf("/runs/%s/%s/tasks/%s/samples/%s",
+		ns,
+		runName,
+		url.PathEscape(taskID),
+		url.PathEscape(sampleID),
+	)
+}
+
+// BuildTaskSamplesListLink builds a path-escaped URL to a task samples list page.
+func BuildTaskSamplesListLink(ns, runName, taskID string) string {
+	return fmt.Sprintf("/runs/%s/%s/tasks/%s/samples",
+		ns,
+		runName,
+		url.PathEscape(taskID),
+	)
 }

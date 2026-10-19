@@ -27,6 +27,9 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/ui"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -50,9 +53,13 @@ func main() {
 
 	var listenAddr string
 	var namespace string
+	var artifactBucket string
+	var artifactDir string
 
 	flag.StringVar(&listenAddr, "listen-addr", ":8080", "The TCP address for the HTTP server to listen on")
 	flag.StringVar(&namespace, "namespace", defaultNs, "Default Kubernetes namespace to query for Runs and Comparisons")
+	flag.StringVar(&artifactBucket, "artifact-bucket", "", "Optional GCS bucket for reading artifacts")
+	flag.StringVar(&artifactDir, "artifact-dir", "", "Optional local filesystem directory for reading artifacts")
 	flag.Parse()
 
 	restCfg, err := config.GetConfig()
@@ -65,9 +72,47 @@ func main() {
 		log.Fatalf("unable to create kubernetes client: %v", err)
 	}
 
+	bucket := artifactBucket
+	dir := artifactDir
+	cm, err := controller.LoadClusterConfig(context.Background(), k8sClient, namespace, controller.DefaultConfigMapName)
+	if err != nil {
+		log.Printf("warning: unable to read cluster configmap %s/%s: %v", namespace, controller.DefaultConfigMapName, err)
+	} else if cm != nil && cm.Data != nil {
+		if bucket == "" {
+			bucket = cm.Data[configkeys.ConfigMapKeyArtifactBucket]
+		}
+		if dir == "" {
+			dir = cm.Data[configkeys.ConfigMapKeyArtifactDir]
+		}
+	}
+
+	var sink artifacts.ArtifactSink
+	if bucket != "" || dir != "" {
+		s, err := controller.NewArtifactSink(context.Background(), bucket, dir, 0)
+		if err != nil {
+			log.Printf("warning: unable to configure artifact sink (bucket=%q, dir=%q): %v", bucket, dir, err)
+		} else {
+			sink = s
+			if sink != nil {
+				log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", bucket, dir)
+			}
+		}
+	} else {
+		log.Printf("no artifact storage configured; sample trajectories will return 404")
+	}
+
+	if sink != nil {
+		defer func() {
+			if err := sink.Close(); err != nil {
+				log.Printf("error closing artifact sink on shutdown: %v", err)
+			}
+		}()
+	}
+
 	server := ui.NewServer(ui.Config{
 		Client:           k8sClient,
 		DefaultNamespace: namespace,
+		ArtifactSink:     sink,
 	})
 
 	httpServer := &http.Server{

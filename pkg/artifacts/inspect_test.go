@@ -18,6 +18,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -596,6 +597,165 @@ func TestExtractInspectDatasetSamples(t *testing.T) {
 		}
 		if _, err := ExtractInspectDatasetSamples([]byte("{invalid")); err == nil {
 			t.Errorf("expected error for invalid json")
+		}
+	})
+}
+
+func TestParseInspectSamples(t *testing.T) {
+	t.Run("TrajectoryMessagesFixture", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join("testdata", "trajectory_messages.json"))
+		if err != nil {
+			t.Fatalf("failed to read fixture: %v", err)
+		}
+
+		samples, err := ParseInspectSamples(data)
+		if err != nil {
+			t.Fatalf("ParseInspectSamples failed: %v", err)
+		}
+
+		if len(samples) != 2 {
+			t.Fatalf("expected 2 samples, got %d", len(samples))
+		}
+
+		// Sample 1: sample-017 (pass)
+		s1 := samples[0]
+		if s1.ID != "sample-017" {
+			t.Errorf("expected ID 'sample-017', got %q", s1.ID)
+		}
+		if !s1.HasScore || s1.Score == nil || *s1.Score != 1.0 {
+			t.Errorf("expected score 1.0, got %v", s1.Score)
+		}
+		if s1.Status != "pass" {
+			t.Errorf("expected status 'pass', got %q", s1.Status)
+		}
+		if s1.ScoreStr != "1.00" {
+			t.Errorf("expected scoreStr '1.00', got %q", s1.ScoreStr)
+		}
+		if s1.Latency == nil || *s1.Latency != 3.0 {
+			t.Errorf("expected latency 3.0, got %v", s1.Latency)
+		}
+		if s1.TotalTokens != 1500 || s1.InputTokens != 1200 || s1.OutputTokens != 300 {
+			t.Errorf("expected tokens 1500 (1200+300), got %d (%d+%d)", s1.TotalTokens, s1.InputTokens, s1.OutputTokens)
+		}
+		if !strings.Contains(s1.Input, "HTTP 200") {
+			t.Errorf("unexpected input: %q", s1.Input)
+		}
+		if !strings.Contains(s1.Output, "Cleared CDN cache") {
+			t.Errorf("unexpected output: %q", s1.Output)
+		}
+
+		// Verify transcript rows for s1
+		if len(s1.Transcript) == 0 {
+			t.Fatalf("expected non-empty transcript for sample-017")
+		}
+		foundToolCall := false
+		foundTool := false
+		for _, row := range s1.Transcript {
+			if row.Kind == "tool_call" && strings.Contains(row.Content, "check_cdn") {
+				foundToolCall = true
+			}
+			if row.Kind == "tool" && strings.Contains(row.Content, "CDN status 404") {
+				foundTool = true
+			}
+		}
+		if !foundToolCall {
+			t.Errorf("expected tool_call check_cdn in transcript: %+v", s1.Transcript)
+		}
+		if !foundTool {
+			t.Errorf("expected tool result in transcript: %+v", s1.Transcript)
+		}
+
+		// Sample 2: sample-019 (fail)
+		s2 := samples[1]
+		if s2.ID != "sample-019" {
+			t.Errorf("expected ID 'sample-019', got %q", s2.ID)
+		}
+		if !s2.HasScore || s2.Score == nil || *s2.Score != 0.0 {
+			t.Errorf("expected score 0.0, got %v", s2.Score)
+		}
+		if s2.Status != "fail" {
+			t.Errorf("expected status 'fail', got %q", s2.Status)
+		}
+		if s2.ScoreStr != "0.00" {
+			t.Errorf("expected scoreStr '0.00', got %q", s2.ScoreStr)
+		}
+		if s2.Latency == nil || *s2.Latency != 13.0 {
+			t.Errorf("expected latency 13.0, got %v", s2.Latency)
+		}
+		if s2.TotalTokens != 41200 {
+			t.Errorf("expected tokens 41200, got %d", s2.TotalTokens)
+		}
+
+		// Verify transcript has tool_calls for classify_severity and page_oncall
+		var kinds []string
+		for _, row := range s2.Transcript {
+			kinds = append(kinds, row.Kind)
+		}
+		// Expect user, tool_call, tool_call, tool, tool, assistant
+		expectedKinds := []string{"user", "tool_call", "tool_call", "tool", "tool", "assistant"}
+		if len(kinds) != len(expectedKinds) {
+			t.Fatalf("expected %d transcript rows, got %d (%v)", len(expectedKinds), len(kinds), kinds)
+		}
+		for i, exp := range expectedKinds {
+			if kinds[i] != exp {
+				t.Errorf("at row %d, expected kind %q, got %q", i, exp, kinds[i])
+			}
+		}
+	})
+
+	t.Run("FallbackEventsWhenMessagesEmpty", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"eval": {"task": "triage/runbook_lookup"},
+			"samples": [
+				{
+					"id": "sample-ev-1",
+					"epoch": 1,
+					"events": [
+						{
+							"event": "tool",
+							"function": "page_oncall",
+							"arguments": {"team": "ops"},
+							"result": "Paged ops"
+						},
+						{
+							"event": "model",
+							"output": {"completion": "All done"}
+						}
+					]
+				}
+			]
+		}`
+		samples, err := ParseInspectSamples([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(samples) != 1 {
+			t.Fatalf("expected 1 sample, got %d", len(samples))
+		}
+		tr := samples[0].Transcript
+		if len(tr) != 3 {
+			t.Fatalf("expected 3 rows (tool_call, tool, assistant), got %d (%+v)", len(tr), tr)
+		}
+		if tr[0].Kind != "tool_call" || tr[1].Kind != "tool" || tr[2].Kind != "assistant" {
+			t.Errorf("unexpected transcript kinds: %+v", tr)
+		}
+	})
+
+	t.Run("EmptyAndInvalid", func(t *testing.T) {
+		if _, err := ParseInspectSamples([]byte("")); err == nil {
+			t.Errorf("expected error for empty data")
+		}
+		if _, err := ParseInspectSamples([]byte("{invalid")); err == nil {
+			t.Errorf("expected error for invalid json")
+		}
+		empty, err := ParseInspectSamples([]byte(`{"version": 2, "samples": []}`))
+		if err != nil {
+			t.Fatalf("unexpected error for empty samples: %v", err)
+		}
+		if len(empty) != 0 {
+			t.Errorf("expected 0 samples, got %d", len(empty))
 		}
 	})
 }

@@ -386,6 +386,41 @@ To grant the controller permissions to write artifacts to a GCS bucket using GKE
 
    *(Note: Manifests remain project-agnostic and do not include the GCP project annotation so that repeated `ap deploy` runs do not overwrite cluster annotations. `kubectl apply` leaves existing annotations in place.)*
 
+### UI Artifact Storage Access (Workload Identity)
+
+To allow the web dashboard (`eval-runner-ui`) to read Inspect logs and display sample lists and trajectory transcripts directly from GCS using Application Default Credentials (ADC, no Secret required):
+
+1. **Create the Google Service Account (GSA) and grant `roles/storage.objectViewer`:**
+
+   ```bash
+   gcloud iam service-accounts create eval-runner-ui \
+     --project=<project> \
+     --description="Service account for eval-runner UI artifact reads"
+
+   gcloud storage buckets add-iam-policy-binding gs://<bucket> \
+     --member="serviceAccount:eval-runner-ui@<project>.iam.gserviceaccount.com" \
+     --role="roles/storage.objectViewer"
+   ```
+
+2. **Bind the Kubernetes ServiceAccount via Workload Identity:**
+
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding eval-runner-ui@<project>.iam.gserviceaccount.com \
+     --project=<project> \
+     --role="roles/iam.workloadIdentityUser" \
+     --member="serviceAccount:<project>.svc.id.goog[eval-runner/eval-runner-ui]"
+   ```
+
+3. **Annotate the Kubernetes ServiceAccount:**
+
+   ```bash
+   kubectl -n eval-runner annotate serviceaccount eval-runner-ui \
+     iam.gke.io/gcp-service-account=eval-runner-ui@<project>.iam.gserviceaccount.com \
+     --overwrite
+   ```
+
+> **Note on LocalDir mode:** When running in `artifactDir` mode in Kubernetes, artifacts are written to an `emptyDir` volume attached to the controller pod and are unreadable from the UI pod. GCS is the recommended sink for multi-pod deployments. LocalDir mode is intended for local development and test environments where storage is shared.
+
 ### Configuring the Cluster ConfigMap
 
 Per-cluster settings (such as the artifact bucket) live in a ConfigMap named `eval-runner-config` in the `eval-runner` namespace, created once by the operator. Because deployment manifests in `k8s/` are project-agnostic, deploys require no argument patching with `kubectl patch`.

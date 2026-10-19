@@ -16,7 +16,10 @@ package e2e
 
 import (
 	"fmt"
+	"io"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -477,6 +480,56 @@ spec:
 		for _, task := range run.Status.Tasks {
 			if !strings.Contains(objectsJSON, fmt.Sprintf("runs/%s/%s/summary.json", commit, task.ID)) {
 				t.Errorf("Expected summary.json for task %s to be stored in fake-gcs-server", task.ID)
+			}
+		}
+
+		// Verify trajectory viewer pages via UI port-forward
+		baseURL, uiCleanup := harness.PortForwardUI(18088)
+		defer uiCleanup()
+
+		for _, task := range run.Status.Tasks {
+			objectPath := strings.TrimPrefix(task.LogPath, fmt.Sprintf("gs://%s/", bucket))
+			rawLog := harness.GetGCSObject("eval-runner", bucket, objectPath)
+			expectedScores, err := artifacts.ParseInspectSampleScores(rawLog)
+			if err != nil {
+				t.Fatalf("failed to parse sample scores for task %s from GCS: %v", task.ID, err)
+			}
+			if len(expectedScores) == 0 {
+				t.Fatalf("expected at least 1 sample score for task %s, got 0", task.ID)
+			}
+
+			// 1. GET /runs/{ns}/{name}/tasks/{task}/samples
+			samplesURL := fmt.Sprintf("%s/runs/eval-runner/%s/tasks/%s/samples", baseURL, runName, url.PathEscape(task.ID))
+			resp, err := http.Get(samplesURL)
+			if err != nil {
+				t.Fatalf("failed to GET %s: %v", samplesURL, err)
+			}
+			samplesBody, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("unexpected status %d for %s: %s", resp.StatusCode, samplesURL, string(samplesBody))
+			}
+			for _, sc := range expectedScores {
+				if !strings.Contains(string(samplesBody), sc.ID) {
+					t.Errorf("expected samples list to contain sample ID %q, got body:\n%s", sc.ID, string(samplesBody))
+				}
+			}
+
+			// 2. GET /runs/{ns}/{name}/tasks/{task}/samples/{sample} for each sample
+			for _, sc := range expectedScores {
+				transcriptURL := fmt.Sprintf("%s/runs/eval-runner/%s/tasks/%s/samples/%s", baseURL, runName, url.PathEscape(task.ID), url.PathEscape(sc.ID))
+				respT, err := http.Get(transcriptURL)
+				if err != nil {
+					t.Fatalf("failed to GET %s: %v", transcriptURL, err)
+				}
+				transcriptBody, err := io.ReadAll(respT.Body)
+				respT.Body.Close()
+				if respT.StatusCode != http.StatusOK {
+					t.Fatalf("unexpected status %d for %s: %s", respT.StatusCode, transcriptURL, string(transcriptBody))
+				}
+				if !strings.Contains(string(transcriptBody), sc.ID) {
+					t.Errorf("expected sample transcript to contain sample ID %q, got body:\n%s", sc.ID, string(transcriptBody))
+				}
 			}
 		}
 

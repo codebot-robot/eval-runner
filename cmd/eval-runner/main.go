@@ -288,21 +288,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	var sink artifacts.ArtifactSink
-	if clusterConfig.ArtifactBucket != "" {
-		var gcsOpts []gcs.Option
-		if clusterConfig.ArtifactMaxUploadBytes > 0 {
-			gcsOpts = append(gcsOpts, gcs.WithMaxUploadBytes(clusterConfig.ArtifactMaxUploadBytes))
-		}
-		gcsSink, err := gcs.New(context.Background(), clusterConfig.ArtifactBucket, gcsOpts...)
-		if err != nil {
-			setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", clusterConfig.ArtifactBucket)
-			os.Exit(1)
-		}
-		sink = gcsSink
-	} else if clusterConfig.ArtifactDir != "" {
-		sink = &artifacts.LocalDirSink{BaseDir: clusterConfig.ArtifactDir}
-	} else {
+	sink, err := controller.NewArtifactSink(context.Background(), clusterConfig.ArtifactBucket, clusterConfig.ArtifactDir, clusterConfig.ArtifactMaxUploadBytes)
+	if err != nil {
+		setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", clusterConfig.ArtifactBucket)
+		os.Exit(1)
+	}
+	if sink == nil {
 		setupLog.Info("neither artifactBucket nor artifactDir configured; using default in-memory sink (non-durable: controller restarts reset Runs to Pending to re-discover)")
 		sink = artifacts.NewInMemorySink()
 	}

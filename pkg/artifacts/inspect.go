@@ -106,15 +106,80 @@ type InspectMetric struct {
 	Value any    `json:"value"`
 }
 
+// InspectToolCall captures an individual tool call initiated by the model.
+type InspectToolCall struct {
+	ID        string `json:"id,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Function  string `json:"function,omitempty"`
+	Arguments any    `json:"arguments,omitempty"`
+}
+
+// InspectMessage captures a conversation message in the Inspect transcript.
+type InspectMessage struct {
+	ID         string            `json:"id,omitempty"`
+	Role       string            `json:"role,omitempty"`
+	Content    any               `json:"content,omitempty"`
+	Source     string            `json:"source,omitempty"`
+	ToolCalls  []InspectToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Function   string            `json:"function,omitempty"`
+	Error      any               `json:"error,omitempty"`
+}
+
+// InspectEvent captures an execution event in the sample's event stream.
+type InspectEvent struct {
+	Event     string `json:"event,omitempty"`
+	Type      string `json:"type,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Function  string `json:"function,omitempty"`
+	Arguments any    `json:"arguments,omitempty"`
+	Result    any    `json:"result,omitempty"`
+	Error     any    `json:"error,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Message   any    `json:"message,omitempty"`
+	Input     any    `json:"input,omitempty"`
+	Output    any    `json:"output,omitempty"`
+}
+
+// InspectTranscriptRow represents a single typed row in the sample transcript.
+type InspectTranscriptRow struct {
+	Kind    string // "user", "assistant", "tool_call", "tool", "system"
+	Content string
+}
+
 // InspectSample represents an individual evaluated sample.
 type InspectSample struct {
 	ID          any                           `json:"id"`
 	Epoch       int                           `json:"epoch,omitempty"`
+	Input       any                           `json:"input,omitempty"`
+	Target      any                           `json:"target,omitempty"`
+	Output      any                           `json:"output,omitempty"`
+	Messages    []InspectMessage              `json:"messages,omitempty"`
+	Events      []InspectEvent                `json:"events,omitempty"`
 	StartedAt   string                        `json:"started_at,omitempty"`
 	CompletedAt string                        `json:"completed_at,omitempty"`
 	TotalTime   float64                       `json:"total_time,omitempty"`
 	Scores      map[string]InspectSampleScore `json:"scores,omitempty"`
 	ModelUsage  map[string]InspectModelUsage  `json:"model_usage,omitempty"`
+}
+
+// ParsedInspectSample contains the full parsed details for a sample.
+type ParsedInspectSample struct {
+	ID           string
+	Epoch        int
+	Score        *float64
+	HasScore     bool
+	ScoreStr     string
+	Status       string // "pass", "fail", "unknown"
+	Input        string
+	Target       string
+	Output       string
+	Latency      *float64
+	TotalTokens  int
+	InputTokens  int
+	OutputTokens int
+	Transcript   []InspectTranscriptRow
 }
 
 // InspectSampleScore captures the score and outcome of a scorer for one sample.
@@ -290,6 +355,195 @@ func ParseInspectLog(data []byte) (*TaskAggregates, error) {
 	return agg, nil
 }
 
+// FormatSampleID formats an Inspect sample ID and optional epoch suffix according to
+// eval-runner conventions: numbers become canonical strings, and epochs > 1 append #<epoch>.
+func FormatSampleID(rawID any, epoch int) string {
+	var idStr string
+	switch v := rawID.(type) {
+	case float64:
+		if v == math.Trunc(v) {
+			idStr = strconv.FormatInt(int64(v), 10)
+		} else {
+			idStr = fmt.Sprint(v)
+		}
+	case float32:
+		f := float64(v)
+		if f == math.Trunc(f) {
+			idStr = strconv.FormatInt(int64(f), 10)
+		} else {
+			idStr = fmt.Sprint(f)
+		}
+	case int:
+		idStr = strconv.Itoa(v)
+	case int64:
+		idStr = strconv.FormatInt(v, 10)
+	case string:
+		idStr = v
+	default:
+		idStr = fmt.Sprint(rawID)
+	}
+
+	if rawID == nil || idStr == "" || idStr == "<nil>" {
+		return ""
+	}
+
+	if epoch > 1 {
+		idStr = fmt.Sprintf("%s#%d", idStr, epoch)
+	}
+
+	return idStr
+}
+
+func selectPrimaryScore(scores map[string]InspectSampleScore, primaryScorer string) (InspectSampleScore, bool) {
+	if len(scores) == 0 {
+		return InspectSampleScore{}, false
+	}
+	if primaryScorer != "" {
+		if targetScore, found := scores[primaryScorer]; found {
+			return targetScore, true
+		}
+	}
+	keys := make([]string, 0, len(scores))
+	for k := range scores {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > 0 {
+		return scores[keys[0]], true
+	}
+	return InspectSampleScore{}, false
+}
+
+func extractStringOrJSON(val any) string {
+	if val == nil {
+		return ""
+	}
+	switch v := val.(type) {
+	case string:
+		return v
+	case bool:
+		return strconv.FormatBool(v)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case float64:
+		if v == math.Trunc(v) {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return fmt.Sprint(v)
+	case []any:
+		var parts []string
+		for _, item := range v {
+			s := extractStringOrJSON(item)
+			if s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		if text, ok := v["text"].(string); ok && text != "" {
+			return text
+		}
+		if content, ok := v["content"].(string); ok && content != "" {
+			return content
+		}
+		if completion, ok := v["completion"].(string); ok && completion != "" {
+			return completion
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(b)
+	default:
+		return fmt.Sprint(val)
+	}
+}
+
+func extractOutputString(val any) string {
+	if val == nil {
+		return ""
+	}
+	if s, ok := val.(string); ok {
+		return s
+	}
+	if m, ok := val.(map[string]any); ok {
+		if comp, ok := m["completion"].(string); ok && comp != "" {
+			return comp
+		}
+		if choices, ok := m["choices"].([]any); ok && len(choices) > 0 {
+			if firstChoice, ok := choices[0].(map[string]any); ok {
+				if msg, ok := firstChoice["message"].(map[string]any); ok {
+					if content, ok := msg["content"].(string); ok && content != "" {
+						return content
+					}
+				}
+			}
+		}
+		if msg, ok := m["message"].(map[string]any); ok {
+			if content, ok := msg["content"].(string); ok && content != "" {
+				return content
+			}
+		}
+	}
+	return extractStringOrJSON(val)
+}
+
+func formatToolCall(function string, arguments any) string {
+	if arguments == nil {
+		if function == "" {
+			return "tool_call()"
+		}
+		return function + "()"
+	}
+	switch a := arguments.(type) {
+	case string:
+		if function == "" {
+			return a
+		}
+		return fmt.Sprintf("%s(%s)", function, a)
+	case map[string]any:
+		keys := make([]string, 0, len(a))
+		for k := range a {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			valStr := formatArgValue(a[k])
+			parts = append(parts, fmt.Sprintf("%s=%s", k, valStr))
+		}
+		if function == "" {
+			return strings.Join(parts, ", ")
+		}
+		return fmt.Sprintf("%s(%s)", function, strings.Join(parts, ", "))
+	default:
+		b, err := json.Marshal(a)
+		if err != nil {
+			if function == "" {
+				return fmt.Sprint(a)
+			}
+			return fmt.Sprintf("%s(%v)", function, a)
+		}
+		if function == "" {
+			return string(b)
+		}
+		return fmt.Sprintf("%s(%s)", function, string(b))
+	}
+}
+
+func formatArgValue(v any) string {
+	if s, ok := v.(string); ok {
+		return fmt.Sprintf("%q", s)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(b)
+}
+
 // ParseInspectSampleScores extracts per-sample scores from Inspect JSON log bytes,
 // matching the primary scorer selection used in ParseInspectLog.
 // Each sample score preserves the sample ID as a string.
@@ -320,21 +574,9 @@ func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 			continue
 		}
 
-		var targetScore InspectSampleScore
-		var found bool
-		if primaryScorer != "" {
-			targetScore, found = s.Scores[primaryScorer]
-		}
+		targetScore, found := selectPrimaryScore(s.Scores, primaryScorer)
 		if !found {
-			keys := make([]string, 0, len(s.Scores))
-			for k := range s.Scores {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			if len(keys) > 0 {
-				targetScore = s.Scores[keys[0]]
-				found = true
-			}
+			continue
 		}
 
 		scoreVal, valid := ScoreToFloat(targetScore.Value)
@@ -342,30 +584,9 @@ func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 			continue
 		}
 
-		var idStr string
-		switch v := s.ID.(type) {
-		case float64:
-			if v == math.Trunc(v) {
-				idStr = strconv.FormatInt(int64(v), 10)
-			} else {
-				idStr = fmt.Sprint(v)
-			}
-		case int:
-			idStr = strconv.Itoa(v)
-		case int64:
-			idStr = strconv.FormatInt(v, 10)
-		case string:
-			idStr = v
-		default:
-			idStr = fmt.Sprint(s.ID)
-		}
-
-		if s.ID == nil || idStr == "" || idStr == "<nil>" {
+		idStr := FormatSampleID(s.ID, s.Epoch)
+		if idStr == "" {
 			continue
-		}
-
-		if s.Epoch > 1 {
-			idStr = fmt.Sprintf("%s#%d", idStr, s.Epoch)
 		}
 
 		sampleScores = append(sampleScores, stats.SampleScore{
@@ -375,6 +596,178 @@ func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 	}
 
 	return sampleScores, nil
+}
+
+// ParseInspectSamples parses raw Inspect JSON log bytes and returns detailed sample records,
+// reusing the primary scorer selection from ParseInspectLog and latency parsing from parseSampleTime.
+func ParseInspectSamples(data []byte) ([]ParsedInspectSample, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, fmt.Errorf("empty log data")
+	}
+
+	var log InspectLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal inspect log: %w", err)
+	}
+
+	if len(log.Samples) == 0 {
+		return nil, nil
+	}
+
+	primaryScorer := ""
+	if len(log.Eval.Scorers) > 0 {
+		primaryScorer = log.Eval.Scorers[0].Name
+	} else if log.Results != nil && len(log.Results.Scores) > 0 {
+		primaryScorer = log.Results.Scores[0].Name
+	}
+
+	var parsed []ParsedInspectSample
+	for _, s := range log.Samples {
+		idStr := FormatSampleID(s.ID, s.Epoch)
+		if idStr == "" {
+			continue
+		}
+
+		var score *float64
+		var hasScore bool
+		scoreStr := "—"
+		status := "unknown"
+
+		if targetScore, found := selectPrimaryScore(s.Scores, primaryScorer); found {
+			if scoreVal, valid := ScoreToFloat(targetScore.Value); valid {
+				score = &scoreVal
+				hasScore = true
+				scoreStr = fmt.Sprintf("%.2f", scoreVal)
+				if scoreVal >= 1.0 {
+					status = "pass"
+				} else {
+					status = "fail"
+				}
+			}
+		}
+
+		inputStr := extractStringOrJSON(s.Input)
+		targetStr := extractStringOrJSON(s.Target)
+		outputStr := extractOutputString(s.Output)
+
+		var latency *float64
+		start, okStart := parseSampleTime(s.StartedAt)
+		end, okEnd := parseSampleTime(s.CompletedAt)
+		if okStart && okEnd && !end.Before(start) {
+			dur := end.Sub(start).Seconds()
+			latency = &dur
+		} else if s.TotalTime > 0 {
+			dur := s.TotalTime
+			latency = &dur
+		}
+
+		inputTokens := 0
+		outputTokens := 0
+		for _, usage := range s.ModelUsage {
+			inputTokens += usage.InputTokens
+			outputTokens += usage.OutputTokens
+		}
+		totalTokens := inputTokens + outputTokens
+
+		// Build transcript rows
+		var transcript []InspectTranscriptRow
+		if len(s.Messages) > 0 {
+			for _, m := range s.Messages {
+				role := strings.ToLower(strings.TrimSpace(m.Role))
+				switch role {
+				case "user":
+					content := extractStringOrJSON(m.Content)
+					if content != "" {
+						transcript = append(transcript, InspectTranscriptRow{Kind: "user", Content: content})
+					}
+				case "system":
+					content := extractStringOrJSON(m.Content)
+					if content != "" {
+						transcript = append(transcript, InspectTranscriptRow{Kind: "system", Content: content})
+					}
+				case "assistant":
+					for _, tc := range m.ToolCalls {
+						transcript = append(transcript, InspectTranscriptRow{
+							Kind:    "tool_call",
+							Content: formatToolCall(tc.Function, tc.Arguments),
+						})
+					}
+					content := extractStringOrJSON(m.Content)
+					if content != "" {
+						transcript = append(transcript, InspectTranscriptRow{Kind: "assistant", Content: content})
+					}
+				case "tool":
+					content := extractStringOrJSON(m.Content)
+					transcript = append(transcript, InspectTranscriptRow{Kind: "tool", Content: content})
+				default:
+					content := extractStringOrJSON(m.Content)
+					if content != "" {
+						transcript = append(transcript, InspectTranscriptRow{Kind: role, Content: content})
+					}
+				}
+			}
+		} else if len(s.Events) > 0 {
+			for _, e := range s.Events {
+				evType := strings.ToLower(strings.TrimSpace(e.Event))
+				if evType == "tool" || e.Function != "" {
+					transcript = append(transcript, InspectTranscriptRow{
+						Kind:    "tool_call",
+						Content: formatToolCall(e.Function, e.Arguments),
+					})
+					if e.Result != nil {
+						transcript = append(transcript, InspectTranscriptRow{
+							Kind:    "tool",
+							Content: extractStringOrJSON(e.Result),
+						})
+					}
+				} else if evType == "model" {
+					outStr := extractOutputString(e.Output)
+					if outStr != "" {
+						transcript = append(transcript, InspectTranscriptRow{
+							Kind:    "assistant",
+							Content: outStr,
+						})
+					}
+				} else if evType == "input" || evType == "sample_init" {
+					inStr := extractStringOrJSON(e.Input)
+					if inStr != "" {
+						transcript = append(transcript, InspectTranscriptRow{
+							Kind:    "user",
+							Content: inStr,
+						})
+					}
+				}
+			}
+		}
+
+		if len(transcript) == 0 {
+			if inputStr != "" {
+				transcript = append(transcript, InspectTranscriptRow{Kind: "user", Content: inputStr})
+			}
+			if outputStr != "" {
+				transcript = append(transcript, InspectTranscriptRow{Kind: "assistant", Content: outputStr})
+			}
+		}
+
+		parsed = append(parsed, ParsedInspectSample{
+			ID:           idStr,
+			Epoch:        s.Epoch,
+			Score:        score,
+			HasScore:     hasScore,
+			ScoreStr:     scoreStr,
+			Status:       status,
+			Input:        inputStr,
+			Target:       targetStr,
+			Output:       outputStr,
+			Latency:      latency,
+			TotalTokens:  totalTokens,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			Transcript:   transcript,
+		})
+	}
+
+	return parsed, nil
 }
 
 // ExtractInspectTokens parses raw Inspect log JSON bytes and returns token usage breakdown if present.
