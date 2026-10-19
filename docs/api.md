@@ -305,6 +305,7 @@ spec:
 | Field | Type | Description |
 |---|---|---|
 | `phase` | `ComparisonPhase` | High-level comparison lifecycle phase: `Running`, `Completed`. |
+| `completionTime` | `*metav1.Time` | Timestamp when the comparison reached the `Completed` phase; cleared if a subsequent `extraSamples` bump moves the comparison back to `Running`. Used to measure `comparisonTTL` retention. |
 | `verdict` | `ComparisonVerdict` | Aggregate run-level verdict: `IMPROVED`, `REGRESSED`, `UNCHANGED`, `INCONCLUSIVE`, `RUNNING`. |
 | `pImprovement` | `*float64` | Posterior probability that the candidate is a net improvement across evaluated tasks (range `[0, 1]`). |
 | `batches` | `[]ComparisonBatchStatus` | Records execution state of each paired batch of Runs (`index`, `sampleRange`, `candidateRun`, `baselineRun`, `phase`). |
@@ -394,7 +395,7 @@ When a pull request closes (merged or closed without merge), GitHub sends a `pul
 
 ### 2. Comparison TTL (`comparisonTTL`)
 As a safety net for standalone or lingering Comparisons, the controller supports an optional time-to-live (`comparisonTTL` in the ConfigMap or `--comparison-ttl` CLI flag, duration, default `0` = disabled). When configured:
-- The controller automatically deletes `Completed` Comparisons whose age exceeds the TTL. Age is measured from creation (`metadata.creationTimestamp`), so a Comparison that took longer than the TTL to finish is deleted the moment it completes.
+- The controller automatically deletes `Completed` Comparisons whose age exceeds the TTL. Age is measured from completion (`status.completionTime`), falling back to creation (`metadata.creationTimestamp`) only for objects that predate the field.
 - Owned batch Runs are garbage-collected via owner references.
 - Baseline Runs are preserved.
 - Active Comparisons (`Running` phase, or `Completed` comparisons with pending `extraSamples` requested) are not deleted until complete.
@@ -405,8 +406,8 @@ As a safety net for standalone or lingering Comparisons, the controller supports
 `kubectl get comparisons` displays:
 
 ```text
-NAME          VERDICT     P(IMP)   BASELINE             CANDIDATE             AGE
-pr-418-eval   IMPROVED    0.98     run-main-a81d0c4     run-pr-418-3f9c2e1    2m
+NAME          VERDICT     P(IMP)   TASKS   BASELINE             CANDIDATE             COMPLETED   AGE
+pr-418-eval   IMPROVED    0.98     2/2     run-main-a81d0c4     run-pr-418-3f9c2e1    1m          2m
 ```
 
 

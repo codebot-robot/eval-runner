@@ -7155,6 +7155,247 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 			t.Errorf("expected 1 comment posted to GitHub, got %d", len(server.Comments()))
 		}
 	})
+
+	t.Run("CompletedComparisonCreated2xTTLAgoCompletedRecentlyNotDeleted", func(t *testing.T) {
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-2x", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseCompleted},
+		}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-2x", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseCompleted},
+		}
+		compTime := metav1.NewTime(now.Add(-1 * time.Minute))
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "comp-2x-ttl",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-2 * ttl)),
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-2x"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-2x"},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:          v1alpha1.ComparisonPhaseCompleted,
+				CompletionTime: &compTime,
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseRun, candRun, comp).
+			WithStatusSubresource(baseRun, candRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:        cl,
+			Scheme:        scheme,
+			ComparisonTTL: ttl,
+			Now:           func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-2x-ttl"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error: %v", err)
+		}
+		expectedRequeue := ttl - 1*time.Minute
+		if res.RequeueAfter != expectedRequeue {
+			t.Errorf("expected RequeueAfter %v (TTL - 1m), got %v", expectedRequeue, res.RequeueAfter)
+		}
+
+		var checkComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &checkComp); err != nil {
+			t.Fatalf("expected comparison to NOT be deleted, got err: %v", err)
+		}
+	})
+
+	t.Run("ComparisonCompletedPastTTLDeleted", func(t *testing.T) {
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-past", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseCompleted},
+		}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-past", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseCompleted},
+		}
+		compTime := metav1.NewTime(now.Add(-ttl - 5*time.Minute))
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "comp-past-ttl",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-5 * ttl)),
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-past"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-past"},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:          v1alpha1.ComparisonPhaseCompleted,
+				CompletionTime: &compTime,
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseRun, candRun, comp).
+			WithStatusSubresource(baseRun, candRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:        cl,
+			Scheme:        scheme,
+			ComparisonTTL: ttl,
+			Now:           func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-past-ttl"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error: %v", err)
+		}
+		if res.RequeueAfter != 0 {
+			t.Errorf("expected RequeueAfter 0, got %v", res.RequeueAfter)
+		}
+
+		var checkComp v1alpha1.Comparison
+		err = cl.Get(t.Context(), req.NamespacedName, &checkComp)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected comparison to be deleted (NotFound), got err: %v", err)
+		}
+		var checkBase v1alpha1.Run
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "base-run-past"}, &checkBase); err != nil {
+			t.Fatalf("expected baseline run to be preserved, got err: %v", err)
+		}
+	})
+
+	t.Run("ExtraSamplesBumpClearsCompletionTimestamp", func(t *testing.T) {
+		taskID := "docs/readme_comprehension"
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		var b1Scores []stats.SampleScore
+		for i := 1; i <= 8; i++ {
+			b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		}
+		fakeGCS.Objects["test-bucket/runs/cand-commit/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b1Scores)}
+		fakeGCS.Objects["test-bucket/runs/base-commit/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, b1Scores)}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-clear", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model:       "mockllm/model",
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+				},
+			},
+		}
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-clear", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model:       "mockllm/model",
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-clear", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-clear"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-clear"},
+				Sampling: &v1alpha1.ComparisonSamplingSpec{
+					BatchSize:         8,
+					MaxSamplesPerTask: 64,
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+			Now:          func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-clear"}}
+		// Reconcile 1: Reaches Completed, sets CompletionTime
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("first reconcile failed: %v", err)
+		}
+
+		var completedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &completedComp); err != nil {
+			t.Fatalf("failed to get completed comparison: %v", err)
+		}
+		if completedComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Fatalf("expected phase Completed, got %s", completedComp.Status.Phase)
+		}
+		if completedComp.Status.CompletionTime == nil {
+			t.Fatalf("expected CompletionTime to be set on Completed comparison, got nil")
+		}
+
+		// ExtraSamples bump
+		completedComp.Spec.ExtraSamples = 8
+		if err := cl.Update(t.Context(), &completedComp); err != nil {
+			t.Fatalf("failed to update extraSamples: %v", err)
+		}
+
+		// Reconcile 2: Schedules extra batch, moves back to Running, clears CompletionTime
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("reconcile after extraSamples bump failed: %v", err)
+		}
+
+		var runningComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &runningComp); err != nil {
+			t.Fatalf("failed to get running comparison: %v", err)
+		}
+		if runningComp.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+			t.Fatalf("expected phase Running after extraSamples bump, got %s", runningComp.Status.Phase)
+		}
+		if runningComp.Status.CompletionTime != nil {
+			t.Errorf("expected CompletionTime to be nil when moved back to Running, got %v", runningComp.Status.CompletionTime)
+		}
+	})
 }
 
 func TestComparisonController_PendingCommands(t *testing.T) {
