@@ -19,11 +19,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -282,8 +285,12 @@ func TestServerRunDetail(t *testing.T) {
 	if !strings.Contains(body, "cibar-01") {
 		t.Errorf("expected 0-1 CI bar element")
 	}
+	expectedLink := "/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples"
+	if !strings.Contains(body, expectedLink) {
+		t.Errorf("expected link to task samples list %q in table", expectedLink)
+	}
 	if !strings.Contains(body, "gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json") {
-		t.Errorf("expected log path as text in table")
+		t.Errorf("expected log path in table")
 	}
 
 	// Test 404 for missing run
@@ -946,5 +953,475 @@ func TestServerRunDetail_SampleRange(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "samples 9-16") {
 		t.Errorf("expected Run Detail view to contain 'samples 9-16', got body:\n%s", body)
+	}
+}
+
+func TestServerTaskSamplesAndTranscript(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: baseDir}
+
+	fixturePath := filepath.Join("..", "artifacts", "testdata", "trajectory_messages.json")
+	fixtureData, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("failed to read trajectory_messages fixture: %v", err)
+	}
+
+	commit := "abcdef1234567890"
+	taskID := "triage/runbook_lookup"
+	meanScore := 0.5
+	now := time.Now()
+	meta := artifacts.RunMetadata{
+		TaskID:     taskID,
+		Commit:     commit,
+		Model:      "gemini-2.5-pro",
+		Samples:    2,
+		Successes:  1,
+		MeanScore:  &meanScore,
+		StartedAt:  &now,
+		FinishedAt: &now,
+	}
+
+	logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", fixtureData)
+	if err != nil {
+		t.Fatalf("failed to store artifact: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sample-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: commit,
+			},
+			Model: "gemini-2.5-pro",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: logURI,
+				},
+				{
+					ID:    "task/no-log",
+					Phase: v1alpha1.TaskPhasePending,
+				},
+				{
+					ID:      "task/bad-prefix",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: filepath.Join(baseDir, "runs", "othercommit12345", "inspect.json"),
+				},
+				{
+					ID:      "task/file-not-found",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: filepath.Join(baseDir, "runs", commit, "missing", "inspect.json"),
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		Build()
+
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+		ArtifactSink:     sink,
+	})
+
+	t.Run("SamplesList_Success", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		for _, expected := range []string{
+			"sample-017",
+			"sample-019",
+			"1.00",
+			"0.00",
+			"3.0s",
+			"13.0s",
+			"1,500",
+			"41,200",
+			"Cleared CDN cache",
+			"Escalated to on-call",
+		} {
+			if !strings.Contains(body, expected) {
+				t.Errorf("expected samples list to contain %q, got body:\n%s", expected, body)
+			}
+		}
+
+		normalizedBody := strings.ReplaceAll(body, baseDir, "/tmp/eval-runner-sink")
+		assertGolden(t, "task_samples.golden.html", normalizedBody)
+	})
+
+	t.Run("SampleTranscript_FailSample", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-019", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		for _, expected := range []string{
+			"sample-019",
+			"FAIL",
+			"user",
+			"Customer reports checkout returns HTTP 502",
+			"tool_call",
+			"classify_severity",
+			"page_oncall",
+			"tool",
+			"high",
+			"Paged on-call team payments",
+			"assistant",
+			"Escalated to on-call. Severity high. No further action.",
+			"class=\"ev bad\"",
+		} {
+			if !strings.Contains(body, expected) {
+				t.Errorf("expected sample transcript to contain %q, got body:\n%s", expected, body)
+			}
+		}
+
+		normalizedBody := strings.ReplaceAll(body, baseDir, "/tmp/eval-runner-sink")
+		assertGolden(t, "sample_transcript.golden.html", normalizedBody)
+	})
+
+	t.Run("SampleTranscript_PassSample", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-017", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		if !strings.Contains(body, "PASS") {
+			t.Errorf("expected sample transcript to contain 'PASS', got body:\n%s", body)
+		}
+		if !strings.Contains(body, "check_cdn") {
+			t.Errorf("expected sample transcript to contain 'check_cdn', got body:\n%s", body)
+		}
+	})
+
+	t.Run("Negative_MissingLogPath_404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/task%2Fno-log/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for missing logPath, got %d", w.Code)
+		}
+	})
+
+	t.Run("Negative_NoSuchTask_404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/nonexistent%2Ftask/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for nonexistent task, got %d", w.Code)
+		}
+	})
+
+	t.Run("Negative_NoSuchRun_404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/no-such-run/tasks/triage%2Frunbook_lookup/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for nonexistent run, got %d", w.Code)
+		}
+	})
+
+	t.Run("Negative_NilSink_404", func(t *testing.T) {
+		serverNoSink := NewServer(Config{
+			Client:           fakeClient,
+			DefaultNamespace: "eval-runner",
+			ArtifactSink:     nil,
+		})
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples", nil)
+		w := httptest.NewRecorder()
+		serverNoSink.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 when ArtifactSink is nil, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "artifact storage not configured") {
+			t.Errorf("expected 'artifact storage not configured' message, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("Negative_PrefixMismatch_403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/task%2Fbad-prefix/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for prefix mismatch, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("Negative_StorageFileNotFound_404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/task%2Ffile-not-found/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for storage file not found, got %d: %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "task log not found on storage") {
+			t.Errorf("expected 'task log not found on storage' message, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("Negative_NoSuchSample_404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/no-such-sample", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for nonexistent sample, got %d", w.Code)
+		}
+	})
+
+	t.Run("Negative_CappedOrTruncatedLog_FriendlyPage", func(t *testing.T) {
+		// Store truncated invalid JSON
+		metaTrunc := artifacts.RunMetadata{
+			TaskID:     "task/truncated",
+			Commit:     commit,
+			Model:      "gemini-2.5-pro",
+			Samples:    1,
+			StartedAt:  &now,
+			FinishedAt: &now,
+		}
+		truncURI, err := sink.StoreArtifact(t.Context(), metaTrunc, "inspect.json", []byte(`{"version": 2, "samples": [{"id": 1, "input": "incomp`))
+		if err != nil {
+			t.Fatalf("failed to store truncated artifact: %v", err)
+		}
+
+		runTrunc := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "run-truncated",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					Commit: commit,
+				},
+				Model: "gemini-2.5-pro",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task/truncated",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: truncURI,
+					},
+				},
+			},
+		}
+
+		clientTrunc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runTrunc).Build()
+		serverTrunc := NewServer(Config{Client: clientTrunc, ArtifactSink: sink})
+
+		// List page should return 200 with friendly message, not 500
+		reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/run-truncated/tasks/task%2Ftruncated/samples", nil)
+		wList := httptest.NewRecorder()
+		serverTrunc.ServeHTTP(wList, reqList)
+
+		if wList.Code != http.StatusOK {
+			t.Errorf("expected 200 OK for truncated log list page, got %d", wList.Code)
+		}
+		if !strings.Contains(wList.Body.String(), "Log Truncated") {
+			t.Errorf("expected 'Log Truncated' message, got body:\n%s", wList.Body.String())
+		}
+
+		// Transcript page should return 200 with friendly message, not 500
+		reqTranscript := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/run-truncated/tasks/task%2Ftruncated/samples/1", nil)
+		wTranscript := httptest.NewRecorder()
+		serverTrunc.ServeHTTP(wTranscript, reqTranscript)
+
+		if wTranscript.Code != http.StatusOK {
+			t.Errorf("expected 200 OK for truncated log transcript page, got %d", wTranscript.Code)
+		}
+		if !strings.Contains(wTranscript.Body.String(), "Log Truncated") {
+			t.Errorf("expected 'Log Truncated' message, got body:\n%s", wTranscript.Body.String())
+		}
+	})
+
+	t.Run("Escaping_HostileContent", func(t *testing.T) {
+		hostileJSON := `{
+			"version": 2,
+			"status": "success",
+			"eval": {"task": "task/hostile"},
+			"samples": [
+				{
+					"id": "sample-xss",
+					"epoch": 1,
+					"input": "<script>alert('input-xss')</script>",
+					"output": {"completion": "<img src=x onerror=alert('output-xss')>"},
+					"messages": [
+						{
+							"role": "user",
+							"content": "<script>alert('msg-xss')</script>"
+						},
+						{
+							"role": "assistant",
+							"tool_calls": [
+								{
+									"id": "c1",
+									"function": "malicious<script>",
+									"arguments": {"arg": "<iframe src=bad></iframe>"}
+								}
+							]
+						}
+					]
+				}
+			]
+		}`
+		metaHostile := artifacts.RunMetadata{
+			TaskID:     "task/hostile",
+			Commit:     commit,
+			Model:      "gemini-2.5-pro",
+			Samples:    1,
+			StartedAt:  &now,
+			FinishedAt: &now,
+		}
+		hostileURI, err := sink.StoreArtifact(t.Context(), metaHostile, "inspect.json", []byte(hostileJSON))
+		if err != nil {
+			t.Fatalf("failed to store hostile artifact: %v", err)
+		}
+
+		runHostile := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "run-hostile",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{Commit: commit},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task/hostile",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: hostileURI,
+					},
+				},
+			},
+		}
+
+		clientHostile := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runHostile).Build()
+		serverHostile := NewServer(Config{Client: clientHostile, ArtifactSink: sink})
+
+		// List page
+		reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/run-hostile/tasks/task%2Fhostile/samples", nil)
+		wList := httptest.NewRecorder()
+		serverHostile.ServeHTTP(wList, reqList)
+
+		bodyList := wList.Body.String()
+		if strings.Contains(bodyList, "<script>alert") {
+			t.Errorf("raw unescaped script tag found in list page HTML:\n%s", bodyList)
+		}
+		if !strings.Contains(bodyList, "&lt;script&gt;alert") {
+			t.Errorf("expected escaped script tag in list page HTML")
+		}
+
+		// Transcript page
+		reqTranscript := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/run-hostile/tasks/task%2Fhostile/samples/sample-xss", nil)
+		wTranscript := httptest.NewRecorder()
+		serverHostile.ServeHTTP(wTranscript, reqTranscript)
+
+		bodyTranscript := wTranscript.Body.String()
+		if strings.Contains(bodyTranscript, "<script>alert") {
+			t.Errorf("raw unescaped script tag found in transcript page HTML:\n%s", bodyTranscript)
+		}
+		if !strings.Contains(bodyTranscript, "&lt;script&gt;alert") {
+			t.Errorf("expected escaped script tag in transcript page HTML")
+		}
+		if strings.Contains(bodyTranscript, "<iframe src=bad>") {
+			t.Errorf("raw unescaped iframe tag found in transcript page HTML:\n%s", bodyTranscript)
+		}
+	})
+}
+
+func TestLogLRUCache(t *testing.T) {
+	t.Run("GetAndSet", func(t *testing.T) {
+		cache := newLogLRUCache(1024, time.Hour)
+		sample := artifacts.ParsedInspectSample{ID: "s1"}
+		cache.set("key1", 50, []artifacts.ParsedInspectSample{sample}, nil)
+
+		got, err, ok := cache.get("key1")
+		if !ok || err != nil || len(got) != 1 || got[0].ID != "s1" {
+			t.Fatalf("expected cache hit for key1, got ok=%v, err=%v, len=%d", ok, err, len(got))
+		}
+
+		_, _, ok = cache.get("nonexistent")
+		if ok {
+			t.Errorf("expected cache miss for nonexistent key")
+		}
+	})
+
+	t.Run("LRUEvictionByBytes", func(t *testing.T) {
+		cache := newLogLRUCache(100, time.Hour)
+		cache.set("k1", 60, []artifacts.ParsedInspectSample{{ID: "s1"}}, nil)
+		cache.set("k2", 50, []artifacts.ParsedInspectSample{{ID: "s2"}}, nil)
+
+		// Total bytes would be 110 > 100, so k1 should be evicted
+		_, _, ok1 := cache.get("k1")
+		if ok1 {
+			t.Errorf("expected k1 to be evicted by byte limit")
+		}
+		_, _, ok2 := cache.get("k2")
+		if !ok2 {
+			t.Errorf("expected k2 to be present in cache")
+		}
+	})
+
+	t.Run("TTLExpiration", func(t *testing.T) {
+		cache := newLogLRUCache(1024, 10*time.Millisecond)
+		cache.set("k1", 10, []artifacts.ParsedInspectSample{{ID: "s1"}}, nil)
+
+		time.Sleep(20 * time.Millisecond)
+
+		_, _, ok := cache.get("k1")
+		if ok {
+			t.Errorf("expected k1 to be expired after TTL")
+		}
+	})
+}
+
+func TestTruncateMessageBytes_UTF8(t *testing.T) {
+	// Japanese text: each rune is 3 bytes in UTF-8
+	s := "こんにちは世界"
+	// Slicing at 5 bytes falls in the middle of the second rune.
+	// TruncateMessageBytes should walk back to the rune boundary at 3 bytes ('こ').
+	truncated := TruncateMessageBytes(s, 5)
+	expectedPrefix := "こ\n... [content truncated]"
+	if truncated != expectedPrefix {
+		t.Errorf("expected %q, got %q", expectedPrefix, truncated)
+	}
+
+	// Short string under limit should remain unchanged
+	if notTruncated := TruncateMessageBytes("hello", 10); notTruncated != "hello" {
+		t.Errorf("expected 'hello', got %q", notTruncated)
 	}
 }

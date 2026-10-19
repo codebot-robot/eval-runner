@@ -15,11 +15,17 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
@@ -107,8 +113,9 @@ type Config struct {
 
 // Server serves read-only web views of Runs and Comparisons.
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
+	cfg   Config
+	mux   *http.ServeMux
+	cache *logLRUCache
 }
 
 // NewServer initializes a new Server with route registration.
@@ -118,8 +125,9 @@ func NewServer(cfg Config) *Server {
 	}
 
 	s := &Server{
-		cfg: cfg,
-		mux: http.NewServeMux(),
+		cfg:   cfg,
+		mux:   http.NewServeMux(),
+		cache: newLogLRUCache(64*1024*1024, 1*time.Hour),
 	}
 
 	s.routes()
@@ -136,6 +144,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /{$}", s.handleRoot)
 	s.mux.HandleFunc("GET /runs", s.handleRunsList)
 	s.mux.HandleFunc("GET /runs/{namespace}/{name}", s.handleRunDetail)
+	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks/{task}/samples", s.handleTaskSamplesList)
+	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks/{task}/samples/{sample}", s.handleSampleTranscript)
 	s.mux.HandleFunc("GET /comparisons", s.handleComparisonsList)
 	s.mux.HandleFunc("GET /comparisons/{namespace}/{name}", s.handleComparisonDetail)
 }
@@ -337,6 +347,11 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			taskSampleRange = fmt.Sprintf("samples %d-%d", task.SampleRange.Start, task.SampleRange.End)
 		}
 
+		var samplesLink string
+		if task.LogPath != "" {
+			samplesLink = BuildTaskSamplesListLink(ns, name, task.ID)
+		}
+
 		taskRows = append(taskRows, RunTaskRow{
 			ID:          task.ID,
 			Phase:       task.Phase,
@@ -351,6 +366,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			Successes:   task.Successes,
 			Method:      method,
 			LogPath:     task.LogPath,
+			SamplesLink: samplesLink,
 			Message:     task.Message,
 			SampleRange: taskSampleRange,
 		})
@@ -617,6 +633,345 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplComparisonDetail.Execute(w, view); err != nil {
+		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]artifacts.ParsedInspectSample, bool, error) {
+	if s.cache != nil {
+		if samples, parseErr, ok := s.cache.get(logPath); ok {
+			if parseErr != nil {
+				return nil, true, parseErr
+			}
+			return samples, false, nil
+		}
+	}
+
+	data, err := s.cfg.ArtifactSink.Load(ctx, logPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "exceeds maximum") {
+			return nil, true, err
+		}
+		return nil, false, err
+	}
+
+	samples, parseErr := artifacts.ParseInspectSamples(data)
+	if parseErr != nil {
+		if s.cache != nil {
+			s.cache.set(logPath, int64(len(data)), nil, parseErr)
+		}
+		return nil, true, parseErr
+	}
+
+	if s.cache != nil {
+		s.cache.set(logPath, int64(len(data)), samples, nil)
+	}
+	return samples, false, nil
+}
+
+func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("namespace")
+	name := r.PathValue("name")
+	taskID := r.PathValue("task")
+
+	if !isValidNamespace(ns) || !isValidResourceName(name) || taskID == "" {
+		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q task=%q", ns, name, taskID), http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	var run v1alpha1.Run
+	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, fmt.Sprintf("run not found: %s/%s", ns, name), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("error loading run %s/%s: %v", ns, name, err), http.StatusInternalServerError)
+		return
+	}
+
+	if s.cfg.ArtifactSink == nil {
+		http.Error(w, "artifact storage not configured", http.StatusNotFound)
+		return
+	}
+
+	var matchedTask *v1alpha1.TaskStatus
+	for i := range run.Status.Tasks {
+		if run.Status.Tasks[i].ID == taskID {
+			matchedTask = &run.Status.Tasks[i]
+			break
+		}
+	}
+
+	if matchedTask == nil || matchedTask.LogPath == "" {
+		http.Error(w, fmt.Sprintf("log path not found for task %q", taskID), http.StatusNotFound)
+		return
+	}
+
+	commit := run.Spec.Repo.Commit
+	expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
+	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
+		http.Error(w, "forbidden: log path does not match run commit prefix", http.StatusForbidden)
+		return
+	}
+
+	view := TaskSamplesListView{
+		ActiveTab:     NavTabRuns,
+		Namespace:     ns,
+		RunName:       name,
+		TaskID:        taskID,
+		EscapedTaskID: url.PathEscape(taskID),
+		Commit:        ShortCommit(commit),
+		Model:         run.Spec.Model,
+		LogPath:       matchedTask.LogPath,
+	}
+
+	samples, isTruncated, err := s.loadInspectSamples(ctx, matchedTask.LogPath)
+	if isTruncated {
+		view.IsTruncatedLog = true
+		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Sample details cannot be displayed."
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmplTaskSamplesList.Execute(w, view); err != nil {
+			http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		}
+		return
+	}
+	if err != nil {
+		if errors.Is(err, artifacts.ErrNotFound) {
+			http.Error(w, fmt.Sprintf("task log not found on storage: %v", err), http.StatusNotFound)
+			return
+		}
+		log.Printf("storage error loading artifact %s: %v", matchedTask.LogPath, err)
+		http.Error(w, fmt.Sprintf("storage error loading artifact: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	totalSamples := len(samples)
+	view.TotalSamples = totalSamples
+
+	page := 1
+	if pStr := r.URL.Query().Get("page"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p > 1 {
+			page = p
+		}
+	}
+
+	const pageSize = 200
+	totalPages := 1
+	if totalSamples > 0 {
+		totalPages = int(math.Ceil(float64(totalSamples) / float64(pageSize)))
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	view.Page = page
+	view.PageSize = pageSize
+	view.TotalPages = totalPages
+
+	startIdx := (page - 1) * pageSize
+	endIdx := startIdx + pageSize
+	if endIdx > totalSamples {
+		endIdx = totalSamples
+	}
+	if startIdx > endIdx {
+		startIdx = endIdx
+	}
+
+	view.ShowingStart = startIdx + 1
+	if totalSamples == 0 {
+		view.ShowingStart = 0
+	}
+	view.ShowingEnd = endIdx
+
+	baseLink := BuildTaskSamplesListLink(ns, name, taskID)
+	if page > 1 {
+		view.HasPrev = true
+		view.PrevLink = fmt.Sprintf("%s?page=%d", baseLink, page-1)
+	}
+	if page < totalPages {
+		view.HasNext = true
+		view.NextLink = fmt.Sprintf("%s?page=%d", baseLink, page+1)
+	}
+
+	var sampleRows []TaskSampleRow
+	for _, sRecord := range samples[startIdx:endIdx] {
+		statusClass := "neutral"
+		if sRecord.Status == "pass" {
+			statusClass = "good"
+		} else if sRecord.Status == "fail" {
+			statusClass = "bad"
+		}
+
+		sampleRows = append(sampleRows, TaskSampleRow{
+			ID:            sRecord.ID,
+			EscapedID:     url.PathEscape(sRecord.ID),
+			Score:         sRecord.ScoreStr,
+			Status:        sRecord.Status,
+			StatusClass:   statusClass,
+			InputPreview:  TruncateRunes(sRecord.Input, 200),
+			OutputPreview: TruncateRunes(sRecord.Output, 200),
+			LatencyStr:    FormatLatency(sRecord.Latency),
+			TokensStr:     FormatTokens(sRecord.TotalTokens),
+			Link:          BuildTaskSampleLink(ns, name, taskID, sRecord.ID),
+		})
+	}
+	view.Samples = sampleRows
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmplTaskSamplesList.Execute(w, view); err != nil {
+		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("namespace")
+	name := r.PathValue("name")
+	taskID := r.PathValue("task")
+	sampleID := r.PathValue("sample")
+
+	if !isValidNamespace(ns) || !isValidResourceName(name) || taskID == "" || sampleID == "" {
+		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q task=%q sample=%q", ns, name, taskID, sampleID), http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	var run v1alpha1.Run
+	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, fmt.Sprintf("run not found: %s/%s", ns, name), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("error loading run %s/%s: %v", ns, name, err), http.StatusInternalServerError)
+		return
+	}
+
+	if s.cfg.ArtifactSink == nil {
+		http.Error(w, "artifact storage not configured", http.StatusNotFound)
+		return
+	}
+
+	var matchedTask *v1alpha1.TaskStatus
+	for i := range run.Status.Tasks {
+		if run.Status.Tasks[i].ID == taskID {
+			matchedTask = &run.Status.Tasks[i]
+			break
+		}
+	}
+
+	if matchedTask == nil || matchedTask.LogPath == "" {
+		http.Error(w, fmt.Sprintf("log path not found for task %q", taskID), http.StatusNotFound)
+		return
+	}
+
+	commit := run.Spec.Repo.Commit
+	expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
+	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
+		http.Error(w, "forbidden: log path does not match run commit prefix", http.StatusForbidden)
+		return
+	}
+
+	view := SampleTranscriptView{
+		ActiveTab:       NavTabRuns,
+		Namespace:       ns,
+		RunName:         name,
+		TaskID:          taskID,
+		EscapedTaskID:   url.PathEscape(taskID),
+		SampleID:        sampleID,
+		EscapedSampleID: url.PathEscape(sampleID),
+		LogPath:         matchedTask.LogPath,
+	}
+
+	samples, isTruncated, err := s.loadInspectSamples(ctx, matchedTask.LogPath)
+	if isTruncated {
+		view.IsTruncatedLog = true
+		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Transcript details cannot be displayed."
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmplSampleTranscript.Execute(w, view); err != nil {
+			http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		}
+		return
+	}
+	if err != nil {
+		if errors.Is(err, artifacts.ErrNotFound) {
+			http.Error(w, fmt.Sprintf("task log not found on storage: %v", err), http.StatusNotFound)
+			return
+		}
+		log.Printf("storage error loading artifact %s: %v", matchedTask.LogPath, err)
+		http.Error(w, fmt.Sprintf("storage error loading artifact: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	var matchedSample *artifacts.ParsedInspectSample
+	for i := range samples {
+		if samples[i].ID == sampleID {
+			matchedSample = &samples[i]
+			break
+		}
+	}
+
+	if matchedSample == nil {
+		http.Error(w, fmt.Sprintf("sample %q not found in task %q", sampleID, taskID), http.StatusNotFound)
+		return
+	}
+
+	statusClass := "neutral"
+	statusUpper := "UNKNOWN"
+	if matchedSample.Status == "pass" {
+		statusClass = "good"
+		statusUpper = "PASS"
+	} else if matchedSample.Status == "fail" {
+		statusClass = "bad"
+		statusUpper = "FAIL"
+	}
+
+	view.Score = matchedSample.ScoreStr
+	view.Status = matchedSample.Status
+	view.StatusUpper = statusUpper
+	view.StatusClass = statusClass
+	view.LatencyStr = FormatLatency(matchedSample.Latency)
+	view.TokensStr = FormatTokens(matchedSample.TotalTokens)
+
+	totalEvents := len(matchedSample.Transcript)
+	view.TotalEvents = totalEvents
+
+	rows := matchedSample.Transcript
+	const maxEvents = 500
+	if len(rows) > maxEvents {
+		rows = rows[:maxEvents]
+		view.IsEventsTruncated = true
+		view.EventsTruncatedMessage = fmt.Sprintf("[Transcript truncated: showing first %d of %d events]", maxEvents, totalEvents)
+	}
+
+	lastAssistantIdx := -1
+	for i, r := range rows {
+		if r.Kind == "assistant" {
+			lastAssistantIdx = i
+		}
+	}
+
+	const maxMessageBytes = 16 * 1024
+	var rowViews []TranscriptRowView
+	for i, r := range rows {
+		class := ""
+		switch r.Kind {
+		case "tool", "tool_call":
+			class = "tool"
+		case "assistant":
+			if matchedSample.Status == "fail" && i == lastAssistantIdx {
+				class = "bad"
+			}
+		}
+		rowViews = append(rowViews, TranscriptRowView{
+			Kind:    r.Kind,
+			Class:   class,
+			Content: TruncateMessageBytes(r.Content, maxMessageBytes),
+		})
+	}
+	view.Rows = rowViews
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmplSampleTranscript.Execute(w, view); err != nil {
 		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
 	}
 }

@@ -407,7 +407,11 @@ const runDetailTemplate = `
                 <td class="mono" style="font-size:13px">{{ if .Method }}{{ .Method }}{{ else }}—{{ end }}</td>
                 <td>
                   {{ if .LogPath }}
+                  {{ if .SamplesLink }}
+                  <a href="{{ .SamplesLink }}" class="log-path mono" title="{{ .LogPath }}">{{ .LogPath }}</a>
+                  {{ else }}
                   <span class="log-path mono" title="{{ .LogPath }}">{{ .LogPath }}</span>
+                  {{ end }}
                   {{ else }}
                   <span style="color:var(--muted)">—</span>
                   {{ end }}
@@ -658,16 +662,216 @@ const comparisonDetailTemplate = `
 </html>
 `
 
+const trajectoryCSS = `
+.breadcrumb { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+.breadcrumb a { color: var(--indigo); text-decoration: none; }
+.breadcrumb a:hover { text-decoration: underline; }
+.sample-link { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); text-decoration: none; font-weight: 500; }
+.sample-link:hover { text-decoration: underline; color: var(--indigo); }
+.st { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.st.p { background: var(--good); }
+.st.f { background: var(--bad); }
+.preview-cell { max-width: 320px; }
+.preview-text { font-family: var(--mono); font-size: 12px; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; line-height: 1.4; margin: 0; max-height: 4.2em; overflow: hidden; }
+.btn-page { font-size: 13px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); text-decoration: none; background: var(--surface); }
+.btn-page:hover { background: var(--canvas); }
+.ev { display: flex; gap: 18px; padding: 12px 16px; border-radius: 10px; margin-bottom: 8px; font-size: 14px; align-items: flex-start; background: var(--canvas); border: 1px solid var(--line); }
+.ev .k { width: 100px; flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); padding-top: 2px; text-transform: uppercase; letter-spacing: 0.05em; }
+.ev .b { flex: 1; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; margin: 0; color: var(--ink); }
+.ev.tool { background: var(--indigo-soft); border-color: #C7D2FE; }
+.ev.tool .k { color: var(--indigo); }
+.ev.bad { background: var(--bad-soft); border-color: #FECACA; }
+.ev.bad .k { color: var(--bad); }
+`
+
+const taskSamplesListTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .TaskID }} · Samples · eval-runner</title>
+  <style>` + baseCSS + trajectoryCSS + `</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="breadcrumb">
+        <a href="/runs">Runs</a> / <a href="/runs/{{ .Namespace }}/{{ .RunName }}">{{ .RunName }}</a> / <span class="mono">{{ .TaskID }}</span>
+      </div>
+
+      <div class="card-header" style="align-items:flex-start;flex-direction:column;gap:8px">
+        <h1 class="card-title mono" style="font-size:22px">{{ .TaskID }}</h1>
+        <div class="meta mono" style="font-size:12px;color:var(--muted)">
+          commit <span class="mono">{{ .Commit }}</span> · {{ .Model }} · <span class="log-path mono" title="{{ .LogPath }}">{{ .LogPath }}</span>
+        </div>
+      </div>
+
+      {{ if .IsTruncatedLog }}
+      <div class="msg-alert" style="margin-bottom:16px">
+        <strong>Log Truncated:</strong> {{ .TruncatedMessage }}
+      </div>
+      {{ else }}
+      <table class="table" style="margin-top:16px">
+        <thead>
+          <tr>
+            <th style="width:140px">sample</th>
+            <th style="width:90px">score</th>
+            <th>input preview</th>
+            <th>output preview</th>
+            <th style="width:90px">latency</th>
+            <th style="width:90px">tokens</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ range .Samples }}
+          <tr>
+            <td class="mono">
+              <a href="{{ .Link }}" class="sample-link">
+                <span class="st {{ if eq .Status "pass" }}p{{ else if eq .Status "fail" }}f{{ end }}"></span>
+                {{ .ID }}
+              </a>
+            </td>
+            <td>
+              <span class="chip chip-{{ .StatusClass }}">{{ .Score }}</span>
+            </td>
+            <td class="preview-cell"><pre class="preview-text">{{ .InputPreview }}</pre></td>
+            <td class="preview-cell"><pre class="preview-text">{{ .OutputPreview }}</pre></td>
+            <td class="mono num">{{ .LatencyStr }}</td>
+            <td class="mono num">{{ .TokensStr }}</td>
+          </tr>
+          {{ else }}
+          <tr>
+            <td colspan="6" class="empty-state">No samples recorded for this task.</td>
+          </tr>
+          {{ end }}
+        </tbody>
+      </table>
+
+      {{ if or .HasPrev .HasNext }}
+      <div class="pagination-bar" style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:8px 0;border-top:1px solid var(--line)">
+        <div style="font-size:13px;color:var(--muted)">
+          Showing {{ .ShowingStart }}–{{ .ShowingEnd }} of {{ .TotalSamples }} samples
+        </div>
+        <div style="display:flex;gap:8px">
+          {{ if .HasPrev }}
+          <a href="{{ .PrevLink }}" class="btn-page">← Previous</a>
+          {{ end }}
+          {{ if .HasNext }}
+          <a href="{{ .NextLink }}" class="btn-page">Next →</a>
+          {{ end }}
+        </div>
+      </div>
+      {{ end }}
+      {{ end }}
+    </div>
+  </main>
+</body>
+</html>
+`
+
+const sampleTranscriptTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .SampleID }} · {{ .TaskID }} · eval-runner</title>
+  <style>` + baseCSS + trajectoryCSS + `</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="breadcrumb">
+        <a href="/runs">Runs</a> / <a href="/runs/{{ .Namespace }}/{{ .RunName }}">{{ .RunName }}</a> / <a href="/runs/{{ .Namespace }}/{{ .RunName }}/tasks/{{ .EscapedTaskID }}/samples">{{ .TaskID }}</a> / <span class="mono">{{ .SampleID }}</span>
+      </div>
+
+      <div class="card-header" style="align-items:flex-start;flex-direction:column;gap:8px">
+        <h2 style="font-size:20px;font-weight:600;margin:0">
+          <span class="mono">{{ .SampleID }}</span> · <span class="chip chip-{{ .StatusClass }}">{{ .StatusUpper }}</span> · {{ .LatencyStr }} · {{ .TokensStr }} tokens
+        </h2>
+        <div class="meta mono" style="font-size:12px;color:var(--muted)">
+          <span class="log-path mono" title="{{ .LogPath }}">{{ .LogPath }}</span> · inspect log format
+        </div>
+      </div>
+
+      {{ if .IsTruncatedLog }}
+      <div class="msg-alert" style="margin-bottom:16px">
+        <strong>Log Truncated:</strong> {{ .TruncatedMessage }}
+      </div>
+      {{ else }}
+
+      <div class="transcript" style="margin-top:20px">
+        {{ range .Rows }}
+        <div class="ev {{ .Class }}">
+          <span class="k">{{ .Kind }}</span>
+          <pre class="b">{{ .Content }}</pre>
+        </div>
+        {{ else }}
+        <div class="empty-state">No transcript events recorded for this sample.</div>
+        {{ end }}
+
+        {{ if .IsEventsTruncated }}
+        <div class="truncation-marker mono" style="margin-top:12px;padding:10px 14px;background:var(--neutral-soft);color:var(--muted);border-radius:6px;font-size:13px;text-align:center">
+          {{ .EventsTruncatedMessage }}
+        </div>
+        {{ end }}
+      </div>
+
+      <div class="foot" style="margin-top:24px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);text-align:right">
+        open format · any agent can read it
+      </div>
+      {{ end }}
+    </div>
+  </main>
+</body>
+</html>
+`
+
 var (
 	tmplRunsList         = template.Must(template.New("runs_list").Parse(runsListTemplate))
 	tmplRunDetail        = template.Must(template.New("run_detail").Parse(runDetailTemplate))
 	tmplComparisonsList  = template.Must(template.New("comparisons_list").Parse(comparisonsListTemplate))
 	tmplComparisonTable  = template.Must(template.New("comparison_table").Parse(ComparisonTableTemplate))
 	tmplComparisonDetail = template.Must(template.Must(template.New("comparison_detail").Parse(ComparisonTableTemplate)).Parse(comparisonDetailTemplate))
+	tmplTaskSamplesList  = template.Must(template.New("task_samples_list").Parse(taskSamplesListTemplate))
+	tmplSampleTranscript = template.Must(template.New("sample_transcript").Parse(sampleTranscriptTemplate))
 
 	// TmplComparisonTable is the parsed template for the comparison table sub-template.
 	TmplComparisonTable = tmplComparisonTable
 )
+
+// RenderTaskSamplesList renders the task samples list template to the given writer.
+func RenderTaskSamplesList(w io.Writer, view TaskSamplesListView) error {
+	return tmplTaskSamplesList.Execute(w, view)
+}
+
+// RenderSampleTranscript renders the sample transcript template to the given writer.
+func RenderSampleTranscript(w io.Writer, view SampleTranscriptView) error {
+	return tmplSampleTranscript.Execute(w, view)
+}
 
 // RenderComparisonTable renders the comparison table sub-template to the given writer.
 func RenderComparisonTable(w io.Writer, view ComparisonTableView) error {

@@ -211,19 +211,20 @@ func sampleRunDetailView() RunDetailView {
 		MeanSuccessRate: "0.84",
 		Tasks: []RunTaskRow{
 			{
-				ID:        "triage/runbook_lookup",
-				Phase:     v1alpha1.TaskPhaseCompleted,
-				PhaseChip: "good",
-				RateStr:   "0.84",
-				HasCI:     true,
-				CILeftPx:  170.4,
-				CIWidthPx: 50.4,
-				CIDotPx:   194.6,
-				CILabel:   "[0.71, 0.92]",
-				Samples:   48,
-				Successes: 40,
-				Method:    "wilson",
-				LogPath:   "gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json",
+				ID:          "triage/runbook_lookup",
+				Phase:       v1alpha1.TaskPhaseCompleted,
+				PhaseChip:   "good",
+				RateStr:     "0.84",
+				HasCI:       true,
+				CILeftPx:    170.4,
+				CIWidthPx:   50.4,
+				CIDotPx:     194.6,
+				CILabel:     "[0.71, 0.92]",
+				Samples:     48,
+				Successes:   40,
+				Method:      "wilson",
+				LogPath:     "gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json",
+				SamplesLink: "/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples",
 			},
 		},
 	}
@@ -682,6 +683,83 @@ func TestEscapingHostileFixtures(t *testing.T) {
 		}
 		if !strings.Contains(html, "&lt;script&gt;") {
 			t.Errorf("expected escaped &lt;script&gt; in sub-template HTML")
+		}
+	})
+
+	t.Run("TaskSamplesListEscaping", func(t *testing.T) {
+		view := TaskSamplesListView{
+			ActiveTab:     NavTabRuns,
+			Namespace:     "eval-runner",
+			RunName:       "hostile-run" + hostileScript,
+			TaskID:        "task/" + hostileImg,
+			EscapedTaskID: "task%2Fescaped",
+			Commit:        "c" + hostileScript,
+			Model:         "model" + hostileIframe,
+			LogPath:       "gs://bucket/" + hostileScript,
+			Samples: []TaskSampleRow{
+				{
+					ID:            "sample-" + hostileScript,
+					Score:         "0.00",
+					InputPreview:  "input " + hostileScript,
+					OutputPreview: "output " + hostileImg,
+					LatencyStr:    "1.0s",
+					TokensStr:     "100",
+					Link:          "/runs/eval-runner/hostile/samples/1",
+				},
+			},
+		}
+
+		var buf bytes.Buffer
+		if err := RenderTaskSamplesList(&buf, view); err != nil {
+			t.Fatalf("RenderTaskSamplesList error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous content in task samples list template: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in task samples list HTML")
+		}
+	})
+
+	t.Run("SampleTranscriptEscaping", func(t *testing.T) {
+		view := SampleTranscriptView{
+			ActiveTab:   NavTabRuns,
+			Namespace:   "eval-runner",
+			RunName:     "hostile-run" + hostileScript,
+			TaskID:      "task/" + hostileImg,
+			SampleID:    "sample-" + hostileScript,
+			Score:       "0.00",
+			Status:      "fail",
+			StatusUpper: "FAIL",
+			StatusClass: "bad",
+			LatencyStr:  "1.0s",
+			TokensStr:   "100",
+			LogPath:     "gs://bucket/" + hostileScript,
+			Rows: []TranscriptRowView{
+				{Kind: "user", Content: "user " + hostileScript},
+				{Kind: "tool_call", Class: "tool", Content: "call " + hostileImg},
+				{Kind: "tool", Class: "tool", Content: "tool " + hostileIframe},
+				{Kind: "assistant", Class: "bad", Content: "assistant " + hostileScript},
+			},
+		}
+
+		var buf bytes.Buffer
+		if err := RenderSampleTranscript(&buf, view); err != nil {
+			t.Fatalf("RenderSampleTranscript error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous content in sample transcript template: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in sample transcript HTML")
 		}
 	})
 }
