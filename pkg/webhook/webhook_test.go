@@ -2478,6 +2478,21 @@ func TestRepoHashAndNaming(t *testing.T) {
 	if multiCand != expectedMultiCand {
 		t.Errorf("expected multi-repo CandidateRun name %q, got %q", expectedMultiCand, multiCand)
 	}
+
+	// 5. BaselineRunName
+	singleBase := BaselineRunName("gke-labs/eval-runner", "1234567890abcdef", false)
+	if singleBase != "base-1234567" {
+		t.Errorf("expected single-repo BaselineRun name 'base-1234567', got %q", singleBase)
+	}
+	multiBase := BaselineRunName("gke-labs/eval-runner", "1234567890abcdef", true)
+	expectedMultiBase := fmt.Sprintf("base-%s-1234567", h1)
+	if multiBase != expectedMultiBase {
+		t.Errorf("expected multi-repo BaselineRun name %q, got %q", expectedMultiBase, multiBase)
+	}
+	emptyRepoBase := BaselineRunName("", "1234567890abcdef", true)
+	if emptyRepoBase != "base-1234567" {
+		t.Errorf("expected empty-repo BaselineRun name 'base-1234567', got %q", emptyRepoBase)
+	}
 }
 
 func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T) {
@@ -2534,6 +2549,7 @@ func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T)
 	hash1 := RepoHash("org1/repo1")
 	expectedComp1Name := fmt.Sprintf("pr-%s-50", hash1)
 	expectedCand1Name := fmt.Sprintf("pr-%s-50-aaaaaaa", hash1)
+	expectedBase1Name := fmt.Sprintf("base-%s-ccccccc", hash1)
 
 	var comp1 v1alpha1.Comparison
 	pollUntil(t, 2*time.Second, func() bool {
@@ -2543,6 +2559,13 @@ func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T)
 	var cand1 v1alpha1.Run
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand1Name}, &cand1); err != nil {
 		t.Fatalf("expected candidate run %s to exist: %v", expectedCand1Name, err)
+	}
+	var base1 v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedBase1Name}, &base1); err != nil {
+		t.Fatalf("expected baseline run %s to exist: %v", expectedBase1Name, err)
+	}
+	if comp1.Spec.Baseline.Run != expectedBase1Name {
+		t.Errorf("expected comp1 Baseline.Run to be %s, got %s", expectedBase1Name, comp1.Spec.Baseline.Run)
 	}
 
 	// 2. PR #50 on org2/repo2 opened (same PR number 50!)
@@ -2578,12 +2601,16 @@ func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T)
 	hash2 := RepoHash("org2/repo2")
 	expectedComp2Name := fmt.Sprintf("pr-%s-50", hash2)
 	expectedCand2Name := fmt.Sprintf("pr-%s-50-bbbbbbb", hash2)
+	expectedBase2Name := fmt.Sprintf("base-%s-ccccccc", hash2)
 
 	if expectedComp1Name == expectedComp2Name {
 		t.Fatalf("expected distinct Comparison names, but both were %s", expectedComp1Name)
 	}
 	if expectedCand1Name == expectedCand2Name {
 		t.Fatalf("expected distinct CandidateRun names, but both were %s", expectedCand1Name)
+	}
+	if expectedBase1Name == expectedBase2Name {
+		t.Fatalf("expected distinct BaselineRun names, but both were %s", expectedBase1Name)
 	}
 
 	var comp2 v1alpha1.Comparison
@@ -2594,6 +2621,13 @@ func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T)
 	var cand2 v1alpha1.Run
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand2Name}, &cand2); err != nil {
 		t.Fatalf("expected candidate run %s to exist: %v", expectedCand2Name, err)
+	}
+	var base2 v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedBase2Name}, &base2); err != nil {
+		t.Fatalf("expected baseline run %s to exist: %v", expectedBase2Name, err)
+	}
+	if comp2.Spec.Baseline.Run != expectedBase2Name {
+		t.Errorf("expected comp2 Baseline.Run to be %s, got %s", expectedBase2Name, comp2.Spec.Baseline.Run)
 	}
 
 	// Verify comp1 was NOT overwritten or re-pointed
@@ -2726,6 +2760,14 @@ func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T)
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand2Name}, &cand2); err != nil {
 		t.Errorf("expected cand2 %s to be preserved, got err: %v", expectedCand2Name, err)
 	}
+
+	// Baseline runs base1 and base2 must both be preserved!
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedBase1Name}, &base1); err != nil {
+		t.Errorf("expected baseline run base1 %s to be preserved, got err: %v", expectedBase1Name, err)
+	}
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedBase2Name}, &base2); err != nil {
+		t.Errorf("expected baseline run base2 %s to be preserved, got err: %v", expectedBase2Name, err)
+	}
 }
 
 func TestMultiRepo_BackwardsCompatibility_ExistingLegacyNames(t *testing.T) {
@@ -2801,4 +2843,337 @@ func TestMultiRepo_BackwardsCompatibility_ExistingLegacyNames(t *testing.T) {
 	if len(compList.Items) != 1 {
 		t.Errorf("expected exactly 1 comparison (reusing legacy pr-50), got %d", len(compList.Items))
 	}
+}
+
+func TestBaselineRuns_CollisionAndReuse(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := t.Context()
+
+	sharedBaseSHA := "abcdef1234567890abcdef1234567890abcdef12"
+	pushSHA := "fedcba9876543210fedcba9876543210fedcba98"
+
+	t.Run("SingleRepo_NamesUnchanged_AndReuseHits", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Comparison{}, &v1alpha1.Run{}).Build()
+		cfg := Config{
+			Namespace:           "eval-runner",
+			DefaultModel:        "mockllm/model",
+			DefaultBatchSize:    4,
+			WebhookRepositories: []string{"org1/repo1"},
+			Client:              cl,
+		}
+		worker := NewWorkerPool(cfg)
+
+		// 1. First PR in single-repo mode
+		pr1 := &PullRequestWorkItem{
+			PRNumber:          10,
+			HeadSHA:           "1111111222222233333334444444555556666666",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/org1/repo1.git",
+			CandidateRepo:     "org1/repo1",
+			BaselineCloneURL:  "https://github.com/org1/repo1.git",
+			BaselineRepo:      "org1/repo1",
+			TargetRepo:        "org1/repo1",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr1); err != nil {
+			t.Fatalf("ProcessPullRequest failed: %v", err)
+		}
+
+		// Single-repo baseline Run must be named base-<sha7>
+		expectedBaseName := "base-abcdef1"
+		var baseRun v1alpha1.Run
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedBaseName}, &baseRun); err != nil {
+			t.Fatalf("expected single-repo baseline run %s to exist: %v", expectedBaseName, err)
+		}
+		if baseRun.Spec.Repo.URL != "https://github.com/org1/repo1.git" {
+			t.Errorf("expected base repo URL https://github.com/org1/repo1.git, got %s", baseRun.Spec.Repo.URL)
+		}
+
+		var comp v1alpha1.Comparison
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-10"}, &comp); err != nil {
+			t.Fatalf("expected comparison pr-10 to exist: %v", err)
+		}
+		if comp.Spec.Baseline.Run != expectedBaseName {
+			t.Errorf("expected comparison to reference %s, got %s", expectedBaseName, comp.Spec.Baseline.Run)
+		}
+
+		// Push event in single-repo mode warms base-<sha7>
+		pushItem := &PushWorkItem{
+			CommitSHA: pushSHA,
+			CloneURL:  "https://github.com/org1/repo1.git",
+			Repo:      "org1/repo1",
+		}
+		if err := worker.ProcessPush(ctx, pushItem); err != nil {
+			t.Fatalf("ProcessPush failed: %v", err)
+		}
+		var pushBaseRun v1alpha1.Run
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "base-fedcba9"}, &pushBaseRun); err != nil {
+			t.Fatalf("expected warm push baseline run base-fedcba9 to exist: %v", err)
+		}
+
+		// Complete the baseline run
+		baseRun.Status.Phase = v1alpha1.RunPhaseCompleted
+		if err := cl.Status().Update(ctx, &baseRun); err != nil {
+			t.Fatalf("failed to mark baseline run completed: %v", err)
+		}
+
+		// 2. Second PR in single-repo mode with same base commit reuses base-<sha7>
+		pr2 := &PullRequestWorkItem{
+			PRNumber:          11,
+			HeadSHA:           "2222222333333344444445555566666667777777",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/org1/repo1.git",
+			CandidateRepo:     "org1/repo1",
+			BaselineCloneURL:  "https://github.com/org1/repo1.git",
+			BaselineRepo:      "org1/repo1",
+			TargetRepo:        "org1/repo1",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr2); err != nil {
+			t.Fatalf("ProcessPullRequest pr2 failed: %v", err)
+		}
+
+		var comp2 v1alpha1.Comparison
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-11"}, &comp2); err != nil {
+			t.Fatalf("expected comparison pr-11 to exist: %v", err)
+		}
+		if comp2.Spec.Baseline.Run != expectedBaseName {
+			t.Errorf("expected pr2 to reuse baseline %s, got %s", expectedBaseName, comp2.Spec.Baseline.Run)
+		}
+	})
+
+	t.Run("MultiRepo_CollisionProducesTwoRuns_AndReuseIsolated", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Comparison{}, &v1alpha1.Run{}).Build()
+		cfg := Config{
+			Namespace:           "eval-runner",
+			DefaultModel:        "mockllm/model",
+			DefaultBatchSize:    4,
+			WebhookRepositories: []string{"org1/repo1", "org2/repo2"},
+			Client:              cl,
+		}
+		worker := NewWorkerPool(cfg)
+
+		hash1 := RepoHash("org1/repo1")
+		hash2 := RepoHash("org2/repo2")
+		expectedBase1Name := fmt.Sprintf("base-%s-abcdef1", hash1)
+		expectedBase2Name := fmt.Sprintf("base-%s-abcdef1", hash2)
+		if expectedBase1Name == expectedBase2Name {
+			t.Fatalf("expected different baseline names for different repos, got %s", expectedBase1Name)
+		}
+
+		// 1. PR in org1/repo1 with shared base commit
+		pr1 := &PullRequestWorkItem{
+			PRNumber:          10,
+			HeadSHA:           "1111111222222233333334444444555556666666",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/org1/repo1.git",
+			CandidateRepo:     "org1/repo1",
+			BaselineCloneURL:  "https://github.com/org1/repo1.git",
+			BaselineRepo:      "org1/repo1",
+			TargetRepo:        "org1/repo1",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr1); err != nil {
+			t.Fatalf("ProcessPullRequest pr1 failed: %v", err)
+		}
+
+		var base1 v1alpha1.Run
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedBase1Name}, &base1); err != nil {
+			t.Fatalf("expected baseline run %s to exist: %v", expectedBase1Name, err)
+		}
+		if base1.Spec.Repo.URL != "https://github.com/org1/repo1.git" {
+			t.Errorf("expected URL https://github.com/org1/repo1.git, got %s", base1.Spec.Repo.URL)
+		}
+
+		// 2. PR in org2/repo2 with SAME shared base commit (fork collision scenario)
+		pr2 := &PullRequestWorkItem{
+			PRNumber:          20,
+			HeadSHA:           "2222222333333344444445555566666667777777",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/org2/repo2.git",
+			CandidateRepo:     "org2/repo2",
+			BaselineCloneURL:  "https://github.com/org2/repo2.git",
+			BaselineRepo:      "org2/repo2",
+			TargetRepo:        "org2/repo2",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr2); err != nil {
+			t.Fatalf("ProcessPullRequest pr2 failed: %v", err)
+		}
+
+		var base2 v1alpha1.Run
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedBase2Name}, &base2); err != nil {
+			t.Fatalf("expected baseline run %s to exist: %v", expectedBase2Name, err)
+		}
+		if base2.Spec.Repo.URL != "https://github.com/org2/repo2.git" {
+			t.Errorf("expected URL https://github.com/org2/repo2.git, got %s", base2.Spec.Repo.URL)
+		}
+
+		// Confirm BOTH baseline Runs exist simultaneously with their respective repo URLs
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedBase1Name}, &base1); err != nil {
+			t.Fatalf("expected baseline run %s to still exist: %v", expectedBase1Name, err)
+		}
+		if base1.Spec.Repo.URL != "https://github.com/org1/repo1.git" {
+			t.Errorf("base1 URL corrupted: %s", base1.Spec.Repo.URL)
+		}
+
+		// 3. Complete org1's baseline run
+		base1.Status.Phase = v1alpha1.RunPhaseCompleted
+		if err := cl.Status().Update(ctx, &base1); err != nil {
+			t.Fatalf("failed to update base1 status: %v", err)
+		}
+
+		// PR in org1/repo1 now reuses base1
+		pr1Again := &PullRequestWorkItem{
+			PRNumber:          12,
+			HeadSHA:           "3333333444444455555666666677777778888888",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/org1/repo1.git",
+			CandidateRepo:     "org1/repo1",
+			BaselineCloneURL:  "https://github.com/org1/repo1.git",
+			BaselineRepo:      "org1/repo1",
+			TargetRepo:        "org1/repo1",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr1Again); err != nil {
+			t.Fatalf("ProcessPullRequest pr1Again failed: %v", err)
+		}
+		var comp1Again v1alpha1.Comparison
+		comp1AgainName := fmt.Sprintf("pr-%s-12", hash1)
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: comp1AgainName}, &comp1Again); err != nil {
+			t.Fatalf("failed to get comp1Again: %v", err)
+		}
+		if comp1Again.Spec.Baseline.Run != expectedBase1Name {
+			t.Errorf("expected pr1Again to reuse %s, got %s", expectedBase1Name, comp1Again.Spec.Baseline.Run)
+		}
+
+		// New PR in org2/repo2 must NOT reuse org1's completed baseline because repo URL differs!
+		pr2Again := &PullRequestWorkItem{
+			PRNumber:          22,
+			HeadSHA:           "4444444555555566666667777777888888899999",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/org2/repo2.git",
+			CandidateRepo:     "org2/repo2",
+			BaselineCloneURL:  "https://github.com/org2/repo2.git",
+			BaselineRepo:      "org2/repo2",
+			TargetRepo:        "org2/repo2",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr2Again); err != nil {
+			t.Fatalf("ProcessPullRequest pr2Again failed: %v", err)
+		}
+		var comp2Again v1alpha1.Comparison
+		comp2AgainName := fmt.Sprintf("pr-%s-22", hash2)
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: comp2AgainName}, &comp2Again); err != nil {
+			t.Fatalf("failed to get comp2Again: %v", err)
+		}
+		if comp2Again.Spec.Baseline.Run != expectedBase2Name {
+			t.Errorf("expected pr2Again to use org2 baseline %s, but got %s", expectedBase2Name, comp2Again.Spec.Baseline.Run)
+		}
+
+		// Complete org2's baseline run and verify org2 PR now reuses base2
+		base2.Status.Phase = v1alpha1.RunPhaseCompleted
+		if err := cl.Status().Update(ctx, &base2); err != nil {
+			t.Fatalf("failed to update base2 status: %v", err)
+		}
+
+		pr2Third := &PullRequestWorkItem{
+			PRNumber:          23,
+			HeadSHA:           "5555555666666677777778888888999999900000",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/org2/repo2.git",
+			CandidateRepo:     "org2/repo2",
+			BaselineCloneURL:  "https://github.com/org2/repo2.git",
+			BaselineRepo:      "org2/repo2",
+			TargetRepo:        "org2/repo2",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr2Third); err != nil {
+			t.Fatalf("ProcessPullRequest pr2Third failed: %v", err)
+		}
+		var comp2Third v1alpha1.Comparison
+		comp2ThirdName := fmt.Sprintf("pr-%s-23", hash2)
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: comp2ThirdName}, &comp2Third); err != nil {
+			t.Fatalf("failed to get comp2Third: %v", err)
+		}
+		if comp2Third.Spec.Baseline.Run != expectedBase2Name {
+			t.Errorf("expected pr2Third to reuse %s, got %s", expectedBase2Name, comp2Third.Spec.Baseline.Run)
+		}
+
+		// 4. Test push events in multi-repo mode produce distinct warm baselines
+		push1 := &PushWorkItem{
+			CommitSHA: pushSHA,
+			CloneURL:  "https://github.com/org1/repo1.git",
+			Repo:      "org1/repo1",
+		}
+		if err := worker.ProcessPush(ctx, push1); err != nil {
+			t.Fatalf("ProcessPush push1 failed: %v", err)
+		}
+		expectedPushBase1 := fmt.Sprintf("base-%s-fedcba9", hash1)
+		var pushRun1 v1alpha1.Run
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedPushBase1}, &pushRun1); err != nil {
+			t.Fatalf("expected push baseline %s to exist: %v", expectedPushBase1, err)
+		}
+
+		push2 := &PushWorkItem{
+			CommitSHA: pushSHA,
+			CloneURL:  "https://github.com/org2/repo2.git",
+			Repo:      "org2/repo2",
+		}
+		if err := worker.ProcessPush(ctx, push2); err != nil {
+			t.Fatalf("ProcessPush push2 failed: %v", err)
+		}
+		expectedPushBase2 := fmt.Sprintf("base-%s-fedcba9", hash2)
+		var pushRun2 v1alpha1.Run
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedPushBase2}, &pushRun2); err != nil {
+			t.Fatalf("expected push baseline %s to exist: %v", expectedPushBase2, err)
+		}
+		if expectedPushBase1 == expectedPushBase2 {
+			t.Errorf("expected distinct push baseline names, both were %s", expectedPushBase1)
+		}
+
+		// 5. Cleanup on PR close preserves baseline Runs
+		closeItem := &PullRequestWorkItem{
+			Action:        ActionClosed,
+			PRNumber:      10,
+			CandidateRepo: "org1/repo1",
+			TargetRepo:    "org1/repo1",
+		}
+		if err := worker.ProcessPullRequestClosed(ctx, closeItem); err != nil {
+			t.Fatalf("ProcessPullRequestClosed failed: %v", err)
+		}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedBase1Name}, &base1); err != nil {
+			t.Errorf("expected baseline run %s to be preserved after PR close, got %v", expectedBase1Name, err)
+		}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedBase2Name}, &base2); err != nil {
+			t.Errorf("expected baseline run %s to be preserved after PR close, got %v", expectedBase2Name, err)
+		}
+	})
+
+	t.Run("WildcardMultiRepo_NamesAndCollisionPrevention", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Comparison{}, &v1alpha1.Run{}).Build()
+		cfg := Config{
+			Namespace:           "eval-runner",
+			DefaultModel:        "mockllm/model",
+			DefaultBatchSize:    4,
+			WebhookRepositories: []string{"*"},
+			Client:              cl,
+		}
+		worker := NewWorkerPool(cfg)
+
+		hashWild := RepoHash("any-org/any-repo")
+		expectedBaseName := fmt.Sprintf("base-%s-abcdef1", hashWild)
+
+		pr := &PullRequestWorkItem{
+			PRNumber:          99,
+			HeadSHA:           "1111111222222233333334444444555556666666",
+			BaseSHA:           sharedBaseSHA,
+			CandidateCloneURL: "https://github.com/any-org/any-repo.git",
+			CandidateRepo:     "any-org/any-repo",
+			BaselineCloneURL:  "https://github.com/any-org/any-repo.git",
+			BaselineRepo:      "any-org/any-repo",
+			TargetRepo:        "any-org/any-repo",
+		}
+		if err := worker.ProcessPullRequest(ctx, pr); err != nil {
+			t.Fatalf("ProcessPullRequest failed: %v", err)
+		}
+
+		var baseRun v1alpha1.Run
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: expectedBaseName}, &baseRun); err != nil {
+			t.Fatalf("expected wildcard multi-repo baseline %s to exist: %v", expectedBaseName, err)
+		}
+	})
 }

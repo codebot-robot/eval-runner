@@ -691,7 +691,10 @@ When an event arrives:
      - Single repository allow-list: `pr-<number>-<headSHA7>`
      - Multiple repositories or wildcard (`*`): `pr-<repoHash>-<number>-<headSHA7>`, where `<repoHash>` is a 7-character lowercase hexadecimal SHA-256 hash of the normalized repository name (`owner/repo`), preventing collisions across allow-listed repositories.
      - Evaluates PR head commit with `defaultModel` and initial `sampleRange {1, defaultBatchSize}`.
-   - **Baseline Run**: `base-<baseSHA7>` (evaluates merge target commit with initial `sampleRange {1, defaultBatchSize}`). If an already `Completed` Run with that commit, repo URL, and model exists, it is reused immediately (baseline cache from concept §4.1).
+   - **Baseline Run**:
+     - Single repository allow-list: `base-<baseSHA7>`
+     - Multiple repositories or wildcard (`*`): `base-<repoHash>-<baseSHA7>`, where `<repoHash>` is a 7-character lowercase hexadecimal SHA-256 hash of the normalized repository name (`owner/repo`), preventing collisions across allow-listed repositories.
+     - Evaluates merge target commit with initial `sampleRange {1, defaultBatchSize}`. If an already `Completed` Run with that commit, repo URL, and model exists, it is reused immediately (baseline cache from concept §4.1). Reuse matches on repository URL, commit, and model via labels/spec, never on name alone.
    - **Comparison**:
      - Single repository allow-list: `pr-<number>`
      - Multiple repositories or wildcard (`*`): `pr-<repoHash>-<number>`
@@ -705,7 +708,7 @@ When an event arrives:
    - **Reopen**: If a closed PR is subsequently reopened, resources are recreated on the next `pull_request` event.
    - **Artifacts**: Artifacts stored in the artifact sink (GCS or local directory) are not purged by PR closure.
 3. **On `push` to the default branch**:
-   - **Warm Baseline Run**: `base-<sha7>` is created with initial `sampleRange {1, defaultBatchSize}` so the baseline run is pre-warmed before PRs arrive.
+   - **Warm Baseline Run**: `base-<sha7>` (single repository allow-list) or `base-<repoHash>-<sha7>` (multiple repositories or wildcard `*`) is created with initial `sampleRange {1, defaultBatchSize}` so the baseline run is pre-warmed before PRs arrive.
 4. **On `issue_comment` (`created`)**:
    - **More Samples Command**: Comments of the form `/eval more <n>` on a pull request trigger evaluation of additional samples.
    - **Credential-Free Webhook**: After verifying HMAC and the repository allow-list, the webhook appends `{commentId, login, requested, receivedAt}` to a bounded `status.pendingCommands` on the Comparison (idempotent per comment ID against pending and handled commands). The webhook holds no GitHub tokens and makes no outbound GitHub calls.
