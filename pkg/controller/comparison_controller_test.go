@@ -1544,6 +1544,50 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		}
 	})
 
+	t.Run("inconclusivePolicy failure produces failure check run", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		comp := makeComp("comp-inconclusive-failure")
+		comp.Status.Verdict = v1alpha1.ComparisonVerdictInconclusive
+		comp.Status.Phase = v1alpha1.ComparisonPhaseCompleted
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			InconclusivePolicy:  "failure",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-inconclusive-failure"}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		checkRuns := server.CheckRuns()
+		if len(checkRuns) != 1 {
+			t.Fatalf("expected 1 check run, got %d", len(checkRuns))
+		}
+		if checkRuns[0].Conclusion != "failure" {
+			t.Errorf("expected conclusion 'failure', got %q", checkRuns[0].Conclusion)
+		}
+	})
+
 	t.Run("retryable 502 on check run persists comment ID with empty hash and retries on second reconcile", func(t *testing.T) {
 		server := github.NewFakeGitHubServer()
 		defer server.Close()

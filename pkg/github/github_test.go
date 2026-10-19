@@ -808,6 +808,311 @@ func TestCheckRunStateForComparison_Matrix(t *testing.T) {
 	}
 }
 
+func TestCheckRunStateForComparison_TitleCountsMixed(t *testing.T) {
+	tests := []struct {
+		name          string
+		verdict       v1alpha1.ComparisonVerdict
+		tasks         []v1alpha1.ComparisonTaskStatus
+		expectedTitle string
+	}{
+		{
+			name:    "AllFourBucketsNonZero",
+			verdict: v1alpha1.ComparisonVerdictInconclusive,
+			tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "t1", Label: v1alpha1.ComparisonTaskLabelImproved},
+				{ID: "t2", Label: v1alpha1.ComparisonTaskLabelImproved},
+				{ID: "t3", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+				{ID: "t4", Label: v1alpha1.ComparisonTaskLabelRegressed},
+				{ID: "t5", Label: v1alpha1.ComparisonTaskLabelInconclusive},
+				{ID: "t6", Label: v1alpha1.ComparisonTaskLabelInconclusive},
+				{ID: "t7", Label: v1alpha1.ComparisonTaskLabelInconclusive},
+			},
+			expectedTitle: "INCONCLUSIVE: 2 improved, 1 unchanged, 1 regressed, 3 inconclusive",
+		},
+		{
+			name:    "OmitZeroBuckets_ImprovedAndRegressedOnly",
+			verdict: v1alpha1.ComparisonVerdictInconclusive,
+			tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "t1", Label: v1alpha1.ComparisonTaskLabelImproved},
+				{ID: "t2", Label: v1alpha1.ComparisonTaskLabelImproved},
+				{ID: "t3", Label: v1alpha1.ComparisonTaskLabelRegressed},
+			},
+			expectedTitle: "INCONCLUSIVE: 2 improved, 1 regressed",
+		},
+		{
+			name:    "SingleBucket_Regressed",
+			verdict: v1alpha1.ComparisonVerdictRegressed,
+			tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "t1", Label: v1alpha1.ComparisonTaskLabelRegressed},
+			},
+			expectedTitle: "REGRESSED: 1 regressed",
+		},
+		{
+			name:    "SingleBucket_Unchanged",
+			verdict: v1alpha1.ComparisonVerdictUnchanged,
+			tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "t1", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+				{ID: "t2", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+			},
+			expectedTitle: "UNCHANGED: 2 unchanged",
+		},
+		{
+			name:    "MixedImprovedAndUnchanged",
+			verdict: v1alpha1.ComparisonVerdictImproved,
+			tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "t1", Label: v1alpha1.ComparisonTaskLabelImproved},
+				{ID: "t2", Label: v1alpha1.ComparisonTaskLabelImproved},
+				{ID: "t3", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+			},
+			expectedTitle: "IMPROVED: 2 improved, 1 unchanged",
+		},
+		{
+			name:    "NoMatchingBuckets_FallsBackToStandardTitle",
+			verdict: v1alpha1.ComparisonVerdictUnchanged,
+			tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "t1", Label: "custom_label"},
+			},
+			expectedTitle: "UNCHANGED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comp := &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: tt.verdict,
+					Tasks:   tt.tasks,
+				},
+			}
+			state := CheckRunStateForComparison(comp, nil, nil)
+			if state.Title != tt.expectedTitle {
+				t.Errorf("Title = %q, want %q", state.Title, tt.expectedTitle)
+			}
+		})
+	}
+}
+
+func TestCheckRunStateForComparison_InconclusivePolicy(t *testing.T) {
+	tests := []struct {
+		name               string
+		verdict            v1alpha1.ComparisonVerdict
+		policy             string
+		expectedStatus     string
+		expectedConclusion string
+	}{
+		{
+			name:               "NeutralPolicy_Inconclusive",
+			verdict:            v1alpha1.ComparisonVerdictInconclusive,
+			policy:             "neutral",
+			expectedStatus:     "completed",
+			expectedConclusion: "neutral",
+		},
+		{
+			name:               "DefaultEmptyPolicy_Inconclusive",
+			verdict:            v1alpha1.ComparisonVerdictInconclusive,
+			policy:             "",
+			expectedStatus:     "completed",
+			expectedConclusion: "neutral",
+		},
+		{
+			name:               "FailurePolicy_Inconclusive",
+			verdict:            v1alpha1.ComparisonVerdictInconclusive,
+			policy:             "failure",
+			expectedStatus:     "completed",
+			expectedConclusion: "failure",
+		},
+		{
+			name:               "FailurePolicy_RunningStaysInProgress",
+			verdict:            v1alpha1.ComparisonVerdictRunning,
+			policy:             "failure",
+			expectedStatus:     "in_progress",
+			expectedConclusion: "",
+		},
+		{
+			name:               "FailurePolicy_RegressedStaysFailure",
+			verdict:            v1alpha1.ComparisonVerdictRegressed,
+			policy:             "failure",
+			expectedStatus:     "completed",
+			expectedConclusion: "failure",
+		},
+		{
+			name:               "FailurePolicy_ImprovedStaysSuccess",
+			verdict:            v1alpha1.ComparisonVerdictImproved,
+			policy:             "failure",
+			expectedStatus:     "completed",
+			expectedConclusion: "success",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comp := &v1alpha1.Comparison{
+				Status: v1alpha1.ComparisonStatus{
+					Verdict: tt.verdict,
+				},
+			}
+			var state CheckRunState
+			if tt.policy != "" {
+				state = CheckRunStateForComparison(comp, nil, nil, tt.policy)
+			} else {
+				state = CheckRunStateForComparison(comp, nil, nil)
+			}
+			if state.Status != tt.expectedStatus {
+				t.Errorf("Status = %q, want %q", state.Status, tt.expectedStatus)
+			}
+			if state.Conclusion != tt.expectedConclusion {
+				t.Errorf("Conclusion = %q, want %q", state.Conclusion, tt.expectedConclusion)
+			}
+		})
+	}
+}
+
+func TestCheckRunStateForComparison_SummaryHints(t *testing.T) {
+	t.Run("SingleInconclusiveTaskWithoutTaskID", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				Verdict: v1alpha1.ComparisonVerdictInconclusive,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:            "task-1",
+						Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+						SuggestedNext: 12,
+					},
+				},
+			},
+		}
+		state := CheckRunStateForComparison(comp, nil, nil)
+		expectedSummary := "INCONCLUSIVE: 1 inconclusive\n\n- comment `/eval more 12` to run 12 more samples"
+		if state.Summary != expectedSummary {
+			t.Errorf("Summary = %q, want %q", state.Summary, expectedSummary)
+		}
+	})
+
+	t.Run("MultipleInconclusiveTasksWithTaskID", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				Verdict: v1alpha1.ComparisonVerdictInconclusive,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:            "task-a",
+						Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+						SuggestedNext: 8,
+					},
+					{
+						ID:            "task-b",
+						Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+						SuggestedNext: 16,
+					},
+				},
+			},
+		}
+		state := CheckRunStateForComparison(comp, nil, nil)
+		expectedSummary := "INCONCLUSIVE: 2 inconclusive\n\n- comment `/eval more 8` to run 8 more samples (task-a)\n- comment `/eval more 16` to run 16 more samples (task-b)"
+		if state.Summary != expectedSummary {
+			t.Errorf("Summary = %q, want %q", state.Summary, expectedSummary)
+		}
+	})
+
+	t.Run("MessageOverrideWithHints", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				Verdict: v1alpha1.ComparisonVerdictInconclusive,
+				Message: "candidate task failed: task-a",
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:            "task-b",
+						Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+						SuggestedNext: 10,
+					},
+					{
+						ID:    "task-a",
+						Label: v1alpha1.ComparisonTaskLabelRegressed,
+					},
+				},
+			},
+		}
+		state := CheckRunStateForComparison(comp, nil, nil)
+		expectedSummary := "candidate task failed: task-a\n\n- comment `/eval more 10` to run 10 more samples (task-b)"
+		if state.Summary != expectedSummary {
+			t.Errorf("Summary = %q, want %q", state.Summary, expectedSummary)
+		}
+	})
+
+	t.Run("Over20InconclusiveTasksBounded", func(t *testing.T) {
+		var tasks []v1alpha1.ComparisonTaskStatus
+		for i := 1; i <= 25; i++ {
+			tasks = append(tasks, v1alpha1.ComparisonTaskStatus{
+				ID:            fmt.Sprintf("task-%02d", i),
+				Label:         v1alpha1.ComparisonTaskLabelInconclusive,
+				SuggestedNext: 8,
+			})
+		}
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				Verdict: v1alpha1.ComparisonVerdictInconclusive,
+				Tasks:   tasks,
+			},
+		}
+		state := CheckRunStateForComparison(comp, nil, nil)
+		if !strings.Contains(state.Summary, "- ... and 5 more inconclusive tasks (see the Comparison view)") {
+			t.Errorf("expected overflow notice in Summary, got:\n%s", state.Summary)
+		}
+	})
+}
+
+func TestReporter_InconclusivePolicyEndToEnd(t *testing.T) {
+	ctx := t.Context()
+	comp, baseRun, candRun := sameCommitComparisonFixture()
+	// sameCommitComparisonFixture has verdict INCONCLUSIVE
+
+	// 1. Reporter with failure policy
+	serverFailure := NewFakeGitHubServer()
+	defer serverFailure.Close()
+
+	repFailure := NewReporter(serverFailure.Client("test-token"), ReporterOptions{
+		InconclusivePolicy: "failure",
+	})
+	statusFailure, err := repFailure.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+	if statusFailure.CheckRunID == 0 {
+		t.Fatalf("expected non-zero CheckRunID")
+	}
+	crsFailure := serverFailure.CheckRuns()
+	if len(crsFailure) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(crsFailure))
+	}
+	if crsFailure[0].Conclusion != "failure" {
+		t.Errorf("expected conclusion 'failure', got %q", crsFailure[0].Conclusion)
+	}
+	if crsFailure[0].Title != "INCONCLUSIVE: 1 unchanged, 1 inconclusive" {
+		t.Errorf("expected Title 'INCONCLUSIVE: 1 unchanged, 1 inconclusive', got %q", crsFailure[0].Title)
+	}
+
+	// 2. Reporter with neutral policy (default)
+	serverNeutral := NewFakeGitHubServer()
+	defer serverNeutral.Close()
+
+	repNeutral := NewReporter(serverNeutral.Client("test-token"), ReporterOptions{
+		InconclusivePolicy: "neutral",
+	})
+	statusNeutral, err := repNeutral.Report(ctx, comp, baseRun, candRun)
+	if err != nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+	if statusNeutral.CheckRunID == 0 {
+		t.Fatalf("expected non-zero CheckRunID")
+	}
+	crsNeutral := serverNeutral.CheckRuns()
+	if len(crsNeutral) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(crsNeutral))
+	}
+	if crsNeutral[0].Conclusion != "neutral" {
+		t.Errorf("expected conclusion 'neutral', got %q", crsNeutral[0].Conclusion)
+	}
+}
+
 func TestReporter_LifecycleAndErrors(t *testing.T) {
 	ctx := t.Context()
 	server := NewFakeGitHubServer()

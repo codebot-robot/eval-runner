@@ -88,6 +88,7 @@ func main() {
 	var gitHubTokenSecret string
 	var gitHubAppSecret string
 	var uiBaseURL string
+	var inconclusivePolicy string
 	var strictConfig bool
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
@@ -104,6 +105,7 @@ func main() {
 	flag.StringVar(&gitHubTokenSecret, "github-token-secret", controller.DefaultGitHubTokenSecret, "Name of Secret in controller namespace containing GitHub token")
 	flag.StringVar(&gitHubAppSecret, "github-app-secret", "", "Name of Secret in controller namespace containing GitHub App credentials")
 	flag.StringVar(&uiBaseURL, "ui-base-url", "", "Base URL for the eval-runner UI (e.g. https://eval-runner.example.com)")
+	flag.StringVar(&inconclusivePolicy, "inconclusive-policy", controller.DefaultInconclusivePolicy, "Check-run conclusion policy for inconclusive verdicts: neutral (default) or failure")
 	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
 	flag.StringVar(&sandboxdImage, "sandboxd-image", "", "Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset)")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
@@ -134,6 +136,7 @@ func main() {
 		maxParallelTasks,
 		strictConfig,
 		artifactMaxUploadBytes,
+		inconclusivePolicy,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -336,6 +339,7 @@ func main() {
 		GitHubTokenSecret:   clusterConfig.GitHubTokenSecret,
 		GitHubAppSecret:     clusterConfig.GitHubAppSecret,
 		UIBaseURL:           clusterConfig.UIBaseURL,
+		InconclusivePolicy:  clusterConfig.InconclusivePolicy,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {

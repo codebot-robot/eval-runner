@@ -275,35 +275,11 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	footerBuilder.WriteString("\n")
 
 	// 5. Actions (e.g. comment `/eval more <n>` to run N more samples for inconclusive tasks)
-	if comp != nil {
-		actions := ui.ComparisonActions(comp)
-		if len(actions) > 0 {
-			var lines []string
-			actionCount := len(actions)
-			limit := actionCount
-			if limit > MaxIDList {
-				limit = MaxIDList
-			}
-			for i := 0; i < limit; i++ {
-				action := actions[i]
-				if action.ShowTaskID && action.TaskID != "" {
-					lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples (%s)", action.SuggestedNext, action.SuggestedNext, EscapeCell(action.TaskID)))
-				} else {
-					lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples", action.SuggestedNext, action.SuggestedNext))
-				}
-			}
-			if actionCount > MaxIDList {
-				remaining := actionCount - MaxIDList
-				taskWord := "tasks"
-				if remaining == 1 {
-					taskWord = "task"
-				}
-				lines = append(lines, fmt.Sprintf("- ... and %d more inconclusive %s (see the Comparison view)", remaining, taskWord))
-			}
-			footerBuilder.WriteString("\n")
-			footerBuilder.WriteString(strings.Join(lines, "\n"))
-			footerBuilder.WriteString("\n")
-		}
+	lines := ActionHintLines(comp)
+	if len(lines) > 0 {
+		footerBuilder.WriteString("\n")
+		footerBuilder.WriteString(strings.Join(lines, "\n"))
+		footerBuilder.WriteString("\n")
 	}
 	footerAndActionsStr := footerBuilder.String()
 
@@ -361,4 +337,40 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	sb.WriteString("\n")
 	sb.WriteString(footerAndActionsStr)
 	return sb.String()
+}
+
+// ActionHintLines returns formatted bulleted action hints for inconclusive tasks in a Comparison,
+// bounded to MaxIDList with an overflow notice if the count exceeds MaxIDList.
+// Returns nil if comp is nil or if there are no action hints.
+func ActionHintLines(comp *v1alpha1.Comparison) []string {
+	if comp == nil {
+		return nil
+	}
+	actions := ui.ComparisonActions(comp)
+	if len(actions) == 0 {
+		return nil
+	}
+	var lines []string
+	actionCount := len(actions)
+	limit := actionCount
+	if limit > MaxIDList {
+		limit = MaxIDList
+	}
+	for i := 0; i < limit; i++ {
+		action := actions[i]
+		if action.ShowTaskID && action.TaskID != "" {
+			lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples (%s)", action.SuggestedNext, action.SuggestedNext, EscapeCell(action.TaskID)))
+		} else {
+			lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples", action.SuggestedNext, action.SuggestedNext))
+		}
+	}
+	if actionCount > MaxIDList {
+		remaining := actionCount - MaxIDList
+		taskWord := "tasks"
+		if remaining == 1 {
+			taskWord = "task"
+		}
+		lines = append(lines, fmt.Sprintf("- ... and %d more inconclusive %s (see the Comparison view)", remaining, taskWord))
+	}
+	return lines
 }

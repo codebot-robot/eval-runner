@@ -24,24 +24,32 @@ import (
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 )
 
 // ReporterOptions holds options for configuring a Reporter.
 type ReporterOptions struct {
-	UIBaseURL string
+	UIBaseURL          string
+	InconclusivePolicy string
 }
 
 // Reporter handles posting Comparison results to a GitHub pull request and check run.
 type Reporter struct {
-	Client    Client
-	UIBaseURL string
+	Client             Client
+	UIBaseURL          string
+	InconclusivePolicy string
 }
 
 // NewReporter creates a new GitHub Reporter.
 func NewReporter(client Client, opts ReporterOptions) *Reporter {
+	policy := strings.ToLower(strings.TrimSpace(opts.InconclusivePolicy))
+	if policy == "" {
+		policy = configkeys.InconclusivePolicyNeutral
+	}
 	return &Reporter{
-		Client:    client,
-		UIBaseURL: opts.UIBaseURL,
+		Client:             client,
+		UIBaseURL:          opts.UIBaseURL,
+		InconclusivePolicy: policy,
 	}
 }
 
@@ -77,7 +85,7 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	owner, repo := parts[0], parts[1]
 
 	markdown := RenderComparisonMarkdown(comp, baseRun, candRun, r.UIBaseURL)
-	checkState := CheckRunStateForComparison(comp, baseRun, candRun)
+	checkState := CheckRunStateForComparison(comp, baseRun, candRun, r.InconclusivePolicy)
 	hash := HashContent(markdown, checkState)
 
 	commentID := int64(0)

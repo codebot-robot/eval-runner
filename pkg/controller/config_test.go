@@ -498,16 +498,20 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	uiURL := fs.String("ui-base-url", "", "ui base url")
 	strictConfig := fs.Bool("strict-config", false, "strict config")
 	uploadBytes := fs.Int64("artifact-max-upload-bytes", 10*1024*1024, "artifact max upload bytes")
+	inconclusivePolicy := fs.String("inconclusive-policy", DefaultInconclusivePolicy, "inconclusive policy")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
+	}
+	if !rawFlags.IsExplicit("inconclusive-policy") {
+		t.Errorf("expected inconclusive-policy to be explicit")
 	}
 	if !rawFlags.IsExplicit("max-parallel-tasks") {
 		t.Errorf("expected max-parallel-tasks to be explicit")
@@ -595,6 +599,114 @@ func TestResolveConfig_UIBaseURL(t *testing.T) {
 	_, err = ResolveConfig(invalidCM, RawFlags{})
 	if err == nil {
 		t.Fatalf("expected error for non-http(s) UIBaseURL, got nil")
+	}
+}
+
+func TestResolveConfig_InconclusivePolicy(t *testing.T) {
+	// 1. Built-in default is "neutral"
+	defCfg := DefaultClusterConfig()
+	if defCfg.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
+		t.Errorf("expected default InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyNeutral, defCfg.InconclusivePolicy)
+	}
+
+	// 2. ConfigMap override with "failure"
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyInconclusivePolicy: "failure",
+		},
+	}
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.InconclusivePolicy != configkeys.InconclusivePolicyFailure {
+		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyFailure, cfg.InconclusivePolicy)
+	}
+
+	// 3. Case insensitivity ("FAILURE")
+	cmUpper := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyInconclusivePolicy: "FAILURE",
+		},
+	}
+	cfgUpper, err := ResolveConfig(cmUpper, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgUpper.InconclusivePolicy != configkeys.InconclusivePolicyFailure {
+		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyFailure, cfgUpper.InconclusivePolicy)
+	}
+
+	// 4. Explicit flag override takes precedence over ConfigMap
+	flags := RawFlags{
+		InconclusivePolicy: "neutral",
+		Explicit:           map[string]bool{"inconclusive-policy": true},
+	}
+	cfgWithFlag, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgWithFlag.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
+		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyNeutral, cfgWithFlag.InconclusivePolicy)
+	}
+
+	// 5. Empty or whitespace value in ConfigMap retains default
+	cmEmpty := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyInconclusivePolicy: "   ",
+		},
+	}
+	cfgEmpty, err := ResolveConfig(cmEmpty, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgEmpty.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
+		t.Errorf("expected default InconclusivePolicy %q for whitespace, got %q", configkeys.InconclusivePolicyNeutral, cfgEmpty.InconclusivePolicy)
+	}
+
+	// 6. Unknown value in ConfigMap rejected with clear error
+	cmInvalid := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyInconclusivePolicy: "unknown",
+		},
+	}
+	_, err = ResolveConfig(cmInvalid, RawFlags{})
+	if err == nil {
+		t.Fatalf("expected error for unknown inconclusivePolicy in ConfigMap, got nil")
+	}
+	expectedSubstr := "invalid inconclusivePolicy \"unknown\" in ConfigMap eval-runner/eval-runner-config: must be \"neutral\" or \"failure\""
+	if !strings.Contains(err.Error(), expectedSubstr) {
+		t.Errorf("expected error containing %q, got %q", expectedSubstr, err.Error())
+	}
+
+	// 7. Unknown value in explicit flag rejected with clear error
+	invalidFlags := RawFlags{
+		InconclusivePolicy: "invalid",
+		Explicit:           map[string]bool{"inconclusive-policy": true},
+	}
+	_, err = ResolveConfig(nil, invalidFlags)
+	if err == nil {
+		t.Fatalf("expected error for unknown inconclusivePolicy flag, got nil")
+	}
+	expectedFlagSubstr := "invalid --inconclusive-policy \"invalid\": must be \"neutral\" or \"failure\""
+	if !strings.Contains(err.Error(), expectedFlagSubstr) {
+		t.Errorf("expected error containing %q, got %q", expectedFlagSubstr, err.Error())
 	}
 }
 
@@ -861,6 +973,7 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 			ConfigMapKeyGitHubTokenSecret:                   "gh-token",
 			ConfigMapKeyGitHubAppSecret:                     "gh-app",
 			ConfigMapKeyUIBaseURL:                           "https://ui",
+			ConfigMapKeyInconclusivePolicy:                  "neutral",
 			configkeys.ConfigMapKeyGitHubWebhookSecret:      "gh-wh",
 			configkeys.ConfigMapKeyWebhookRepositories:      "org/repo",
 			configkeys.ConfigMapKeyDefaultModel:             "model",
