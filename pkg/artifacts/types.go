@@ -122,7 +122,9 @@ type ComparisonTaskArtifact struct {
 	CandidateCostUSD *float64                         `json:"candidateCostUSD,omitempty"`
 	BaseCostUSD      *float64                         `json:"baseCostUSD,omitempty"`
 	PossibleSamples  int                              `json:"possibleSamples,omitempty"`
-	PairsTable       []stats.PairedSampleScore        `json:"pairsTable,omitempty"`
+	// PairsTable records paired scores for each sample in execution order (candidate log order).
+	// Callers (such as the UI CI-history chart) rely on this ordering to reconstruct batch prefix series.
+	PairsTable []stats.PairedSampleScore `json:"pairsTable,omitempty"`
 }
 
 // ComparisonArtifact is the schema stored as comparisons/<name>.json in the artifact sink.

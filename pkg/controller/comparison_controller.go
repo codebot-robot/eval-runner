@@ -1935,28 +1935,26 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		for _, s := range te.candScores {
 			candMap[s.ID] = s.Score
 		}
-		baseMap := make(map[string]float64)
+		baseMap := make(map[string]float64, len(te.baseScores))
 		for _, s := range te.baseScores {
 			baseMap[s.ID] = s.Score
 		}
-		var commonIDs []string
-		for id := range candMap {
-			if _, ok := baseMap[id]; ok {
-				commonIDs = append(commonIDs, id)
-			}
-		}
-		sort.Strings(commonIDs)
 
 		var pairsTable []PairedSampleScore
-		for _, id := range commonIDs {
-			cScore := candMap[id]
-			bScore := baseMap[id]
-			pairsTable = append(pairsTable, PairedSampleScore{
-				ID:             id,
-				BaseScore:      bScore,
-				CandidateScore: cScore,
-				Delta:          cScore - bScore,
-			})
+		seen := make(map[string]bool, len(te.candScores))
+		for _, s := range te.candScores {
+			if seen[s.ID] {
+				continue
+			}
+			seen[s.ID] = true
+			if bScore, ok := baseMap[s.ID]; ok {
+				pairsTable = append(pairsTable, PairedSampleScore{
+					ID:             s.ID,
+					BaseScore:      bScore,
+					CandidateScore: s.Score,
+					Delta:          s.Score - bScore,
+				})
+			}
 		}
 
 		taskArtifacts = append(taskArtifacts, ComparisonTaskArtifact{
