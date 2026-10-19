@@ -144,6 +144,18 @@ type TaskStatus struct {
 	// PossibleSamples is the total dataset size (possible samples) when known from the Inspect log.
 	// +optional
 	PossibleSamples int `json:"possibleSamples,omitempty"`
+
+	// SamplesDone is the number of samples completed so far while the task is running.
+	// +optional
+	SamplesDone int `json:"samplesDone,omitempty"`
+
+	// SamplesPlanned is the expected total number of samples to be evaluated for this task.
+	// +optional
+	SamplesPlanned int `json:"samplesPlanned,omitempty"`
+
+	// LastProgressAt is the timestamp when samplesDone was last updated.
+	// +optional
+	LastProgressAt *metav1.Time `json:"lastProgressAt,omitempty"`
 }
 
 // TaskLatency records latency percentiles (in seconds) aggregated across evaluated samples.

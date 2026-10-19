@@ -319,6 +319,11 @@ spec:
                     id:
                       description: ID is the unique identifier of the task (e.g. docs/readme_comprehension).
                       type: string
+                    lastProgressAt:
+                      description: LastProgressAt is the timestamp when samplesDone
+                        was last updated.
+                      format: date-time
+                      type: string
                     latency:
                       description: Latency records sample latency percentiles (p50
                         and p95 in seconds) aggregated across evaluated samples.
@@ -379,6 +384,14 @@ spec:
                         rule: self.end >= self.start
                     samples:
                       description: Samples is the number of samples scored.
+                      type: integer
+                    samplesDone:
+                      description: SamplesDone is the number of samples completed
+                        so far while the task is running.
+                      type: integer
+                    samplesPlanned:
+                      description: SamplesPlanned is the expected total number of
+                        samples to be evaluated for this task.
                       type: integer
                     startedAt:
                       description: StartedAt is the time when the task transitioned
