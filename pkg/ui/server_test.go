@@ -2702,4 +2702,61 @@ func TestComparisonCIHistory(t *testing.T) {
 			t.Errorf("expected no history table when artifact storage is unavailable")
 		}
 	})
+
+	t.Run("Negative_EmptySummaryPath_QuietInProgress", func(t *testing.T) {
+		compInProgress := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "comp-in-progress",
+				Namespace: "eval-runner",
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:       v1alpha1.ComparisonPhaseRunning,
+				SummaryPath: "",
+			},
+		}
+		clInProgress := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compInProgress).Build()
+		srvInProgress := NewServer(Config{Client: clInProgress, ArtifactSink: sink})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-in-progress", nil)
+		w := httptest.NewRecorder()
+		srvInProgress.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for in-progress comparison, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, "Confidence Interval History") {
+			t.Errorf("expected no Confidence Interval History section for comparison without summaryPath, got:\n%s", body)
+		}
+	})
+
+	t.Run("Negative_SummaryPathMissingComparisonsPrefix", func(t *testing.T) {
+		compBadPrefix := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "comp-bad-prefix",
+				Namespace: "eval-runner",
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:       v1alpha1.ComparisonPhaseCompleted,
+				SummaryPath: "gs://eval-bucket/runs/abcdef12/manifest.json",
+			},
+		}
+		clBadPrefix := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compBadPrefix).Build()
+		srvBadPrefix := NewServer(Config{Client: clBadPrefix, ArtifactSink: sink})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-bad-prefix", nil)
+		w := httptest.NewRecorder()
+		srvBadPrefix.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for bad prefix summaryPath, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "history not available") {
+			t.Errorf("expected 'history not available' note when summaryPath lacks comparisons/ prefix, got:\n%s", body)
+		}
+		if strings.Contains(body, "history-table") {
+			t.Errorf("expected no history table when summaryPath lacks comparisons/ prefix")
+		}
+	})
 }

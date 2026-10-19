@@ -23,6 +23,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1048,8 +1049,23 @@ func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]arti
 	return samples, false, nil
 }
 
-func (s *Server) loadComparisonArtifact(ctx context.Context, summaryPath string) (*artifacts.ComparisonArtifact, bool, error) {
-	if s.compCache != nil {
+func hasComparisonPrefix(path string) bool {
+	clean := strings.TrimSpace(path)
+	if strings.HasPrefix(clean, "gs://") {
+		trimmed := strings.TrimPrefix(clean, "gs://")
+		parts := strings.SplitN(trimmed, "/", 2)
+		return len(parts) == 2 && strings.HasPrefix(parts[1], "comparisons/")
+	}
+	if strings.HasPrefix(clean, "mem://") {
+		trimmed := strings.TrimPrefix(clean, "mem://")
+		return strings.HasPrefix(strings.TrimPrefix(trimmed, "/"), "comparisons/")
+	}
+	clean = filepath.ToSlash(filepath.Clean(clean))
+	return strings.HasPrefix(clean, "comparisons/") || strings.Contains(clean, "/comparisons/")
+}
+
+func (s *Server) loadComparisonArtifact(ctx context.Context, summaryPath string, isCompleted bool) (*artifacts.ComparisonArtifact, bool, error) {
+	if isCompleted && s.compCache != nil {
 		if art, loadErr, ok := s.compCache.get(summaryPath); ok {
 			if loadErr != nil {
 				return nil, true, loadErr
@@ -1061,7 +1077,7 @@ func (s *Server) loadComparisonArtifact(ctx context.Context, summaryPath string)
 	data, err := s.cfg.ArtifactSink.Load(ctx, summaryPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "exceeds maximum") {
-			if s.compCache != nil {
+			if isCompleted && s.compCache != nil {
 				s.compCache.set(summaryPath, 0, nil, err)
 			}
 			return nil, true, err
@@ -1071,13 +1087,13 @@ func (s *Server) loadComparisonArtifact(ctx context.Context, summaryPath string)
 
 	var art artifacts.ComparisonArtifact
 	if parseErr := json.Unmarshal(data, &art); parseErr != nil {
-		if s.compCache != nil {
+		if isCompleted && s.compCache != nil {
 			s.compCache.set(summaryPath, int64(len(data)), nil, parseErr)
 		}
 		return nil, true, parseErr
 	}
 
-	if s.compCache != nil {
+	if isCompleted && s.compCache != nil {
 		s.compCache.set(summaryPath, int64(len(data)), &art, nil)
 	}
 	return &art, false, nil
@@ -1143,7 +1159,6 @@ func subsampleBoundaries(in []int, maxPoints int) []int {
 	out[0] = in[0]
 	out[maxPoints-1] = in[len(in)-1]
 	step := float64(len(in)-1) / float64(maxPoints-1)
-	lastVal := out[0]
 	for i := 1; i < maxPoints-1; i++ {
 		idx := int(math.Round(float64(i) * step))
 		if idx <= 0 {
@@ -1152,15 +1167,12 @@ func subsampleBoundaries(in []int, maxPoints int) []int {
 		if idx >= len(in)-1 {
 			idx = len(in) - 2
 		}
-		val := in[idx]
-		if val <= lastVal {
-			val = lastVal + 1
-		}
-		out[i] = val
-		lastVal = val
+		out[i] = in[idx]
 	}
-	if out[maxPoints-2] >= out[maxPoints-1] {
-		return in[:maxPoints]
+	for i := 1; i < maxPoints; i++ {
+		if out[i] <= out[i-1] {
+			return in[:maxPoints]
+		}
 	}
 	return out
 }
@@ -1171,11 +1183,15 @@ func (s *Server) populateComparisonHistories(ctx context.Context, comp *v1alpha1
 		return
 	}
 	if comp.Status.SummaryPath == "" {
+		return
+	}
+	if !hasComparisonPrefix(comp.Status.SummaryPath) {
 		view.HistoryNote = "history not available"
 		return
 	}
 
-	art, parseOrSizeErr, err := s.loadComparisonArtifact(ctx, comp.Status.SummaryPath)
+	isCompleted := comp.Status.Phase == v1alpha1.ComparisonPhaseCompleted
+	art, parseOrSizeErr, err := s.loadComparisonArtifact(ctx, comp.Status.SummaryPath, isCompleted)
 	if err != nil {
 		if errors.Is(err, artifacts.ErrNotFound) || parseOrSizeErr {
 			view.HistoryNote = "history not available"
@@ -1192,6 +1208,11 @@ func (s *Server) populateComparisonHistories(ctx context.Context, comp *v1alpha1
 	margin := stats.DefaultEquivalenceMargin
 	if comp.Spec.EquivalenceMargin != nil && *comp.Spec.EquivalenceMargin > 0 {
 		margin = *comp.Spec.EquivalenceMargin
+	}
+
+	sampleCap := 0
+	if comp.Spec.Sampling != nil {
+		sampleCap = comp.Spec.Sampling.EffectiveMaxSamplesPerTask()
 	}
 
 	taskIDs := make([]string, 0, len(comp.Status.Tasks))
@@ -1222,7 +1243,7 @@ func (s *Server) populateComparisonHistories(ctx context.Context, comp *v1alpha1
 			continue
 		}
 
-		points := stats.ComputePairedCISeries(matchedArt.PairsTable, boundaries, 0.95, stats.DefaultSeed, margin)
+		points := stats.ComputePairedCISeries(matchedArt.PairsTable, boundaries, 0.95, stats.DefaultSeed, margin, sampleCap)
 		if len(points) == 0 {
 			continue
 		}
