@@ -91,6 +91,7 @@ func main() {
 	var inconclusivePolicy string
 	var strictConfig bool
 	var comparisonTTL time.Duration
+	var commandUsers string
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -107,6 +108,7 @@ func main() {
 	flag.StringVar(&gitHubAppSecret, "github-app-secret", "", "Name of Secret in controller namespace containing GitHub App credentials")
 	flag.StringVar(&uiBaseURL, "ui-base-url", "", "Base URL for the eval-runner UI (e.g. https://eval-runner.example.com)")
 	flag.StringVar(&inconclusivePolicy, "inconclusive-policy", controller.DefaultInconclusivePolicy, "Check-run conclusion policy for inconclusive verdicts: neutral (default) or failure")
+	flag.StringVar(&commandUsers, "command-users", "", "Comma-separated allow-list of GitHub usernames permitted to execute comment commands without checking GitHub permissions")
 	flag.StringVar(&sampleRunnerImage, "sample-runner-image", "", "Container image used for sample execution sandboxes (derived from controller pod image if unset)")
 	flag.StringVar(&sandboxdImage, "sandboxd-image", "", "Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset)")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
@@ -140,6 +142,7 @@ func main() {
 		artifactMaxUploadBytes,
 		inconclusivePolicy,
 		comparisonTTL,
+		commandUsers,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -346,6 +349,7 @@ func main() {
 		InconclusivePolicy:  clusterConfig.InconclusivePolicy,
 		ComparisonTTL:       clusterConfig.ComparisonTTL,
 		ModelPrices:         clusterConfig.ModelPrices,
+		CommandUsers:        clusterConfig.CommandUsers,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {

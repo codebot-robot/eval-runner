@@ -7156,3 +7156,493 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 		}
 	})
 }
+
+func TestComparisonController_PendingCommands(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	t.Run("outsider denied", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-outsider", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5001,
+						Login:      "outsider",
+						Requested:  8,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, tokenSecret).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-outsider"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 0 {
+			t.Errorf("expected ExtraSamples 0, got %d", latest.Spec.ExtraSamples)
+		}
+		if len(latest.Status.PendingCommands) != 0 {
+			t.Errorf("expected 0 pendingCommands, got %d", len(latest.Status.PendingCommands))
+		}
+		if len(latest.Status.HandledCommands) != 1 {
+			t.Fatalf("expected 1 handledCommand, got %d", len(latest.Status.HandledCommands))
+		}
+		h := latest.Status.HandledCommands[0]
+		if h.CommentID != 5001 || h.Login != "outsider" || h.Outcome != "denied: unauthorized" {
+			t.Errorf("unexpected handled command: %+v", h)
+		}
+	})
+
+	t.Run("bot login denied even in commandUsers", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-bot", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5099,
+						Login:      "renovate[bot]",
+						Requested:  8,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			CommandUsers:        []string{"renovate[bot]"},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-bot"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 0 {
+			t.Errorf("expected ExtraSamples 0 for bot user, got %d", latest.Spec.ExtraSamples)
+		}
+		if len(latest.Status.HandledCommands) != 1 || latest.Status.HandledCommands[0].Outcome != "denied: bot" {
+			t.Errorf("expected outcome 'denied: bot', got %+v", latest.Status.HandledCommands)
+		}
+	})
+
+	t.Run("reader denied", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetUserPermission("gke-labs", "eval-runner", "reader", "read")
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-reader", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5002,
+						Login:      "reader",
+						Requested:  8,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, tokenSecret).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-reader"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 0 {
+			t.Errorf("expected ExtraSamples 0, got %d", latest.Spec.ExtraSamples)
+		}
+		if len(latest.Status.HandledCommands) != 1 || latest.Status.HandledCommands[0].Outcome != "denied: unauthorized" {
+			t.Errorf("expected outcome 'denied: unauthorized', got %+v", latest.Status.HandledCommands)
+		}
+	})
+
+	t.Run("allowlisted user authorized", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-allowlisted", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				ExtraSamples: 2,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5003,
+						Login:      "alice",
+						Requested:  8,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, tokenSecret).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			CommandUsers:        []string{"ALICE"},
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-allowlisted"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 10 { // 2 + 8
+			t.Errorf("expected ExtraSamples 10, got %d", latest.Spec.ExtraSamples)
+		}
+		if len(latest.Status.HandledCommands) != 1 || latest.Status.HandledCommands[0].Outcome != "applied" {
+			t.Errorf("expected outcome 'applied', got %+v", latest.Status.HandledCommands)
+		}
+	})
+
+	t.Run("writer authorized and reacts", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetUserPermission("gke-labs", "eval-runner", "writer", "write")
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-writer", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5004,
+						Login:      "writer",
+						Requested:  16,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, tokenSecret).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-writer"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 16 {
+			t.Errorf("expected ExtraSamples 16, got %d", latest.Spec.ExtraSamples)
+		}
+		reactions := server.CommentReactions(5004)
+		if len(reactions) != 1 || reactions[0] != "eyes" {
+			t.Errorf("expected reaction ['eyes'], got %v", reactions)
+		}
+		if len(latest.Status.HandledCommands) != 1 || latest.Status.HandledCommands[0].Outcome != "applied" {
+			t.Errorf("expected outcome 'applied', got %+v", latest.Status.HandledCommands)
+		}
+	})
+
+	t.Run("api error fails closed", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.InjectPathError("GET", "/repos/gke-labs/eval-runner/collaborators/writer/permission", 500, `{"message":"Internal Server Error"}`)
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-api-err", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5005,
+						Login:      "writer",
+						Requested:  8,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, tokenSecret).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-api-err"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 0 {
+			t.Errorf("expected ExtraSamples to remain 0 on API error, got %d", latest.Spec.ExtraSamples)
+		}
+		if len(latest.Status.HandledCommands) != 1 || !strings.HasPrefix(latest.Status.HandledCommands[0].Outcome, "error:") {
+			t.Errorf("expected error outcome on API error, got %+v", latest.Status.HandledCommands)
+		}
+	})
+
+	t.Run("reaction failure fallback to reply", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetUserPermission("gke-labs", "eval-runner", "writer", "write")
+		server.InjectPathError("POST", "/repos/gke-labs/eval-runner/issues/comments/5006/reactions", 500, `{"message":"reactions disabled"}`)
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-react-fallback", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5006,
+						Login:      "writer",
+						Requested:  8,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, tokenSecret).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-react-fallback"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 8 {
+			t.Errorf("expected ExtraSamples 8, got %d", latest.Spec.ExtraSamples)
+		}
+		foundAck := false
+		for _, c := range server.Comments() {
+			if strings.Contains(c.Body, "Evaluating 8 more sample(s) for PR #10 (extraSamples=8)") {
+				foundAck = true
+				break
+			}
+		}
+		if !foundAck {
+			t.Errorf("expected acknowledgement comment on PR, got: %v", server.Comments())
+		}
+	})
+
+	t.Run("clamping by custom sampling spec", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-clamp", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+				Sampling: &v1alpha1.ComparisonSamplingSpec{
+					BatchSize:         4,
+					MaxSamplesPerTask: 16,
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  5007,
+						Login:      "alice",
+						Requested:  64,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			CommandUsers:        []string{"alice"},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-clamp"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if latest.Spec.ExtraSamples != 16 {
+			t.Errorf("expected ExtraSamples 16 (clamped from 64 to 16), got %d", latest.Spec.ExtraSamples)
+		}
+		if len(latest.Status.HandledCommands) != 1 || latest.Status.HandledCommands[0].Outcome != "applied" {
+			t.Errorf("expected outcome applied, got %+v", latest.Status.HandledCommands)
+		}
+	})
+
+	t.Run("handledCommands bounded", func(t *testing.T) {
+		var existingHandled []v1alpha1.ComparisonHandledCommand
+		for i := 0; i < 110; i++ {
+			existingHandled = append(existingHandled, v1alpha1.ComparisonHandledCommand{
+				CommentID: int64(1000 + i),
+				Login:     "alice",
+				Requested: 2,
+				Outcome:   "applied",
+			})
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-bounded", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     10,
+				},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				HandledCommands: existingHandled,
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  9999,
+						Login:      "alice",
+						Requested:  2,
+						ReceivedAt: metav1.Now(),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).WithStatusSubresource(comp).Build()
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ControllerNamespace: "eval-runner",
+			CommandUsers:        []string{"alice"},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-bounded"}}
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var latest v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &latest); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if len(latest.Status.HandledCommands) > v1alpha1.MaxHandledCommands {
+			t.Errorf("expected HandledCommands to be bounded by %d, got %d", v1alpha1.MaxHandledCommands, len(latest.Status.HandledCommands))
+		}
+	})
+}

@@ -137,6 +137,7 @@ type ComparisonReconciler struct {
 	GitHubBaseURL       string
 	GitHubClientFactory func(creds GitHubCredentials) github.Client
 	ComparisonTTL       time.Duration
+	CommandUsers        []string
 	Now                 func() time.Time
 	ModelPrices         map[string]ModelPrice
 
@@ -200,15 +201,7 @@ func (r *ComparisonReconciler) getOrCreateAppAuth(secret *corev1.Secret, appID, 
 	return appAuth, nil
 }
 
-func (r *ComparisonReconciler) reportToGitHub(
-	ctx context.Context,
-	comp *v1alpha1.Comparison,
-	baseRun, candRun *v1alpha1.Run,
-) error {
-	if comp == nil || comp.Spec.PullRequest == nil {
-		return nil
-	}
-
+func (r *ComparisonReconciler) getGitHubClient(ctx context.Context) (github.Client, error) {
 	secretNames := []string{}
 	if r.GitHubAppSecret != "" {
 		secretNames = append(secretNames, r.GitHubAppSecret)
@@ -218,16 +211,9 @@ func (r *ComparisonReconciler) reportToGitHub(
 	}
 
 	if len(secretNames) == 0 {
-		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
-			Message: "disabled",
-		}
-		return nil
+		return nil, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	var ghClient github.Client
 	for _, secretName := range secretNames {
 		var secret corev1.Secret
 		key := types.NamespacedName{
@@ -238,7 +224,7 @@ func (r *ComparisonReconciler) reportToGitHub(
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			return fmt.Errorf("failed to get github credentials secret %q: %w", secretName, err)
+			return nil, fmt.Errorf("failed to get github credentials secret %q: %w", secretName, err)
 		}
 
 		appID := strings.TrimSpace(string(secret.Data["app-id"]))
@@ -263,10 +249,7 @@ func (r *ComparisonReconciler) reportToGitHub(
 		if appID != "" && installationID != "" && len(privKey) > 0 {
 			appAuth, err := r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
 			if err != nil {
-				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
-					Message: fmt.Sprintf("invalid app credentials: %v", err),
-				}
-				return nil
+				return nil, fmt.Errorf("invalid app credentials: %w", err)
 			}
 
 			creds := GitHubCredentials{
@@ -277,30 +260,189 @@ func (r *ComparisonReconciler) reportToGitHub(
 				AppAuth:        appAuth,
 			}
 			if r.GitHubClientFactory != nil {
-				ghClient = r.GitHubClientFactory(creds)
-			} else {
-				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
-					AppAuth: appAuth,
-					BaseURL: r.GitHubBaseURL,
-				})
+				return r.GitHubClientFactory(creds), nil
 			}
-			break
+			return github.NewHTTPClient(github.HTTPClientConfig{
+				AppAuth: appAuth,
+				BaseURL: r.GitHubBaseURL,
+			}), nil
 		} else if token != "" {
 			creds := GitHubCredentials{
 				Token: token,
 			}
 			if r.GitHubClientFactory != nil {
-				ghClient = r.GitHubClientFactory(creds)
-			} else {
-				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
-					Token:   token,
-					BaseURL: r.GitHubBaseURL,
-				})
+				return r.GitHubClientFactory(creds), nil
 			}
-			break
+			return github.NewHTTPClient(github.HTTPClientConfig{
+				Token:   token,
+				BaseURL: r.GitHubBaseURL,
+			}), nil
 		}
 	}
 
+	return nil, nil
+}
+
+func (r *ComparisonReconciler) processPendingCommands(ctx context.Context, comp *v1alpha1.Comparison) (bool, error) {
+	if len(comp.Status.PendingCommands) == 0 {
+		return false, nil
+	}
+
+	logger := log.FromContext(ctx)
+	ghClient, ghErr := r.getGitHubClient(ctx)
+	if ghErr != nil {
+		logger.Info("warning: failed to get github client while processing commands", "err", ghErr)
+	}
+
+	var newHandled []v1alpha1.ComparisonHandledCommand
+	totalExtraBump := 0
+
+	for _, cmd := range comp.Status.PendingCommands {
+		authorized := false
+		var outcome string
+
+		// Reject bot logins (e.g. renovate[bot], dependabot[bot], etc.)
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(cmd.Login)), "[bot]") {
+			outcome = "denied: bot"
+		} else if IsUserAllowed(cmd.Login, r.CommandUsers) {
+			// 1. Check commandUsers allow-list (exact case-insensitive match)
+			authorized = true
+		} else {
+			// 2. Check GitHub collaborator permissions API
+			if comp.Spec.PullRequest == nil {
+				outcome = "denied: no pull request configured"
+			} else if ghClient == nil || ghErr != nil {
+				outcome = "error: github credentials unavailable"
+			} else {
+				parts := strings.Split(comp.Spec.PullRequest.Repository, "/")
+				if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+					outcome = fmt.Sprintf("denied: invalid pullRequest.repository %q", comp.Spec.PullRequest.Repository)
+				} else {
+					owner, repo := parts[0], parts[1]
+					perm, err := ghClient.GetRepoPermission(ctx, owner, repo, cmd.Login)
+					if err != nil {
+						logger.Info("github collaborator permission check failed", "user", cmd.Login, "repo", comp.Spec.PullRequest.Repository, "err", err)
+						outcome = fmt.Sprintf("error: failed to verify permissions: %v", err)
+					} else if !github.HasWriteAccess(perm) {
+						outcome = "denied: unauthorized"
+					} else {
+						authorized = true
+					}
+				}
+			}
+		}
+
+		if authorized {
+			samplesToBump := cmd.Requested
+			if comp.Spec.Sampling != nil {
+				maxPerTask := comp.Spec.Sampling.EffectiveMaxSamplesPerTask()
+				if maxPerTask > 0 && samplesToBump > maxPerTask {
+					samplesToBump = maxPerTask
+				}
+			} else if samplesToBump > v1alpha1.DefaultMaxSamplesPerTask {
+				samplesToBump = v1alpha1.DefaultMaxSamplesPerTask
+			}
+			totalExtraBump += samplesToBump
+			outcome = "applied"
+
+			// Acknowledge via GitHub reaction (eyes) or fallback comment
+			if ghClient != nil && comp.Spec.PullRequest != nil {
+				parts := strings.Split(comp.Spec.PullRequest.Repository, "/")
+				if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+					owner, repo := parts[0], parts[1]
+					prNum := comp.Spec.PullRequest.Number
+					if reactErr := ghClient.CreateCommentReaction(ctx, owner, repo, cmd.CommentID, "eyes"); reactErr != nil {
+						logger.Info("failed to react to comment, falling back to acknowledgement comment", "commentId", cmd.CommentID, "err", reactErr)
+						msg := fmt.Sprintf("Evaluating %d more sample(s) for PR #%d (extraSamples=%d).", cmd.Requested, prNum, comp.Spec.ExtraSamples+totalExtraBump)
+						if _, replyErr := ghClient.CreateIssueComment(ctx, owner, repo, prNum, msg); replyErr != nil {
+							logger.Info("warning: failed to post acknowledgement comment", "pr", prNum, "err", replyErr)
+						}
+					}
+				}
+			}
+		}
+
+		handled := v1alpha1.ComparisonHandledCommand{
+			CommentID:  cmd.CommentID,
+			Login:      cmd.Login,
+			Requested:  cmd.Requested,
+			ReceivedAt: cmd.ReceivedAt,
+			HandledAt:  &metav1.Time{Time: r.now()},
+			Outcome:    outcome,
+		}
+		newHandled = append(newHandled, handled)
+	}
+
+	key := types.NamespacedName{Namespace: comp.Namespace, Name: comp.Name}
+	specBumped := false
+
+	handledIDs := make(map[int64]bool, len(newHandled))
+	for _, h := range newHandled {
+		handledIDs[h.CommentID] = true
+	}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest v1alpha1.Comparison
+		if err := r.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+
+		if totalExtraBump > 0 && !specBumped {
+			latest.Spec.ExtraSamples += totalExtraBump
+			if err := r.Update(ctx, &latest); err != nil {
+				return err
+			}
+			specBumped = true
+		}
+
+		latest.Status.HandledCommands = append(latest.Status.HandledCommands, newHandled...)
+		if len(latest.Status.HandledCommands) > v1alpha1.MaxHandledCommands {
+			latest.Status.HandledCommands = latest.Status.HandledCommands[len(latest.Status.HandledCommands)-v1alpha1.MaxHandledCommands:]
+		}
+
+		var remainingPending []v1alpha1.ComparisonPendingCommand
+		for _, p := range latest.Status.PendingCommands {
+			if !handledIDs[p.CommentID] {
+				remainingPending = append(remainingPending, p)
+			}
+		}
+		latest.Status.PendingCommands = remainingPending
+
+		if err := r.Status().Update(ctx, &latest); err != nil {
+			return err
+		}
+
+		comp.Spec = latest.Spec
+		comp.Status = latest.Status
+		return nil
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed persisting pending command outcome: %w", err)
+	}
+
+	return true, nil
+}
+
+func (r *ComparisonReconciler) reportToGitHub(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	baseRun, candRun *v1alpha1.Run,
+) error {
+	if comp == nil || comp.Spec.PullRequest == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	ghClient, err := r.getGitHubClient(ctx)
+	if err != nil {
+		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
+			Message: err.Error(),
+		}
+		return nil
+	}
 	if ghClient == nil {
 		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
 			Message: "disabled",
@@ -711,6 +853,13 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	if comp.DeletionTimestamp != nil {
 		return ctrl.Result{}, nil
+	}
+
+	// Process pending review comment commands (e.g. /eval more <n>)
+	if len(comp.Status.PendingCommands) > 0 {
+		if _, err := r.processPendingCommands(ctx, &comp); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed processing pending commands on comparison %s: %w", comp.Name, err)
+		}
 	}
 
 	// Check TTL expiration for completed comparisons

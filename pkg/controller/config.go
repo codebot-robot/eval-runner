@@ -157,6 +157,7 @@ type ClusterConfig struct {
 	TaskGracePeriod        time.Duration
 	UIBaseURL              string
 	ComparisonTTL          time.Duration
+	CommandUsers           []string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -175,6 +176,7 @@ type RawFlags struct {
 	TaskGracePeriod        time.Duration
 	UIBaseURL              string
 	ComparisonTTL          time.Duration
+	CommandUsers           string
 	StrictConfig           bool
 	Explicit               map[string]bool
 }
@@ -204,6 +206,7 @@ func DefaultClusterConfig() ClusterConfig {
 		TaskGracePeriod:        DefaultTaskGracePeriod,
 		UIBaseURL:              "",
 		ComparisonTTL:          0,
+		CommandUsers:           nil,
 	}
 }
 
@@ -217,6 +220,7 @@ func FlagsFromFlagSet(
 	artifactMaxUploadBytes int64,
 	inconclusivePolicy string,
 	comparisonTTL time.Duration,
+	commandUsers string,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -237,6 +241,7 @@ func FlagsFromFlagSet(
 		TaskGracePeriod:        taskGracePeriod,
 		UIBaseURL:              uiBaseURL,
 		ComparisonTTL:          comparisonTTL,
+		CommandUsers:           commandUsers,
 		StrictConfig:           strictConfig,
 		Explicit:               explicit,
 	}
@@ -490,6 +495,11 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				}
 			}
 		}
+
+		// 14. commandUsers
+		if val, ok := cm.Data[ConfigMapKeyCommandUsers]; ok {
+			cfg.CommandUsers = ParseUserList(val)
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -571,8 +581,42 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		}
 		cfg.InconclusivePolicy = lower
 	}
+	if flags.IsExplicit("command-users") {
+		cfg.CommandUsers = ParseUserList(flags.CommandUsers)
+	}
 
 	return cfg, nil
+}
+
+// ParseUserList parses a comma-separated list of GitHub usernames.
+func ParseUserList(s string) []string {
+	var users []string
+	for _, part := range strings.Split(s, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			users = append(users, trimmed)
+		}
+	}
+	return users
+}
+
+// IsUserAllowed checks whether user is in allowList (case-insensitive exact match).
+// Returns false if allowList is empty or user is empty. Wildcards are not supported.
+func IsUserAllowed(user string, allowList []string) bool {
+	if len(allowList) == 0 {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(user))
+	if normalized == "" {
+		return false
+	}
+	for _, allowed := range allowList {
+		trimmed := strings.ToLower(strings.TrimSpace(allowed))
+		if trimmed == normalized {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadClusterConfig retrieves the ConfigMap using the uncached reader.

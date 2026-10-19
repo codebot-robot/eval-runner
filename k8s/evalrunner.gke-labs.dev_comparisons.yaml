@@ -223,6 +223,46 @@ spec:
                 description: ExtraSamplesApplied records the number of extra samples
                   that have been consumed into extension batches.
                 type: integer
+              handledCommands:
+                description: HandledCommands records review comment commands that
+                  have been processed by the controller.
+                items:
+                  description: ComparisonHandledCommand represents a review comment
+                    command that has been processed by the controller.
+                  properties:
+                    commentId:
+                      description: CommentID is the GitHub issue comment ID where
+                        the command was issued.
+                      format: int64
+                      type: integer
+                    handledAt:
+                      description: HandledAt is the time when the controller processed
+                        the command.
+                      format: date-time
+                      type: string
+                    login:
+                      description: Login is the GitHub username of the user who issued
+                        the command.
+                      type: string
+                    outcome:
+                      description: 'Outcome records the result of processing the command
+                        (e.g. "applied", "denied: unauthorized", or error details).'
+                      type: string
+                    receivedAt:
+                      description: ReceivedAt is the time when the webhook received
+                        and recorded the command.
+                      format: date-time
+                      type: string
+                    requested:
+                      description: Requested is the number of additional samples requested.
+                      type: integer
+                  required:
+                  - commentId
+                  - login
+                  - receivedAt
+                  - requested
+                  type: object
+                type: array
               message:
                 description: Message is human-readable detail on failure, notes, or
                   current status.
@@ -233,6 +273,37 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: number
+              pendingCommands:
+                description: PendingCommands records unhandled review comment commands
+                  waiting for controller processing.
+                items:
+                  description: ComparisonPendingCommand represents an unhandled command
+                    received from a GitHub review comment.
+                  properties:
+                    commentId:
+                      description: CommentID is the GitHub issue comment ID where
+                        the command was issued.
+                      format: int64
+                      type: integer
+                    login:
+                      description: Login is the GitHub username of the user who issued
+                        the command.
+                      type: string
+                    receivedAt:
+                      description: ReceivedAt is the time when the webhook received
+                        and recorded the command.
+                      format: date-time
+                      type: string
+                    requested:
+                      description: Requested is the number of additional samples requested.
+                      type: integer
+                  required:
+                  - commentId
+                  - login
+                  - receivedAt
+                  - requested
+                  type: object
+                type: array
               phase:
                 description: Phase is the lifecycle phase of the comparison (Running,
                   Completed, Failed).

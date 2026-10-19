@@ -16,18 +16,20 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
-	"github.com/gke-labs/eval-runner/pkg/github"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1174,7 +1176,6 @@ func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
 		Data: map[string]string{
 			ConfigMapKeyDefaultBatchSize:         "16",
 			ConfigMapKeyDefaultMaxSamplesPerTask: "48",
-			ConfigMapKeyCommandUsers:             "alice, bob, CHARLIE",
 		},
 	}
 
@@ -1187,24 +1188,6 @@ func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
 	}
 	if cfg.DefaultMaxSamplesPerTask != 48 {
 		t.Errorf("expected DefaultMaxSamplesPerTask 48, got %d", cfg.DefaultMaxSamplesPerTask)
-	}
-	if len(cfg.CommandUsers) != 3 || cfg.CommandUsers[0] != "alice" || cfg.CommandUsers[1] != "bob" || cfg.CommandUsers[2] != "CHARLIE" {
-		t.Errorf("expected CommandUsers [alice bob CHARLIE], got %v", cfg.CommandUsers)
-	}
-
-	// Verify case-insensitive user check and no wildcard support
-	if !IsUserAllowed("Alice", cfg.CommandUsers) {
-		t.Errorf("expected Alice to be allowed")
-	}
-	if !IsUserAllowed("charlie", cfg.CommandUsers) {
-		t.Errorf("expected charlie to be allowed")
-	}
-	if IsUserAllowed("eve", cfg.CommandUsers) {
-		t.Errorf("expected eve to not be allowed")
-	}
-	// Wildcard "*" in allow-list must NOT match arbitrary users
-	if IsUserAllowed("eve", []string{"*"}) {
-		t.Errorf("expected '*' to NOT act as a wildcard in commandUsers")
 	}
 
 	// Malformed batch size
@@ -1233,11 +1216,9 @@ func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
 	flags := RawWebhookFlags{
 		DefaultBatchSize:         &bs,
 		DefaultMaxSamplesPerTask: &ms,
-		CommandUsers:             "david",
 		Explicit: map[string]bool{
 			"default-batch-size":           true,
 			"default-max-samples-per-task": true,
-			"command-users":                true,
 		},
 	}
 	cfgFlags, err := ResolveWebhookConfig(cm, flags, nil)
@@ -1249,9 +1230,6 @@ func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
 	}
 	if cfgFlags.DefaultMaxSamplesPerTask != 128 {
 		t.Errorf("expected explicit flag DefaultMaxSamplesPerTask 128, got %d", cfgFlags.DefaultMaxSamplesPerTask)
-	}
-	if len(cfgFlags.CommandUsers) != 1 || cfgFlags.CommandUsers[0] != "david" {
-		t.Errorf("expected CommandUsers [david], got %v", cfgFlags.CommandUsers)
 	}
 }
 
@@ -1419,6 +1397,21 @@ func TestParseEvalMoreCommand(t *testing.T) {
 	}
 }
 
+type secretTrackingClient struct {
+	client.Client
+	mu         sync.Mutex
+	secretGets []string
+}
+
+func (c *secretTrackingClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Secret); ok {
+		c.mu.Lock()
+		c.secretGets = append(c.secretGets, key.Name)
+		c.mu.Unlock()
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 func TestHandler_IssueComment_ParseAndBound(t *testing.T) {
 	secretKey := []byte("comment-secret")
 	scheme := newTestScheme()
@@ -1436,15 +1429,15 @@ func TestHandler_IssueComment_ParseAndBound(t *testing.T) {
 			ExtraSamples: 4,
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(comp).WithObjects(comp).Build()
+	trackCl := &secretTrackingClient{Client: cl}
 
 	cfg := Config{
 		Namespace:                "eval-runner",
 		StaticWebhookSecret:      secretKey,
 		WebhookRepositories:      []string{"gke-labs/eval-runner"},
-		CommandUsers:             []string{"allowed-user"},
 		DefaultMaxSamplesPerTask: 64,
-		Client:                   cl,
+		Client:                   trackCl,
 	}
 	server := NewServer(cfg)
 	server.Start()
@@ -1483,15 +1476,19 @@ func TestHandler_IssueComment_ParseAndBound(t *testing.T) {
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-42"}, &updatedComp); err != nil {
 		t.Fatalf("failed to get comparison: %v", err)
 	}
-	// Initial was 4, added 8 -> 12
-	if updatedComp.Spec.ExtraSamples != 12 {
-		t.Errorf("expected ExtraSamples 12, got %d", updatedComp.Spec.ExtraSamples)
+	// Webhook must NOT bump Spec.ExtraSamples; that is reserved for the controller
+	if updatedComp.Spec.ExtraSamples != 4 {
+		t.Errorf("expected ExtraSamples to remain 4, got %d", updatedComp.Spec.ExtraSamples)
 	}
-	if !isCommentHandled(updatedComp.Annotations, 1001) {
-		t.Errorf("expected comment 1001 to be recorded in annotations")
+	if len(updatedComp.Status.PendingCommands) != 1 {
+		t.Fatalf("expected 1 pendingCommand, got %d", len(updatedComp.Status.PendingCommands))
+	}
+	cmd1 := updatedComp.Status.PendingCommands[0]
+	if cmd1.CommentID != 1001 || cmd1.Login != "allowed-user" || cmd1.Requested != 8 || cmd1.ReceivedAt.IsZero() {
+		t.Errorf("unexpected pending command: %+v", cmd1)
 	}
 
-	// 2. Post /eval more 100 (should be bounded by defaultMaxSamplesPerTask=64)
+	// 2. Post /eval more 100 (should be bounded to defaultMaxSamplesPerTask=64)
 	payload2 := []byte(`{
 		"action": "created",
 		"issue": {
@@ -1523,9 +1520,12 @@ func TestHandler_IssueComment_ParseAndBound(t *testing.T) {
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-42"}, &updatedComp); err != nil {
 		t.Fatalf("failed to get comparison: %v", err)
 	}
-	// Previous was 12, added bounded 64 -> 76
-	if updatedComp.Spec.ExtraSamples != 76 {
-		t.Errorf("expected ExtraSamples 76 (12 + 64 bounded), got %d", updatedComp.Spec.ExtraSamples)
+	if len(updatedComp.Status.PendingCommands) != 2 {
+		t.Fatalf("expected 2 pendingCommands, got %d", len(updatedComp.Status.PendingCommands))
+	}
+	cmd2 := updatedComp.Status.PendingCommands[1]
+	if cmd2.CommentID != 1002 || cmd2.Requested != 64 {
+		t.Errorf("expected requested 64 (bounded by defaultMaxSamplesPerTask), got %+v", cmd2)
 	}
 
 	// 3. /eval rerun is ignored
@@ -1623,8 +1623,7 @@ func TestHandler_IssueComment_ParseAndBound(t *testing.T) {
 		t.Errorf("expected ignored: bot comment, got: %s", rrBot.Body.String())
 	}
 
-	// 6. Repository mismatch is ignored like not found (Blocking 3)
-	// Comparison pr-42 belongs to gke-labs/eval-runner; incoming comment is for other-org/other-repo#42
+	// 6. Repository mismatch is ignored like not found
 	cfgWithTwoRepos := cfg
 	cfgWithTwoRepos.WebhookRepositories = []string{"gke-labs/eval-runner", "other-org/other-repo"}
 	serverMultiRepo := NewServer(cfgWithTwoRepos)
@@ -1661,245 +1660,89 @@ func TestHandler_IssueComment_ParseAndBound(t *testing.T) {
 	if !strings.Contains(rrMismatch.Body.String(), "ignored: comparison not found") {
 		t.Errorf("expected ignored: comparison not found, got: %s", rrMismatch.Body.String())
 	}
-	// Verify pr-42 ExtraSamples was NOT bumped
-	var compAfterMismatch v1alpha1.Comparison
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-42"}, &compAfterMismatch); err != nil {
+
+	// 7. Invalid author login shape is rejected with 200
+	payloadBadLogin := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 42,
+			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/42"}
+		},
+		"comment": {
+			"id": 1008,
+			"body": "/eval more 8",
+			"user": {"login": "<script>alert(1)</script>"}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	sigBadLogin := ComputeSignature(payloadBadLogin, secretKey)
+	reqBadLogin := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadBadLogin))
+	reqBadLogin.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqBadLogin.Header.Set(HeaderHubSignature256, sigBadLogin)
+	rrBadLogin := httptest.NewRecorder()
+
+	server.ServeHTTP(rrBadLogin, reqBadLogin)
+	if rrBadLogin.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for invalid login, got %d", rrBadLogin.Code)
+	}
+	if !strings.Contains(rrBadLogin.Body.String(), "ignored: invalid author login") {
+		t.Errorf("expected ignored: invalid author login, got: %s", rrBadLogin.Body.String())
+	}
+
+	// 8. Bounding: when status.pendingCommands reaches MaxPendingCommands, new commands are dropped and oldest preserved
+	var lastRR *httptest.ResponseRecorder
+	for i := 2000; i < 2070; i++ {
+		p := []byte(fmt.Sprintf(`{
+			"action": "created",
+			"issue": {
+				"number": 42,
+				"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/42"}
+			},
+			"comment": {
+				"id": %d,
+				"body": "/eval more 2",
+				"user": {"login": "user-%d"}
+			},
+			"repository": {
+				"full_name": "gke-labs/eval-runner",
+				"name": "eval-runner",
+				"owner": {"login": "gke-labs"}
+			}
+		}`, i, i))
+		s := ComputeSignature(p, secretKey)
+		req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(p))
+		req.Header.Set(HeaderGitHubEvent, EventIssueComment)
+		req.Header.Set(HeaderHubSignature256, s)
+		lastRR = httptest.NewRecorder()
+		server.ServeHTTP(lastRR, req)
+	}
+
+	if !strings.Contains(lastRR.Body.String(), "ignored: pending commands queue full") {
+		t.Errorf("expected queue full response for overflow, got: %s", lastRR.Body.String())
+	}
+
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-42"}, &updatedComp); err != nil {
 		t.Fatalf("failed to get comparison: %v", err)
 	}
-	if compAfterMismatch.Spec.ExtraSamples != 76 {
-		t.Errorf("expected ExtraSamples to remain 76 after mismatched repo attempt, got %d", compAfterMismatch.Spec.ExtraSamples)
+	if len(updatedComp.Status.PendingCommands) != v1alpha1.MaxPendingCommands {
+		t.Errorf("expected pendingCommands count exactly %d, got %d", v1alpha1.MaxPendingCommands, len(updatedComp.Status.PendingCommands))
+	}
+	// Oldest entries must be preserved
+	if updatedComp.Status.PendingCommands[0].CommentID != 1001 {
+		t.Errorf("expected oldest comment 1001 to be preserved, got %d", updatedComp.Status.PendingCommands[0].CommentID)
 	}
 
-	// 7. Comparison with custom spec.sampling.maxSamplesPerTask bounds n
-	compCustomCap := &v1alpha1.Comparison{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pr-70",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.ComparisonSpec{
-			PullRequest: &v1alpha1.PullRequestSpec{
-				Repository: "gke-labs/eval-runner",
-				Number:     70,
-			},
-			Sampling: &v1alpha1.ComparisonSamplingSpec{
-				BatchSize:         4,
-				MaxSamplesPerTask: 16,
-			},
-			ExtraSamples: 0,
-		},
-	}
-	if err := cl.Create(t.Context(), compCustomCap); err != nil {
-		t.Fatalf("failed to create custom cap comparison: %v", err)
-	}
-
-	payloadCustomCap := []byte(`{
-		"action": "created",
-		"issue": {
-			"number": 70,
-			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/70"}
-		},
-		"comment": {
-			"id": 1007,
-			"body": "/eval more 64",
-			"user": {"login": "allowed-user"}
-		},
-		"repository": {
-			"full_name": "gke-labs/eval-runner",
-			"name": "eval-runner",
-			"owner": {"login": "gke-labs"}
+	// 9. Assert NO Secret reads occurred (especially github-token or github-app)
+	trackCl.mu.Lock()
+	defer trackCl.mu.Unlock()
+	for _, s := range trackCl.secretGets {
+		if s == "github-token" || s == "github-app" {
+			t.Errorf("webhook unexpectedly read secret %s", s)
 		}
-	}`)
-	sigCustomCap := ComputeSignature(payloadCustomCap, secretKey)
-	reqCustomCap := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadCustomCap))
-	reqCustomCap.Header.Set(HeaderGitHubEvent, EventIssueComment)
-	reqCustomCap.Header.Set(HeaderHubSignature256, sigCustomCap)
-	rrCustomCap := httptest.NewRecorder()
-
-	server.ServeHTTP(rrCustomCap, reqCustomCap)
-	if rrCustomCap.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for custom cap comparison, got %d", rrCustomCap.Code)
-	}
-	var compAfterCustomCap v1alpha1.Comparison
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-70"}, &compAfterCustomCap); err != nil {
-		t.Fatalf("failed to get comparison: %v", err)
-	}
-	// Bounded by comp.Spec.Sampling.EffectiveMaxSamplesPerTask() = 16
-	if compAfterCustomCap.Spec.ExtraSamples != 16 {
-		t.Errorf("expected ExtraSamples 16 (bounded by Comparison custom cap), got %d", compAfterCustomCap.Spec.ExtraSamples)
-	}
-}
-
-func TestHandler_IssueComment_RejectsUnauthorized(t *testing.T) {
-	secretKey := []byte("comment-auth-secret")
-	scheme := newTestScheme()
-
-	comp := &v1alpha1.Comparison{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pr-50",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.ComparisonSpec{
-			PullRequest: &v1alpha1.PullRequestSpec{
-				Repository: "gke-labs/eval-runner",
-				Number:     50,
-			},
-			ExtraSamples: 0,
-		},
-	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
-
-	fakeGH := github.NewFakeGitHubServer()
-	defer fakeGH.Close()
-
-	// Configure collaborator permissions in fake GitHub
-	fakeGH.SetUserPermission("gke-labs", "eval-runner", "writer", "write")
-	fakeGH.SetUserPermission("gke-labs", "eval-runner", "reader", "read")
-	// "outsider" is not added, will return 404 from GitHub API
-
-	ghClient := fakeGH.Client("test-token")
-
-	cfg := Config{
-		Namespace:                "eval-runner",
-		StaticWebhookSecret:      secretKey,
-		WebhookRepositories:      []string{"gke-labs/eval-runner"},
-		CommandUsers:             []string{"allowlisted-user"},
-		DefaultMaxSamplesPerTask: 64,
-		GitHubClient:             ghClient,
-		Client:                   cl,
-	}
-	server := NewServer(cfg)
-	server.Start()
-	defer server.Stop()
-
-	// 1. Outsider author (not in allow-list, not a collaborator) -> 403 Forbidden
-	payloadOutsider := []byte(`{
-		"action": "created",
-		"issue": {
-			"number": 50,
-			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
-		},
-		"comment": {
-			"id": 2001,
-			"body": "/eval more 8",
-			"user": {"login": "outsider"}
-		},
-		"repository": {
-			"full_name": "gke-labs/eval-runner",
-			"name": "eval-runner",
-			"owner": {"login": "gke-labs"}
-		}
-	}`)
-	sigOutsider := ComputeSignature(payloadOutsider, secretKey)
-	reqOutsider := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadOutsider))
-	reqOutsider.Header.Set(HeaderGitHubEvent, EventIssueComment)
-	reqOutsider.Header.Set(HeaderHubSignature256, sigOutsider)
-	rrOutsider := httptest.NewRecorder()
-
-	server.ServeHTTP(rrOutsider, reqOutsider)
-	if rrOutsider.Code != http.StatusForbidden {
-		t.Errorf("expected 403 Forbidden for outsider, got %d: %s", rrOutsider.Code, rrOutsider.Body.String())
-	}
-
-	// 2. Read-only collaborator -> 403 Forbidden
-	payloadReader := []byte(`{
-		"action": "created",
-		"issue": {
-			"number": 50,
-			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
-		},
-		"comment": {
-			"id": 2002,
-			"body": "/eval more 8",
-			"user": {"login": "reader"}
-		},
-		"repository": {
-			"full_name": "gke-labs/eval-runner",
-			"name": "eval-runner",
-			"owner": {"login": "gke-labs"}
-		}
-	}`)
-	sigReader := ComputeSignature(payloadReader, secretKey)
-	reqReader := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadReader))
-	reqReader.Header.Set(HeaderGitHubEvent, EventIssueComment)
-	reqReader.Header.Set(HeaderHubSignature256, sigReader)
-	rrReader := httptest.NewRecorder()
-
-	server.ServeHTTP(rrReader, reqReader)
-	if rrReader.Code != http.StatusForbidden {
-		t.Errorf("expected 403 Forbidden for reader, got %d: %s", rrReader.Code, rrReader.Body.String())
-	}
-
-	// 3. Allow-listed user without write permission on GitHub -> 200 OK
-	payloadAllowlisted := []byte(`{
-		"action": "created",
-		"issue": {
-			"number": 50,
-			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
-		},
-		"comment": {
-			"id": 2003,
-			"body": "/eval more 8",
-			"user": {"login": "allowlisted-user"}
-		},
-		"repository": {
-			"full_name": "gke-labs/eval-runner",
-			"name": "eval-runner",
-			"owner": {"login": "gke-labs"}
-		}
-	}`)
-	sigAllowlisted := ComputeSignature(payloadAllowlisted, secretKey)
-	reqAllowlisted := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadAllowlisted))
-	reqAllowlisted.Header.Set(HeaderGitHubEvent, EventIssueComment)
-	reqAllowlisted.Header.Set(HeaderHubSignature256, sigAllowlisted)
-	rrAllowlisted := httptest.NewRecorder()
-
-	server.ServeHTTP(rrAllowlisted, reqAllowlisted)
-	if rrAllowlisted.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for allowlisted user, got %d: %s", rrAllowlisted.Code, rrAllowlisted.Body.String())
-	}
-
-	// 4. Collaborator with write access -> 200 OK and reacts with "eyes"
-	payloadWriter := []byte(`{
-		"action": "created",
-		"issue": {
-			"number": 50,
-			"pull_request": {"url": "https://api.github.com/repos/gke-labs/eval-runner/pulls/50"}
-		},
-		"comment": {
-			"id": 2004,
-			"body": "/eval more 16",
-			"user": {"login": "writer"}
-		},
-		"repository": {
-			"full_name": "gke-labs/eval-runner",
-			"name": "eval-runner",
-			"owner": {"login": "gke-labs"}
-		}
-	}`)
-	sigWriter := ComputeSignature(payloadWriter, secretKey)
-	reqWriter := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payloadWriter))
-	reqWriter.Header.Set(HeaderGitHubEvent, EventIssueComment)
-	reqWriter.Header.Set(HeaderHubSignature256, sigWriter)
-	rrWriter := httptest.NewRecorder()
-
-	server.ServeHTTP(rrWriter, reqWriter)
-	if rrWriter.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for writer, got %d: %s", rrWriter.Code, rrWriter.Body.String())
-	}
-
-	// Verify reaction "eyes" recorded on fake GitHub server
-	reactions := fakeGH.CommentReactions(2004)
-	if len(reactions) != 1 || reactions[0] != "eyes" {
-		t.Errorf("expected comment 2004 to have reaction ['eyes'], got %v", reactions)
-	}
-
-	// Verify ExtraSamples was incremented (0 + 8 from allowlisted + 16 from writer = 24)
-	var finalComp v1alpha1.Comparison
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-50"}, &finalComp); err != nil {
-		t.Fatalf("failed to get comparison: %v", err)
-	}
-	if finalComp.Spec.ExtraSamples != 24 {
-		t.Errorf("expected ExtraSamples 24, got %d", finalComp.Spec.ExtraSamples)
 	}
 }
 
@@ -1920,20 +1763,15 @@ func TestHandler_IssueComment_IdempotentOnRedelivery(t *testing.T) {
 			ExtraSamples: 0,
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
-
-	fakeGH := github.NewFakeGitHubServer()
-	defer fakeGH.Close()
-	fakeGH.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
-	ghClient := fakeGH.Client("test-token")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(comp).WithObjects(comp).Build()
+	trackCl := &secretTrackingClient{Client: cl}
 
 	cfg := Config{
 		Namespace:                "eval-runner",
 		StaticWebhookSecret:      secretKey,
 		WebhookRepositories:      []string{"gke-labs/eval-runner"},
 		DefaultMaxSamplesPerTask: 64,
-		GitHubClient:             ghClient,
-		Client:                   cl,
+		Client:                   trackCl,
 	}
 	server := NewServer(cfg)
 	server.Start()
@@ -1973,11 +1811,11 @@ func TestHandler_IssueComment_IdempotentOnRedelivery(t *testing.T) {
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-60"}, &compAfter1); err != nil {
 		t.Fatalf("failed to get comparison: %v", err)
 	}
-	if compAfter1.Spec.ExtraSamples != 8 {
-		t.Errorf("expected ExtraSamples 8 after first delivery, got %d", compAfter1.Spec.ExtraSamples)
+	if len(compAfter1.Status.PendingCommands) != 1 {
+		t.Fatalf("expected 1 pending command after first delivery, got %d", len(compAfter1.Status.PendingCommands))
 	}
-	if len(fakeGH.CommentReactions(3001)) != 1 {
-		t.Errorf("expected 1 reaction after first delivery, got %d", len(fakeGH.CommentReactions(3001)))
+	if compAfter1.Status.PendingCommands[0].CommentID != 3001 {
+		t.Errorf("expected comment ID 3001, got %d", compAfter1.Status.PendingCommands[0].CommentID)
 	}
 
 	// Delivery 2 (redelivery of identical comment payload)
@@ -1998,13 +1836,53 @@ func TestHandler_IssueComment_IdempotentOnRedelivery(t *testing.T) {
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-60"}, &compAfter2); err != nil {
 		t.Fatalf("failed to get comparison: %v", err)
 	}
-	// ExtraSamples must remain 8 (NOT bumped again)
-	if compAfter2.Spec.ExtraSamples != 8 {
-		t.Errorf("expected ExtraSamples to remain 8 on redelivery, got %d", compAfter2.Spec.ExtraSamples)
+	// PendingCommands must still have only 1 entry
+	if len(compAfter2.Status.PendingCommands) != 1 {
+		t.Errorf("expected pendingCommands count to remain 1 on redelivery, got %d", len(compAfter2.Status.PendingCommands))
 	}
-	// Reactions must remain 1 (NOT reacted again)
-	if len(fakeGH.CommentReactions(3001)) != 1 {
-		t.Errorf("expected reactions count to remain 1 on redelivery, got %d", len(fakeGH.CommentReactions(3001)))
+
+	// Delivery 3 (when comment is already recorded in status.handledCommands)
+	compAfter2.Status.HandledCommands = []v1alpha1.ComparisonHandledCommand{
+		{
+			CommentID: 3001,
+			Login:     "reviewer",
+			Requested: 8,
+			Outcome:   "applied",
+		},
+	}
+	compAfter2.Status.PendingCommands = nil
+	if err := cl.Status().Update(t.Context(), &compAfter2); err != nil {
+		t.Fatalf("failed to update status: %v", err)
+	}
+
+	req3 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload))
+	req3.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	req3.Header.Set(HeaderHubSignature256, sig)
+	rr3 := httptest.NewRecorder()
+
+	server.ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("delivery 3 failed with status %d: %s", rr3.Code, rr3.Body.String())
+	}
+	if !strings.Contains(rr3.Body.String(), "ok: comment already handled") {
+		t.Errorf("expected body to contain 'ok: comment already handled', got %s", rr3.Body.String())
+	}
+
+	var compAfter3 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-60"}, &compAfter3); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if len(compAfter3.Status.PendingCommands) != 0 {
+		t.Errorf("expected 0 pendingCommands after already handled redelivery, got %d", len(compAfter3.Status.PendingCommands))
+	}
+
+	// Assert NO Secret reads occurred
+	trackCl.mu.Lock()
+	defer trackCl.mu.Unlock()
+	for _, s := range trackCl.secretGets {
+		if s == "github-token" || s == "github-app" {
+			t.Errorf("webhook unexpectedly read secret %s", s)
+		}
 	}
 }
 

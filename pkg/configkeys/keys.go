@@ -74,7 +74,7 @@ const (
 	ConfigMapKeyDefaultBatchSize = "defaultBatchSize"
 	// ConfigMapKeyDefaultMaxSamplesPerTask is the ConfigMap key for the default maximum samples per task (used by eval-runner-webhook).
 	ConfigMapKeyDefaultMaxSamplesPerTask = "defaultMaxSamplesPerTask"
-	// ConfigMapKeyCommandUsers is the ConfigMap key for allowed comment command users (used by eval-runner-webhook).
+	// ConfigMapKeyCommandUsers is the ConfigMap key for allowed comment command users (used by eval-runner controller).
 	ConfigMapKeyCommandUsers = "commandUsers"
 )
 

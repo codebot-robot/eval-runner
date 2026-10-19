@@ -85,10 +85,15 @@ func (s *ComparisonSamplingSpec) EffectiveBatchSize() int {
 	return s.BatchSize
 }
 
-// EffectiveMaxSamplesPerTask returns the maximum total samples per task, defaulting to 64 if unset or non-positive.
+const (
+	// DefaultMaxSamplesPerTask is the default maximum total samples per task across batches.
+	DefaultMaxSamplesPerTask = 64
+)
+
+// EffectiveMaxSamplesPerTask returns the maximum total samples per task, defaulting to DefaultMaxSamplesPerTask if unset or non-positive.
 func (s *ComparisonSamplingSpec) EffectiveMaxSamplesPerTask() int {
 	if s == nil || s.MaxSamplesPerTask <= 0 {
-		return 64
+		return DefaultMaxSamplesPerTask
 	}
 	return s.MaxSamplesPerTask
 }
@@ -306,6 +311,52 @@ type ComparisonReportingStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
+const (
+	// MaxPendingCommands is the maximum number of pending commands recorded on a Comparison status.
+	MaxPendingCommands = 50
+
+	// MaxHandledCommands is the maximum number of handled commands preserved in a Comparison status.
+	MaxHandledCommands = 100
+)
+
+// ComparisonPendingCommand represents an unhandled command received from a GitHub review comment.
+type ComparisonPendingCommand struct {
+	// CommentID is the GitHub issue comment ID where the command was issued.
+	CommentID int64 `json:"commentId"`
+
+	// Login is the GitHub username of the user who issued the command.
+	Login string `json:"login"`
+
+	// Requested is the number of additional samples requested.
+	Requested int `json:"requested"`
+
+	// ReceivedAt is the time when the webhook received and recorded the command.
+	ReceivedAt metav1.Time `json:"receivedAt"`
+}
+
+// ComparisonHandledCommand represents a review comment command that has been processed by the controller.
+type ComparisonHandledCommand struct {
+	// CommentID is the GitHub issue comment ID where the command was issued.
+	CommentID int64 `json:"commentId"`
+
+	// Login is the GitHub username of the user who issued the command.
+	Login string `json:"login"`
+
+	// Requested is the number of additional samples requested.
+	Requested int `json:"requested"`
+
+	// ReceivedAt is the time when the webhook received and recorded the command.
+	ReceivedAt metav1.Time `json:"receivedAt"`
+
+	// HandledAt is the time when the controller processed the command.
+	// +optional
+	HandledAt *metav1.Time `json:"handledAt,omitempty"`
+
+	// Outcome records the result of processing the command (e.g. "applied", "denied: unauthorized", or error details).
+	// +optional
+	Outcome string `json:"outcome,omitempty"`
+}
+
 // ComparisonStatus defines the observed state of Comparison.
 type ComparisonStatus struct {
 	// Phase is the lifecycle phase of the comparison (Running, Completed, Failed).
@@ -357,6 +408,14 @@ type ComparisonStatus struct {
 	// Reporting records the status of GitHub PR comment and check run reporting.
 	// +optional
 	Reporting *ComparisonReportingStatus `json:"reporting,omitempty"`
+
+	// PendingCommands records unhandled review comment commands waiting for controller processing.
+	// +optional
+	PendingCommands []ComparisonPendingCommand `json:"pendingCommands,omitempty"`
+
+	// HandledCommands records review comment commands that have been processed by the controller.
+	// +optional
+	HandledCommands []ComparisonHandledCommand `json:"handledCommands,omitempty"`
 }
 
 // +kubebuilder:object:root=true

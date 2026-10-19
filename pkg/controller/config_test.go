@@ -500,6 +500,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	uploadBytes := fs.Int64("artifact-max-upload-bytes", 10*1024*1024, "artifact max upload bytes")
 	inconclusivePolicy := fs.String("inconclusive-policy", DefaultInconclusivePolicy, "inconclusive policy")
 	compTTL := fs.Duration("comparison-ttl", 0, "comparison ttl")
+	commandUsers := fs.String("command-users", "", "command users")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
 	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h"})
@@ -507,7 +508,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -1710,4 +1711,55 @@ func TestResolveConfig_ModelPrices(t *testing.T) {
 			t.Errorf("expected nil ModelPrices with sentinel none, got %+v", cfg.ModelPrices)
 		}
 	})
+}
+
+func TestResolveConfig_CommandUsers(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "eval-runner-config",
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyCommandUsers: "alice, bob, CHARLIE",
+		},
+	}
+
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error resolving config: %v", err)
+	}
+	expectedUsers := []string{"alice", "bob", "CHARLIE"}
+	if !reflect.DeepEqual(cfg.CommandUsers, expectedUsers) {
+		t.Errorf("expected CommandUsers %v, got %v", expectedUsers, cfg.CommandUsers)
+	}
+
+	// Verify case-insensitive check and no wildcard
+	if !IsUserAllowed("Alice", cfg.CommandUsers) {
+		t.Errorf("expected Alice to be allowed")
+	}
+	if !IsUserAllowed("charlie", cfg.CommandUsers) {
+		t.Errorf("expected charlie to be allowed")
+	}
+	if IsUserAllowed("eve", cfg.CommandUsers) {
+		t.Errorf("expected eve to not be allowed")
+	}
+	if IsUserAllowed("eve", []string{"*"}) {
+		t.Errorf("expected '*' to NOT act as a wildcard in commandUsers")
+	}
+
+	// Explicit flag overrides ConfigMap
+	flags := RawFlags{
+		CommandUsers: "david, emily",
+		Explicit: map[string]bool{
+			"command-users": true,
+		},
+	}
+	cfgFlags, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("unexpected error resolving config with flags: %v", err)
+	}
+	expectedFlagUsers := []string{"david", "emily"}
+	if !reflect.DeepEqual(cfgFlags.CommandUsers, expectedFlagUsers) {
+		t.Errorf("expected flag CommandUsers %v, got %v", expectedFlagUsers, cfgFlags.CommandUsers)
+	}
 }

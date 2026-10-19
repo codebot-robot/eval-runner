@@ -20,8 +20,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
-	"github.com/gke-labs/eval-runner/pkg/github"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,7 +51,7 @@ const (
 	DefaultBatchSize = 8
 
 	// DefaultMaxSamplesPerTask is the default maximum samples per task across batches.
-	DefaultMaxSamplesPerTask = 64
+	DefaultMaxSamplesPerTask = v1alpha1.DefaultMaxSamplesPerTask
 
 	// ConfigMapKeyDefaultModel is the ConfigMap key for the default model.
 	ConfigMapKeyDefaultModel = configkeys.ConfigMapKeyDefaultModel
@@ -65,20 +65,11 @@ const (
 	// ConfigMapKeyDefaultMaxSamplesPerTask is the ConfigMap key for the default maximum samples per task.
 	ConfigMapKeyDefaultMaxSamplesPerTask = configkeys.ConfigMapKeyDefaultMaxSamplesPerTask
 
-	// ConfigMapKeyCommandUsers is the ConfigMap key for allowed comment command users.
-	ConfigMapKeyCommandUsers = configkeys.ConfigMapKeyCommandUsers
-
 	// ConfigMapKeyGitHubWebhookSecret is the ConfigMap key for the webhook secret name.
 	ConfigMapKeyGitHubWebhookSecret = configkeys.ConfigMapKeyGitHubWebhookSecret
 
 	// ConfigMapKeyWebhookRepositories is the ConfigMap key for repository allow-list.
 	ConfigMapKeyWebhookRepositories = configkeys.ConfigMapKeyWebhookRepositories
-
-	// ConfigMapKeyGitHubTokenSecret is the ConfigMap key for GitHub token Secret name.
-	ConfigMapKeyGitHubTokenSecret = configkeys.ConfigMapKeyGitHubTokenSecret
-
-	// ConfigMapKeyGitHubAppSecret is the ConfigMap key for GitHub App credentials Secret name.
-	ConfigMapKeyGitHubAppSecret = configkeys.ConfigMapKeyGitHubAppSecret
 
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
 	// a credential or feature that otherwise has a non-empty built-in default.
@@ -95,19 +86,12 @@ type Config struct {
 	DefaultLimit             *int
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
-	CommandUsers             []string
-	GitHubTokenSecret        string
-	GitHubAppSecret          string
-	GitHubBaseURL            string
 	WebhookRepositories      []string
 	Workers                  int
 	QueueSize                int
 
 	// StaticWebhookSecret optionally provides the HMAC secret directly (useful for testing or env vars).
 	StaticWebhookSecret []byte
-
-	// GitHubClient optionally provides a pre-configured GitHub API client (useful for testing).
-	GitHubClient github.Client
 
 	// Client is the Kubernetes client used for reading Secrets/ConfigMaps and managing Runs/Comparisons.
 	Client client.Client
@@ -123,10 +107,6 @@ type RawWebhookFlags struct {
 	DefaultLimit             *int
 	DefaultBatchSize         *int
 	DefaultMaxSamplesPerTask *int
-	CommandUsers             string
-	GitHubTokenSecret        string
-	GitHubAppSecret          string
-	GitHubBaseURL            string
 	WebhookRepositories      string
 	Workers                  int
 	QueueSize                int
@@ -152,10 +132,6 @@ func DefaultConfig() Config {
 		DefaultLimit:             nil,
 		DefaultBatchSize:         DefaultBatchSize,
 		DefaultMaxSamplesPerTask: DefaultMaxSamplesPerTask,
-		CommandUsers:             nil,
-		GitHubTokenSecret:        "github-token",
-		GitHubAppSecret:          "github-app",
-		GitHubBaseURL:            "",
 		WebhookRepositories:      nil,
 		Workers:                  DefaultWorkers,
 		QueueSize:                DefaultQueueSize,
@@ -254,29 +230,6 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 				cfg.DefaultMaxSamplesPerTask = ms
 			}
 		}
-		if val, ok := cm.Data[ConfigMapKeyCommandUsers]; ok {
-			cfg.CommandUsers = ParseUserList(val)
-		}
-		if val, ok := cm.Data[ConfigMapKeyGitHubTokenSecret]; ok {
-			trimmed := strings.TrimSpace(val)
-			if trimmed != "" {
-				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.GitHubTokenSecret = ""
-				} else {
-					cfg.GitHubTokenSecret = trimmed
-				}
-			}
-		}
-		if val, ok := cm.Data[ConfigMapKeyGitHubAppSecret]; ok {
-			trimmed := strings.TrimSpace(val)
-			if trimmed != "" {
-				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.GitHubAppSecret = ""
-				} else {
-					cfg.GitHubAppSecret = trimmed
-				}
-			}
-		}
 		if val, ok := cm.Data[ConfigMapKeyWebhookRepositories]; ok {
 			cfg.WebhookRepositories = ParseRepositoryList(val)
 		}
@@ -302,59 +255,11 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 	if flags.IsExplicit("default-max-samples-per-task") && flags.DefaultMaxSamplesPerTask != nil {
 		cfg.DefaultMaxSamplesPerTask = *flags.DefaultMaxSamplesPerTask
 	}
-	if flags.IsExplicit("command-users") {
-		cfg.CommandUsers = ParseUserList(flags.CommandUsers)
-	}
-	if flags.IsExplicit("github-token-secret") {
-		if strings.EqualFold(flags.GitHubTokenSecret, ConfigSentinelDisabled) {
-			cfg.GitHubTokenSecret = ""
-		} else {
-			cfg.GitHubTokenSecret = flags.GitHubTokenSecret
-		}
-	}
-	if flags.IsExplicit("github-app-secret") {
-		if strings.EqualFold(flags.GitHubAppSecret, ConfigSentinelDisabled) {
-			cfg.GitHubAppSecret = ""
-		} else {
-			cfg.GitHubAppSecret = flags.GitHubAppSecret
-		}
-	}
 	if flags.IsExplicit("webhook-repositories") {
 		cfg.WebhookRepositories = ParseRepositoryList(flags.WebhookRepositories)
 	}
 
 	return cfg, nil
-}
-
-// ParseUserList parses a comma-separated list of GitHub usernames.
-func ParseUserList(s string) []string {
-	var users []string
-	for _, part := range strings.Split(s, ",") {
-		trimmed := strings.TrimSpace(part)
-		if trimmed != "" {
-			users = append(users, trimmed)
-		}
-	}
-	return users
-}
-
-// IsUserAllowed checks whether user is in allowList (case-insensitive exact match).
-// Returns false if allowList is empty or user is empty. Wildcards are not supported.
-func IsUserAllowed(user string, allowList []string) bool {
-	if len(allowList) == 0 {
-		return false
-	}
-	normalized := strings.ToLower(strings.TrimSpace(user))
-	if normalized == "" {
-		return false
-	}
-	for _, allowed := range allowList {
-		trimmed := strings.ToLower(strings.TrimSpace(allowed))
-		if trimmed == normalized {
-			return true
-		}
-	}
-	return false
 }
 
 // ParseRepositoryList parses a comma-separated list of repository names ("owner/repo").
