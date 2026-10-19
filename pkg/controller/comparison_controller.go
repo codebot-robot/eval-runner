@@ -54,6 +54,11 @@ const (
 	LabelBatch = "evalrunner.gke-labs.dev/batch"
 	// LabelRole indicates whether a batch run is candidate or baseline.
 	LabelRole = "evalrunner.gke-labs.dev/role"
+
+	// RoleCandidate identifies the candidate run in a batch pair.
+	RoleCandidate = "candidate"
+	// RoleBaseline identifies the baseline run in a batch pair.
+	RoleBaseline = "baseline"
 )
 
 // PairedSampleScore records paired scores for a single sample ID.
@@ -775,6 +780,86 @@ func (r *ComparisonReconciler) addOwnerReferenceToRun(ctx context.Context, run *
 	})
 }
 
+// ensureBatchRun gets or creates a batch Run (candidate or baseline), performing baseline reuse
+// lookup when role is RoleBaseline. Returns the name of the batch Run.
+func (r *ComparisonReconciler) ensureBatchRun(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	templateRun *v1alpha1.Run,
+	role string,
+	tasks []string,
+	window v1alpha1.SampleRange,
+	batchIndex int,
+) (string, error) {
+	logger := log.FromContext(ctx)
+
+	if role == RoleBaseline {
+		batchKey := ComputeBatchKey(templateRun.Spec.Repo.URL, templateRun.Spec.Repo.Commit, templateRun.Spec.Model, tasks, window)
+		existingBase, err := r.findCompletedBaselineRun(ctx, comp.Namespace, templateRun.Spec.Repo.URL, templateRun.Spec.Repo.Commit, templateRun.Spec.Model, tasks, window)
+		if err != nil {
+			return "", fmt.Errorf("failed looking up baseline run for reuse: %w", err)
+		}
+		if existingBase != nil {
+			if addErr := r.addOwnerReferenceToRun(ctx, existingBase, comp); addErr != nil {
+				return "", fmt.Errorf("failed to add owner reference to reused baseline run %q: %w", existingBase.Name, addErr)
+			}
+			logger.Info("reusing completed baseline run for batch", "comparison", comp.Name, "batch", batchIndex, "run", existingBase.Name, "batchKey", batchKey)
+			return existingBase.Name, nil
+		}
+	}
+
+	roleSuffix := "cand"
+	isController := true
+	if role == RoleBaseline {
+		roleSuffix = "base"
+		isController = false
+	}
+	runName := fmt.Sprintf("%s-b%d-%s", comp.Name, batchIndex, roleSuffix)
+
+	var existingRun v1alpha1.Run
+	if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: runName}, &existingRun); apierrors.IsNotFound(err) {
+		spec := templateRun.Spec.DeepCopy()
+		spec.Tasks = tasks
+		spec.SampleRange = &window
+		spec.Limit = nil
+
+		labels := map[string]string{
+			LabelComparison: comp.Name,
+			LabelBatch:      strconv.Itoa(batchIndex),
+			LabelRole:       role,
+		}
+		if role == RoleBaseline {
+			labels[LabelBatchKey] = ComputeBatchKey(templateRun.Spec.Repo.URL, templateRun.Spec.Repo.Commit, templateRun.Spec.Model, tasks, window)
+		}
+
+		clone := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      runName,
+				Namespace: comp.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion:         v1alpha1.GroupVersion.String(),
+						Kind:               "Comparison",
+						Name:               comp.Name,
+						UID:                comp.UID,
+						Controller:         ptr.To(isController),
+						BlockOwnerDeletion: ptr.To(true),
+					},
+				},
+				Labels: labels,
+			},
+			Spec: *spec,
+		}
+		if err := r.Create(ctx, clone); err != nil && !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("failed to create %s batch run: %w", role, err)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("failed looking up %s run %q: %w", role, runName, err)
+	}
+
+	return runName, nil
+}
+
 func toComparisonTaskLabel(label stats.TaskLabel) v1alpha1.ComparisonTaskLabel {
 	if label == stats.TaskLabelContinue {
 		return v1alpha1.ComparisonTaskLabelRunning
@@ -1110,6 +1195,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 	batchRuns := make([]batchRunPair, len(batches))
 	allBatchesTerminal := true
+	var missingBatchRuns []string
 
 	for i := range batches {
 		var bCand, bBase v1alpha1.Run
@@ -1127,6 +1213,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseFailed},
 					}
 					batchFailed = true
+					missingBatchRuns = append(missingBatchRuns, batches[i].CandidateRun)
 				} else {
 					return ctrl.Result{}, fmt.Errorf("failed to get candidate batch run %q: %w", batches[i].CandidateRun, cErr)
 				}
@@ -1141,6 +1228,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseFailed},
 					}
 					batchFailed = true
+					missingBatchRuns = append(missingBatchRuns, batches[i].BaselineRun)
 				} else {
 					return ctrl.Result{}, fmt.Errorf("failed to get baseline batch run %q: %w", batches[i].BaselineRun, bErr)
 				}
@@ -1569,6 +1657,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				dec.Label = stats.TaskLabelInconclusive
 				dec.Stop = true
 				dec.Reason = "dataset exhausted"
+				dec.EstimatedSamples = 0
+				dec.NextBatchSize = 0
 			}
 		} else {
 			dec = stats.Decide(est, margin, samplesRun, maxSamples, 0, 0)
@@ -1657,96 +1747,16 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 			continueTasks = nil
 		} else {
-			candCloneName := fmt.Sprintf("%s-b%d-cand", comp.Name, nextBatchIndex)
-			baseRunName := fmt.Sprintf("%s-b%d-base", comp.Name, nextBatchIndex)
-
 			batchRange := v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
-			batchKey := ComputeBatchKey(baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, continueTasks, batchRange)
 
-			// Baseline reuse lookup
-			existingBaseRun, err := r.findCompletedBaselineRun(ctx, comp.Namespace, baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, continueTasks, batchRange)
+			baseRunName, err := r.ensureBatchRun(ctx, &comp, &baselineRun, RoleBaseline, continueTasks, batchRange, nextBatchIndex)
 			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed looking up baseline run for reuse: %w", err)
-			}
-			if existingBaseRun != nil {
-				baseRunName = existingBaseRun.Name
-				if addErr := r.addOwnerReferenceToRun(ctx, existingBaseRun, &comp); addErr != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to add owner reference to reused baseline run %q: %w", baseRunName, addErr)
-				}
-				logger.Info("reusing completed baseline run for batch", "comparison", comp.Name, "batch", nextBatchIndex, "run", baseRunName, "batchKey", batchKey)
-			} else {
-				var existingBase v1alpha1.Run
-				if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseRunName}, &existingBase); apierrors.IsNotFound(err) {
-					baseSpec := baselineRun.Spec.DeepCopy()
-					baseSpec.Tasks = continueTasks
-					baseSpec.SampleRange = &v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
-					baseSpec.Limit = nil
-
-					baseClone := &v1alpha1.Run{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      baseRunName,
-							Namespace: comp.Namespace,
-							OwnerReferences: []metav1.OwnerReference{
-								{
-									APIVersion:         v1alpha1.GroupVersion.String(),
-									Kind:               "Comparison",
-									Name:               comp.Name,
-									UID:                comp.UID,
-									Controller:         ptr.To(false),
-									BlockOwnerDeletion: ptr.To(true),
-								},
-							},
-							Labels: map[string]string{
-								LabelBatchKey:   batchKey,
-								LabelComparison: comp.Name,
-								LabelBatch:      strconv.Itoa(nextBatchIndex),
-								LabelRole:       "baseline",
-							},
-						},
-						Spec: *baseSpec,
-					}
-					if err := r.Create(ctx, baseClone); err != nil && !apierrors.IsAlreadyExists(err) {
-						return ctrl.Result{}, fmt.Errorf("failed to create baseline batch run: %w", err)
-					}
-				} else if err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed looking up baseline run %q: %w", baseRunName, err)
-				}
+				return ctrl.Result{}, err
 			}
 
-			var existingCand v1alpha1.Run
-			if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: candCloneName}, &existingCand); apierrors.IsNotFound(err) {
-				candSpec := candidateRun.Spec.DeepCopy()
-				candSpec.Tasks = continueTasks
-				candSpec.SampleRange = &v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
-				candSpec.Limit = nil
-
-				candClone := &v1alpha1.Run{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      candCloneName,
-						Namespace: comp.Namespace,
-						OwnerReferences: []metav1.OwnerReference{
-							{
-								APIVersion:         v1alpha1.GroupVersion.String(),
-								Kind:               "Comparison",
-								Name:               comp.Name,
-								UID:                comp.UID,
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
-							},
-						},
-						Labels: map[string]string{
-							"evalrunner.gke-labs.dev/comparison": comp.Name,
-							"evalrunner.gke-labs.dev/batch":      strconv.Itoa(nextBatchIndex),
-							"evalrunner.gke-labs.dev/role":       "candidate",
-						},
-					},
-					Spec: *candSpec,
-				}
-				if err := r.Create(ctx, candClone); err != nil && !apierrors.IsAlreadyExists(err) {
-					return ctrl.Result{}, fmt.Errorf("failed to create candidate batch run: %w", err)
-				}
-			} else if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed looking up candidate run %q: %w", candCloneName, err)
+			candCloneName, err := r.ensureBatchRun(ctx, &comp, &candidateRun, RoleCandidate, continueTasks, batchRange, nextBatchIndex)
+			if err != nil {
+				return ctrl.Result{}, err
 			}
 
 			batches = append(batches, v1alpha1.ComparisonBatchStatus{
@@ -1865,95 +1875,16 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 			nextEnd := nextStart + batchSize - 1
 
-			candCloneName := fmt.Sprintf("%s-b%d-cand", comp.Name, nextBatchIndex)
-			baseRunName := fmt.Sprintf("%s-b%d-base", comp.Name, nextBatchIndex)
-
 			batchRange := v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
-			batchKey := ComputeBatchKey(baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, extraTasks, batchRange)
 
-			existingBase, err := r.findCompletedBaselineRun(ctx, comp.Namespace, baselineRun.Spec.Repo.URL, baselineRun.Spec.Repo.Commit, baselineRun.Spec.Model, extraTasks, batchRange)
+			baseRunName, err := r.ensureBatchRun(ctx, &comp, &baselineRun, RoleBaseline, extraTasks, batchRange, nextBatchIndex)
 			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed looking up baseline run for extra batch reuse: %w", err)
-			}
-			if existingBase != nil {
-				baseRunName = existingBase.Name
-				if addErr := r.addOwnerReferenceToRun(ctx, existingBase, &comp); addErr != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to add owner reference to reused baseline run %q: %w", baseRunName, addErr)
-				}
-				logger.Info("reusing completed baseline run for extra batch", "comparison", comp.Name, "batch", nextBatchIndex, "run", baseRunName, "batchKey", batchKey)
-			} else {
-				var existingBaseRun v1alpha1.Run
-				if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseRunName}, &existingBaseRun); apierrors.IsNotFound(err) {
-					baseSpec := baselineRun.Spec.DeepCopy()
-					baseSpec.Tasks = extraTasks
-					baseSpec.SampleRange = &batchRange
-					baseSpec.Limit = nil
-
-					baseClone := &v1alpha1.Run{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      baseRunName,
-							Namespace: comp.Namespace,
-							OwnerReferences: []metav1.OwnerReference{
-								{
-									APIVersion:         v1alpha1.GroupVersion.String(),
-									Kind:               "Comparison",
-									Name:               comp.Name,
-									UID:                comp.UID,
-									Controller:         ptr.To(false),
-									BlockOwnerDeletion: ptr.To(true),
-								},
-							},
-							Labels: map[string]string{
-								LabelBatchKey:   batchKey,
-								LabelComparison: comp.Name,
-								LabelBatch:      strconv.Itoa(nextBatchIndex),
-								LabelRole:       "baseline",
-							},
-						},
-						Spec: *baseSpec,
-					}
-					if err := r.Create(ctx, baseClone); err != nil && !apierrors.IsAlreadyExists(err) {
-						return ctrl.Result{}, fmt.Errorf("failed to create baseline batch run: %w", err)
-					}
-				} else if err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed looking up baseline run %q: %w", baseRunName, err)
-				}
+				return ctrl.Result{}, err
 			}
 
-			var existingCand v1alpha1.Run
-			if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: candCloneName}, &existingCand); apierrors.IsNotFound(err) {
-				candSpec := candidateRun.Spec.DeepCopy()
-				candSpec.Tasks = extraTasks
-				candSpec.SampleRange = &batchRange
-				candSpec.Limit = nil
-
-				candClone := &v1alpha1.Run{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      candCloneName,
-						Namespace: comp.Namespace,
-						OwnerReferences: []metav1.OwnerReference{
-							{
-								APIVersion:         v1alpha1.GroupVersion.String(),
-								Kind:               "Comparison",
-								Name:               comp.Name,
-								UID:                comp.UID,
-								Controller:         ptr.To(true),
-								BlockOwnerDeletion: ptr.To(true),
-							},
-						},
-						Labels: map[string]string{
-							"evalrunner.gke-labs.dev/comparison": comp.Name,
-							"evalrunner.gke-labs.dev/batch":      strconv.Itoa(nextBatchIndex),
-							"evalrunner.gke-labs.dev/role":       "candidate",
-						},
-					},
-					Spec: *candSpec,
-				}
-				if err := r.Create(ctx, candClone); err != nil && !apierrors.IsAlreadyExists(err) {
-					return ctrl.Result{}, fmt.Errorf("failed to create candidate batch run: %w", err)
-				}
-			} else if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed looking up candidate run %q: %w", candCloneName, err)
+			candCloneName, err := r.ensureBatchRun(ctx, &comp, &candidateRun, RoleCandidate, extraTasks, batchRange, nextBatchIndex)
+			if err != nil {
+				return ctrl.Result{}, err
 			}
 
 			batches = append(batches, v1alpha1.ComparisonBatchStatus{
@@ -2168,6 +2099,14 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	pImp := runVerdict.PImprovement
 
 	var unexecutedNotes []string
+	if len(missingBatchRuns) > 0 {
+		sort.Strings(missingBatchRuns)
+		runWord := "run"
+		if len(missingBatchRuns) > 1 {
+			runWord = "runs"
+		}
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("missing batch %s: %s", runWord, github.FormatIDList(missingBatchRuns, github.MaxIDList)))
+	}
 	if len(candFailed) > 0 && !capped {
 		taskWord := "task"
 		if len(candFailed) > 1 {
