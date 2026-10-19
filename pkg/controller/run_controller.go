@@ -2296,9 +2296,12 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	var v1Tokens *v1alpha1.TaskTokens
 	if tokens != nil {
 		v1Tokens = &v1alpha1.TaskTokens{
-			Input:  tokens.Input,
-			Output: tokens.Output,
-			Total:  tokens.Input + tokens.Output,
+			Input:      tokens.Input,
+			Output:     tokens.Output,
+			Total:      tokens.Input + tokens.Output,
+			Reasoning:  tokens.Reasoning,
+			CacheRead:  tokens.CacheRead,
+			CacheWrite: tokens.CacheWrite,
 		}
 	}
 

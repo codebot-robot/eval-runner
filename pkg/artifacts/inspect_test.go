@@ -363,13 +363,27 @@ func TestExtractInspectTokens(t *testing.T) {
 				{
 					"id": 1,
 					"model_usage": {
-						"mockllm/model": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+						"mockllm/model": {
+							"input_tokens": 100,
+							"output_tokens": 20,
+							"total_tokens": 120,
+							"reasoning_tokens": 10,
+							"input_tokens_cache_read": 80,
+							"input_tokens_cache_write": 5
+						}
 					}
 				},
 				{
 					"id": 2,
 					"model_usage": {
-						"mockllm/model": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}
+						"mockllm/model": {
+							"input_tokens": 50,
+							"output_tokens": 10,
+							"total_tokens": 60,
+							"reasoning_tokens": 5,
+							"input_tokens_cache_read": 40,
+							"input_tokens_cache_write": 2
+						}
 					}
 				}
 			]
@@ -383,6 +397,9 @@ func TestExtractInspectTokens(t *testing.T) {
 		}
 		if tokens.Input != 150 || tokens.Output != 30 || tokens.Total != 180 {
 			t.Fatalf("expected input=150, output=30, total=180, got %+v", tokens)
+		}
+		if tokens.Reasoning != 15 || tokens.CacheRead != 120 || tokens.CacheWrite != 7 {
+			t.Fatalf("expected reasoning=15, cacheRead=120, cacheWrite=7, got %+v", tokens)
 		}
 	})
 
@@ -411,6 +428,15 @@ func TestExtractInspectTokens(t *testing.T) {
 		}
 		if tokens.Total != 141496 {
 			t.Errorf("expected total=141496, got %d", tokens.Total)
+		}
+		if tokens.Reasoning != 150 {
+			t.Errorf("expected reasoning=150, got %d", tokens.Reasoning)
+		}
+		if tokens.CacheRead != 130000 {
+			t.Errorf("expected cacheRead=130000, got %d", tokens.CacheRead)
+		}
+		if tokens.CacheWrite != 650 {
+			t.Errorf("expected cacheWrite=650, got %d", tokens.CacheWrite)
 		}
 	})
 

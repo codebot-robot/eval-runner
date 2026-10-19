@@ -325,13 +325,16 @@ spec:
 
 $$\text{total} = \text{input} + \text{output}$$
 
-Inspect log provider-specific totals or unexposed fields (such as cache read/write or reasoning tokens) are dropped so that `total` is strictly and deterministically reproducible from the exposed components.
+Inspect log provider-specific totals are dropped so that `total` is strictly and deterministically reproducible from the exposed components. Reasoning tokens (`reasoning`) and prompt cache token counts (`cacheRead`, `cacheWrite`) are recorded as separate optional fields and are not folded into `total` because token billing differs per provider (e.g. Gemini and Anthropic bill reasoning as output tokens; cost mapping belongs to #155).
 
 | Field | Type | Description |
 |---|---|---|
 | `input` | `int` | Input/prompt tokens consumed by models for this task. |
 | `output` | `int` | Output/completion tokens consumed by models for this task. |
 | `total` | `int` | Total tokens consumed for this task (`input + output`). |
+| `reasoning` | `int` | Reasoning/thinking tokens consumed by models for this task (reported separately; billing differs per provider, see #155). |
+| `cacheRead` | `int` | Cached input tokens read by models for this task. |
+| `cacheWrite` | `int` | Tokens written to cache by models for this task. |
 
 ### ComparisonSummary (`status.summary`)
 

@@ -215,7 +215,11 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		if hasTokens {
 			tokensStr := "—"
 			if row.Tokens != nil {
-				tokensStr = fmt.Sprintf("%d", row.Tokens.Total)
+				if row.Tokens.Reasoning > 0 {
+					tokensStr = fmt.Sprintf("%d (+R %d)", row.Tokens.Total, row.Tokens.Reasoning)
+				} else {
+					tokensStr = fmt.Sprintf("%d", row.Tokens.Total)
+				}
 			}
 			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
 				escapedID,

@@ -367,27 +367,45 @@ func ExtractInspectTokens(data []byte) (*TaskTokens, error) {
 
 	inputTokens := 0
 	outputTokens := 0
+	reasoningTokens := 0
+	cacheReadTokens := 0
+	cacheWriteTokens := 0
 	foundTokens := false
 
 	if log.Stats != nil && len(log.Stats.ModelUsage) > 0 {
 		for _, usage := range log.Stats.ModelUsage {
-			if usage.TotalTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+			if usage.TotalTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 ||
+				usage.ReasoningTokens > 0 || usage.InputTokensCacheRead > 0 || usage.InputTokensCacheWrite > 0 {
 				inputTokens += usage.InputTokens
 				outputTokens += usage.OutputTokens
+				reasoningTokens += usage.ReasoningTokens
+				cacheReadTokens += usage.InputTokensCacheRead
+				cacheWriteTokens += usage.InputTokensCacheWrite
 				foundTokens = true
 			}
 		}
 		if foundTokens {
-			return &TaskTokens{Input: inputTokens, Output: outputTokens, Total: inputTokens + outputTokens}, nil
+			return &TaskTokens{
+				Input:      inputTokens,
+				Output:     outputTokens,
+				Total:      inputTokens + outputTokens,
+				Reasoning:  reasoningTokens,
+				CacheRead:  cacheReadTokens,
+				CacheWrite: cacheWriteTokens,
+			}, nil
 		}
 	}
 
 	for _, s := range log.Samples {
 		if len(s.ModelUsage) > 0 {
 			for _, usage := range s.ModelUsage {
-				if usage.TotalTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+				if usage.TotalTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 ||
+					usage.ReasoningTokens > 0 || usage.InputTokensCacheRead > 0 || usage.InputTokensCacheWrite > 0 {
 					inputTokens += usage.InputTokens
 					outputTokens += usage.OutputTokens
+					reasoningTokens += usage.ReasoningTokens
+					cacheReadTokens += usage.InputTokensCacheRead
+					cacheWriteTokens += usage.InputTokensCacheWrite
 					foundTokens = true
 				}
 			}
@@ -395,7 +413,14 @@ func ExtractInspectTokens(data []byte) (*TaskTokens, error) {
 	}
 
 	if foundTokens {
-		return &TaskTokens{Input: inputTokens, Output: outputTokens, Total: inputTokens + outputTokens}, nil
+		return &TaskTokens{
+			Input:      inputTokens,
+			Output:     outputTokens,
+			Total:      inputTokens + outputTokens,
+			Reasoning:  reasoningTokens,
+			CacheRead:  cacheReadTokens,
+			CacheWrite: cacheWriteTokens,
+		}, nil
 	}
 	return nil, nil
 }

@@ -459,9 +459,10 @@ func batchesTokensComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1a
 					Losses:   2,
 					Ties:     6,
 					Tokens: &v1alpha1.TaskTokens{
-						Input:  600,
-						Output: 200,
-						Total:  800,
+						Input:     600,
+						Output:    200,
+						Total:     800,
+						Reasoning: 100,
 					},
 				},
 				{
@@ -1359,11 +1360,12 @@ func TestRenderComparisonMarkdown_SingleTaskAction(t *testing.T) {
 
 func TestRenderComparisonMarkdown_Tokens(t *testing.T) {
 	comp, baseRun, candRun := sameCommitComparisonFixture()
-	// Set explicit tokens on task 0, nil on task 1
+	// Set explicit tokens on task 0 with reasoning, nil on task 1
 	comp.Status.Tasks[0].Tokens = &v1alpha1.TaskTokens{
-		Input:  600,
-		Output: 200,
-		Total:  800,
+		Input:     600,
+		Output:    200,
+		Total:     800,
+		Reasoning: 150,
 	}
 	comp.Status.Tasks[1].Tokens = nil
 
@@ -1371,11 +1373,18 @@ func TestRenderComparisonMarkdown_Tokens(t *testing.T) {
 	if !strings.Contains(got, "| eval | base | this PR | Δ (95% CI) | label | samples | tokens |") {
 		t.Errorf("expected markdown table to include tokens header when tokens non-nil, got:\n%s", got)
 	}
-	if !strings.Contains(got, "| docs/readme\\_comprehension | 1.00 | 1.00 | +0.00 [+0.00, +0.00] | unchanged | 20 | 800 |") {
-		t.Errorf("expected markdown to display 800 tokens for task 0, got:\n%s", got)
+	if !strings.Contains(got, "| docs/readme\\_comprehension | 1.00 | 1.00 | +0.00 [+0.00, +0.00] | unchanged | 20 | 800 (+R 150) |") {
+		t.Errorf("expected markdown to display 800 (+R 150) tokens for task 0, got:\n%s", got)
 	}
 	if !strings.Contains(got, "| docs/readme\\_comprehension\\_blind | 0.20 | 0.15 | -0.05 [-0.15, +0.00] | inconclusive | 20 | — |") {
 		t.Errorf("expected markdown to display '—' tokens for task 1, got:\n%s", got)
+	}
+
+	// Task 0 without reasoning displays plain total
+	comp.Status.Tasks[0].Tokens.Reasoning = 0
+	gotNoReasoning := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(gotNoReasoning, "| docs/readme\\_comprehension | 1.00 | 1.00 | +0.00 [+0.00, +0.00] | unchanged | 20 | 800 |") {
+		t.Errorf("expected markdown to display 800 tokens for task 0 when reasoning=0, got:\n%s", gotNoReasoning)
 	}
 
 	// Without tokens, tokens column is omitted

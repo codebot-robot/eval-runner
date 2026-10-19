@@ -147,6 +147,18 @@ type TaskTokens struct {
 	// Total is the total number of tokens consumed (input + output).
 	// +optional
 	Total int `json:"total,omitempty"`
+
+	// Reasoning is the number of reasoning/thinking tokens consumed.
+	// +optional
+	Reasoning int `json:"reasoning,omitempty"`
+
+	// CacheRead is the number of cached input tokens read.
+	// +optional
+	CacheRead int `json:"cacheRead,omitempty"`
+
+	// CacheWrite is the number of tokens written to the cache.
+	// +optional
+	CacheWrite int `json:"cacheWrite,omitempty"`
 }
 
 // SampleRange specifies a 1-based, inclusive window of samples to evaluate.

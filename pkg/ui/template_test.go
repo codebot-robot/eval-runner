@@ -422,9 +422,10 @@ func batchesTokensComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1a
 					Losses:   2,
 					Ties:     6,
 					Tokens: &v1alpha1.TaskTokens{
-						Input:  600,
-						Output: 200,
-						Total:  800,
+						Input:     600,
+						Output:    200,
+						Total:     800,
+						Reasoning: 100,
 					},
 				},
 				{
@@ -1139,6 +1140,22 @@ func TestComparisonTable_Tokens(t *testing.T) {
 			SamplesRun:  16,
 			Tokens:      nil,
 		},
+		{
+			ID:          "task-with-reasoning",
+			BaseRate:    "0.70",
+			CandRate:    "0.90",
+			Delta:       "+0.20",
+			StatusClass: "good",
+			Label:       "improved",
+			Pairs:       16,
+			SamplesRun:  16,
+			Tokens: &v1alpha1.TaskTokens{
+				Input:     500,
+				Output:    200,
+				Total:     700,
+				Reasoning: 80,
+			},
+		},
 	}
 
 	var buf bytes.Buffer
@@ -1158,6 +1175,9 @@ func TestComparisonTable_Tokens(t *testing.T) {
 	}
 	if !strings.Contains(output, "<td class=\"num\">—</td>") {
 		t.Errorf("expected '—' tokens for task-without-tokens, got:\n%s", output)
+	}
+	if !strings.Contains(output, "<td class=\"num\">700 (+R 80)</td>") {
+		t.Errorf("expected total tokens '700 (+R 80)' for task-with-reasoning, got:\n%s", output)
 	}
 }
 
