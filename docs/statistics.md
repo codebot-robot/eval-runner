@@ -426,7 +426,7 @@ To avoid redundant evaluation when multiple pull requests or extra sample reques
 - **Deterministic Batch Key**: Before creating a baseline batch Run, the controller computes a SHA-256 hash identifying the evaluation slice:
   $$\text{batchKey} = \text{SHA256}(\text{repoURL} \mathbin{\Vert} \text{commit} \mathbin{\Vert} \text{model} \mathbin{\Vert} \text{tasks} \mathbin{\Vert} \text{start-end})[:32]$$
   Baseline batch Runs are labeled with `evalrunner.gke-labs.dev/batch-key: <hash>`.
-- **Reuse Lookup**: The controller looks for an existing `Completed` Run in the namespace matching the batch key label. A spec-matching fallback allows any completed Run in the namespace with matching repo URL, commit, model, task set, and sample window (such as a user-created Run or independent seed) to be adopted as a baseline batch.
+- **Reuse Lookup**: The controller looks for an existing `Completed` Run in the namespace matching the batch key label. Because all baseline clones carry this label, subsequent comparisons with identical configuration and windows reuse the completed baseline evaluation without scanning every Run in the namespace.
 - **Multiple Owner References**: Reused baseline Runs are updated to include owner references for each consuming Comparison (`controller: false`, `blockOwnerDeletion: true`), preventing garbage collection from deleting a shared baseline Run when an earlier Comparison is deleted.
 - **Cache Invalidation**: Any change in commit, model, task set, or sample range alters the batch key, automatically triggering creation of a fresh baseline Run.
 
