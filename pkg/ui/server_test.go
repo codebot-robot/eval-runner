@@ -16,6 +16,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -300,6 +301,12 @@ func TestServerRunDetail(t *testing.T) {
 	if wNotFound.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing run, got %d", wNotFound.Code)
 	}
+	if strings.TrimSpace(wNotFound.Body.String()) != "run not found" {
+		t.Errorf("expected 'run not found', got %q", wNotFound.Body.String())
+	}
+	if strings.Contains(wNotFound.Body.String(), "non-existent-run") {
+		t.Errorf("expected no reflected input in body, got %q", wNotFound.Body.String())
+	}
 }
 
 func TestServerComparisonsList(t *testing.T) {
@@ -409,6 +416,12 @@ func TestServerComparisonDetail(t *testing.T) {
 	server.ServeHTTP(wNotFound, reqNotFound)
 	if wNotFound.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing comparison, got %d", wNotFound.Code)
+	}
+	if strings.TrimSpace(wNotFound.Body.String()) != "comparison not found" {
+		t.Errorf("expected 'comparison not found', got %q", wNotFound.Body.String())
+	}
+	if strings.Contains(wNotFound.Body.String(), "missing-comp") {
+		t.Errorf("expected no reflected input in body, got %q", wNotFound.Body.String())
 	}
 }
 
@@ -532,6 +545,11 @@ func TestServerRouteParamValidation(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("route %q: expected 400 Bad Request, got %d", route, w.Code)
 		}
+		for _, leak := range []string{"UPPERCASE", "bad_ns", "notanumber", "with_underscore", "eval_runner"} {
+			if strings.Contains(w.Body.String(), leak) {
+				t.Errorf("route %q: expected no reflected input %q in body, got %q", route, leak, w.Body.String())
+			}
+		}
 	}
 }
 
@@ -564,6 +582,11 @@ func TestServerForbidden(t *testing.T) {
 
 		if w.Code != http.StatusForbidden {
 			t.Errorf("route %q: expected 403 Forbidden, got %d", route, w.Code)
+		}
+		for _, leak := range []string{"secret-namespace", "run-1", "comp-1", "access denied"} {
+			if strings.Contains(w.Body.String(), leak) {
+				t.Errorf("route %q: expected no leaked details %q in body, got %q", route, leak, w.Body.String())
+			}
 		}
 	}
 }
@@ -956,6 +979,32 @@ func TestServerRunDetail_SampleRange(t *testing.T) {
 	}
 }
 
+type errorSink struct {
+	err error
+}
+
+func (s *errorSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+	return "", nil
+}
+func (s *errorSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
+	return "", nil
+}
+func (s *errorSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
+	return "", nil
+}
+func (s *errorSink) Load(ctx context.Context, path string) ([]byte, error) {
+	return nil, s.err
+}
+func (s *errorSink) ArtifactPrefix(commit string) string {
+	return ""
+}
+func (s *errorSink) IsDurable() bool {
+	return false
+}
+func (s *errorSink) Close() error {
+	return nil
+}
+
 func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	scheme := newTestScheme(t)
 	baseDir := t.TempDir()
@@ -1137,6 +1186,12 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		if w.Code != http.StatusNotFound {
 			t.Errorf("expected 404 for nonexistent task, got %d", w.Code)
 		}
+		if strings.TrimSpace(w.Body.String()) != "log path not found for task" {
+			t.Errorf("expected exact 'log path not found for task' message, got %q", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "nonexistent") {
+			t.Errorf("expected no reflected task ID in body, got %q", w.Body.String())
+		}
 	})
 
 	t.Run("Negative_NoSuchRun_404", func(t *testing.T) {
@@ -1146,6 +1201,12 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 
 		if w.Code != http.StatusNotFound {
 			t.Errorf("expected 404 for nonexistent run, got %d", w.Code)
+		}
+		if strings.TrimSpace(w.Body.String()) != "run not found" {
+			t.Errorf("expected exact 'run not found' message, got %q", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "no-such-run") || strings.Contains(w.Body.String(), "eval-runner") {
+			t.Errorf("expected no reflected input in body, got %q", w.Body.String())
 		}
 	})
 
@@ -1185,8 +1246,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		if w.Code != http.StatusNotFound {
 			t.Errorf("expected 404 for storage file not found, got %d: %s", w.Code, w.Body.String())
 		}
-		if !strings.Contains(w.Body.String(), "task log not found on storage") {
-			t.Errorf("expected 'task log not found on storage' message, got %q", w.Body.String())
+		if strings.TrimSpace(w.Body.String()) != "task log not found on storage" {
+			t.Errorf("expected exact 'task log not found on storage' message, got %q", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "missing") || strings.Contains(w.Body.String(), "file-not-found") {
+			t.Errorf("expected no leaked storage path in body, got %q", w.Body.String())
 		}
 	})
 
@@ -1197,6 +1261,63 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 
 		if w.Code != http.StatusNotFound {
 			t.Errorf("expected 404 for nonexistent sample, got %d", w.Code)
+		}
+		if strings.TrimSpace(w.Body.String()) != "sample not found" {
+			t.Errorf("expected exact 'sample not found' message, got %q", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "no-such-sample") {
+			t.Errorf("expected no reflected input in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("Negative_InvalidRouteParams_400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/invalid_namespace/sample-run/tasks/triage%2Frunbook_lookup/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for invalid namespace, got %d", w.Code)
+		}
+		if strings.TrimSpace(w.Body.String()) != "invalid route params" {
+			t.Errorf("expected exact 'invalid route params' message, got %q", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "invalid_namespace") {
+			t.Errorf("expected no reflected input in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("Negative_StorageError_WrappedGoogleAPI_FixedBodyWithoutLeaks", func(t *testing.T) {
+		secretLeak := "googleapi: got HTTP response code 403 with body: <?xml version=\"1.0\"?><Error><Code>AccessDenied</Code><BucketName>super-secret-eval-bucket</BucketName></Error>"
+		wrappedErr := fmt.Errorf("failed to read artifact from gs://super-secret-eval-bucket/runs/%s/triage/runbook_lookup/inspect.json: %w", commit, errors.New(secretLeak))
+
+		serverWithErrSink := NewServer(Config{
+			Client:           fakeClient,
+			DefaultNamespace: "eval-runner",
+			ArtifactSink:     &errorSink{err: wrappedErr},
+		})
+
+		paths := []string{
+			"/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples",
+			"/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-017",
+		}
+
+		for _, path := range paths {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			serverWithErrSink.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("%s: expected 502 Bad Gateway, got %d: %s", path, w.Code, w.Body.String())
+			}
+			expectedBody := "artifact storage unavailable; see UI logs"
+			if strings.TrimSpace(w.Body.String()) != expectedBody {
+				t.Errorf("%s: expected fixed body %q, got %q", path, expectedBody, w.Body.String())
+			}
+			for _, leak := range []string{"googleapi", "AccessDenied", "super-secret-eval-bucket", "<?xml", "gs://"} {
+				if strings.Contains(w.Body.String(), leak) {
+					t.Errorf("%s: body leaks raw error string %q: %s", path, leak, w.Body.String())
+				}
+			}
 		}
 	})
 

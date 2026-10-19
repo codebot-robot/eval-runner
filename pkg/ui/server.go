@@ -158,6 +158,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// httpError writes a fixed public message and logs the detail, which must never reach the body.
+func httpError(w http.ResponseWriter, status int, public string, detail string, err error) {
+	if err != nil {
+		if detail != "" {
+			log.Printf("%s: %v", detail, err)
+		} else {
+			log.Printf("%v", err)
+		}
+	}
+	http.Error(w, public, status)
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/runs", http.StatusFound)
 }
@@ -177,23 +189,23 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
 		return
 	}
 
 	offset, limit, err := parsePagination(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid pagination params", "invalid pagination query params", err)
 		return
 	}
 
 	var runList v1alpha1.RunList
 	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
 		if apierrors.IsForbidden(err) {
-			http.Error(w, fmt.Sprintf("forbidden: access to namespace %q denied: %v", ns, err), http.StatusForbidden)
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
 		}
-		http.Error(w, fmt.Sprintf("failed to list runs in namespace %s: %v", ns, err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "failed to list runs", fmt.Sprintf("failed to list runs in namespace %s", ns), err)
 		return
 	}
 
@@ -294,7 +306,7 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplRunsList.Execute(w, view); err != nil {
-		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
 }
 
@@ -303,21 +315,21 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("namespace")
 	name := r.PathValue("name")
 	if !isValidNamespace(ns) || !isValidResourceName(name) {
-		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q", ns, name), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid route params: namespace=%q name=%q", ns, name), nil)
 		return
 	}
 
 	var run v1alpha1.Run
 	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, fmt.Sprintf("Run %s/%s not found", ns, name), http.StatusNotFound)
+			httpError(w, http.StatusNotFound, "run not found", "", nil)
 			return
 		}
 		if apierrors.IsForbidden(err) {
-			http.Error(w, fmt.Sprintf("forbidden: access to run %s/%s denied: %v", ns, name, err), http.StatusForbidden)
+			httpError(w, http.StatusForbidden, "forbidden: access to run denied", fmt.Sprintf("access to run %s/%s denied", ns, name), err)
 			return
 		}
-		http.Error(w, fmt.Sprintf("failed to get run %s/%s: %v", ns, name, err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "failed to get run", fmt.Sprintf("failed to get run %s/%s", ns, name), err)
 		return
 	}
 
@@ -467,7 +479,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplRunDetail.Execute(w, view); err != nil {
-		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
 }
 
@@ -475,23 +487,23 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
 		return
 	}
 
 	offset, limit, err := parsePagination(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid pagination params", "invalid pagination query params", err)
 		return
 	}
 
 	var compList v1alpha1.ComparisonList
 	if err := s.cfg.Client.List(ctx, &compList, client.InNamespace(ns)); err != nil {
 		if apierrors.IsForbidden(err) {
-			http.Error(w, fmt.Sprintf("forbidden: access to namespace %q denied: %v", ns, err), http.StatusForbidden)
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
 		}
-		http.Error(w, fmt.Sprintf("failed to list comparisons in namespace %s: %v", ns, err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "failed to list comparisons", fmt.Sprintf("failed to list comparisons in namespace %s", ns), err)
 		return
 	}
 
@@ -576,7 +588,7 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplComparisonsList.Execute(w, view); err != nil {
-		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
 }
 
@@ -585,21 +597,21 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	ns := r.PathValue("namespace")
 	name := r.PathValue("name")
 	if !isValidNamespace(ns) || !isValidResourceName(name) {
-		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q", ns, name), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid route params: namespace=%q name=%q", ns, name), nil)
 		return
 	}
 
 	var comp v1alpha1.Comparison
 	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &comp); err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, fmt.Sprintf("Comparison %s/%s not found", ns, name), http.StatusNotFound)
+			httpError(w, http.StatusNotFound, "comparison not found", "", nil)
 			return
 		}
 		if apierrors.IsForbidden(err) {
-			http.Error(w, fmt.Sprintf("forbidden: access to comparison %s/%s denied: %v", ns, name, err), http.StatusForbidden)
+			httpError(w, http.StatusForbidden, "forbidden: access to comparison denied", fmt.Sprintf("access to comparison %s/%s denied", ns, name), err)
 			return
 		}
-		http.Error(w, fmt.Sprintf("failed to get comparison %s/%s: %v", ns, name, err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "failed to get comparison", fmt.Sprintf("failed to get comparison %s/%s", ns, name), err)
 		return
 	}
 
@@ -633,7 +645,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplComparisonDetail.Execute(w, view); err != nil {
-		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
 }
 
@@ -675,7 +687,7 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("task")
 
 	if !isValidNamespace(ns) || !isValidResourceName(name) || taskID == "" {
-		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q task=%q", ns, name, taskID), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid route params", "", nil)
 		return
 	}
 
@@ -683,15 +695,15 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 	var run v1alpha1.Run
 	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, fmt.Sprintf("run not found: %s/%s", ns, name), http.StatusNotFound)
+			httpError(w, http.StatusNotFound, "run not found", "", nil)
 			return
 		}
-		http.Error(w, fmt.Sprintf("error loading run %s/%s: %v", ns, name, err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "error loading run", fmt.Sprintf("error loading run %s/%s", ns, name), err)
 		return
 	}
 
 	if s.cfg.ArtifactSink == nil {
-		http.Error(w, "artifact storage not configured", http.StatusNotFound)
+		httpError(w, http.StatusNotFound, "artifact storage not configured", "", nil)
 		return
 	}
 
@@ -704,14 +716,14 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if matchedTask == nil || matchedTask.LogPath == "" {
-		http.Error(w, fmt.Sprintf("log path not found for task %q", taskID), http.StatusNotFound)
+		httpError(w, http.StatusNotFound, "log path not found for task", "", nil)
 		return
 	}
 
 	commit := run.Spec.Repo.Commit
 	expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
 	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
-		http.Error(w, "forbidden: log path does not match run commit prefix", http.StatusForbidden)
+		httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
 		return
 	}
 
@@ -732,17 +744,16 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Sample details cannot be displayed."
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmplTaskSamplesList.Execute(w, view); err != nil {
-			http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+			httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 		}
 		return
 	}
 	if err != nil {
 		if errors.Is(err, artifacts.ErrNotFound) {
-			http.Error(w, fmt.Sprintf("task log not found on storage: %v", err), http.StatusNotFound)
+			httpError(w, http.StatusNotFound, "task log not found on storage", "", nil)
 			return
 		}
-		log.Printf("storage error loading artifact %s: %v", matchedTask.LogPath, err)
-		http.Error(w, fmt.Sprintf("storage error loading artifact: %v", err), http.StatusBadGateway)
+		httpError(w, http.StatusBadGateway, "artifact storage unavailable; see UI logs", fmt.Sprintf("storage error loading artifact %s", matchedTask.LogPath), err)
 		return
 	}
 
@@ -820,7 +831,7 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplTaskSamplesList.Execute(w, view); err != nil {
-		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
 }
 
@@ -831,7 +842,7 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 	sampleID := r.PathValue("sample")
 
 	if !isValidNamespace(ns) || !isValidResourceName(name) || taskID == "" || sampleID == "" {
-		http.Error(w, fmt.Sprintf("invalid route params: namespace=%q name=%q task=%q sample=%q", ns, name, taskID, sampleID), http.StatusBadRequest)
+		httpError(w, http.StatusBadRequest, "invalid route params", "", nil)
 		return
 	}
 
@@ -839,15 +850,15 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 	var run v1alpha1.Run
 	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, fmt.Sprintf("run not found: %s/%s", ns, name), http.StatusNotFound)
+			httpError(w, http.StatusNotFound, "run not found", "", nil)
 			return
 		}
-		http.Error(w, fmt.Sprintf("error loading run %s/%s: %v", ns, name, err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "error loading run", fmt.Sprintf("error loading run %s/%s", ns, name), err)
 		return
 	}
 
 	if s.cfg.ArtifactSink == nil {
-		http.Error(w, "artifact storage not configured", http.StatusNotFound)
+		httpError(w, http.StatusNotFound, "artifact storage not configured", "", nil)
 		return
 	}
 
@@ -860,14 +871,14 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if matchedTask == nil || matchedTask.LogPath == "" {
-		http.Error(w, fmt.Sprintf("log path not found for task %q", taskID), http.StatusNotFound)
+		httpError(w, http.StatusNotFound, "log path not found for task", "", nil)
 		return
 	}
 
 	commit := run.Spec.Repo.Commit
 	expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
 	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
-		http.Error(w, "forbidden: log path does not match run commit prefix", http.StatusForbidden)
+		httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
 		return
 	}
 
@@ -888,17 +899,16 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Transcript details cannot be displayed."
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmplSampleTranscript.Execute(w, view); err != nil {
-			http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+			httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 		}
 		return
 	}
 	if err != nil {
 		if errors.Is(err, artifacts.ErrNotFound) {
-			http.Error(w, fmt.Sprintf("task log not found on storage: %v", err), http.StatusNotFound)
+			httpError(w, http.StatusNotFound, "task log not found on storage", "", nil)
 			return
 		}
-		log.Printf("storage error loading artifact %s: %v", matchedTask.LogPath, err)
-		http.Error(w, fmt.Sprintf("storage error loading artifact: %v", err), http.StatusBadGateway)
+		httpError(w, http.StatusBadGateway, "artifact storage unavailable; see UI logs", fmt.Sprintf("storage error loading artifact %s", matchedTask.LogPath), err)
 		return
 	}
 
@@ -911,7 +921,7 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if matchedSample == nil {
-		http.Error(w, fmt.Sprintf("sample %q not found in task %q", sampleID, taskID), http.StatusNotFound)
+		httpError(w, http.StatusNotFound, "sample not found", "", nil)
 		return
 	}
 
@@ -972,6 +982,6 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplSampleTranscript.Execute(w, view); err != nil {
-		http.Error(w, fmt.Sprintf("template render error: %v", err), http.StatusInternalServerError)
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
 }
