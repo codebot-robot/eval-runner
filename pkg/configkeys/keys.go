@@ -53,6 +53,8 @@ const (
 	ConfigMapKeyGitHubAppSecret = "githubAppSecret"
 	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
 	ConfigMapKeyUIBaseURL = "uiBaseURL"
+	// ConfigMapKeyInconclusivePolicy is the ConfigMap key for check run inconclusive verdict policy ("neutral" or "failure").
+	ConfigMapKeyInconclusivePolicy = "inconclusivePolicy"
 
 	// Webhook keys
 
@@ -70,4 +72,11 @@ const (
 	ConfigMapKeyDefaultMaxSamplesPerTask = "defaultMaxSamplesPerTask"
 	// ConfigMapKeyCommandUsers is the ConfigMap key for allowed comment command users (used by eval-runner-webhook).
 	ConfigMapKeyCommandUsers = "commandUsers"
+)
+
+const (
+	// InconclusivePolicyNeutral maps an INCONCLUSIVE verdict to a "neutral" check-run conclusion (default).
+	InconclusivePolicyNeutral = "neutral"
+	// InconclusivePolicyFailure maps an INCONCLUSIVE verdict to a "failure" check-run conclusion.
+	InconclusivePolicyFailure = "failure"
 )

@@ -62,6 +62,8 @@ const (
 	ConfigMapKeyGitHubAppSecret = configkeys.ConfigMapKeyGitHubAppSecret
 	// ConfigMapKeyUIBaseURL is the ConfigMap key for the eval-runner UI base URL.
 	ConfigMapKeyUIBaseURL = configkeys.ConfigMapKeyUIBaseURL
+	// ConfigMapKeyInconclusivePolicy is the ConfigMap key for check run inconclusive verdict policy ("neutral" or "failure").
+	ConfigMapKeyInconclusivePolicy = configkeys.ConfigMapKeyInconclusivePolicy
 	// ConfigMapKeyDefaultBatchSize is the ConfigMap key for default batch size.
 	ConfigMapKeyDefaultBatchSize = configkeys.ConfigMapKeyDefaultBatchSize
 	// ConfigMapKeyDefaultMaxSamplesPerTask is the ConfigMap key for default maximum samples per task.
@@ -75,6 +77,9 @@ const (
 
 	// DefaultGitHubTokenSecret is the default Secret name for GitHub credentials in controller namespace.
 	DefaultGitHubTokenSecret = "github-token"
+
+	// DefaultInconclusivePolicy is the default check-run conclusion policy for inconclusive comparisons.
+	DefaultInconclusivePolicy = configkeys.InconclusivePolicyNeutral
 )
 
 // KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
@@ -92,6 +97,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyGitHubTokenSecret:        {},
 	configkeys.ConfigMapKeyGitHubAppSecret:          {},
 	configkeys.ConfigMapKeyUIBaseURL:                {},
+	configkeys.ConfigMapKeyInconclusivePolicy:       {},
 	configkeys.ConfigMapKeyGitHubWebhookSecret:      {},
 	configkeys.ConfigMapKeyWebhookRepositories:      {},
 	configkeys.ConfigMapKeyDefaultModel:             {},
@@ -130,6 +136,7 @@ type ClusterConfig struct {
 	ExecutionDeadline      time.Duration
 	GitHubTokenSecret      string
 	GitHubAppSecret        string
+	InconclusivePolicy     string
 	MaxParallelTasks       int
 	ModelSecret            string
 	SandboxdImage          string
@@ -146,6 +153,7 @@ type RawFlags struct {
 	ExecutionDeadline      time.Duration
 	GitHubTokenSecret      string
 	GitHubAppSecret        string
+	InconclusivePolicy     string
 	MaxParallelTasks       int
 	ModelSecret            string
 	SandboxdImage          string
@@ -173,6 +181,7 @@ func DefaultClusterConfig() ClusterConfig {
 		ExecutionDeadline:      DefaultExecutionDeadline,
 		GitHubTokenSecret:      DefaultGitHubTokenSecret,
 		GitHubAppSecret:        "",
+		InconclusivePolicy:     DefaultInconclusivePolicy,
 		MaxParallelTasks:       DefaultMaxParallelTasks,
 		ModelSecret:            DefaultModelSecret,
 		SandboxdImage:          discovery.SandboxdImage,
@@ -189,6 +198,7 @@ func FlagsFromFlagSet(
 	maxParallelTasks int,
 	strictConfig bool,
 	artifactMaxUploadBytes int64,
+	inconclusivePolicy string,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -202,6 +212,7 @@ func FlagsFromFlagSet(
 		ExecutionDeadline:      executionDeadline,
 		GitHubTokenSecret:      gitHubTokenSecret,
 		GitHubAppSecret:        gitHubAppSecret,
+		InconclusivePolicy:     inconclusivePolicy,
 		MaxParallelTasks:       maxParallelTasks,
 		ModelSecret:            modelSecret,
 		SandboxdImage:          sandboxdImage,
@@ -404,6 +415,20 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.ArtifactMaxUploadBytes = parsed
 			}
 		}
+
+		// 12. inconclusivePolicy
+		if val, ok := cm.Data[ConfigMapKeyInconclusivePolicy]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				lower := strings.ToLower(trimmed)
+				if lower != configkeys.InconclusivePolicyNeutral && lower != configkeys.InconclusivePolicyFailure {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be %q or %q",
+						ConfigMapKeyInconclusivePolicy, val, ns, name,
+						configkeys.InconclusivePolicyNeutral, configkeys.InconclusivePolicyFailure)
+				}
+				cfg.InconclusivePolicy = lower
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -470,6 +495,14 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 	if flags.IsExplicit("task-grace-period") {
 		cfg.TaskGracePeriod = flags.TaskGracePeriod
+	}
+	if flags.IsExplicit("inconclusive-policy") {
+		lower := strings.ToLower(strings.TrimSpace(flags.InconclusivePolicy))
+		if lower != configkeys.InconclusivePolicyNeutral && lower != configkeys.InconclusivePolicyFailure {
+			return cfg, fmt.Errorf("invalid --inconclusive-policy %q: must be %q or %q",
+				flags.InconclusivePolicy, configkeys.InconclusivePolicyNeutral, configkeys.InconclusivePolicyFailure)
+		}
+		cfg.InconclusivePolicy = lower
 	}
 
 	return cfg, nil

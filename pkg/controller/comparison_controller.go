@@ -124,6 +124,7 @@ type ComparisonReconciler struct {
 	GitHubTokenSecret   string
 	GitHubAppSecret     string
 	UIBaseURL           string
+	InconclusivePolicy  string
 	GitHubBaseURL       string
 	GitHubClientFactory func(creds GitHubCredentials) github.Client
 
@@ -289,7 +290,8 @@ func (r *ComparisonReconciler) reportToGitHub(
 	}
 
 	reporter := github.NewReporter(ghClient, github.ReporterOptions{
-		UIBaseURL: r.UIBaseURL,
+		UIBaseURL:          r.UIBaseURL,
+		InconclusivePolicy: r.InconclusivePolicy,
 	})
 	repStatus, err := reporter.Report(ctx, comp, baseRun, candRun)
 	if repStatus != nil {

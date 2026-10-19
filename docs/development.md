@@ -430,6 +430,7 @@ Supported ConfigMap keys include:
 - `githubAppSecret`: Name of Secret in controller namespace containing GitHub App credentials.
 - `githubTokenSecret`: Name of Secret in controller namespace containing GitHub credentials (default `github-token`).
 - `githubWebhookSecret`: Name of Secret in controller namespace containing GitHub webhook secret (default `github-webhook`).
+- `inconclusivePolicy`: Check-run conclusion policy for INCONCLUSIVE comparisons (`neutral` or `failure`, default `neutral`). When set to `failure`, an INCONCLUSIVE comparison marks the `eval-runner / evals` check run conclusion as `failure` to block PR merging.
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
 - `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
 - `sandboxdImage`: Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset).
@@ -563,11 +564,14 @@ The comment is updated in-place on each reconcile using a hidden HTML marker (`<
 ### Check Run State Mapping
 
 The controller creates and updates a check run named `eval-runner / evals` on `headSHA`:
-- `RUNNING`: status `in_progress`, description `running · N of M samples`
-- `IMPROVED`: status `completed`, conclusion `success`, description `IMPROVED · P(improvement) = 0.98`
-- `UNCHANGED`: status `completed`, conclusion `success`, description `UNCHANGED`
-- `INCONCLUSIVE`: status `completed`, conclusion `neutral`, description `INCONCLUSIVE · more samples recommended`
-- `REGRESSED`: status `completed`, conclusion `failure`, description `REGRESSED`
+- **Title**: `<VERDICT>: N improved, M unchanged, K regressed, J inconclusive` built from `status.tasks[].label` (omitting zero buckets). For running comparisons, `running · N of M samples` or `running`.
+- **Summary**: The existing body plus, for inconclusive tasks, the suggested extra sample hint text (e.g. `- comment `/eval more <n>` to run N more samples`).
+- **State and conclusion mapping**:
+  - `RUNNING`: status `in_progress`, conclusion `""`
+  - `IMPROVED`: status `completed`, conclusion `success`
+  - `UNCHANGED`: status `completed`, conclusion `success`
+  - `INCONCLUSIVE`: status `completed`, conclusion `neutral` (default) or `failure` if `inconclusivePolicy` is set to `failure`
+  - `REGRESSED`: status `completed`, conclusion `failure`
 
 ### Browsing and Inspecting Results
 
