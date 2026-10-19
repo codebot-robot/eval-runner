@@ -2450,6 +2450,10 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 					},
 					{
 						ID:    "task-neither",
+						Phase: v1alpha1.TaskPhasePending,
+					},
+					{
+						ID:    "task-failed-both",
 						Phase: v1alpha1.TaskPhaseFailed,
 					},
 				},
@@ -2472,6 +2476,10 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 					},
 					{
 						ID:    "task-neither",
+						Phase: v1alpha1.TaskPhasePending,
+					},
+					{
+						ID:    "task-failed-both",
 						Phase: v1alpha1.TaskPhaseFailed,
 					},
 				},
@@ -2532,6 +2540,9 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 		}
 		if len(artifact.NotExecuted) != 1 || artifact.NotExecuted[0] != "task-neither" {
 			t.Errorf("Expected artifact.NotExecuted [task-neither], got %v", artifact.NotExecuted)
+		}
+		if len(artifact.FailedInBothRuns) != 1 || artifact.FailedInBothRuns[0] != "task-failed-both" {
+			t.Errorf("Expected artifact.FailedInBothRuns [task-failed-both], got %v", artifact.FailedInBothRuns)
 		}
 		expectedNotBoth := []string{"task-base-only", "task-cand-only"}
 		if len(artifact.NotExecutedByBothRuns) != 2 ||
@@ -3097,6 +3108,137 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 		}
 		if strings.Contains(updated.Status.Message, "tasks not executed: docs/task_two") {
 			t.Errorf("Expected status.message NOT to mention 'tasks not executed: docs/task_two', got %q", updated.Status.Message)
+		}
+
+		artObj, ok := fakeGCS.Objects["test-bucket/comparisons/cmp-task-both-fail.json"]
+		if !ok {
+			t.Fatalf("Expected comparison artifact at test-bucket/comparisons/cmp-task-both-fail.json")
+		}
+		var artifact ComparisonArtifact
+		if err := json.Unmarshal(artObj.Data, &artifact); err != nil {
+			t.Fatalf("Failed to unmarshal stored comparison artifact: %v", err)
+		}
+		if len(artifact.FailedInBothRuns) != 1 || artifact.FailedInBothRuns[0] != task2 {
+			t.Errorf("Expected artifact.FailedInBothRuns [%s], got %v", task2, artifact.FailedInBothRuns)
+		}
+		if len(artifact.NotExecuted) != 0 {
+			t.Errorf("Expected artifact.NotExecuted to be empty, got %v", artifact.NotExecuted)
+		}
+	})
+
+	t.Run("task unattempted in both runs does not cap UNCHANGED verdict and notes tasks not executed", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		fakeGCS.Objects["test-bucket/runs/cand-commit/"+task1+"/log.json"] = fakes.FakeObject{
+			Data: makeSyntheticInspectLog(task1, scoresEqual),
+		}
+		fakeGCS.Objects["test-bucket/runs/base-commit/"+task1+"/log.json"] = fakes.FakeObject{
+			Data: makeSyntheticInspectLog(task1, scoresEqual),
+		}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-both-unattempted", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      task1,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/cand-commit/" + task1 + "/log.json",
+					},
+					{
+						ID:    task2,
+						Phase: v1alpha1.TaskPhasePending,
+					},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-both-unattempted", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      task1,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/base-commit/" + task1 + "/log.json",
+					},
+					{
+						ID:    task2,
+						Phase: v1alpha1.TaskPhasePending,
+					},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "cmp-task-both-unattempted", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-both-unattempted"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-both-unattempted"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "cmp-task-both-unattempted"}}
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Failed to get updated comparison: %v", err)
+		}
+
+		// Verdict remains UNCHANGED
+		if updated.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
+			t.Errorf("Expected aggregate verdict %s, got %s", v1alpha1.ComparisonVerdictUnchanged, updated.Status.Verdict)
+		}
+		if !strings.Contains(updated.Status.Message, "tasks not executed: docs/task_two") {
+			t.Errorf("Expected status.message to mention 'tasks not executed: docs/task_two', got %q", updated.Status.Message)
+		}
+		if strings.Contains(updated.Status.Message, "failed in both runs:") {
+			t.Errorf("Expected status.message NOT to mention 'failed in both runs:', got %q", updated.Status.Message)
+		}
+
+		artObj, ok := fakeGCS.Objects["test-bucket/comparisons/cmp-task-both-unattempted.json"]
+		if !ok {
+			t.Fatalf("Expected comparison artifact at test-bucket/comparisons/cmp-task-both-unattempted.json")
+		}
+		var artifact ComparisonArtifact
+		if err := json.Unmarshal(artObj.Data, &artifact); err != nil {
+			t.Fatalf("Failed to unmarshal stored comparison artifact: %v", err)
+		}
+		if len(artifact.NotExecuted) != 1 || artifact.NotExecuted[0] != task2 {
+			t.Errorf("Expected artifact.NotExecuted [%s], got %v", task2, artifact.NotExecuted)
+		}
+		if len(artifact.FailedInBothRuns) != 0 {
+			t.Errorf("Expected artifact.FailedInBothRuns to be empty, got %v", artifact.FailedInBothRuns)
 		}
 	})
 }
@@ -7289,6 +7431,9 @@ func TestComparisonReconciler_StatusMessageBoundedWithMarker(t *testing.T) {
 	if strings.Contains(artJSONStr, `"notExecutedByBothRuns":`) {
 		t.Errorf("Expected artifact JSON to omit 'notExecutedByBothRuns', got: %s", artJSONStr)
 	}
+	if strings.Contains(artJSONStr, `"failedInBothRuns":`) {
+		t.Errorf("Expected artifact JSON to omit 'failedInBothRuns', got: %s", artJSONStr)
+	}
 	if strings.Contains(artJSONStr, `"candidateFailed":`) {
 		t.Errorf("Expected artifact JSON to omit 'candidateFailed', got: %s", artJSONStr)
 	}
@@ -7320,13 +7465,14 @@ func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *test
 	candFailedTask := "evals/task_cand_failed"
 	notBothTask := "evals/task_not_both"
 	neitherTask := "evals/task_neither"
+	failedBothTask := "evals/task_failed_both"
 
 	candRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-lists", Namespace: "eval-runner"},
 		Spec: v1alpha1.RunSpec{
 			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
 			Model: "mockllm/model",
-			Tasks: []string{execTaskID, candFailedTask, notBothTask, neitherTask},
+			Tasks: []string{execTaskID, candFailedTask, notBothTask, neitherTask, failedBothTask},
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseCompleted,
@@ -7335,6 +7481,7 @@ func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *test
 				{ID: candFailedTask, Phase: v1alpha1.TaskPhaseFailed},
 				{ID: notBothTask, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/" + notBothTask + "/log.json"},
 				{ID: neitherTask, Phase: v1alpha1.TaskPhasePending},
+				{ID: failedBothTask, Phase: v1alpha1.TaskPhaseFailed},
 			},
 		},
 	}
@@ -7344,7 +7491,7 @@ func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *test
 		Spec: v1alpha1.RunSpec{
 			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
 			Model: "mockllm/model",
-			Tasks: []string{execTaskID, candFailedTask, notBothTask, neitherTask},
+			Tasks: []string{execTaskID, candFailedTask, notBothTask, neitherTask, failedBothTask},
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseCompleted,
@@ -7353,6 +7500,7 @@ func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *test
 				{ID: candFailedTask, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/" + candFailedTask + "/log.json"},
 				{ID: notBothTask, Phase: v1alpha1.TaskPhasePending},
 				{ID: neitherTask, Phase: v1alpha1.TaskPhasePending},
+				{ID: failedBothTask, Phase: v1alpha1.TaskPhaseFailed},
 			},
 		},
 	}
@@ -7400,6 +7548,9 @@ func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *test
 	}
 	if len(artifact.NotExecutedByBothRuns) != 1 || artifact.NotExecutedByBothRuns[0] != notBothTask {
 		t.Errorf("Expected NotExecutedByBothRuns [%s], got %v", notBothTask, artifact.NotExecutedByBothRuns)
+	}
+	if len(artifact.FailedInBothRuns) != 1 || artifact.FailedInBothRuns[0] != failedBothTask {
+		t.Errorf("Expected FailedInBothRuns [%s], got %v", failedBothTask, artifact.FailedInBothRuns)
 	}
 	if len(artifact.SkippedNotPlanned) != 0 {
 		t.Errorf("Expected SkippedNotPlanned to be empty, got %v", artifact.SkippedNotPlanned)
