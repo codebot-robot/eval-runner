@@ -282,7 +282,17 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 		// Preserve candidate run name from existing Comparison on redelivery
 		candRunName = existingComp.Spec.Candidate.Run
 	}
-	defaultBaseRunName := fmt.Sprintf("base-%s", ShortSHA(baseSHA))
+	baselineRepo := item.BaselineRepo
+	if baselineRepo == "" {
+		baselineRepo = item.TargetRepo
+	}
+	defaultBaseRunName := BaselineRunName(baselineRepo, baseSHA, wp.cfg.IsMultiRepo())
+	if existingComp != nil && existingComp.Spec.PullRequest != nil &&
+		strings.EqualFold(existingComp.Spec.PullRequest.BaseSHA, baseSHA) &&
+		existingComp.Spec.Baseline.Run != "" {
+		// Preserve baseline run name from existing Comparison on redelivery
+		defaultBaseRunName = existingComp.Spec.Baseline.Run
+	}
 
 	// 1. Create or update Candidate Run: pr-<number>-<headSHA7> or pr-<repoHash>-<number>-<headSHA7>
 	// Use CandidateCloneURL (head repo for fork PRs) so checkout succeeds (Blocking 1)
@@ -314,7 +324,7 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 
 	// 2. Reconcile Baseline Run with Baseline Cache (§4.1):
 	// Reuse if a Completed Run for that exact commit, repo URL, and model already exists (F1).
-	baselineRunName, err := wp.findCompletedBaselineRun(ctx, ns, baseSHA, item.BaselineCloneURL, wp.cfg.DefaultModel)
+	baselineRunName, err := wp.findCompletedBaselineRun(ctx, ns, baseSHA, item.BaselineCloneURL, wp.cfg.DefaultModel, baselineRepo)
 	if err != nil {
 		log.Printf("warning: error checking baseline cache for commit %s: %v", baseSHA, err)
 	}
@@ -396,7 +406,7 @@ func (wp *WorkerPool) ProcessPush(ctx context.Context, item *PushWorkItem) error
 
 	commitSHA := item.CommitSHA
 	ns := wp.cfg.Namespace
-	baseRunName := fmt.Sprintf("base-%s", ShortSHA(commitSHA))
+	baseRunName := BaselineRunName(item.Repo, commitSHA, wp.cfg.IsMultiRepo())
 	sanitizedRepo := SanitizeLabelValue(item.Repo)
 
 	baseRun := &v1alpha1.Run{
@@ -430,19 +440,29 @@ func (wp *WorkerPool) ProcessPush(ctx context.Context, item *PushWorkItem) error
 }
 
 // findCompletedBaselineRun checks if any Run in the namespace targeting commit, URL, and model has completed (F1).
-func (wp *WorkerPool) findCompletedBaselineRun(ctx context.Context, namespace, commit, expectedURL, model string) (string, error) {
-	// 1. Direct candidate base-<sha7>
-	directName := fmt.Sprintf("base-%s", ShortSHA(commit))
-	var directRun v1alpha1.Run
-	if err := wp.cfg.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: directName}, &directRun); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return "", err
+func (wp *WorkerPool) findCompletedBaselineRun(ctx context.Context, namespace, commit, expectedURL, model string, repo ...string) (string, error) {
+	// 1. Direct candidate(s)
+	var candidateNames []string
+	if len(repo) > 0 && repo[0] != "" {
+		candidateNames = append(candidateNames, BaselineRunName(repo[0], commit, wp.cfg.IsMultiRepo()))
+	}
+	legacyName := fmt.Sprintf("base-%s", ShortSHA(commit))
+	if len(candidateNames) == 0 || candidateNames[0] != legacyName {
+		candidateNames = append(candidateNames, legacyName)
+	}
+
+	for _, directName := range candidateNames {
+		var directRun v1alpha1.Run
+		if err := wp.cfg.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: directName}, &directRun); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return "", err
+			}
+		} else if directRun.Status.Phase == v1alpha1.RunPhaseCompleted &&
+			directRun.Spec.Model == model &&
+			strings.EqualFold(directRun.Spec.Repo.Commit, commit) &&
+			directRun.Spec.Repo.URL == expectedURL {
+			return directRun.Name, nil
 		}
-	} else if directRun.Status.Phase == v1alpha1.RunPhaseCompleted &&
-		directRun.Spec.Model == model &&
-		strings.EqualFold(directRun.Spec.Repo.Commit, commit) &&
-		directRun.Spec.Repo.URL == expectedURL {
-		return directRun.Name, nil
 	}
 
 	// 2. Query runs matching label head-sha in the namespace (F1: exact commit and repo URL match)

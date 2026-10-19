@@ -375,11 +375,11 @@ Check run titles display per-label counts: `<VERDICT>: N improved, M unchanged, 
 
 ## Webhook Resource Naming
 
-Comparisons and candidate Runs created automatically by `eval-runner-webhook` follow deterministic naming conventions based on the configured `webhookRepositories`:
+Comparisons, candidate Runs, and baseline Runs created automatically by `eval-runner-webhook` follow deterministic naming conventions based on the configured `webhookRepositories`:
 
-- **Single repository**: `pr-<number>` for Comparisons and `pr-<number>-<headSHA7>` for candidate Runs.
-- **Multiple repositories or wildcard (`*`)**: `pr-<repoHash>-<number>` for Comparisons and `pr-<repoHash>-<number>-<headSHA7>` for candidate Runs, where `<repoHash>` is a 7-character hexadecimal SHA-256 hash of the normalized repository name (`owner/repo`). This guarantees RFC 1123 DNS subdomain compliance and prevents collisions when multiple allow-listed repositories share the same pull request number.
-- **Label-based resolution**: Webhook lookups (synchronization, `/eval more` comment commands, and PR closure cleanup) resolve objects by labels (`evalrunner.gke-labs.dev/pr` and `evalrunner.gke-labs.dev/repo`), preserving compatibility with existing single-repo or pre-upgrade objects.
+- **Single repository**: `pr-<number>` for Comparisons, `pr-<number>-<headSHA7>` for candidate Runs, and `base-<sha7>` for baseline Runs.
+- **Multiple repositories or wildcard (`*`)**: `pr-<repoHash>-<number>` for Comparisons, `pr-<repoHash>-<number>-<headSHA7>` for candidate Runs, and `base-<repoHash>-<sha7>` for baseline Runs, where `<repoHash>` is a 7-character hexadecimal SHA-256 hash of the normalized repository name (`owner/repo`). This guarantees RFC 1123 DNS subdomain compliance and prevents collisions when multiple allow-listed repositories share the same pull request number or commit SHA.
+- **Label-based resolution**: Webhook lookups (synchronization, `/eval more` comment commands, and PR closure cleanup) resolve objects by labels (`evalrunner.gke-labs.dev/pr` and `evalrunner.gke-labs.dev/repo`), preserving compatibility with existing single-repo or pre-upgrade objects. Baseline reuse keys on repository URL, commit, model, tasks, and window via labels, never on name alone.
 
 ## Retention and Cleanup
 
@@ -389,7 +389,7 @@ Eval-runner provides two complementary mechanisms to clean up Comparisons and Ru
 When a pull request closes (merged or closed without merge), GitHub sends a `pull_request` event with `action: closed`. The `eval-runner-webhook` handler matches the Comparisons and seed candidate Runs for that pull request by label (`evalrunner.gke-labs.dev/pr`) and repository (`spec.pullRequest.repository` matching the target repository) and deletes them:
 - **Comparisons**: Deleted directly. Their owned batch Runs are automatically garbage-collected by Kubernetes via `metadata.ownerReferences`.
 - **Seed Candidate Runs**: Deleted directly by the webhook, unless referenced as `spec.baseline.run` by another surviving live Comparison or carrying an owner reference to a surviving Comparison (e.g. stacked branches or fast-forward merges), in which case they are preserved.
-- **Baseline Runs**: Preserved. Baseline Runs are keyed to default branch commits (`base-<sha7>`), are not tagged with PR labels, and are reused across pull requests to eliminate redundant evaluation work.
+- **Baseline Runs**: Preserved. Baseline Runs are keyed to default branch commits (`base-<sha7>` or `base-<repoHash>-<sha7>`), are not tagged with PR labels, and are reused across pull requests to eliminate redundant evaluation work.
 - **Reopen**: If a closed PR is reopened, its resources are recreated on the next incoming `pull_request` event.
 - **Artifacts**: Artifacts in the artifact sink (GCS or local directory) are not purged by PR closure or TTL; artifact retention is governed independently by storage lifecycle policies.
 

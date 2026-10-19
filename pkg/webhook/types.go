@@ -296,6 +296,17 @@ func CandidateRunName(repo string, prNum int, headSHA string, isMultiRepo bool) 
 	return fmt.Sprintf("pr-%d-%s", prNum, ShortSHA(headSHA))
 }
 
+// BaselineRunName returns the deterministic baseline Run resource name for a repository and commit SHA.
+// If isMultiRepo is true, a 7-character repository hash is included (base-<repoHash>-<sha7>)
+// to prevent collisions across allow-listed repositories. If false, the single-repo name
+// (base-<sha7>) is returned for backwards compatibility.
+func BaselineRunName(repo string, commitSHA string, isMultiRepo bool) string {
+	if isMultiRepo && repo != "" {
+		return fmt.Sprintf("base-%s-%s", RepoHash(repo), ShortSHA(commitSHA))
+	}
+	return fmt.Sprintf("base-%s", ShortSHA(commitSHA))
+}
+
 // SanitizeLabelValue converts an arbitrary string (such as "owner/name") into a valid
 // Kubernetes label value:
 // - Max 63 characters
