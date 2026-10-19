@@ -495,6 +495,674 @@ func TestServerComparisonDetail_BatchesAndTokens(t *testing.T) {
 	}
 }
 
+func TestServerPullsList(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+	pImp95 := 0.95
+	pImp05 := 0.05
+	compTime := metav1.NewTime(now.Add(-8 * time.Minute))
+
+	// comp1: gke-labs/eval-runner PR 10 (head1, older)
+	comp1 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-10-head1",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-20 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     10,
+				HeadSHA:    "1111111222222222222222222222222222222222",
+				BaseSHA:    "0000000111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+		},
+	}
+
+	// comp2: gke-labs/eval-runner PR 10 (head2, newer push)
+	comp2 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-10-head2",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     10,
+				HeadSHA:    "2222222222222222222222222222222222222222",
+				BaseSHA:    "0000000111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict:        v1alpha1.ComparisonVerdictImproved,
+			PImprovement:   &pImp95,
+			CompletionTime: &compTime,
+			Batches: []v1alpha1.ComparisonBatchStatus{
+				{Index: 1}, {Index: 2},
+			},
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "task-1", SamplesRun: 96, Pairs: 48},
+			},
+		},
+	}
+
+	// comp3: gke-labs/eval-runner PR 11 (newest in gke-labs/eval-runner)
+	comp3 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-11",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-5 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     11,
+				HeadSHA:    "3333333222222222222222222222222222222222",
+				BaseSHA:    "0000000111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict:      v1alpha1.ComparisonVerdictRegressed,
+			PImprovement: &pImp05,
+		},
+	}
+
+	// comp4: other-org/other-repo PR 10 (newest overall)
+	comp4 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-other-10",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "other-org/other-repo",
+				Number:     10,
+				HeadSHA:    "4444444222222222222222222222222222222222",
+				BaseSHA:    "0000000111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictUnchanged,
+		},
+	}
+
+	// compNonPR: comparison without spec.pullRequest
+	compNonPR := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-non-pr",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand"},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp1, comp2, comp3, comp4, compNonPR).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/pulls", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+
+	// 1. Assert non-PR comparison is excluded
+	if strings.Contains(body, "comp-non-pr") {
+		t.Errorf("expected comp-non-pr to be excluded from /pulls")
+	}
+
+	// 2. Assert grouping: gke-labs/eval-runner PR 10 should have only one row (with latest head2)
+	if strings.Contains(body, "pr-10-head1") {
+		t.Errorf("did not expect older comp pr-10-head1 in /pulls list view")
+	}
+	if !strings.Contains(body, "pr-10-head2") {
+		t.Errorf("expected latest comparison pr-10-head2 in /pulls list view")
+	}
+
+	// 3. Assert ordering: other-org/other-repo (1m ago) before PR 11 (5m ago) before PR 10 (10m ago)
+	posOther := strings.Index(body, "pr-other-10")
+	posPR11 := strings.Index(body, "pr-11")
+	posPR10 := strings.Index(body, "pr-10-head2")
+	if posOther == -1 || posPR11 == -1 || posPR10 == -1 {
+		t.Fatalf("missing PR comparisons in body: other=%d pr11=%d pr10=%d", posOther, posPR11, posPR10)
+	}
+	if !(posOther < posPR11 && posPR11 < posPR10) {
+		t.Errorf("expected newest head first ordering: posOther=%d < posPR11=%d < posPR10=%d", posOther, posPR11, posPR10)
+	}
+
+	// 4. Assert links: GitHub link, comparison link, history link
+	if !strings.Contains(body, "https://github.com/gke-labs/eval-runner/pull/10") {
+		t.Errorf("expected GitHub link for PR 10")
+	}
+	if !strings.Contains(body, "/comparisons/eval-runner/pr-10-head2") {
+		t.Errorf("expected Comparison link for PR 10")
+	}
+	hashGke := RepoHash("gke-labs/eval-runner")
+	if !strings.Contains(body, fmt.Sprintf("/pulls/%s/10", hashGke)) {
+		t.Errorf("expected history link for PR 10: /pulls/%s/10", hashGke)
+	}
+
+	// 5. Assert columns: Head 2222222, Verdict IMPROVED, P=0.95, Samples 96, Batches 2
+	if !strings.Contains(body, "2222222") {
+		t.Errorf("expected short head 2222222")
+	}
+	if !strings.Contains(body, "IMPROVED") {
+		t.Errorf("expected verdict IMPROVED")
+	}
+	if !strings.Contains(body, "0.95") {
+		t.Errorf("expected P(imp) 0.95")
+	}
+	if !strings.Contains(body, ">96<") {
+		t.Errorf("expected samples run 96")
+	}
+	if !strings.Contains(body, ">2<") {
+		t.Errorf("expected batches 2")
+	}
+}
+
+func TestServerPullDetail(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+	pImp98 := 0.98
+	compTime := metav1.NewTime(now.Add(-4 * time.Minute))
+
+	comp1 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-42-head1",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-20 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     42,
+				HeadSHA:    "1111111222222222222222222222222222222222",
+				BaseSHA:    "0000000111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			Batches: []v1alpha1.ComparisonBatchStatus{{Index: 1}},
+			Tasks:   []v1alpha1.ComparisonTaskStatus{{ID: "task-1", SamplesRun: 48}},
+		},
+	}
+
+	comp2 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-42-head2",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-5 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     42,
+				HeadSHA:    "2222222222222222222222222222222222222222",
+				BaseSHA:    "0000000111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict:        v1alpha1.ComparisonVerdictImproved,
+			PImprovement:   &pImp98,
+			CompletionTime: &compTime,
+			Batches:        []v1alpha1.ComparisonBatchStatus{{Index: 1}, {Index: 2}},
+			Tasks:          []v1alpha1.ComparisonTaskStatus{{ID: "task-1", SamplesRun: 96}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp1, comp2).Build()
+	server := NewServer(Config{Client: fakeClient})
+	hash := RepoHash("gke-labs/eval-runner")
+
+	t.Run("ByRepoHashAndNumberPath", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/pulls/%s/42", hash), nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		// Title and links
+		if !strings.Contains(body, "gke-labs/eval-runner") || !strings.Contains(body, "#42") {
+			t.Errorf("expected repo and PR number in title")
+		}
+		if !strings.Contains(body, "https://github.com/gke-labs/eval-runner/pull/42") {
+			t.Errorf("expected GitHub link")
+		}
+		if !strings.Contains(body, "← Back to Pull Requests") {
+			t.Errorf("expected back link")
+		}
+
+		// Both comparisons present
+		if !strings.Contains(body, "pr-42-head2") || !strings.Contains(body, "pr-42-head1") {
+			t.Errorf("expected both comparisons in history")
+		}
+
+		// Ordering: newer comp2 before older comp1
+		pos2 := strings.Index(body, "pr-42-head2")
+		pos1 := strings.Index(body, "pr-42-head1")
+		if !(pos2 < pos1) {
+			t.Errorf("expected comp2 (newer) before comp1 (older)")
+		}
+
+		// Verdicts
+		if !strings.Contains(body, "IMPROVED") || !strings.Contains(body, "INCONCLUSIVE") {
+			t.Errorf("expected both verdicts in history")
+		}
+	})
+
+	t.Run("ByRepoAndNumberQuery", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls?repo=gke-labs/eval-runner&number=42", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "pr-42-head2") || !strings.Contains(body, "pr-42-head1") {
+			t.Errorf("expected both comparisons when queried via ?repo=...&number=...")
+		}
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/pulls/%s/999", hash), nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 Not Found, got %d", w.Code)
+		}
+		if strings.Contains(w.Body.String(), "999") || strings.Contains(w.Body.String(), hash) {
+			t.Errorf("expected no reflected parameters in 404 body: %q", w.Body.String())
+		}
+	})
+
+	t.Run("InvalidRouteParams", func(t *testing.T) {
+		for _, urlPath := range []string{
+			fmt.Sprintf("/pulls/%s/-1", hash),
+			fmt.Sprintf("/pulls/%s/bad", hash),
+			"/pulls/bad%20hash/42",
+		} {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("path %s: expected 400 Bad Request, got %d", urlPath, w.Code)
+			}
+			for _, leak := range []string{"bad", "bad%20hash", "-1"} {
+				if strings.Contains(w.Body.String(), leak) {
+					t.Errorf("path %s: leaked input %q in body: %s", urlPath, leak, w.Body.String())
+				}
+			}
+		}
+	})
+}
+
+func TestServerPullsPagination(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+
+	comps := make([]client.Object, 5)
+	for i := 0; i < 5; i++ {
+		comps[i] = &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              fmt.Sprintf("pr-comp-%d", i+1),
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-time.Duration(5-i) * time.Minute)), // 5 is newest
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     i + 1,
+					HeadSHA:    fmt.Sprintf("head%d1111111111111111111111111111111", i+1),
+				},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Verdict: v1alpha1.ComparisonVerdictImproved,
+			},
+		}
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comps...).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	t.Run("Page1", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls?limit=2&offset=0", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		// PR 5 and 4 should be present
+		if !strings.Contains(body, ">#5<") || !strings.Contains(body, ">#4<") {
+			t.Errorf("expected #5 and #4 on page 1")
+		}
+		if strings.Contains(body, ">#3<") {
+			t.Errorf("did not expect #3 on page 1")
+		}
+		if !strings.Contains(body, "More →") {
+			t.Errorf("expected More link on page 1")
+		}
+		if !strings.Contains(body, "offset=2") {
+			t.Errorf("expected offset=2 in Next link")
+		}
+		if strings.Contains(body, "← Previous") {
+			t.Errorf("did not expect Previous link on page 1")
+		}
+		if !strings.Contains(body, "Showing 1–2 of 5") {
+			t.Errorf("expected Showing 1–2 of 5")
+		}
+	})
+
+	t.Run("Page2", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls?limit=2&offset=2", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		if !strings.Contains(body, ">#3<") || !strings.Contains(body, ">#2<") {
+			t.Errorf("expected #3 and #2 on page 2")
+		}
+		if strings.Contains(body, ">#5<") || strings.Contains(body, ">#1<") {
+			t.Errorf("unexpected PR on page 2")
+		}
+		if !strings.Contains(body, "More →") || !strings.Contains(body, "← Previous") {
+			t.Errorf("expected both More and Previous links on page 2")
+		}
+		if !strings.Contains(body, "Showing 3–4 of 5") {
+			t.Errorf("expected Showing 3–4 of 5")
+		}
+	})
+
+	t.Run("Page3", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls?limit=2&offset=4", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		if !strings.Contains(body, ">#1<") {
+			t.Errorf("expected #1 on page 3")
+		}
+		if strings.Contains(body, "More →") {
+			t.Errorf("did not expect More link on last page")
+		}
+		if !strings.Contains(body, "← Previous") {
+			t.Errorf("expected Previous link on page 3")
+		}
+		if !strings.Contains(body, "Showing 5–5 of 5") {
+			t.Errorf("expected Showing 5–5 of 5")
+		}
+	})
+}
+
+func TestServerPullsNamespaceFilterAndEmptyState(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	compDefault := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-default",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     1,
+				HeadSHA:    "1111111222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{Verdict: v1alpha1.ComparisonVerdictImproved},
+	}
+
+	compCustom := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-custom",
+			Namespace: "custom-ns",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "custom-org/custom-repo",
+				Number:     2,
+				HeadSHA:    "2222222222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{Verdict: v1alpha1.ComparisonVerdictImproved},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compDefault, compCustom).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	t.Run("DefaultNamespace", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "gke-labs/eval-runner") {
+			t.Errorf("expected default ns PR")
+		}
+		if strings.Contains(body, "custom-org/custom-repo") {
+			t.Errorf("did not expect custom ns PR in default ns view")
+		}
+	})
+
+	t.Run("CustomNamespace", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls?namespace=custom-ns", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "custom-org/custom-repo") {
+			t.Errorf("expected custom ns PR")
+		}
+		if strings.Contains(body, "gke-labs/eval-runner") {
+			t.Errorf("did not expect default ns PR in custom ns view")
+		}
+	})
+
+	t.Run("EmptyNamespace", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls?namespace=empty-ns", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "No pull requests found in namespace empty-ns.") {
+			t.Errorf("expected empty state message for empty-ns")
+		}
+	})
+
+	t.Run("InvalidNamespace", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls?namespace=INVALID_NS", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", w.Code)
+		}
+		if strings.Contains(w.Body.String(), "INVALID_NS") {
+			t.Errorf("expected no reflected namespace in 400 body")
+		}
+	})
+}
+
+func TestServerPullsEscaping(t *testing.T) {
+	scheme := newTestScheme(t)
+	const hostile = `<script>alert('pwned')</script>`
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-hostile",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "evil/repo" + hostile,
+				Number:     13,
+				HeadSHA:    "head" + hostile,
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictImproved,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	t.Run("PullsListEscaping", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, "<script") {
+			t.Errorf("unescaped <script found in /pulls HTML")
+		}
+		if !strings.Contains(body, "&lt;script&gt;") {
+			t.Errorf("expected &lt;script&gt; in /pulls HTML")
+		}
+	})
+
+	t.Run("PullDetailEscaping", func(t *testing.T) {
+		hash := RepoHash("evil/repo" + hostile)
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/pulls/%s/13", hash), nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, "<script") {
+			t.Errorf("unescaped <script found in /pulls/{repohash}/{number} HTML")
+		}
+		if !strings.Contains(body, "&lt;script&gt;") {
+			t.Errorf("expected &lt;script&gt; in /pulls/{repohash}/{number} HTML")
+		}
+	})
+}
+
+func TestServerWebhookE2EFixture(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Fixture matching the webhook e2e fixture from pkg/webhook/testdata/pull_request.json
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-305",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "base-bbbbbbb",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "pr-305-aaaaaaa",
+			},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         8,
+				MaxSamplesPerTask: 64,
+			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     305,
+				HeadSHA:    "aaaaaaa111111122222223333333444444455555",
+				BaseSHA:    "bbbbbbb111111122222223333333444444455555",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseCompleted,
+			Verdict: v1alpha1.ComparisonVerdictImproved,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
+	server := NewServer(Config{Client: fakeClient})
+	hash := RepoHash("gke-labs/eval-runner")
+
+	// Both pages render for Comparisons created by the webhook e2e fixture
+	t.Run("PullsListRendersWebhookFixture", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/pulls", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "gke-labs/eval-runner") {
+			t.Errorf("expected repository in body")
+		}
+		if !strings.Contains(body, "#305") {
+			t.Errorf("expected #305 in body")
+		}
+		if !strings.Contains(body, "aaaaaaa") {
+			t.Errorf("expected short head aaaaaaa in body")
+		}
+		if !strings.Contains(body, "pr-305") {
+			t.Errorf("expected pr-305 comparison in body")
+		}
+	})
+
+	t.Run("PullDetailRendersWebhookFixture", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/pulls/%s/305", hash), nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "gke-labs/eval-runner") || !strings.Contains(body, "#305") {
+			t.Errorf("expected repo and #305 in title")
+		}
+		if !strings.Contains(body, "pr-305") {
+			t.Errorf("expected comparison name pr-305")
+		}
+		if !strings.Contains(body, "aaaaaaa") {
+			t.Errorf("expected head SHA aaaaaaa")
+		}
+		if !strings.Contains(body, "bbbbbbb") {
+			t.Errorf("expected base SHA bbbbbbb")
+		}
+	})
+}
+
 func TestServerRouteParamValidation(t *testing.T) {
 	scheme := newTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -535,6 +1203,20 @@ func TestServerRouteParamValidation(t *testing.T) {
 		"/comparisons?limit=notanumber",
 		"/comparisons?offset=-2",
 		"/comparisons?offset=invalid",
+		// Invalid query params on /pulls
+		"/pulls?namespace=UPPERCASE",
+		"/pulls?namespace=bad_ns",
+		"/pulls?limit=-1",
+		"/pulls?limit=bad",
+		"/pulls?offset=-1",
+		"/pulls?offset=notanumber",
+		"/pulls?repo=gke-labs/eval-runner&number=-1",
+		"/pulls?repo=gke-labs/eval-runner&number=notanumber",
+		// Invalid route params on /pulls/{repohash}/{number}
+		"/pulls/bad%20hash/1",
+		"/pulls/2cc24c2/-1",
+		"/pulls/2cc24c2/notanumber",
+		"/pulls/2cc24c2/0",
 	}
 
 	for _, route := range invalidRoutes {
@@ -545,7 +1227,7 @@ func TestServerRouteParamValidation(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("route %q: expected 400 Bad Request, got %d", route, w.Code)
 		}
-		for _, leak := range []string{"UPPERCASE", "bad_ns", "notanumber", "with_underscore", "eval_runner"} {
+		for _, leak := range []string{"UPPERCASE", "bad_ns", "notanumber", "with_underscore", "eval_runner", "bad%20hash", "2cc24c2"} {
 			if strings.Contains(w.Body.String(), leak) {
 				t.Errorf("route %q: expected no reflected input %q in body, got %q", route, leak, w.Body.String())
 			}
@@ -573,6 +1255,8 @@ func TestServerForbidden(t *testing.T) {
 		"/runs/eval-runner/run-1",
 		"/comparisons?namespace=secret-namespace",
 		"/comparisons/eval-runner/comp-1",
+		"/pulls?namespace=secret-namespace",
+		"/pulls/2cc24c2/42?namespace=secret-namespace",
 	}
 
 	for _, route := range forbiddenRequests {
@@ -583,7 +1267,7 @@ func TestServerForbidden(t *testing.T) {
 		if w.Code != http.StatusForbidden {
 			t.Errorf("route %q: expected 403 Forbidden, got %d", route, w.Code)
 		}
-		for _, leak := range []string{"secret-namespace", "run-1", "comp-1", "access denied"} {
+		for _, leak := range []string{"secret-namespace", "run-1", "comp-1", "access denied", "2cc24c2"} {
 			if strings.Contains(w.Body.String(), leak) {
 				t.Errorf("route %q: expected no leaked details %q in body, got %q", route, leak, w.Body.String())
 			}

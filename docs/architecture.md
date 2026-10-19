@@ -143,6 +143,8 @@ The `eval-runner-webhook` service (image `eval-runner-webhook`) receives GitHub 
 ### Web Dashboard UI (`cmd/eval-runner-ui`)
 
 The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboard:
+- `GET /pulls`: Overview table of pull requests derived from webhook-created Comparisons, grouped by repository and PR number with latest verdict, samples run, batches, and completion time.
+- `GET /pulls/{repohash}/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression.
 - `GET /runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
 - `GET /runs/{namespace}/{name}`: Detailed per-task breakdown for a single Run.
 - `GET /runs/{namespace}/{name}/tasks/{task}/samples`: Per-task sample list with IDs, scores, preview snippets, latency, and tokens.

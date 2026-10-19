@@ -81,6 +81,18 @@ func runUISmoke(t *testing.T, harness *Harness, runName string) {
 	if !strings.Contains(string(bodyRun), runName) {
 		t.Errorf("expected run name %q in run detail HTML", runName)
 	}
+
+	// 3. Curl /pulls page
+	pullsURL := baseURL + "/pulls"
+	respPulls, err := http.Get(pullsURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", pullsURL, err)
+	}
+	bodyPulls, _ := io.ReadAll(respPulls.Body)
+	respPulls.Body.Close()
+	if respPulls.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected pulls page status: %d body=%s", respPulls.StatusCode, string(bodyPulls))
+	}
 }
 
 // TestUISmoke is retained for backwards compatibility with `go test -run TestUISmoke`.

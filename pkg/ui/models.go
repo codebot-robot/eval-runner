@@ -15,6 +15,8 @@
 package ui
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"net/url"
@@ -31,6 +33,7 @@ import (
 type NavTab string
 
 const (
+	NavTabPulls       NavTab = "pulls"
 	NavTabRuns        NavTab = "runs"
 	NavTabComparisons NavTab = "comparisons"
 )
@@ -141,6 +144,118 @@ type ComparisonsListView struct {
 	HasPrev      bool
 	PrevLink     string
 	ShowingRange string
+}
+
+// PullRequestListItem represents a single aggregated pull request row in the /pulls list view.
+type PullRequestListItem struct {
+	Repository     string
+	RepoHash       string
+	Number         int
+	GitHubURL      string
+	HeadSHA        string
+	HeadSHAShort   string
+	Verdict        v1alpha1.ComparisonVerdict
+	VerdictChip    string
+	PImprovement   string
+	SamplesRun     int
+	Batches        int
+	CompletionTime string
+	ComparisonName string
+	ComparisonLink string
+	HistoryLink    string
+	Namespace      string
+}
+
+// PullRequestsListView is the view model for the /pulls list page.
+type PullRequestsListView struct {
+	ActiveTab    NavTab
+	Namespace    string
+	Pulls        []PullRequestListItem
+	TotalCount   int
+	Offset       int
+	Limit        int
+	HasMore      bool
+	NextLink     string
+	HasPrev      bool
+	PrevLink     string
+	ShowingRange string
+}
+
+// PullRequestHistoryItem represents one Comparison in a pull request's history.
+type PullRequestHistoryItem struct {
+	Name           string
+	Namespace      string
+	HeadSHA        string
+	HeadSHAShort   string
+	BaseSHA        string
+	BaseSHAShort   string
+	Verdict        v1alpha1.ComparisonVerdict
+	VerdictChip    string
+	PImprovement   string
+	SamplesRun     int
+	Batches        int
+	CompletionTime string
+	Age            string
+	Link           string
+}
+
+// PullRequestDetailView is the view model for the /pulls/{repohash}/{number} history page.
+type PullRequestDetailView struct {
+	ActiveTab   NavTab
+	Namespace   string
+	Repository  string
+	RepoHash    string
+	Number      int
+	GitHubURL   string
+	BackLink    string
+	Comparisons []PullRequestHistoryItem
+	TotalCount  int
+}
+
+// RepoHash returns a deterministic 7-character lowercase hexadecimal SHA-256 hash
+// of the normalized repository name (e.g. "owner/repo").
+func RepoHash(repo string) string {
+	norm := strings.ToLower(strings.TrimSpace(repo))
+	h := sha256.Sum256([]byte(norm))
+	return hex.EncodeToString(h[:])[:7]
+}
+
+// BuildGitHubPRURL builds a link to the GitHub pull request.
+func BuildGitHubPRURL(repo string, prNum int) string {
+	cleanRepo := strings.TrimPrefix(strings.TrimSpace(repo), "https://github.com/")
+	cleanRepo = strings.TrimPrefix(cleanRepo, "http://github.com/")
+	cleanRepo = strings.TrimSuffix(cleanRepo, ".git")
+	cleanRepo = strings.Trim(cleanRepo, "/")
+	return fmt.Sprintf("https://github.com/%s/pull/%d", cleanRepo, prNum)
+}
+
+// ComparisonSamplesRun returns the total evaluated samples for a Comparison.
+func ComparisonSamplesRun(comp *v1alpha1.Comparison) int {
+	if comp == nil {
+		return 0
+	}
+	samplesRunTotal := 0
+	totalPairs := 0
+	for _, task := range comp.Status.Tasks {
+		totalPairs += task.Pairs
+		if task.SamplesRun > 0 {
+			samplesRunTotal += task.SamplesRun
+		} else {
+			samplesRunTotal += task.Pairs
+		}
+	}
+	if samplesRunTotal == 0 && totalPairs > 0 {
+		samplesRunTotal = totalPairs
+	}
+	return samplesRunTotal
+}
+
+// FormatCompletionTime formats a Comparison completion timestamp as an age string, or "—" if not set.
+func FormatCompletionTime(t *metav1.Time) string {
+	if t == nil || t.IsZero() {
+		return "—"
+	}
+	return FormatAge(*t)
 }
 
 // ComparisonTableView is the view model for rendering the comparison table sub-template.
