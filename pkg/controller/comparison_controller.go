@@ -712,7 +712,6 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				}
 				return ctrl.Result{}, nil
 			}
-			return ctrl.Result{RequeueAfter: r.ComparisonTTL - age}, nil
 		}
 	}
 
