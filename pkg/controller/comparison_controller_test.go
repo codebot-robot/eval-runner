@@ -9452,3 +9452,430 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 		}
 	})
 }
+
+func TestAdaptivePairedSampling_BaselineReuse_AddOwnerReferenceErrorRequeues(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	repoURL := "git://repo"
+	baseCommit := "base-commit-hash"
+	model := "mockllm/model"
+
+	batchKey := ComputeBatchKey(repoURL, baseCommit, model, []string{taskID}, v1alpha1.SampleRange{Start: 9, End: 16})
+	existingBaseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pre-existing-base-run-b2",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelBatchKey: batchKey,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: v1alpha1.GroupVersion.String(),
+					Kind:       "Comparison",
+					Name:       "earlier-comparison",
+					UID:        "earlier-uid-1234",
+				},
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     "gs://test-bucket/runs/base-commit-hash/pre_existing.json",
+					Samples:     8,
+					SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+				},
+			},
+		},
+	}
+
+	candScoresB1 := []stats.SampleScore{
+		{ID: "1", Score: 1.0}, {ID: "2", Score: 0.0}, {ID: "3", Score: 1.0}, {ID: "4", Score: 0.0},
+		{ID: "5", Score: 1.0}, {ID: "6", Score: 0.0}, {ID: "7", Score: 1.0}, {ID: "8", Score: 0.0},
+	}
+	baseScoresB1 := []stats.SampleScore{
+		{ID: "1", Score: 0.0}, {ID: "2", Score: 1.0}, {ID: "3", Score: 0.0}, {ID: "4", Score: 1.0},
+		{ID: "5", Score: 0.0}, {ID: "6", Score: 1.0}, {ID: "7", Score: 0.0}, {ID: "8", Score: 1.0},
+	}
+	fakeGCS.Objects["test-bucket/runs/cand-commit/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, candScoresB1)}
+	fakeGCS.Objects["test-bucket/runs/base-commit-hash/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, baseScoresB1)}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: "cand-commit"},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-hash/b1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-reuse-err", Namespace: "eval-runner", UID: "comp-reuse-uid"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-b1"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-b1"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         8,
+				MaxSamplesPerTask: 96,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingBaseRun, candRun, baseRun, comp).
+		WithStatusSubresource(existingBaseRun, candRun, baseRun, comp).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if run, ok := obj.(*v1alpha1.Run); ok && run.Name == "pre-existing-base-run-b2" {
+					return errors.New("simulated update error on reused baseline run")
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-reuse-err"}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err == nil {
+		t.Fatalf("Expected Reconcile to return error when addOwnerReference fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to add owner reference to reused baseline run \"pre-existing-base-run-b2\"") {
+		t.Errorf("Expected error mentioning reused baseline run, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "simulated update error on reused baseline run") {
+		t.Errorf("Expected root cause in error, got: %v", err)
+	}
+
+	// Verify comparison was not updated with batch 2
+	var checkComp v1alpha1.Comparison
+	_ = cl.Get(t.Context(), req.NamespacedName, &checkComp)
+	if len(checkComp.Status.Batches) > 1 {
+		t.Errorf("Comparison should not have scheduled batch 2 after owner reference failure, got batches: %+v", checkComp.Status.Batches)
+	}
+}
+
+func TestAdaptivePairedSampling_ExtraSamples_ConsumedRequestMarker_ShortOrFailedBatch(t *testing.T) {
+	scheme := setupScheme(t)
+	task1 := "task-short"
+	task2 := "task-normal"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	// Batch 1: 8 samples that decide "improved" for both tasks
+	var b1Cand, b1Base []stats.SampleScore
+	for i := 1; i <= 8; i++ {
+		b1Cand = append(b1Cand, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		b1Base = append(b1Base, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.0})
+	}
+	fakeGCS.Objects["test-bucket/runs/cand/b1-t1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task1, b1Cand)}
+	fakeGCS.Objects["test-bucket/runs/base/b1-t1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task1, b1Base)}
+	fakeGCS.Objects["test-bucket/runs/cand/b1-t2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task2, b1Cand)}
+	fakeGCS.Objects["test-bucket/runs/base/b1-t2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task2, b1Base)}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand"},
+			Model:       "mockllm/model",
+			Tasks:       []string{task1, task2},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: task1, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand/b1-t1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+				{ID: task2, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand/b1-t2.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base"},
+			Model:       "mockllm/model",
+			Tasks:       []string{task1, task2},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: task1, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base/b1-t1.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+				{ID: task2, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base/b1-t2.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-extra-short", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate:    v1alpha1.ComparisonRunRef{Run: "cand-run-b1"},
+			Baseline:     v1alpha1.ComparisonRunRef{Run: "base-run-b1"},
+			Sampling:     &v1alpha1.ComparisonSamplingSpec{BatchSize: 8, MaxSamplesPerTask: 8},
+			ExtraSamples: 8,
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-extra-short"}}
+
+	// Reconcile 1: All tasks decided (improved), extraSamples=8 > applied=0,
+	// so extra batch 2 is scheduled across all decided tasks (window 9-16),
+	// and extraSamplesApplied is set to 8 (consumed-request marker).
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile 1 failed: %v", err)
+	}
+
+	var compB2 v1alpha1.Comparison
+	_ = cl.Get(t.Context(), req.NamespacedName, &compB2)
+	if compB2.Status.ExtraSamplesApplied != 8 {
+		t.Fatalf("Expected ExtraSamplesApplied to be 8 after scheduling, got %d", compB2.Status.ExtraSamplesApplied)
+	}
+	if len(compB2.Status.Batches) != 2 {
+		t.Fatalf("Expected 2 batches scheduled, got %d", len(compB2.Status.Batches))
+	}
+
+	// In batch 2:
+	// task1 returns short (only 3 samples, 9-11 -> exhausted)
+	// task2 returns full window (8 samples, 9-16)
+	var b2ShortCand, b2ShortBase []stats.SampleScore
+	for i := 9; i <= 11; i++ {
+		b2ShortCand = append(b2ShortCand, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		b2ShortBase = append(b2ShortBase, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.0})
+	}
+	var b2FullCand, b2FullBase []stats.SampleScore
+	for i := 9; i <= 16; i++ {
+		b2FullCand = append(b2FullCand, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		b2FullBase = append(b2FullBase, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.0})
+	}
+	fakeGCS.Objects["test-bucket/runs/cand/b2-t1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task1, b2ShortCand)}
+	fakeGCS.Objects["test-bucket/runs/base/b2-t1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task1, b2ShortBase)}
+	fakeGCS.Objects["test-bucket/runs/cand/b2-t2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task2, b2FullCand)}
+	fakeGCS.Objects["test-bucket/runs/base/b2-t2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(task2, b2FullBase)}
+
+	var candB2, baseB2 v1alpha1.Run
+	_ = cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-extra-short-b2-cand"}, &candB2)
+	_ = cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-extra-short-b2-base"}, &baseB2)
+	candB2.Status.Phase = v1alpha1.RunPhaseCompleted
+	candB2.Status.Tasks = []v1alpha1.TaskStatus{
+		{ID: task1, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand/b2-t1.json", Samples: 3, SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16}},
+		{ID: task2, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand/b2-t2.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16}},
+	}
+	baseB2.Status.Phase = v1alpha1.RunPhaseCompleted
+	baseB2.Status.Tasks = []v1alpha1.TaskStatus{
+		{ID: task1, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base/b2-t1.json", Samples: 3, SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16}},
+		{ID: task2, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base/b2-t2.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16}},
+	}
+	_ = cl.Status().Update(t.Context(), &candB2)
+	_ = cl.Status().Update(t.Context(), &baseB2)
+
+	// Reconcile 2: Completes batch 2. ExtraSamplesApplied remains 8 as a consumed-request marker,
+	// even though task1 only returned 3 samples.
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile 2 failed: %v", err)
+	}
+
+	var compCompleted v1alpha1.Comparison
+	_ = cl.Get(t.Context(), req.NamespacedName, &compCompleted)
+	if compCompleted.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Fatalf("Expected comparison Completed, got %s", compCompleted.Status.Phase)
+	}
+	if compCompleted.Status.ExtraSamplesApplied != 8 {
+		t.Errorf("Expected ExtraSamplesApplied to remain 8 (consumed-request marker), got %d", compCompleted.Status.ExtraSamplesApplied)
+	}
+	if len(compCompleted.Status.Batches) != 2 {
+		t.Errorf("Expected exactly 2 batches, got %d", len(compCompleted.Status.Batches))
+	}
+
+	// Bump extraSamples to 16 -> triggers another batch for non-exhausted tasks (task2)
+	compCompleted.Spec.ExtraSamples = 16
+	_ = cl.Update(t.Context(), &compCompleted)
+
+	// Reconcile 3: Schedules batch 3 (window 17-24) for task2
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile 3 failed: %v", err)
+	}
+
+	var compB3 v1alpha1.Comparison
+	_ = cl.Get(t.Context(), req.NamespacedName, &compB3)
+	if compB3.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+		t.Fatalf("Expected comparison Running for batch 3, got %s", compB3.Status.Phase)
+	}
+	if compB3.Status.ExtraSamplesApplied != 16 {
+		t.Errorf("Expected ExtraSamplesApplied bumped to 16, got %d", compB3.Status.ExtraSamplesApplied)
+	}
+	if len(compB3.Status.Batches) != 3 {
+		t.Errorf("Expected 3 batches, got %d", len(compB3.Status.Batches))
+	}
+}
+
+func TestComparisonReconciler_MissingBatchRunMessage(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	candScores := []stats.SampleScore{{ID: "1", Score: 1.0}}
+	baseScores := []stats.SampleScore{{ID: "1", Score: 1.0}}
+	fakeGCS.Objects["test-bucket/runs/cand/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, candScores)}
+	fakeGCS.Objects["test-bucket/runs/base/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskID, baseScores)}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand"},
+			Model:       "mockllm/model",
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand/b1.json", Samples: 1, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base"},
+			Model:       "mockllm/model",
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base/b1.json", Samples: 1, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+			},
+		},
+	}
+
+	// Batch 2 candidate exists, but batch 2 baseline run ("shared-base-b2") was deleted / is missing!
+	candB2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-b2", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand"},
+			Model:       "mockllm/model",
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand/b1.json", Samples: 1, SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8}},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-missing-shared", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-b1"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-b1"},
+			Sampling:  &v1alpha1.ComparisonSamplingSpec{BatchSize: 4, MaxSamplesPerTask: 16},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase: v1alpha1.ComparisonPhaseRunning,
+			Batches: []v1alpha1.ComparisonBatchStatus{
+				{Index: 1, CandidateRun: "cand-b1", BaselineRun: "base-b1", Phase: v1alpha1.ComparisonPhaseCompleted},
+				{Index: 2, CandidateRun: "cand-b2", BaselineRun: "shared-base-b2", Phase: v1alpha1.ComparisonPhaseRunning},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, candB2, comp).
+		WithStatusSubresource(candRun, baseRun, candB2, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-missing-shared"}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	var compUpdated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &compUpdated); err != nil {
+		t.Fatalf("Get comparison failed: %v", err)
+	}
+
+	if compUpdated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("Expected comparison to terminate Completed, got %s", compUpdated.Status.Phase)
+	}
+	if compUpdated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+		t.Errorf("Expected verdict Inconclusive, got %s", compUpdated.Status.Verdict)
+	}
+	if !strings.Contains(compUpdated.Status.Message, "missing batch run: shared-base-b2") {
+		t.Errorf("Expected status.Message to explicitly name missing shared run, got %q", compUpdated.Status.Message)
+	}
+}

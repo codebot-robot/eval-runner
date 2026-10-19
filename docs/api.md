@@ -296,8 +296,8 @@ spec:
 | `equivalenceMargin` | `*float64` | Statistical equivalence margin $\delta$ (default: `0.05` for $\pm 0.05$). |
 | `sampling` | `*ComparisonSamplingSpec` | Optional. Configures adaptive paired batch sampling driven by the stopping rule. When omitted, only the single pair of referenced runs is compared. |
 | `sampling.batchSize` | `int` | Number of samples to evaluate in each subsequent batch (default: `8`). |
-| `sampling.maxSamplesPerTask` | `int` | Maximum total number of samples evaluated per task across all batches (default: `64`). |
-| `extraSamples` | `int` | Optional. Additional samples requested beyond the stopping rule per undecided task (or all tasks if decided) (default: `0`). Evaluates beyond `sampling.maxSamplesPerTask`; bumping triggers more. In PR workflows, review comments of the form `/eval more <n>` increment this value. |
+| `sampling.maxSamplesPerTask` | `int` | Maximum total number of samples evaluated per task across all batches (default: `64`). Clamps the stopping rule's sample range window; once reached without resolving, undecided tasks are marked `inconclusive`. Note that explicit `extraSamples` requests are not bounded by this cap. |
+| `extraSamples` | `int` | Optional. Additional samples requested beyond the stopping rule per undecided task (or all tasks if decided) (default: `0`). Evaluates beyond `sampling.maxSamplesPerTask` (explicit user requests are not bounded by the sample cap); bumping triggers more. In PR workflows, review comments of the form `/eval more <n>` increment this value. |
 | `tasks` | `[]string` | Optional allow-list of task IDs to evaluate. When omitted, all tasks present in both runs are compared. |
 
 ## Status (`status`)
