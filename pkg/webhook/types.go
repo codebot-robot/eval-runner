@@ -266,6 +266,36 @@ func ShortSHA(sha string) string {
 	return s[:7]
 }
 
+// RepoHash returns a deterministic 7-character lowercase hexadecimal SHA-256 hash
+// of the normalized repository name (e.g. "owner/repo").
+func RepoHash(repo string) string {
+	norm := strings.ToLower(strings.TrimSpace(repo))
+	h := sha256.Sum256([]byte(norm))
+	return hex.EncodeToString(h[:])[:7]
+}
+
+// ComparisonName returns the deterministic Comparison resource name for a PR.
+// If isMultiRepo is true, a 7-character repository hash is included (pr-<repoHash>-<prNum>)
+// to prevent collisions across allow-listed repositories. If false, the single-repo name
+// (pr-<prNum>) is returned for backwards compatibility.
+func ComparisonName(repo string, prNum int, isMultiRepo bool) string {
+	if isMultiRepo && repo != "" {
+		return fmt.Sprintf("pr-%s-%d", RepoHash(repo), prNum)
+	}
+	return fmt.Sprintf("pr-%d", prNum)
+}
+
+// CandidateRunName returns the deterministic candidate Run resource name for a PR and head commit.
+// If isMultiRepo is true, a 7-character repository hash is included (pr-<repoHash>-<prNum>-<headSHA7>)
+// to prevent collisions across allow-listed repositories. If false, the single-repo name
+// (pr-<prNum>-<headSHA7>) is returned for backwards compatibility.
+func CandidateRunName(repo string, prNum int, headSHA string, isMultiRepo bool) string {
+	if isMultiRepo && repo != "" {
+		return fmt.Sprintf("pr-%s-%d-%s", RepoHash(repo), prNum, ShortSHA(headSHA))
+	}
+	return fmt.Sprintf("pr-%d-%s", prNum, ShortSHA(headSHA))
+}
+
 // SanitizeLabelValue converts an arbitrary string (such as "owner/name") into a valid
 // Kubernetes label value:
 // - Max 63 characters

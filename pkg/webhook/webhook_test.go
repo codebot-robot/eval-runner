@@ -2424,3 +2424,381 @@ func TestProcessPullRequestClosed_PreservesSeedRunReusedBySurvivingComparison(t 
 		t.Errorf("expected comparison pr-8 to be preserved, got err: %v", err)
 	}
 }
+
+func TestRepoHashAndNaming(t *testing.T) {
+	// 1. RepoHash
+	h1 := RepoHash("gke-labs/eval-runner")
+	h2 := RepoHash("GKE-LABS/eval-runner")
+	h3 := RepoHash(" other-org/other-repo  ")
+	if len(h1) != 7 {
+		t.Errorf("expected RepoHash length 7, got %d (%s)", len(h1), h1)
+	}
+	if h1 != h2 {
+		t.Errorf("expected case-insensitive hash equality: %s vs %s", h1, h2)
+	}
+	if h1 == h3 {
+		t.Errorf("expected different hashes for different repos: %s vs %s", h1, h3)
+	}
+
+	// 2. IsMultiRepo
+	if IsMultiRepo(nil) {
+		t.Errorf("expected IsMultiRepo(nil) to be false")
+	}
+	if IsMultiRepo([]string{"gke-labs/eval-runner"}) {
+		t.Errorf("expected single-repo allow-list to not be multi-repo")
+	}
+	if IsMultiRepo([]string{"gke-labs/eval-runner", "gke-labs/eval-runner"}) {
+		t.Errorf("expected duplicate single-repo to not be multi-repo")
+	}
+	if !IsMultiRepo([]string{"gke-labs/eval-runner", "other/repo"}) {
+		t.Errorf("expected multiple repos to be multi-repo")
+	}
+	if !IsMultiRepo([]string{"*"}) {
+		t.Errorf("expected wildcard '*' to be multi-repo")
+	}
+
+	// 3. ComparisonName
+	singleComp := ComparisonName("gke-labs/eval-runner", 50, false)
+	if singleComp != "pr-50" {
+		t.Errorf("expected single-repo Comparison name 'pr-50', got %q", singleComp)
+	}
+	multiComp := ComparisonName("gke-labs/eval-runner", 50, true)
+	expectedMultiComp := fmt.Sprintf("pr-%s-50", h1)
+	if multiComp != expectedMultiComp {
+		t.Errorf("expected multi-repo Comparison name %q, got %q", expectedMultiComp, multiComp)
+	}
+
+	// 4. CandidateRunName
+	singleCand := CandidateRunName("gke-labs/eval-runner", 50, "1234567890abcdef", false)
+	if singleCand != "pr-50-1234567" {
+		t.Errorf("expected single-repo CandidateRun name 'pr-50-1234567', got %q", singleCand)
+	}
+	multiCand := CandidateRunName("gke-labs/eval-runner", 50, "1234567890abcdef", true)
+	expectedMultiCand := fmt.Sprintf("pr-%s-50-1234567", h1)
+	if multiCand != expectedMultiCand {
+		t.Errorf("expected multi-repo CandidateRun name %q, got %q", expectedMultiCand, multiCand)
+	}
+}
+
+func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T) {
+	secretKey := []byte("multi-repo-secret")
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Comparison{}).Build()
+
+	cfg := Config{
+		Namespace:           "eval-runner",
+		StaticWebhookSecret: secretKey,
+		WebhookRepositories: []string{"org1/repo1", "org2/repo2"},
+		DefaultModel:        "mockllm/model",
+		Client:              cl,
+	}
+
+	server := NewServer(cfg)
+	server.Start()
+	defer server.Stop()
+
+	sha1 := "aaaaaaa111111122222223333333444444455555"
+	sha2 := "bbbbbbb111111122222223333333444444455555"
+	baseSHA := "ccccccc111111122222223333333444444455555"
+
+	// 1. PR #50 on org1/repo1 opened
+	pr1Payload := fmt.Sprintf(`{
+		"action": "opened",
+		"number": 50,
+		"pull_request": {
+			"number": 50,
+			"head": {
+				"sha": %q,
+				"ref": "feature1",
+				"repo": {"full_name": "org1/repo1", "name": "repo1", "clone_url": "https://github.com/org1/repo1.git", "owner": {"login": "org1"}}
+			},
+			"base": {
+				"sha": %q,
+				"ref": "main",
+				"repo": {"full_name": "org1/repo1", "name": "repo1", "clone_url": "https://github.com/org1/repo1.git", "owner": {"login": "org1"}}
+			}
+		},
+		"repository": {"full_name": "org1/repo1", "name": "repo1", "clone_url": "https://github.com/org1/repo1.git", "owner": {"login": "org1"}}
+	}`, sha1, baseSHA)
+
+	sig1 := ComputeSignature([]byte(pr1Payload), secretKey)
+	req1 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader([]byte(pr1Payload)))
+	req1.Header.Set(HeaderGitHubEvent, EventPullRequest)
+	req1.Header.Set(HeaderHubSignature256, sig1)
+	rr1 := httptest.NewRecorder()
+	server.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for PR1, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+
+	hash1 := RepoHash("org1/repo1")
+	expectedComp1Name := fmt.Sprintf("pr-%s-50", hash1)
+	expectedCand1Name := fmt.Sprintf("pr-%s-50-aaaaaaa", hash1)
+
+	var comp1 v1alpha1.Comparison
+	pollUntil(t, 2*time.Second, func() bool {
+		return cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp1Name}, &comp1) == nil
+	})
+
+	var cand1 v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand1Name}, &cand1); err != nil {
+		t.Fatalf("expected candidate run %s to exist: %v", expectedCand1Name, err)
+	}
+
+	// 2. PR #50 on org2/repo2 opened (same PR number 50!)
+	pr2Payload := fmt.Sprintf(`{
+		"action": "opened",
+		"number": 50,
+		"pull_request": {
+			"number": 50,
+			"head": {
+				"sha": %q,
+				"ref": "feature2",
+				"repo": {"full_name": "org2/repo2", "name": "repo2", "clone_url": "https://github.com/org2/repo2.git", "owner": {"login": "org2"}}
+			},
+			"base": {
+				"sha": %q,
+				"ref": "main",
+				"repo": {"full_name": "org2/repo2", "name": "repo2", "clone_url": "https://github.com/org2/repo2.git", "owner": {"login": "org2"}}
+			}
+		},
+		"repository": {"full_name": "org2/repo2", "name": "repo2", "clone_url": "https://github.com/org2/repo2.git", "owner": {"login": "org2"}}
+	}`, sha2, baseSHA)
+
+	sig2 := ComputeSignature([]byte(pr2Payload), secretKey)
+	req2 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader([]byte(pr2Payload)))
+	req2.Header.Set(HeaderGitHubEvent, EventPullRequest)
+	req2.Header.Set(HeaderHubSignature256, sig2)
+	rr2 := httptest.NewRecorder()
+	server.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for PR2, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+
+	hash2 := RepoHash("org2/repo2")
+	expectedComp2Name := fmt.Sprintf("pr-%s-50", hash2)
+	expectedCand2Name := fmt.Sprintf("pr-%s-50-bbbbbbb", hash2)
+
+	if expectedComp1Name == expectedComp2Name {
+		t.Fatalf("expected distinct Comparison names, but both were %s", expectedComp1Name)
+	}
+	if expectedCand1Name == expectedCand2Name {
+		t.Fatalf("expected distinct CandidateRun names, but both were %s", expectedCand1Name)
+	}
+
+	var comp2 v1alpha1.Comparison
+	pollUntil(t, 2*time.Second, func() bool {
+		return cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp2Name}, &comp2) == nil
+	})
+
+	var cand2 v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand2Name}, &cand2); err != nil {
+		t.Fatalf("expected candidate run %s to exist: %v", expectedCand2Name, err)
+	}
+
+	// Verify comp1 was NOT overwritten or re-pointed
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp1Name}, &comp1); err != nil {
+		t.Fatalf("expected comp1 %s to still exist: %v", expectedComp1Name, err)
+	}
+	if comp1.Spec.Candidate.Run != expectedCand1Name {
+		t.Errorf("comp1 candidate run was corrupted: expected %s, got %s", expectedCand1Name, comp1.Spec.Candidate.Run)
+	}
+
+	// 3. Post /eval more 4 on org1/repo1 PR #50
+	comment1 := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 50,
+			"pull_request": {"url": "https://api.github.com/repos/org1/repo1/pulls/50"}
+		},
+		"comment": {
+			"id": 1001,
+			"body": "/eval more 4",
+			"user": {"login": "alice"}
+		},
+		"repository": {
+			"full_name": "org1/repo1",
+			"name": "repo1",
+			"owner": {"login": "org1"}
+		}
+	}`)
+	sigComment1 := ComputeSignature(comment1, secretKey)
+	reqComment1 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(comment1))
+	reqComment1.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqComment1.Header.Set(HeaderHubSignature256, sigComment1)
+	rrComment1 := httptest.NewRecorder()
+	server.ServeHTTP(rrComment1, reqComment1)
+	if rrComment1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for comment1, got %d: %s", rrComment1.Code, rrComment1.Body.String())
+	}
+
+	// Verify comp1 received the pending command, and comp2 did NOT
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp1Name}, &comp1); err != nil {
+		t.Fatalf("failed to get comp1: %v", err)
+	}
+	if len(comp1.Status.PendingCommands) != 1 || comp1.Status.PendingCommands[0].CommentID != 1001 {
+		t.Errorf("expected comp1 to have pending command 1001, got %v", comp1.Status.PendingCommands)
+	}
+
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp2Name}, &comp2); err != nil {
+		t.Fatalf("failed to get comp2: %v", err)
+	}
+	if len(comp2.Status.PendingCommands) != 0 {
+		t.Errorf("expected comp2 to have 0 pending commands, got %v", comp2.Status.PendingCommands)
+	}
+
+	// 4. Post /eval more 6 on org2/repo2 PR #50
+	comment2 := []byte(`{
+		"action": "created",
+		"issue": {
+			"number": 50,
+			"pull_request": {"url": "https://api.github.com/repos/org2/repo2/pulls/50"}
+		},
+		"comment": {
+			"id": 1002,
+			"body": "/eval more 6",
+			"user": {"login": "bob"}
+		},
+		"repository": {
+			"full_name": "org2/repo2",
+			"name": "repo2",
+			"owner": {"login": "org2"}
+		}
+	}`)
+	sigComment2 := ComputeSignature(comment2, secretKey)
+	reqComment2 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(comment2))
+	reqComment2.Header.Set(HeaderGitHubEvent, EventIssueComment)
+	reqComment2.Header.Set(HeaderHubSignature256, sigComment2)
+	rrComment2 := httptest.NewRecorder()
+	server.ServeHTTP(rrComment2, reqComment2)
+	if rrComment2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for comment2, got %d: %s", rrComment2.Code, rrComment2.Body.String())
+	}
+
+	// Verify comp2 received pending command 1002, and comp1 remains untouched
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp2Name}, &comp2); err != nil {
+		t.Fatalf("failed to get comp2: %v", err)
+	}
+	if len(comp2.Status.PendingCommands) != 1 || comp2.Status.PendingCommands[0].CommentID != 1002 {
+		t.Errorf("expected comp2 to have pending command 1002, got %v", comp2.Status.PendingCommands)
+	}
+
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp1Name}, &comp1); err != nil {
+		t.Fatalf("failed to get comp1: %v", err)
+	}
+	if len(comp1.Status.PendingCommands) != 1 || comp1.Status.PendingCommands[0].CommentID != 1001 {
+		t.Errorf("expected comp1 to still have only pending command 1001, got %v", comp1.Status.PendingCommands)
+	}
+
+	// 5. Close PR #50 on org1/repo1
+	closePayload := fmt.Sprintf(`{
+		"action": "closed",
+		"number": 50,
+		"pull_request": {
+			"number": 50,
+			"head": {"sha": %q, "ref": "feature1", "repo": {"full_name": "org1/repo1", "name": "repo1", "owner": {"login": "org1"}}},
+			"base": {"sha": %q, "ref": "main", "repo": {"full_name": "org1/repo1", "name": "repo1", "owner": {"login": "org1"}}}
+		},
+		"repository": {"full_name": "org1/repo1", "name": "repo1", "owner": {"login": "org1"}}
+	}`, sha1, baseSHA)
+	sigClose := ComputeSignature([]byte(closePayload), secretKey)
+	reqClose := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader([]byte(closePayload)))
+	reqClose.Header.Set(HeaderGitHubEvent, EventPullRequest)
+	reqClose.Header.Set(HeaderHubSignature256, sigClose)
+	rrClose := httptest.NewRecorder()
+	server.ServeHTTP(rrClose, reqClose)
+	if rrClose.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for close, got %d: %s", rrClose.Code, rrClose.Body.String())
+	}
+
+	// comp1 and cand1 must be deleted
+	pollUntil(t, 2*time.Second, func() bool {
+		return apierrors.IsNotFound(cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp1Name}, &comp1))
+	})
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand1Name}, &cand1); !apierrors.IsNotFound(err) {
+		t.Errorf("expected cand1 %s to be deleted, got err: %v", expectedCand1Name, err)
+	}
+
+	// comp2 and cand2 must be preserved!
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp2Name}, &comp2); err != nil {
+		t.Errorf("expected comp2 %s to be preserved, got err: %v", expectedComp2Name, err)
+	}
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand2Name}, &cand2); err != nil {
+		t.Errorf("expected cand2 %s to be preserved, got err: %v", expectedCand2Name, err)
+	}
+}
+
+func TestMultiRepo_BackwardsCompatibility_ExistingLegacyNames(t *testing.T) {
+	scheme := newTestScheme()
+
+	// Pre-create a legacy Comparison named "pr-50" without hash
+	legacyComp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-50",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:      "50",
+				LabelRepo:    "org1_repo1",
+				LabelHeadSHA: "1111111111111111111111111111111111111111",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-abcdef1"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "pr-50-1111111"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org1/repo1",
+				Number:     50,
+				HeadSHA:    "1111111111111111111111111111111111111111",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(legacyComp).
+		WithStatusSubresource(legacyComp).
+		Build()
+
+	cfg := Config{
+		Namespace:           "eval-runner",
+		DefaultModel:        "mockllm/model",
+		WebhookRepositories: []string{"org1/repo1", "org2/repo2"}, // multi-repo enabled!
+		Client:              cl,
+	}
+	worker := NewWorkerPool(cfg)
+	ctx := t.Context()
+
+	// 1. Synchronize event for org1/repo1 PR #50 with new commit
+	syncItem := &PullRequestWorkItem{
+		PRNumber:          50,
+		HeadSHA:           "2222222222222222222222222222222222222222",
+		BaseSHA:           "abcdef1234567890abcdef1234567890abcdef12",
+		CandidateCloneURL: "https://github.com/org1/repo1.git",
+		CandidateRepo:     "org1/repo1",
+		BaselineCloneURL:  "https://github.com/org1/repo1.git",
+		BaselineRepo:      "org1/repo1",
+		TargetRepo:        "org1/repo1",
+	}
+
+	if err := worker.ProcessPullRequest(ctx, syncItem); err != nil {
+		t.Fatalf("ProcessPullRequest failed: %v", err)
+	}
+
+	// Verify legacy comparison "pr-50" was updated in-place (not duplicated)
+	var updatedComp v1alpha1.Comparison
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-50"}, &updatedComp); err != nil {
+		t.Fatalf("expected legacy comparison pr-50 to exist: %v", err)
+	}
+	if updatedComp.Spec.PullRequest.HeadSHA != "2222222222222222222222222222222222222222" {
+		t.Errorf("expected HeadSHA updated to 2222222222222222222222222222222222222222, got %s", updatedComp.Spec.PullRequest.HeadSHA)
+	}
+
+	// Verify no new Comparison was created
+	var compList v1alpha1.ComparisonList
+	if err := cl.List(ctx, &compList, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list comparisons: %v", err)
+	}
+	if len(compList.Items) != 1 {
+		t.Errorf("expected exactly 1 comparison (reusing legacy pr-50), got %d", len(compList.Items))
+	}
+}

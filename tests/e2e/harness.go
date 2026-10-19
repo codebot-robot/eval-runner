@@ -168,7 +168,7 @@ data:
   defaultBatchSize: "8"
   defaultMaxSamplesPerTask: "64"
   commandUsers: "reviewer"
-  webhookRepositories: "*"
+  webhookRepositories: "gke-labs/eval-runner"
 `
 	h.KubectlApplyContent(cmManifest)
 

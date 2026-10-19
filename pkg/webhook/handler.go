@@ -467,16 +467,10 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 	}
 
 	prNum := event.Issue.Number
-	compName := fmt.Sprintf("pr-%d", prNum)
-	key := types.NamespacedName{
-		Namespace: s.cfg.Namespace,
-		Name:      compName,
-	}
 
-	var comp v1alpha1.Comparison
+	var comp *v1alpha1.Comparison
 	alreadyHandled := false
 	queueFull := false
-	repoMismatch := false
 
 	backoff := wait.Backoff{
 		Steps:    10,
@@ -486,13 +480,13 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 	}
 
 	err = retry.OnError(backoff, apierrors.IsConflict, func() error {
-		if getErr := s.cfg.Client.Get(r.Context(), key, &comp); getErr != nil {
+		var getErr error
+		comp, getErr = FindComparisonForPR(r.Context(), s.cfg.Client, s.cfg.Namespace, repoFullName, prNum)
+		if getErr != nil {
 			return getErr
 		}
-
-		if comp.Spec.PullRequest == nil || !strings.EqualFold(comp.Spec.PullRequest.Repository, repoFullName) {
-			repoMismatch = true
-			return nil
+		if comp == nil {
+			return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("comparisons").GroupResource(), fmt.Sprintf("pr-%d for %s", prNum, repoFullName))
 		}
 
 		for _, cmd := range comp.Status.PendingCommands {
@@ -522,23 +516,17 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 
 		comp.Status.PendingCommands = append(comp.Status.PendingCommands, newCmd)
 
-		return s.cfg.Client.Status().Update(r.Context(), &comp)
+		return s.cfg.Client.Status().Update(r.Context(), comp)
 	})
 
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Printf("comparison %s/%s not found for PR #%d", s.cfg.Namespace, compName, prNum)
+			log.Printf("comparison for %s PR #%d not found", repoFullName, prNum)
 			writeResponse(w, http.StatusOK, "ignored: comparison not found\n")
 			return
 		}
-		log.Printf("error updating comparison %s/%s: %v", s.cfg.Namespace, compName, err)
+		log.Printf("error updating comparison for %s PR #%d: %v", repoFullName, prNum, err)
 		http.Error(w, fmt.Sprintf("Failed to update comparison: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if repoMismatch {
-		log.Printf("comparison %s/%s repository does not match %s for PR #%d (delivery %s)", s.cfg.Namespace, compName, repoFullName, prNum, deliveryID)
-		writeResponse(w, http.StatusOK, "ignored: comparison not found\n")
 		return
 	}
 
@@ -549,6 +537,10 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 	}
 
 	if queueFull {
+		compName := ""
+		if comp != nil {
+			compName = comp.Name
+		}
 		log.Printf("pending commands queue full on Comparison %s/%s for PR #%d; dropping command %d (delivery %s)", s.cfg.Namespace, compName, prNum, event.Comment.ID, deliveryID)
 		writeResponse(w, http.StatusOK, "ignored: pending commands queue full\n")
 		return
