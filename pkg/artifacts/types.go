@@ -18,6 +18,9 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 )
 
 // ErrNotFound indicates that an artifact was not found in the sink.
@@ -90,6 +93,59 @@ type TaskSummary struct {
 	Latency         *TaskLatency `json:"latency,omitempty"`
 	CostUSD         *float64     `json:"costUSD,omitempty"`
 	PossibleSamples int          `json:"possibleSamples,omitempty"`
+}
+
+// ComparisonTaskArtifact records paired comparison details for a single task in the artifact JSON.
+type ComparisonTaskArtifact struct {
+	ID               string                           `json:"id"`
+	BaseRate         float64                          `json:"baseRate"`
+	CandidateRate    float64                          `json:"candidateRate"`
+	Delta            float64                          `json:"delta"`
+	DeltaCI          v1alpha1.DeltaConfidenceInterval `json:"deltaCI"`
+	Pairs            int                              `json:"pairs"`
+	Wins             int                              `json:"wins"`
+	Losses           int                              `json:"losses"`
+	Ties             int                              `json:"ties"`
+	Dropped          v1alpha1.ComparisonDropped       `json:"dropped"`
+	Label            string                           `json:"label"`
+	PImprovement     float64                          `json:"pImprovement"`
+	SamplesRun       int                              `json:"samplesRun,omitempty"`
+	Decision         string                           `json:"decision,omitempty"`
+	SuggestedNext    int                              `json:"suggestedNext,omitempty"`
+	Tokens           *v1alpha1.TaskTokens             `json:"tokens,omitempty"`
+	CandidateTokens  *v1alpha1.TaskTokens             `json:"candidateTokens,omitempty"`
+	BaseTokens       *v1alpha1.TaskTokens             `json:"baseTokens,omitempty"`
+	Latency          *v1alpha1.TaskLatency            `json:"latency,omitempty"`
+	CandidateLatency *v1alpha1.TaskLatency            `json:"candidateLatency,omitempty"`
+	BaseLatency      *v1alpha1.TaskLatency            `json:"baseLatency,omitempty"`
+	CostUSD          *float64                         `json:"costUSD,omitempty"`
+	CandidateCostUSD *float64                         `json:"candidateCostUSD,omitempty"`
+	BaseCostUSD      *float64                         `json:"baseCostUSD,omitempty"`
+	PossibleSamples  int                              `json:"possibleSamples,omitempty"`
+	// PairsTable records paired scores for each sample in execution order (candidate log order).
+	// Callers (such as the UI CI-history chart) rely on this ordering to reconstruct batch prefix series.
+	PairsTable []stats.PairedSampleScore `json:"pairsTable,omitempty"`
+}
+
+// ComparisonArtifact is the schema stored as comparisons/<name>.json in the artifact sink.
+type ComparisonArtifact struct {
+	Comparison            string                           `json:"comparison"`
+	Namespace             string                           `json:"namespace"`
+	Baseline              string                           `json:"baseline"`
+	Candidate             string                           `json:"candidate"`
+	Verdict               string                           `json:"verdict"`
+	PImprovement          float64                          `json:"pImprovement"`
+	CostUSD               *float64                         `json:"costUSD,omitempty"`
+	PossibleSamples       int                              `json:"possibleSamples,omitempty"`
+	Summary               string                           `json:"summary,omitempty"`
+	Tasks                 []ComparisonTaskArtifact         `json:"tasks"`
+	Batches               []v1alpha1.ComparisonBatchStatus `json:"batches,omitempty"`
+	CreatedAt             time.Time                        `json:"createdAt"`
+	SkippedNotPlanned     []string                         `json:"skippedNotPlanned,omitempty"`
+	NotExecuted           []string                         `json:"notExecuted,omitempty"`
+	NotExecutedByBothRuns []string                         `json:"notExecutedByBothRuns,omitempty"`
+	FailedInBothRuns      []string                         `json:"failedInBothRuns,omitempty"`
+	CandidateFailed       []string                         `json:"candidateFailed,omitempty"`
 }
 
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.

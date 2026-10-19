@@ -62,63 +62,13 @@ const (
 )
 
 // PairedSampleScore records paired scores for a single sample ID.
-type PairedSampleScore struct {
-	ID             string  `json:"id"`
-	BaseScore      float64 `json:"baseScore"`
-	CandidateScore float64 `json:"candidateScore"`
-	Delta          float64 `json:"delta"`
-}
+type PairedSampleScore = stats.PairedSampleScore
 
 // ComparisonTaskArtifact records paired comparison details for a single task in the artifact JSON.
-type ComparisonTaskArtifact struct {
-	ID               string                           `json:"id"`
-	BaseRate         float64                          `json:"baseRate"`
-	CandidateRate    float64                          `json:"candidateRate"`
-	Delta            float64                          `json:"delta"`
-	DeltaCI          v1alpha1.DeltaConfidenceInterval `json:"deltaCI"`
-	Pairs            int                              `json:"pairs"`
-	Wins             int                              `json:"wins"`
-	Losses           int                              `json:"losses"`
-	Ties             int                              `json:"ties"`
-	Dropped          v1alpha1.ComparisonDropped       `json:"dropped"`
-	Label            string                           `json:"label"`
-	PImprovement     float64                          `json:"pImprovement"`
-	SamplesRun       int                              `json:"samplesRun,omitempty"`
-	Decision         string                           `json:"decision,omitempty"`
-	SuggestedNext    int                              `json:"suggestedNext,omitempty"`
-	Tokens           *v1alpha1.TaskTokens             `json:"tokens,omitempty"`
-	CandidateTokens  *v1alpha1.TaskTokens             `json:"candidateTokens,omitempty"`
-	BaseTokens       *v1alpha1.TaskTokens             `json:"baseTokens,omitempty"`
-	Latency          *v1alpha1.TaskLatency            `json:"latency,omitempty"`
-	CandidateLatency *v1alpha1.TaskLatency            `json:"candidateLatency,omitempty"`
-	BaseLatency      *v1alpha1.TaskLatency            `json:"baseLatency,omitempty"`
-	CostUSD          *float64                         `json:"costUSD,omitempty"`
-	CandidateCostUSD *float64                         `json:"candidateCostUSD,omitempty"`
-	BaseCostUSD      *float64                         `json:"baseCostUSD,omitempty"`
-	PossibleSamples  int                              `json:"possibleSamples,omitempty"`
-	PairsTable       []PairedSampleScore              `json:"pairsTable,omitempty"`
-}
+type ComparisonTaskArtifact = artifacts.ComparisonTaskArtifact
 
 // ComparisonArtifact is the schema stored as comparisons/<name>.json in the artifact sink.
-type ComparisonArtifact struct {
-	Comparison            string                           `json:"comparison"`
-	Namespace             string                           `json:"namespace"`
-	Baseline              string                           `json:"baseline"`
-	Candidate             string                           `json:"candidate"`
-	Verdict               string                           `json:"verdict"`
-	PImprovement          float64                          `json:"pImprovement"`
-	CostUSD               *float64                         `json:"costUSD,omitempty"`
-	PossibleSamples       int                              `json:"possibleSamples,omitempty"`
-	Summary               string                           `json:"summary,omitempty"`
-	Tasks                 []ComparisonTaskArtifact         `json:"tasks"`
-	Batches               []v1alpha1.ComparisonBatchStatus `json:"batches,omitempty"`
-	CreatedAt             time.Time                        `json:"createdAt"`
-	SkippedNotPlanned     []string                         `json:"skippedNotPlanned,omitempty"`
-	NotExecuted           []string                         `json:"notExecuted,omitempty"`
-	NotExecutedByBothRuns []string                         `json:"notExecutedByBothRuns,omitempty"`
-	FailedInBothRuns      []string                         `json:"failedInBothRuns,omitempty"`
-	CandidateFailed       []string                         `json:"candidateFailed,omitempty"`
-}
+type ComparisonArtifact = artifacts.ComparisonArtifact
 
 // GitHubCredentials holds credentials extracted from a Secret for factory injection.
 type GitHubCredentials struct {
@@ -1985,28 +1935,26 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		for _, s := range te.candScores {
 			candMap[s.ID] = s.Score
 		}
-		baseMap := make(map[string]float64)
+		baseMap := make(map[string]float64, len(te.baseScores))
 		for _, s := range te.baseScores {
 			baseMap[s.ID] = s.Score
 		}
-		var commonIDs []string
-		for id := range candMap {
-			if _, ok := baseMap[id]; ok {
-				commonIDs = append(commonIDs, id)
-			}
-		}
-		sort.Strings(commonIDs)
 
 		var pairsTable []PairedSampleScore
-		for _, id := range commonIDs {
-			cScore := candMap[id]
-			bScore := baseMap[id]
-			pairsTable = append(pairsTable, PairedSampleScore{
-				ID:             id,
-				BaseScore:      bScore,
-				CandidateScore: cScore,
-				Delta:          cScore - bScore,
-			})
+		seen := make(map[string]bool, len(te.candScores))
+		for _, s := range te.candScores {
+			if seen[s.ID] {
+				continue
+			}
+			seen[s.ID] = true
+			if bScore, ok := baseMap[s.ID]; ok {
+				pairsTable = append(pairsTable, PairedSampleScore{
+					ID:             s.ID,
+					BaseScore:      bScore,
+					CandidateScore: s.Score,
+					Delta:          s.Score - bScore,
+				})
+			}
 		}
 
 		taskArtifacts = append(taskArtifacts, ComparisonTaskArtifact{

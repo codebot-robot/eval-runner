@@ -631,6 +631,180 @@ type ComparisonDetailView struct {
 	CostUSD          *float64
 	PossibleSamples  int
 	SamplesSummary   string
+
+	// Histories contains per-task CI history points and inline SVG for tasks with pairs >= 2.
+	Histories []ComparisonTaskHistory
+
+	// HistoryNote is set when comparison history cannot be loaded (e.g. "artifact storage unavailable" or "history not available").
+	HistoryNote string
+}
+
+// ComparisonTaskHistory holds the recomputed CI width history and SVG for a single task.
+type ComparisonTaskHistory struct {
+	TaskID string
+	Points []ComparisonHistoryPoint
+	SVG    ComparisonHistorySVG
+}
+
+// ComparisonHistoryPoint holds a single point in the CI history table beneath the chart.
+type ComparisonHistoryPoint struct {
+	N              int
+	DeltaFormatted string
+	CIFormatted    string
+	CIWidth        float64
+	Decision       string
+	DecisionChip   string
+}
+
+// ComparisonHistorySVG holds precomputed numeric coordinates for inline SVG rendering.
+type ComparisonHistorySVG struct {
+	ViewBox     string
+	X0          float64
+	Y0          float64
+	X1          float64
+	Y1          float64
+	MarginY     float64
+	MarginLabel string
+	PointsAttr  string
+	Circles     []SVGCircle
+	FinalLabel  SVGFinalLabel
+	XAxisTicks  []SVGTick
+	YAxisTicks  []SVGTick
+}
+
+// SVGCircle represents a data point circle on the SVG chart.
+type SVGCircle struct {
+	CX float64
+	CY float64
+	R  float64
+}
+
+// SVGFinalLabel represents the label positioned at the final point.
+type SVGFinalLabel struct {
+	X    float64
+	Y    float64
+	Text string
+}
+
+// SVGTick represents an axis tick with a numeric coordinate and label.
+type SVGTick struct {
+	X     float64
+	Y     float64
+	Y1    float64
+	Y2    float64
+	TextY float64
+	Text  string
+}
+
+// DecisionChipClass returns the CSS chip class for a stats decision label string.
+func DecisionChipClass(label string) string {
+	switch label {
+	case "improved":
+		return "good"
+	case "regressed":
+		return "bad"
+	case "unchanged":
+		return "neutral"
+	case "inconclusive":
+		return "warn"
+	default:
+		return "pending"
+	}
+}
+
+// BuildComparisonHistorySVG generates server-side numeric SVG coordinates for CI width vs n.
+func BuildComparisonHistorySVG(points []ComparisonHistoryPoint, margin float64) ComparisonHistorySVG {
+	const (
+		viewBox = "0 0 640 220"
+		x0      = 60.0
+		x1      = 560.0
+		y0      = 25.0
+		y1      = 175.0
+	)
+
+	if len(points) == 0 {
+		return ComparisonHistorySVG{ViewBox: viewBox, X0: x0, Y0: y0, X1: x1, Y1: y1}
+	}
+
+	nMax := points[len(points)-1].N
+	if nMax <= 0 {
+		nMax = 1
+	}
+
+	maxCIWidth := margin
+	for _, pt := range points {
+		if pt.CIWidth > maxCIWidth {
+			maxCIWidth = pt.CIWidth
+		}
+	}
+
+	yMax := maxCIWidth * 1.25
+	if yMax < 0.20 {
+		yMax = 0.20
+	}
+
+	marginY := y1 - (margin/yMax)*(y1-y0)
+	marginLabel := fmt.Sprintf("margin ±%.2f", margin)
+
+	var pointsAttrBuilder strings.Builder
+	circles := make([]SVGCircle, len(points))
+
+	for i, pt := range points {
+		cx := x0 + (float64(pt.N)/float64(nMax))*(x1-x0)
+		cy := y1 - (pt.CIWidth/yMax)*(y1-y0)
+		circles[i] = SVGCircle{CX: cx, CY: cy, R: 4.0}
+
+		if i > 0 {
+			pointsAttrBuilder.WriteByte(' ')
+		}
+		pointsAttrBuilder.WriteString(fmt.Sprintf("%.1f,%.1f", cx, cy))
+	}
+
+	lastPt := points[len(points)-1]
+	lastCircle := circles[len(circles)-1]
+	finalLabelY := lastCircle.CY - 10.0
+	if finalLabelY < y0+10.0 {
+		finalLabelY = lastCircle.CY + 15.0
+	}
+	finalLabelX := lastCircle.CX
+	if finalLabelX > x1-60.0 {
+		finalLabelX = x1 - 60.0
+	}
+	finalLabel := SVGFinalLabel{
+		X:    finalLabelX,
+		Y:    finalLabelY,
+		Text: fmt.Sprintf("n=%d (%.2f)", lastPt.N, lastPt.CIWidth),
+	}
+
+	var xTicks []SVGTick
+	xTicks = append(xTicks, SVGTick{X: x0, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: "0"})
+	if nMax >= 8 {
+		midN := nMax / 2
+		midX := x0 + (float64(midN)/float64(nMax))*(x1-x0)
+		xTicks = append(xTicks, SVGTick{X: midX, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: fmt.Sprintf("%d", midN)})
+	}
+	xTicks = append(xTicks, SVGTick{X: x1, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: fmt.Sprintf("%d", nMax)})
+
+	yTicks := []SVGTick{
+		{X: x0 - 8.0, Y: y1 + 4.0, Text: "0.00"},
+		{X: x0 - 8.0, Y: marginY + 4.0, Text: fmt.Sprintf("%.2f", margin)},
+		{X: x0 - 8.0, Y: y0 + 4.0, Text: fmt.Sprintf("%.2f", yMax)},
+	}
+
+	return ComparisonHistorySVG{
+		ViewBox:     viewBox,
+		X0:          x0,
+		Y0:          y0,
+		X1:          x1,
+		Y1:          y1,
+		MarginY:     marginY,
+		MarginLabel: marginLabel,
+		PointsAttr:  pointsAttrBuilder.String(),
+		Circles:     circles,
+		FinalLabel:  finalLabel,
+		XAxisTicks:  xTicks,
+		YAxisTicks:  yTicks,
+	}
 }
 
 // NewComparisonDetailView constructs a ComparisonDetailView from a Comparison and optional Runs.

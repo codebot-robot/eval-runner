@@ -340,3 +340,140 @@ func TestTieSplittingAndNormalFallback(t *testing.T) {
 		t.Errorf("BayesianBootstrapPImprovement(3W/2L/15T) = %v, want ~0.656 (Beta(4, 3))", pBoot3W2L)
 	}
 }
+
+func TestComputePairedCISeries_Deterministic(t *testing.T) {
+	pairs := make([]PairedSampleScore, 12)
+	for i := 0; i < 12; i++ {
+		base := 0.5
+		cand := 0.5 + float64(i%3)*0.2
+		pairs[i] = PairedSampleScore{
+			ID:             fmt.Sprintf("sample-%d", i),
+			BaseScore:      base,
+			CandidateScore: cand,
+			Delta:          cand - base,
+		}
+	}
+
+	nValues := []int{4, 8, 12}
+	run1 := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05, 0)
+	run2 := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05, 0)
+
+	if len(run1) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(run1))
+	}
+	if len(run2) != 3 {
+		t.Fatalf("expected 3 points in run2, got %d", len(run2))
+	}
+
+	for i := range run1 {
+		p1, p2 := run1[i], run2[i]
+		if p1.N != p2.N {
+			t.Errorf("point %d: N mismatch (%d vs %d)", i, p1.N, p2.N)
+		}
+		if p1.CIWidth != p2.CIWidth {
+			t.Errorf("point %d: CIWidth mismatch (%v vs %v)", i, p1.CIWidth, p2.CIWidth)
+		}
+		if p1.Estimate.MeanDelta != p2.Estimate.MeanDelta {
+			t.Errorf("point %d: MeanDelta mismatch (%v vs %v)", i, p1.Estimate.MeanDelta, p2.Estimate.MeanDelta)
+		}
+		if p1.Estimate.CI != p2.Estimate.CI {
+			t.Errorf("point %d: CI mismatch (%v vs %v)", i, p1.Estimate.CI, p2.Estimate.CI)
+		}
+		if p1.Decision.Label != p2.Decision.Label {
+			t.Errorf("point %d: Decision.Label mismatch (%v vs %v)", i, p1.Decision.Label, p2.Decision.Label)
+		}
+	}
+}
+
+func TestComputePairedCISeries_SeriesAtGivenN(t *testing.T) {
+	pairs := make([]PairedSampleScore, 12)
+	for i := 0; i < 12; i++ {
+		cand := 0.8
+		base := 0.6
+		pairs[i] = PairedSampleScore{
+			ID:             fmt.Sprintf("sample-%d", i),
+			BaseScore:      base,
+			CandidateScore: cand,
+			Delta:          cand - base,
+		}
+	}
+
+	nValues := []int{4, 8, 12}
+	series := ComputePairedCISeries(pairs, nValues, 0.95, 42, 0.05, 0)
+
+	if len(series) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(series))
+	}
+
+	expectedNs := []int{4, 8, 12}
+	for i, pt := range series {
+		if pt.N != expectedNs[i] {
+			t.Errorf("point %d: expected N=%d, got %d", i, expectedNs[i], pt.N)
+		}
+		expectedWidth := pt.Estimate.CI.Upper - pt.Estimate.CI.Lower
+		if math.Abs(pt.CIWidth-expectedWidth) > 1e-9 {
+			t.Errorf("point %d: expected CIWidth %v, got %v", i, expectedWidth, pt.CIWidth)
+		}
+		if i > 0 && pt.N <= series[i-1].N {
+			t.Errorf("expected strictly monotone n, but pt[%d].N=%d <= pt[%d].N=%d", i, pt.N, i-1, series[i-1].N)
+		}
+	}
+}
+
+func TestComputePairedCISeries_SampleCapDecisionParity(t *testing.T) {
+	// Undecided differences: alternating wins and losses with mean near zero
+	pairs := make([]PairedSampleScore, 12)
+	for i := 0; i < 12; i++ {
+		cand := 0.5
+		if i%2 == 0 {
+			cand = 0.9
+		} else {
+			cand = 0.1
+		}
+		pairs[i] = PairedSampleScore{
+			ID:             fmt.Sprintf("sample-%d", i),
+			BaseScore:      0.5,
+			CandidateScore: cand,
+			Delta:          cand - 0.5,
+		}
+	}
+
+	// With sampleCap = 12: at n=4 and n=8 it continues, but at n=12 (reaching cap) it resolves to inconclusive
+	series := ComputePairedCISeries(pairs, []int{4, 8, 12}, 0.95, 42, 0.05, 12)
+	if len(series) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(series))
+	}
+	if series[0].Decision.Label != TaskLabelContinue {
+		t.Errorf("at n=4 before cap, expected continue, got %v", series[0].Decision.Label)
+	}
+	if series[2].Decision.Label != TaskLabelInconclusive {
+		t.Errorf("at n=12 reaching cap, expected inconclusive, got %v", series[2].Decision.Label)
+	}
+}
+
+func TestComputePairedCISeries_EdgeCases(t *testing.T) {
+	// Pairs < 2 returns nil
+	if res := ComputePairedCISeries(nil, []int{4}, 0.95, 42, 0.05, 0); res != nil {
+		t.Errorf("expected nil for nil pairs, got %v", res)
+	}
+	onePair := []PairedSampleScore{{ID: "1", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3}}
+	if res := ComputePairedCISeries(onePair, []int{1}, 0.95, 42, 0.05, 0); res != nil {
+		t.Errorf("expected nil for single pair, got %v", res)
+	}
+
+	// nValues with n < 2, n > len(pairs), duplicates or non-monotone
+	pairs := []PairedSampleScore{
+		{ID: "1", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3},
+		{ID: "2", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3},
+		{ID: "3", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3},
+		{ID: "4", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3},
+	}
+	// n=1 (<2), n=3 (valid), n=2 (non-monotone), n=4 (valid), n=10 (>len)
+	res := ComputePairedCISeries(pairs, []int{1, 3, 2, 4, 10}, 0.95, 42, 0.05, 0)
+	if len(res) != 2 {
+		t.Fatalf("expected 2 valid points (n=3 and n=4), got %d", len(res))
+	}
+	if res[0].N != 3 || res[1].N != 4 {
+		t.Errorf("expected points at N=3 and N=4, got N=%d and N=%d", res[0].N, res[1].N)
+	}
+}

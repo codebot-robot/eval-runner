@@ -450,6 +450,142 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 	}
 }
 
+func TestComparisonReconciler_PairsTableExecutionOrder(t *testing.T) {
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	// Execution order: sample-10, sample-2, sample-1, sample-20
+	// If sorted lexicographically: sample-1, sample-10, sample-2, sample-20
+	executionOrder := []string{"sample-10", "sample-2", "sample-1", "sample-20"}
+
+	var candScores []stats.SampleScore
+	var baseScores []stats.SampleScore
+	for _, id := range executionOrder {
+		candScores = append(candScores, stats.SampleScore{ID: id, Score: 1.0})
+		baseScores = append(baseScores, stats.SampleScore{ID: id, Score: 0.5})
+	}
+	// Add an unpaired baseline and candidate sample to ensure skipping works
+	candScores = append(candScores, stats.SampleScore{ID: "cand-only", Score: 1.0})
+	baseScores = append([]stats.SampleScore{{ID: "base-only", Score: 0.5}}, baseScores...)
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	candLogPath := "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"
+	baseLogPath := "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json"
+
+	fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(taskID, candScores),
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(taskID, baseScores),
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cand-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: candLogPath,
+				},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: baseLogPath,
+				},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-comp-order",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      comp.Name,
+			Namespace: comp.Namespace,
+		},
+	}
+
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	artObj, exists := fakeGCS.Objects["test-bucket/comparisons/test-comp-order.json"]
+	if !exists {
+		t.Fatalf("Expected comparison artifact in GCS")
+	}
+
+	var artifact ComparisonArtifact
+	if err := json.Unmarshal(artObj.Data, &artifact); err != nil {
+		t.Fatalf("Failed to parse stored comparison artifact: %v", err)
+	}
+
+	if len(artifact.Tasks) != 1 {
+		t.Fatalf("Expected 1 task in artifact, got %d", len(artifact.Tasks))
+	}
+
+	pairs := artifact.Tasks[0].PairsTable
+	if len(pairs) != len(executionOrder) {
+		t.Fatalf("Expected %d pairs, got %d", len(executionOrder), len(pairs))
+	}
+
+	for i, wantID := range executionOrder {
+		if pairs[i].ID != wantID {
+			t.Errorf("pairsTable[%d].ID: got %q, want execution order %q", i, pairs[i].ID, wantID)
+		}
+	}
+}
+
 func TestComparisonReconciler_MissingRuns(t *testing.T) {
 	scheme := setupScheme(t)
 

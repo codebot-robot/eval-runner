@@ -34,6 +34,22 @@ type SampleScore struct {
 	Score float64 `json:"score"`
 }
 
+// PairedSampleScore records paired scores for a single sample ID.
+type PairedSampleScore struct {
+	ID             string  `json:"id"`
+	BaseScore      float64 `json:"baseScore"`
+	CandidateScore float64 `json:"candidateScore"`
+	Delta          float64 `json:"delta"`
+}
+
+// PairedCISeriesPoint represents a single evaluation point in a CI-vs-n history series.
+type PairedCISeriesPoint struct {
+	N        int            `json:"n"`
+	Estimate PairedEstimate `json:"estimate"`
+	CIWidth  float64        `json:"ciWidth"`
+	Decision Decision       `json:"decision"`
+}
+
 // PairedEstimate contains the statistics from a paired comparison between
 // a candidate configuration (e.g. PR) and baseline.
 type PairedEstimate struct {

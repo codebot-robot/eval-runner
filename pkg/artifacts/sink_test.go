@@ -176,9 +176,26 @@ func TestLocalDirSink_StoreComparisonAndLoad(t *testing.T) {
 		t.Errorf("Expected content %s, got %s", runPayload, loaded)
 	}
 
-	// Reject loading artifacts outside runs/
-	if _, err := sink.Load(t.Context(), savedPath); err == nil {
-		t.Errorf("Expected error loading path outside runs/, got nil")
+	// Load comparison artifact succeeds
+	loadedComp, err := sink.Load(t.Context(), savedPath)
+	if err != nil {
+		t.Fatalf("Load comparison failed: %v", err)
+	}
+	if string(loadedComp) != string(payload) {
+		t.Errorf("Expected content %s, got %s", payload, loadedComp)
+	}
+
+	// Reject loading artifacts outside runs/ or comparisons/
+	otherDir := filepath.Join(tempDir, "other")
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatalf("Failed to create otherDir: %v", err)
+	}
+	otherPath := filepath.Join(otherDir, "file.json")
+	if err := os.WriteFile(otherPath, []byte("{}"), 0644); err != nil {
+		t.Fatalf("Failed to write otherPath: %v", err)
+	}
+	if _, err := sink.Load(t.Context(), otherPath); err == nil {
+		t.Errorf("Expected error loading path outside runs/ or comparisons/, got nil")
 	}
 
 	// Test empty BaseDir in Load

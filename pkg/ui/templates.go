@@ -636,6 +636,73 @@ const comparisonDetailTemplate = `
           {{ end }}
         </ul>
         {{- end }}
+        {{- if or .Histories .HistoryNote }}
+        <h2 style="font-size:17px;font-weight:600;margin:24px 0 12px">Confidence Interval History</h2>
+        {{- if .HistoryNote }}
+        <div style="font-size:13px;color:var(--muted);padding:8px 0">{{ .HistoryNote }}</div>
+        {{- end }}
+        {{- range .Histories }}
+        <div style="margin-top:16px">
+          <div class="mono" style="font-weight:600;font-size:14px;margin-bottom:8px">{{ .TaskID }}</div>
+          <div style="overflow-x:auto">
+            <svg viewBox="{{ .SVG.ViewBox }}" width="100%" height="220" style="max-width:640px;display:block">
+              <!-- Grid / Axes -->
+              <line x1="{{ .SVG.X0 }}" y1="{{ .SVG.Y1 }}" x2="{{ .SVG.X1 }}" y2="{{ .SVG.Y1 }}" stroke="var(--line)" stroke-width="1"/>
+              <line x1="{{ .SVG.X0 }}" y1="{{ .SVG.Y0 }}" x2="{{ .SVG.X0 }}" y2="{{ .SVG.Y1 }}" stroke="var(--line)" stroke-width="1"/>
+
+              <!-- Equivalence margin reference line -->
+              <line x1="{{ .SVG.X0 }}" y1="{{ .SVG.MarginY }}" x2="{{ .SVG.X1 }}" y2="{{ .SVG.MarginY }}" stroke="var(--muted)" stroke-dasharray="4 4" stroke-width="1"/>
+              <text x="{{ .SVG.X1 }}" y="{{ .SVG.MarginY }}" dx="-4" dy="-4" text-anchor="end" font-size="11" fill="var(--muted)" font-family="var(--sans)">{{ .SVG.MarginLabel }}</text>
+
+              <!-- Polyline series -->
+              <polyline points="{{ .SVG.PointsAttr }}" fill="none" stroke="var(--indigo)" stroke-width="2"/>
+
+              <!-- Points -->
+              {{ range .SVG.Circles }}
+              <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)" stroke="#fff" stroke-width="2"/>
+              {{ end }}
+
+              <!-- Final point label -->
+              <text x="{{ .SVG.FinalLabel.X }}" y="{{ .SVG.FinalLabel.Y }}" font-size="11" font-weight="600" fill="var(--indigo)" font-family="var(--mono)">{{ .SVG.FinalLabel.Text }}</text>
+
+              <!-- X Ticks & Labels -->
+              {{ range .SVG.XAxisTicks }}
+              <line x1="{{ .X }}" y1="{{ .Y1 }}" x2="{{ .X }}" y2="{{ .Y2 }}" stroke="var(--line)" stroke-width="1"/>
+              <text x="{{ .X }}" y="{{ .TextY }}" text-anchor="middle" font-size="11" fill="var(--muted)" font-family="var(--mono)">{{ .Text }}</text>
+              {{ end }}
+
+              <!-- Y Ticks & Labels -->
+              {{ range .SVG.YAxisTicks }}
+              <text x="{{ .X }}" y="{{ .Y }}" text-anchor="end" font-size="11" fill="var(--muted)" font-family="var(--mono)">{{ .Text }}</text>
+              {{ end }}
+            </svg>
+          </div>
+
+          <div style="overflow-x:auto;margin-top:12px;margin-bottom:20px">
+            <table class="ci history-table">
+              <thead>
+                <tr>
+                  <th>n</th>
+                  <th>Δ</th>
+                  <th>95% CI</th>
+                  <th>decision</th>
+                </tr>
+              </thead>
+              <tbody>
+                {{ range .Points }}
+                <tr>
+                  <td class="num">{{ .N }}</td>
+                  <td class="num">{{ .DeltaFormatted }}</td>
+                  <td class="num">{{ .CIFormatted }}</td>
+                  <td><span class="chip {{ .DecisionChip }}"><span class="dot"></span>{{ .Decision }}</span></td>
+                </tr>
+                {{ end }}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {{- end }}
+        {{- end }}
         {{- if .Batches }}
         <h2 style="font-size:17px;font-weight:600;margin:24px 0 12px">Batches</h2>
         <div style="overflow-x:auto">
