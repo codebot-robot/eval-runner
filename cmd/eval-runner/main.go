@@ -93,6 +93,7 @@ func main() {
 	var strictConfig bool
 	var comparisonTTL time.Duration
 	var commandUsers string
+	var pollProgressInterval time.Duration
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -100,6 +101,7 @@ func main() {
 	flag.DurationVar(&discoveryDeadline, "discovery-deadline", controller.DefaultDiscoveryDeadline, "Overall deadline for discovery to complete")
 	flag.DurationVar(&executionDeadline, "execution-deadline", controller.DefaultExecutionDeadline, "Overall deadline for sample execution to complete")
 	flag.DurationVar(&taskGracePeriod, "task-grace-period", controller.DefaultTaskGracePeriod, "Grace period before failing a Running task whose sandbox is missing")
+	flag.DurationVar(&pollProgressInterval, "poll-progress-interval", controller.DefaultPollProgressInterval, "Interval between task progress polling attempts (minimum 1s)")
 	flag.Int64Var(&maxStdoutBytes, "max-stdout-bytes", discovery.MaxStdoutBytes, "Maximum stdout bytes buffered from discovery execution")
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
@@ -144,6 +146,7 @@ func main() {
 		inconclusivePolicy,
 		comparisonTTL,
 		commandUsers,
+		pollProgressInterval,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -319,6 +322,7 @@ func main() {
 		MaxMessageBytes:      discovery.MaxMessageBytes,
 		MaxDiscoveryAttempts: maxDiscoveryAttempts,
 		MaxParallelTasks:     clusterConfig.MaxParallelTasks,
+		PollProgressInterval: clusterConfig.PollProgressInterval,
 		ModelSecret:          clusterConfig.ModelSecret,
 		ModelPrices:          clusterConfig.ModelPrices,
 		SampleRunnerImage:    sampleRunnerImage,

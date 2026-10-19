@@ -252,6 +252,7 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Discovery deadline | `--discovery-deadline` / ConfigMap `discoveryDeadline` | `10m` | Overall discovery deadline exceeded; Run marked `Failed` and sandbox deleted. |
 | Execution deadline | `--execution-deadline` / ConfigMap `executionDeadline` | `30m` | Overall sample execution deadline exceeded; Run marked `Failed` and sandboxes deleted. |
 | Max parallel tasks | `--max-parallel-tasks` / ConfigMap `maxParallelTasks` | `4` | Caps concurrent task sandboxes executing at one time. |
+| Poll progress interval | `--poll-progress-interval` / ConfigMap `pollProgressInterval` | `10s` | Interval between task progress polling attempts and per-task write floor (minimum `1s`). |
 | Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` or `"none"` to disable). |
 | Model pricing | ConfigMap `modelPrices` | `"{}"` | JSON map model -> `{inputPer1M, outputPer1M}` in USD for computing task and comparison evaluation costs (exact, case-sensitive string match on `Run.spec.model`; unknown JSON fields rejected). |
 | Default batch size | `--default-batch-size` / ConfigMap `defaultBatchSize` | `8` | Default batch size for paired adaptive sampling in webhook-created Comparisons and seed Run sampleRange. |

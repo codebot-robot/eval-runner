@@ -327,6 +327,30 @@ func TestResolveConfig_MalformedValue(t *testing.T) {
 			errContains: "must be positive",
 		},
 		{
+			name:        "invalid pollProgressInterval duration format",
+			key:         "pollProgressInterval",
+			value:       "not-a-duration",
+			errContains: "invalid pollProgressInterval",
+		},
+		{
+			name:        "sub-second pollProgressInterval",
+			key:         "pollProgressInterval",
+			value:       "500ms",
+			errContains: "must be at least 1s",
+		},
+		{
+			name:        "zero pollProgressInterval",
+			key:         "pollProgressInterval",
+			value:       "0s",
+			errContains: "must be at least 1s",
+		},
+		{
+			name:        "negative pollProgressInterval",
+			key:         "pollProgressInterval",
+			value:       "-5s",
+			errContains: "must be at least 1s",
+		},
+		{
 			name:        "invalid artifactBucket with subpath",
 			key:         "artifactBucket",
 			value:       "gs://bucket/with/subpath",
@@ -501,14 +525,15 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	inconclusivePolicy := fs.String("inconclusive-policy", DefaultInconclusivePolicy, "inconclusive policy")
 	compTTL := fs.Duration("comparison-ttl", 0, "comparison ttl")
 	commandUsers := fs.String("command-users", "", "command users")
+	pollInterval := fs.Duration("poll-progress-interval", 10*time.Second, "poll progress interval")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -544,6 +569,12 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	}
 	if rawFlags.ComparisonTTL != 24*time.Hour {
 		t.Errorf("expected ComparisonTTL 24h, got %v", rawFlags.ComparisonTTL)
+	}
+	if !rawFlags.IsExplicit("poll-progress-interval") {
+		t.Errorf("expected poll-progress-interval to be explicit")
+	}
+	if rawFlags.PollProgressInterval != 2*time.Second {
+		t.Errorf("expected PollProgressInterval 2s, got %v", rawFlags.PollProgressInterval)
 	}
 	if rawFlags.IsExplicit("github-app-secret") {
 		t.Errorf("expected github-app-secret NOT to be explicit")
@@ -1761,5 +1792,108 @@ func TestResolveConfig_CommandUsers(t *testing.T) {
 	expectedFlagUsers := []string{"david", "emily"}
 	if !reflect.DeepEqual(cfgFlags.CommandUsers, expectedFlagUsers) {
 		t.Errorf("expected flag CommandUsers %v, got %v", expectedFlagUsers, cfgFlags.CommandUsers)
+	}
+}
+
+func TestResolveConfig_PollProgressInterval(t *testing.T) {
+	// 1. Default when unset is DefaultPollProgressInterval (10s)
+	cfg, err := ResolveConfig(nil, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PollProgressInterval != DefaultPollProgressInterval {
+		t.Errorf("expected default PollProgressInterval %v, got %v", DefaultPollProgressInterval, cfg.PollProgressInterval)
+	}
+
+	// 2. Valid duration from ConfigMap
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyPollProgressInterval: "2s",
+		},
+	}
+	cfg, err = ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PollProgressInterval != 2*time.Second {
+		t.Errorf("expected PollProgressInterval 2s, got %v", cfg.PollProgressInterval)
+	}
+
+	// 3. Minimum 1s validation on ConfigMap
+	for _, val := range []string{"500ms", "0s", "-1s"} {
+		cmSubSec := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      DefaultConfigMapName,
+				Namespace: "eval-runner",
+			},
+			Data: map[string]string{
+				ConfigMapKeyPollProgressInterval: val,
+			},
+		}
+		if _, err := ResolveConfig(cmSubSec, RawFlags{}); err == nil {
+			t.Errorf("expected error for sub-second pollProgressInterval %q, got nil", val)
+		}
+	}
+
+	// 4. Invalid duration string
+	cmInvalid := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyPollProgressInterval: "not-a-duration",
+		},
+	}
+	if _, err := ResolveConfig(cmInvalid, RawFlags{}); err == nil {
+		t.Errorf("expected error for invalid duration string, got nil")
+	}
+
+	// 5. Flag overrides ConfigMap
+	flags := RawFlags{
+		PollProgressInterval: 5 * time.Second,
+		Explicit: map[string]bool{
+			"poll-progress-interval": true,
+		},
+	}
+	cfgFlags, err := ResolveConfig(cm, flags)
+	if err != nil {
+		t.Fatalf("unexpected error resolving config with flags: %v", err)
+	}
+	if cfgFlags.PollProgressInterval != 5*time.Second {
+		t.Errorf("expected flag PollProgressInterval 5s, got %v", cfgFlags.PollProgressInterval)
+	}
+
+	// 6. Minimum 1s validation on flag
+	invalidFlag := RawFlags{
+		PollProgressInterval: 500 * time.Millisecond,
+		Explicit: map[string]bool{
+			"poll-progress-interval": true,
+		},
+	}
+	if _, err := ResolveConfig(cm, invalidFlag); err == nil {
+		t.Errorf("expected error for sub-second flag --poll-progress-interval, got nil")
+	}
+
+	// 7. Empty or whitespace value in ConfigMap retains default
+	cmEmpty := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			ConfigMapKeyPollProgressInterval: "   ",
+		},
+	}
+	cfgEmpty, err := ResolveConfig(cmEmpty, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error for empty string: %v", err)
+	}
+	if cfgEmpty.PollProgressInterval != DefaultPollProgressInterval {
+		t.Errorf("expected default PollProgressInterval %v for empty string, got %v", DefaultPollProgressInterval, cfgEmpty.PollProgressInterval)
 	}
 }

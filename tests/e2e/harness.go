@@ -171,6 +171,7 @@ data:
   defaultMaxSamplesPerTask: "64"
   commandUsers: "reviewer"
   webhookRepositories: "gke-labs/eval-runner"
+  pollProgressInterval: 2s
 `
 	h.KubectlApplyContent(cmManifest)
 
@@ -388,6 +389,7 @@ metadata:
   namespace: eval-runner
 data:
   artifactBucket: %s
+  pollProgressInterval: 2s
 `, bucket)
 	h.KubectlApplyContent(cmManifest)
 
@@ -408,6 +410,7 @@ metadata:
   namespace: eval-runner
 data:
   artifactDir: /tmp/artifacts
+  pollProgressInterval: 2s
 `
 	h.KubectlApplyContent(cmManifest)
 

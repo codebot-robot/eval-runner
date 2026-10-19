@@ -469,6 +469,7 @@ Supported ConfigMap keys include:
 - `githubWebhookSecret`: Name of Secret in controller namespace containing GitHub webhook secret (default `github-webhook`).
 - `inconclusivePolicy`: Check-run conclusion policy for INCONCLUSIVE comparisons (`neutral` or `failure`, default `neutral`). When set to `failure`, an INCONCLUSIVE comparison marks the `eval-runner / evals` check run conclusion as `failure` to block PR merging.
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
+- `pollProgressInterval`: Interval between task progress polling attempts and per-task write floor (default `10s`, minimum `1s`).
 - `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
 - `sandboxdImage`: Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset).
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).

@@ -6590,10 +6590,11 @@ func TestLiveTaskProgressPolling_SuccessiveSnapshots(t *testing.T) {
 	}
 
 	r := &RunReconciler{
-		Client:               cl,
-		Scheme:               scheme,
-		Now:                  nowFn,
-		PollProgressInterval: 10 * time.Millisecond,
+		Client:                   cl,
+		Scheme:                   scheme,
+		Now:                      nowFn,
+		PollProgressInterval:     10 * time.Millisecond,
+		MinProgressWriteInterval: 10 * time.Second,
 	}
 
 	stopCh := make(chan struct{})
@@ -6666,6 +6667,153 @@ func TestLiveTaskProgressPolling_SuccessiveSnapshots(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("poller failed to exit after stopCh closed")
 	}
+}
+
+func TestLiveTaskProgressPolling_WriteFloorFollowsInterval(t *testing.T) {
+	// Verify helper methods
+	rDefault := &RunReconciler{}
+	if rDefault.pollProgressInterval() != DefaultPollProgressInterval {
+		t.Errorf("expected default pollProgressInterval %v, got %v", DefaultPollProgressInterval, rDefault.pollProgressInterval())
+	}
+	if rDefault.minProgressWriteInterval() != DefaultPollProgressInterval {
+		t.Errorf("expected default minProgressWriteInterval %v, got %v", DefaultPollProgressInterval, rDefault.minProgressWriteInterval())
+	}
+
+	rConfigured := &RunReconciler{
+		PollProgressInterval: 2 * time.Second,
+	}
+	if rConfigured.pollProgressInterval() != 2*time.Second {
+		t.Errorf("expected pollProgressInterval 2s, got %v", rConfigured.pollProgressInterval())
+	}
+	if rConfigured.minProgressWriteInterval() != 2*time.Second {
+		t.Errorf("expected minProgressWriteInterval 2s following pollProgressInterval, got %v", rConfigured.minProgressWriteInterval())
+	}
+
+	rOverridden := &RunReconciler{
+		PollProgressInterval:     2 * time.Second,
+		MinProgressWriteInterval: 5 * time.Second,
+	}
+	if rOverridden.minProgressWriteInterval() != 5*time.Second {
+		t.Errorf("expected explicit minProgressWriteInterval 5s, got %v", rOverridden.minProgressWriteInterval())
+	}
+
+	// Now verify in actual poller execution that the write floor follows PollProgressInterval (2s)
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-floor",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:             "task-1",
+					Phase:          v1alpha1.TaskPhaseRunning,
+					SamplesDone:    0,
+					SamplesPlanned: 10,
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	startTime := time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC)
+	var currentTime = startTime
+	var timeMu sync.Mutex
+
+	nowFn := func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return currentTime
+	}
+
+	advanceTime := func(d time.Duration) {
+		timeMu.Lock()
+		currentTime = currentTime.Add(d)
+		timeMu.Unlock()
+	}
+
+	var currentLog []byte
+	var logMu sync.Mutex
+	setLog := func(samples int) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		var sampleItems []string
+		for i := 1; i <= samples; i++ {
+			sampleItems = append(sampleItems, fmt.Sprintf(`{"id": %d}`, i))
+		}
+		currentLog = []byte(fmt.Sprintf(`{
+			"version": 2,
+			"status": "started",
+			"eval": {"dataset": {"samples": 10}},
+			"samples": [%s]
+		}`, strings.Join(sampleItems, ",")))
+	}
+	setLog(0)
+
+	fc := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(config.Command) > 0 && config.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "eval.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			return currentLog, nil
+		},
+	}
+
+	// PollProgressInterval is 2s, MinProgressWriteInterval is 0 (unspecified).
+	// Write floor should follow PollProgressInterval (2s).
+	r := &RunReconciler{
+		Client:               cl,
+		Scheme:               scheme,
+		Now:                  nowFn,
+		PollProgressInterval: 2 * time.Second,
+	}
+
+	stopCh := make(chan struct{})
+	pollerDone := make(chan struct{})
+
+	go func() {
+		defer close(pollerDone)
+		r.pollTaskProgress(t.Context(), fc, run, "task-1", nil, 10*time.Millisecond, startTime, stopCh)
+	}()
+
+	// 1. Advance virtual time by 1s (less than 2s write floor), update log to 1 sample:
+	advanceTime(1 * time.Second)
+	setLog(1)
+	time.Sleep(50 * time.Millisecond)
+
+	var r1 v1alpha1.Run
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if r1.Status.Tasks[0].SamplesDone != 0 {
+		t.Errorf("expected 0 samplesDone after only 1s (less than 2s write floor), got %d", r1.Status.Tasks[0].SamplesDone)
+	}
+
+	// 2. Advance virtual time by another 1.5s (total 2.5s >= 2s): write should happen!
+	advanceTime(1500 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+
+	_ = cl.Get(t.Context(), client.ObjectKeyFromObject(run), &r1)
+	if r1.Status.Tasks[0].SamplesDone != 1 {
+		t.Fatalf("expected 1 samplesDone after 2.5s, got %d", r1.Status.Tasks[0].SamplesDone)
+	}
+
+	close(stopCh)
+	<-pollerDone
 }
 
 func TestLiveTaskProgressPolling_FailureModes(t *testing.T) {

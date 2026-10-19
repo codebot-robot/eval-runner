@@ -51,6 +51,8 @@ const (
 	ConfigMapKeyExecutionDeadline = configkeys.ConfigMapKeyExecutionDeadline
 	// ConfigMapKeyMaxParallelTasks is the ConfigMap key for maximum parallel task sandboxes.
 	ConfigMapKeyMaxParallelTasks = configkeys.ConfigMapKeyMaxParallelTasks
+	// ConfigMapKeyPollProgressInterval is the ConfigMap key for task progress polling interval.
+	ConfigMapKeyPollProgressInterval = configkeys.ConfigMapKeyPollProgressInterval
 	// ConfigMapKeyModelSecret is the ConfigMap key for default model credentials Secret name.
 	ConfigMapKeyModelSecret = configkeys.ConfigMapKeyModelSecret
 	// ConfigMapKeySandboxdImage is the ConfigMap key for sandboxd init container image.
@@ -96,6 +98,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyDiscoveryDeadline:        {},
 	configkeys.ConfigMapKeyExecutionDeadline:        {},
 	configkeys.ConfigMapKeyMaxParallelTasks:         {},
+	configkeys.ConfigMapKeyPollProgressInterval:     {},
 	configkeys.ConfigMapKeyModelSecret:              {},
 	configkeys.ConfigMapKeySandboxdImage:            {},
 	configkeys.ConfigMapKeyTaskGracePeriod:          {},
@@ -153,6 +156,7 @@ type ClusterConfig struct {
 	MaxParallelTasks       int
 	ModelSecret            string
 	ModelPrices            map[string]ModelPrice
+	PollProgressInterval   time.Duration
 	SandboxdImage          string
 	TaskGracePeriod        time.Duration
 	UIBaseURL              string
@@ -172,6 +176,7 @@ type RawFlags struct {
 	InconclusivePolicy     string
 	MaxParallelTasks       int
 	ModelSecret            string
+	PollProgressInterval   time.Duration
 	SandboxdImage          string
 	TaskGracePeriod        time.Duration
 	UIBaseURL              string
@@ -202,6 +207,7 @@ func DefaultClusterConfig() ClusterConfig {
 		InconclusivePolicy:     DefaultInconclusivePolicy,
 		MaxParallelTasks:       DefaultMaxParallelTasks,
 		ModelSecret:            DefaultModelSecret,
+		PollProgressInterval:   DefaultPollProgressInterval,
 		SandboxdImage:          discovery.SandboxdImage,
 		TaskGracePeriod:        DefaultTaskGracePeriod,
 		UIBaseURL:              "",
@@ -221,6 +227,7 @@ func FlagsFromFlagSet(
 	inconclusivePolicy string,
 	comparisonTTL time.Duration,
 	commandUsers string,
+	pollProgressInterval time.Duration,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -237,6 +244,7 @@ func FlagsFromFlagSet(
 		InconclusivePolicy:     inconclusivePolicy,
 		MaxParallelTasks:       maxParallelTasks,
 		ModelSecret:            modelSecret,
+		PollProgressInterval:   pollProgressInterval,
 		SandboxdImage:          sandboxdImage,
 		TaskGracePeriod:        taskGracePeriod,
 		UIBaseURL:              uiBaseURL,
@@ -338,6 +346,21 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be positive", ConfigMapKeyMaxParallelTasks, val, ns, name)
 				}
 				cfg.MaxParallelTasks = n
+			}
+		}
+
+		// pollProgressInterval
+		if val, ok := cm.Data[ConfigMapKeyPollProgressInterval]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				d, err := time.ParseDuration(trimmed)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %w", ConfigMapKeyPollProgressInterval, val, ns, name, err)
+				}
+				if d < time.Second {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be at least 1s", ConfigMapKeyPollProgressInterval, val, ns, name)
+				}
+				cfg.PollProgressInterval = d
 			}
 		}
 
@@ -557,6 +580,12 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	if flags.IsExplicit("max-parallel-tasks") {
 		cfg.MaxParallelTasks = flags.MaxParallelTasks
 	}
+	if flags.IsExplicit("poll-progress-interval") {
+		if flags.PollProgressInterval < time.Second {
+			return cfg, fmt.Errorf("invalid flag --poll-progress-interval: must be at least 1s")
+		}
+		cfg.PollProgressInterval = flags.PollProgressInterval
+	}
 	if flags.IsExplicit("model-secret") {
 		if strings.EqualFold(flags.ModelSecret, ConfigSentinelDisabled) {
 			cfg.ModelSecret = ""
@@ -680,6 +709,7 @@ func LoadAndResolveClusterConfig(
 		"githubTokenSecret", resolved.GitHubTokenSecret,
 		"maxParallelTasks", resolved.MaxParallelTasks,
 		"modelSecret", resolved.ModelSecret,
+		"pollProgressInterval", resolved.PollProgressInterval,
 		"sandboxdImage", resolved.SandboxdImage,
 		"taskGracePeriod", resolved.TaskGracePeriod,
 	)
