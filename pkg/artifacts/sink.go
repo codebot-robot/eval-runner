@@ -174,8 +174,9 @@ func (s *LocalDirSink) Load(ctx context.Context, path string) ([]byte, error) {
 	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
 		return nil, fmt.Errorf("artifact path %q escapes base directory %q", path, s.BaseDir)
 	}
-	if !strings.HasPrefix(rel, "runs"+string(filepath.Separator)) && rel != "runs" {
-		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' prefix", path)
+	if !strings.HasPrefix(rel, "runs"+string(filepath.Separator)) && rel != "runs" &&
+		!strings.HasPrefix(rel, "comparisons"+string(filepath.Separator)) && rel != "comparisons" {
+		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
 	}
 
 	f, err := os.Open(cleanPath)

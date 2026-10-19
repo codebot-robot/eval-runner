@@ -357,9 +357,18 @@ func TestGCSSink_StoreComparisonAndLoad(t *testing.T) {
 		t.Errorf("Loaded mismatch: got %s, want %s", loadedPath, runPayload)
 	}
 
-	// Missing runs/ prefix rejected
-	if _, err := sink.Load(t.Context(), "comparisons/comp-1.json"); err == nil {
-		t.Errorf("Expected error for missing runs/ prefix, got nil")
+	// Load comparison artifact via object path
+	loadedComp, err := sink.Load(t.Context(), "comparisons/comp-1.json")
+	if err != nil {
+		t.Fatalf("Load comparison failed: %v", err)
+	}
+	if string(loadedComp) != string(payload) {
+		t.Errorf("Loaded comparison mismatch: got %s, want %s", loadedComp, payload)
+	}
+
+	// Missing runs/ or comparisons/ prefix rejected
+	if _, err := sink.Load(t.Context(), "other/file.json"); err == nil {
+		t.Errorf("Expected error for missing runs/ or comparisons/ prefix, got nil")
 	}
 
 	// Bucket mismatch

@@ -283,8 +283,8 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("bucket name is empty")
 	}
 
-	if !strings.HasPrefix(object, "runs/") {
-		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' prefix", path)
+	if !strings.HasPrefix(object, "runs/") && !strings.HasPrefix(object, "comparisons/") {
+		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
 	}
 
 	capLimit := s.maxUploadBytes

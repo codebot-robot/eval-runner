@@ -146,3 +146,129 @@ func (c *logLRUCache) removeEntry(e *logCacheEntry) {
 	c.detach(e)
 	c.totalBytes -= e.dataLen
 }
+
+// comparisonCacheEntry holds the cached parsed comparison artifact and error for a specific summaryPath.
+type comparisonCacheEntry struct {
+	key       string
+	dataLen   int64
+	artifact  *artifacts.ComparisonArtifact
+	loadErr   error
+	createdAt time.Time
+	prev      *comparisonCacheEntry
+	next      *comparisonCacheEntry
+}
+
+// comparisonLRUCache is an in-process, thread-safe LRU cache bounded by total byte size and TTL.
+type comparisonLRUCache struct {
+	mu         sync.Mutex
+	maxBytes   int64
+	totalBytes int64
+	ttl        time.Duration
+	entries    map[string]*comparisonCacheEntry
+	head       *comparisonCacheEntry // MRU
+	tail       *comparisonCacheEntry // LRU
+}
+
+func newComparisonLRUCache(maxBytes int64, ttl time.Duration) *comparisonLRUCache {
+	if maxBytes <= 0 {
+		maxBytes = 32 * 1024 * 1024 // 32 MiB default
+	}
+	if ttl <= 0 {
+		ttl = 1 * time.Hour // 1 hour default
+	}
+	return &comparisonLRUCache{
+		maxBytes: maxBytes,
+		ttl:      ttl,
+		entries:  make(map[string]*comparisonCacheEntry),
+	}
+}
+
+// get retrieves cached comparison artifact if present and not expired, moving the entry to the head.
+func (c *comparisonLRUCache) get(key string) (*artifacts.ComparisonArtifact, error, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[key]
+	if !ok {
+		return nil, nil, false
+	}
+
+	if time.Since(entry.createdAt) > c.ttl {
+		c.removeEntry(entry)
+		return nil, nil, false
+	}
+
+	c.moveToHead(entry)
+	return entry.artifact, entry.loadErr, true
+}
+
+// set adds or replaces a cache entry, evicting the least recently used entries if maxBytes is exceeded.
+func (c *comparisonLRUCache) set(key string, dataLen int64, artifact *artifacts.ComparisonArtifact, loadErr error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if existing, ok := c.entries[key]; ok {
+		c.removeEntry(existing)
+	}
+
+	if dataLen > c.maxBytes {
+		return // single entry larger than cache capacity is not cached
+	}
+
+	for c.totalBytes+dataLen > c.maxBytes && c.tail != nil {
+		c.removeEntry(c.tail)
+	}
+
+	entry := &comparisonCacheEntry{
+		key:       key,
+		dataLen:   dataLen,
+		artifact:  artifact,
+		loadErr:   loadErr,
+		createdAt: time.Now(),
+	}
+
+	c.entries[key] = entry
+	c.insertAtHead(entry)
+	c.totalBytes += dataLen
+}
+
+func (c *comparisonLRUCache) moveToHead(e *comparisonCacheEntry) {
+	if c.head == e {
+		return
+	}
+	c.detach(e)
+	c.insertAtHead(e)
+}
+
+func (c *comparisonLRUCache) insertAtHead(e *comparisonCacheEntry) {
+	e.prev = nil
+	e.next = c.head
+	if c.head != nil {
+		c.head.prev = e
+	}
+	c.head = e
+	if c.tail == nil {
+		c.tail = e
+	}
+}
+
+func (c *comparisonLRUCache) detach(e *comparisonCacheEntry) {
+	if e.prev != nil {
+		e.prev.next = e.next
+	} else {
+		c.head = e.next
+	}
+	if e.next != nil {
+		e.next.prev = e.prev
+	} else {
+		c.tail = e.prev
+	}
+	e.prev = nil
+	e.next = nil
+}
+
+func (c *comparisonLRUCache) removeEntry(e *comparisonCacheEntry) {
+	delete(c.entries, e.key)
+	c.detach(e)
+	c.totalBytes -= e.dataLen
+}

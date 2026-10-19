@@ -30,6 +30,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -125,9 +126,10 @@ type Config struct {
 
 // Server serves read-only web views of Runs and Comparisons.
 type Server struct {
-	cfg   Config
-	mux   *http.ServeMux
-	cache *logLRUCache
+	cfg       Config
+	mux       *http.ServeMux
+	cache     *logLRUCache
+	compCache *comparisonLRUCache
 }
 
 // NewServer initializes a new Server with route registration.
@@ -137,9 +139,10 @@ func NewServer(cfg Config) *Server {
 	}
 
 	s := &Server{
-		cfg:   cfg,
-		mux:   http.NewServeMux(),
-		cache: newLogLRUCache(64*1024*1024, 1*time.Hour),
+		cfg:       cfg,
+		mux:       http.NewServeMux(),
+		cache:     newLogLRUCache(64*1024*1024, 1*time.Hour),
+		compCache: newComparisonLRUCache(32*1024*1024, 1*time.Hour),
 	}
 
 	s.routes()
@@ -707,6 +710,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	}
 
 	view := NewComparisonDetailView(&comp, baseRunPtr, candRunPtr)
+	s.populateComparisonHistories(ctx, &comp, &view)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplComparisonDetail.Execute(w, view); err != nil {
@@ -1042,6 +1046,210 @@ func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]arti
 		s.cache.set(logPath, int64(len(data)), samples, nil)
 	}
 	return samples, false, nil
+}
+
+func (s *Server) loadComparisonArtifact(ctx context.Context, summaryPath string) (*artifacts.ComparisonArtifact, bool, error) {
+	if s.compCache != nil {
+		if art, loadErr, ok := s.compCache.get(summaryPath); ok {
+			if loadErr != nil {
+				return nil, true, loadErr
+			}
+			return art, false, nil
+		}
+	}
+
+	data, err := s.cfg.ArtifactSink.Load(ctx, summaryPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "exceeds maximum") {
+			if s.compCache != nil {
+				s.compCache.set(summaryPath, 0, nil, err)
+			}
+			return nil, true, err
+		}
+		return nil, false, err
+	}
+
+	var art artifacts.ComparisonArtifact
+	if parseErr := json.Unmarshal(data, &art); parseErr != nil {
+		if s.compCache != nil {
+			s.compCache.set(summaryPath, int64(len(data)), nil, parseErr)
+		}
+		return nil, true, parseErr
+	}
+
+	if s.compCache != nil {
+		s.compCache.set(summaryPath, int64(len(data)), &art, nil)
+	}
+	return &art, false, nil
+}
+
+func computeBatchBoundaries(batches []v1alpha1.ComparisonBatchStatus, totalPairs int) []int {
+	if totalPairs < 2 {
+		return nil
+	}
+
+	var rawBoundaries []int
+	hasBatchWidths := false
+
+	cumulative := 0
+	for _, b := range batches {
+		if b.SampleRange != nil && b.SampleRange.End >= b.SampleRange.Start {
+			hasBatchWidths = true
+			width := b.SampleRange.End - b.SampleRange.Start + 1
+			cumulative += width
+			if cumulative <= totalPairs {
+				rawBoundaries = append(rawBoundaries, cumulative)
+			} else {
+				rawBoundaries = append(rawBoundaries, totalPairs)
+				break
+			}
+		}
+	}
+
+	if hasBatchWidths {
+		if len(rawBoundaries) > 0 && rawBoundaries[len(rawBoundaries)-1] < totalPairs {
+			rawBoundaries = append(rawBoundaries, totalPairs)
+		}
+	} else {
+		// Fall back to every 4 pairs when batches are absent
+		for n := 4; n < totalPairs; n += 4 {
+			rawBoundaries = append(rawBoundaries, n)
+		}
+		rawBoundaries = append(rawBoundaries, totalPairs)
+	}
+
+	// Filter for n >= 2 and strictly monotone
+	var boundaries []int
+	last := 0
+	for _, n := range rawBoundaries {
+		if n >= 2 && n <= totalPairs && n > last {
+			boundaries = append(boundaries, n)
+			last = n
+		}
+	}
+
+	if len(boundaries) > 50 {
+		boundaries = subsampleBoundaries(boundaries, 50)
+	}
+
+	return boundaries
+}
+
+func subsampleBoundaries(in []int, maxPoints int) []int {
+	if len(in) <= maxPoints || maxPoints < 2 {
+		return in
+	}
+	out := make([]int, maxPoints)
+	out[0] = in[0]
+	out[maxPoints-1] = in[len(in)-1]
+	step := float64(len(in)-1) / float64(maxPoints-1)
+	lastVal := out[0]
+	for i := 1; i < maxPoints-1; i++ {
+		idx := int(math.Round(float64(i) * step))
+		if idx <= 0 {
+			idx = 1
+		}
+		if idx >= len(in)-1 {
+			idx = len(in) - 2
+		}
+		val := in[idx]
+		if val <= lastVal {
+			val = lastVal + 1
+		}
+		out[i] = val
+		lastVal = val
+	}
+	if out[maxPoints-2] >= out[maxPoints-1] {
+		return in[:maxPoints]
+	}
+	return out
+}
+
+func (s *Server) populateComparisonHistories(ctx context.Context, comp *v1alpha1.Comparison, view *ComparisonDetailView) {
+	if s.cfg.ArtifactSink == nil {
+		view.HistoryNote = "artifact storage unavailable"
+		return
+	}
+	if comp.Status.SummaryPath == "" {
+		view.HistoryNote = "history not available"
+		return
+	}
+
+	art, parseOrSizeErr, err := s.loadComparisonArtifact(ctx, comp.Status.SummaryPath)
+	if err != nil {
+		if errors.Is(err, artifacts.ErrNotFound) || parseOrSizeErr {
+			view.HistoryNote = "history not available"
+		} else {
+			view.HistoryNote = "artifact storage unavailable"
+		}
+		return
+	}
+	if art == nil {
+		view.HistoryNote = "history not available"
+		return
+	}
+
+	margin := stats.DefaultEquivalenceMargin
+	if comp.Spec.EquivalenceMargin != nil && *comp.Spec.EquivalenceMargin > 0 {
+		margin = *comp.Spec.EquivalenceMargin
+	}
+
+	taskIDs := make([]string, 0, len(comp.Status.Tasks))
+	for _, t := range comp.Status.Tasks {
+		taskIDs = append(taskIDs, t.ID)
+	}
+	if len(taskIDs) == 0 {
+		for _, t := range art.Tasks {
+			taskIDs = append(taskIDs, t.ID)
+		}
+	}
+
+	var histories []ComparisonTaskHistory
+	for _, tid := range taskIDs {
+		var matchedArt *artifacts.ComparisonTaskArtifact
+		for i := range art.Tasks {
+			if art.Tasks[i].ID == tid {
+				matchedArt = &art.Tasks[i]
+				break
+			}
+		}
+		if matchedArt == nil || len(matchedArt.PairsTable) < 2 {
+			continue
+		}
+
+		boundaries := computeBatchBoundaries(comp.Status.Batches, len(matchedArt.PairsTable))
+		if len(boundaries) == 0 {
+			continue
+		}
+
+		points := stats.ComputePairedCISeries(matchedArt.PairsTable, boundaries, 0.95, stats.DefaultSeed, margin)
+		if len(points) == 0 {
+			continue
+		}
+
+		historyPoints := make([]ComparisonHistoryPoint, len(points))
+		for i, pt := range points {
+			historyPoints[i] = ComparisonHistoryPoint{
+				N:              pt.N,
+				DeltaFormatted: fmt.Sprintf("%+.2f", pt.Estimate.MeanDelta),
+				CIFormatted:    fmt.Sprintf("[%+.2f, %+.2f]", pt.Estimate.CI.Lower, pt.Estimate.CI.Upper),
+				CIWidth:        pt.CIWidth,
+				Decision:       string(pt.Decision.Label),
+				DecisionChip:   DecisionChipClass(string(pt.Decision.Label)),
+			}
+		}
+
+		svg := BuildComparisonHistorySVG(historyPoints, margin)
+		histories = append(histories, ComparisonTaskHistory{
+			TaskID: matchedArt.ID,
+			Points: historyPoints,
+			SVG:    svg,
+		})
+	}
+
+	if len(histories) > 0 {
+		view.Histories = histories
+	}
 }
 
 func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {

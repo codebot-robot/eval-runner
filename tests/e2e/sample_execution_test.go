@@ -590,6 +590,97 @@ spec:
 
 		// Clean up
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+
+		// Verify sampling Comparison with CI-vs-n history chart and table in fake-gcs
+		compCandRun := "gcs-batch-cand"
+		compBaseRun := "gcs-batch-base"
+		samplingCompName := "gcs-sampling-comp"
+
+		harness.runCmd("kubectl", "delete", "run", compCandRun, compBaseRun, fmt.Sprintf("%s-b2-cand", samplingCompName), fmt.Sprintf("%s-b2-base", samplingCompName), "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "comparison", samplingCompName, "-n", "eval-runner", "--ignore-not-found")
+
+		compCandManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 1
+    end: 4
+`, compCandRun, commit)
+
+		compBaseManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  sampleRange:
+    start: 1
+    end: 4
+`, compBaseRun, commit)
+
+		samplingCompManifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Comparison
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  candidate:
+    run: %s
+  baseline:
+    run: %s
+  sampling:
+    batchSize: 4
+    maxSamplesPerTask: 12
+  equivalenceMargin: 0.05
+`, samplingCompName, compCandRun, compBaseRun)
+
+		harness.KubectlApplyContent(compCandManifest)
+		harness.KubectlApplyContent(compBaseManifest)
+		harness.KubectlApplyContent(samplingCompManifest)
+
+		comp := harness.WaitForComparisonPhase("eval-runner", samplingCompName, string(v1alpha1.ComparisonPhaseCompleted), 180*time.Second)
+		if len(comp.Status.Batches) < 2 {
+			t.Fatalf("Expected sampling comparison to run at least 2 batches, got %d", len(comp.Status.Batches))
+		}
+
+		// GET the Comparison page for the sampling Comparison and assert history table rows exist
+		compURL := fmt.Sprintf("%s/comparisons/eval-runner/%s", baseURL, samplingCompName)
+		respComp, err := http.Get(compURL)
+		if err != nil {
+			t.Fatalf("failed to GET %s: %v", compURL, err)
+		}
+		compBodyBytes, err := io.ReadAll(respComp.Body)
+		respComp.Body.Close()
+		if respComp.StatusCode != http.StatusOK {
+			t.Fatalf("unexpected status %d for %s: %s", respComp.StatusCode, compURL, string(compBodyBytes))
+		}
+		compBody := string(compBodyBytes)
+		if !strings.Contains(compBody, "Confidence Interval History") {
+			t.Errorf("expected Comparison page to contain 'Confidence Interval History', got body:\n%s", compBody)
+		}
+		if !strings.Contains(compBody, "history-table") {
+			t.Errorf("expected Comparison page to contain 'history-table', got body:\n%s", compBody)
+		}
+
+		// Clean up sampling runs
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", compCandRun, 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", compBaseRun, 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", fmt.Sprintf("%s-b2-cand", samplingCompName), 30*time.Second)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", fmt.Sprintf("%s-b2-base", samplingCompName), 30*time.Second)
 	})
 
 	t.Run("SamplingPairedBatchLoop", func(t *testing.T) {

@@ -460,6 +460,25 @@ Sample latency and dataset progress metrics provide operational observability ac
   $$\text{"\$X.XX spent, } N \text{ of } M \text{ possible samples"}$$
   where $N$ is the count of evaluated pairs ($\sum \text{tasks}[].\text{samplesRun}$) to align with the dataset unit $M$, $M$ is omitted when unknown from the log (falling back to "$N\text{ run} \cdot P\text{ paired}$"), and cost is omitted when no price is known.
 
+### 5.8 Confidence Interval Width vs. n History (Budget Page Recomputation)
+
+To give reviewers intuition into whether evaluating more samples would help resolve uncertainty (see `docs/concept/ui/budget.html` and `docs/concept/functionality.md` §4.2/§4.6), the web UI Comparison view renders a per-task **CI width vs. $n$** chart and table without storing per-batch histories in Kubernetes CRD status:
+
+- **Bounded Status Invariant**: `Comparison.status` stores only the latest estimate and batch metadata; per-batch history is deliberately omitted from status to prevent unbounded resource bloat.
+- **Recomputation from Stored Pairs**: The complete comparison artifact (`comparisons/<name>.json`) persists the full `pairsTable` containing sample-ordered paired scores for each task. The UI loads this artifact through `ArtifactSink.Load` and reconstructs the CI trajectory server-side on demand.
+- **Batch Boundary Evaluation**: For each task with $n \ge 2$ pairs:
+  - Cumulative sample count boundaries $n$ are derived from `status.batches[].sampleRange` widths ($\sum (\text{end}_i - \text{start}_i + 1)$). When batches are absent, boundaries fall back to every 4 pairs ($n = 4, 8, 12, \dots$) plus the final total pair count.
+  - At each boundary $n$, the prefix slice `pairsTable[:n]` is evaluated using `stats.ComparePairedWithSeed` with a fixed seed (`DefaultSeed = 42`) for deterministic bootstrap percentile intervals.
+  - Stopping rule decisions at that $n$ are evaluated via `stats.Decide(est, margin, n, 0, 0, 0)`.
+- **Bounded Series**: The series is capped at at most 50 points; if more batch boundaries exist, intermediate boundaries are uniformly subsampled.
+- **Visual & Accessible Presentation**:
+  - Static inline SVG chart with strictly numeric coordinate attributes plotting CI width ($\text{Upper} - \text{Lower}$) versus $n$.
+  - Equivalence margin reference line rendered at $y = \text{margin}$ (e.g. `margin ±0.05`) to illustrate when interval width approaches decision thresholds.
+  - Final point clearly labelled with sample count $n$ and interval width.
+  - Accessible HTML table beneath the chart displaying $n$, $\Delta$, $95\%\text{ CI}$, and the categorical decision at each boundary for screen readers and automated testing.
+- **Resilience**: If the comparison artifact is missing or exceeds the maximum artifact size cap, the view renders a graceful note ("history not available") without failing the HTTP request. If artifact storage is unreachable, "artifact storage unavailable" is displayed.
+
+
 
 
 

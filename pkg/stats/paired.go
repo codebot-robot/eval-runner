@@ -438,3 +438,51 @@ func BayesianBootstrapPImprovement(diffs []float64, draws int, seed int64) float
 
 	return wins / float64(draws)
 }
+
+// ComputePairedCISeries evaluates paired delta estimates and confidence intervals
+// for prefix slices of pairs at each specified n in nValues using a fixed random seed.
+// Only valid sample sizes (2 <= n <= len(pairs)) are evaluated.
+// Duplicate or non-increasing n values are ignored to ensure monotone progression.
+// If confidence <= 0 or >= 1, DefaultConfidence (0.95) is used.
+// If margin <= 0, DefaultEquivalenceMargin (0.05) is used.
+func ComputePairedCISeries(pairs []PairedSampleScore, nValues []int, confidence float64, seed int64, margin float64) []PairedCISeriesPoint {
+	if len(pairs) < 2 {
+		return nil
+	}
+	if confidence <= 0 || confidence >= 1 {
+		confidence = DefaultConfidence
+	}
+	if margin <= 0 {
+		margin = DefaultEquivalenceMargin
+	}
+
+	var series []PairedCISeriesPoint
+	lastN := 0
+
+	for _, n := range nValues {
+		if n < 2 || n > len(pairs) || n <= lastN {
+			continue
+		}
+		sub := pairs[:n]
+		cand := make([]SampleScore, n)
+		base := make([]SampleScore, n)
+		for i := 0; i < n; i++ {
+			cand[i] = SampleScore{ID: sub[i].ID, Score: sub[i].CandidateScore}
+			base[i] = SampleScore{ID: sub[i].ID, Score: sub[i].BaseScore}
+		}
+
+		est := ComparePairedWithSeed(cand, base, confidence, seed)
+		ciWidth := est.CI.Upper - est.CI.Lower
+		dec := Decide(est, margin, n, 0, 0, 0)
+
+		series = append(series, PairedCISeriesPoint{
+			N:        n,
+			Estimate: est,
+			CIWidth:  ciWidth,
+			Decision: dec,
+		})
+		lastN = n
+	}
+
+	return series
+}

@@ -150,7 +150,7 @@ The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboa
 - `GET /runs/{namespace}/{name}/tasks/{task}/samples`: Per-task sample list with IDs, scores, preview snippets, latency, and tokens.
 - `GET /runs/{namespace}/{name}/tasks/{task}/samples/{sample}`: Sample transcript viewer rendering multi-turn message and event streams as typed text rows.
 - `GET /comparisons`: Overview of all Comparisons with verdicts, $P(\text{improvement})$, and batch progress.
-- `GET /comparisons/{namespace}/{name}`: Complete paired comparison table mirroring the PR comment layout.
+- `GET /comparisons/{namespace}/{name}`: Complete paired comparison table mirroring the PR comment layout, plus per-task CI-width-vs-n history chart and stopping rule decision table recomputed from the stored comparison artifact.
 
 The UI loads `artifactBucket` and `artifactDir` configuration from `eval-runner-config` at startup, connecting to the configured `ArtifactSink` (GCS using Application Default Credentials, or a local filesystem directory). An in-process LRU cache (bounded by byte size and TTL) caches immutable Inspect evaluation logs across page requests.
 

@@ -16,18 +16,23 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -2394,4 +2399,307 @@ func TestTruncateMessageBytes_UTF8(t *testing.T) {
 	if notTruncated := TruncateMessageBytes("hello", 10); notTruncated != "hello" {
 		t.Errorf("expected 'hello', got %q", notTruncated)
 	}
+}
+
+func TestComparisonCIHistory(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: baseDir}
+
+	// 1. Prepare positive fixture: 3 batches, 12 pairs
+	pairs := make([]stats.PairedSampleScore, 12)
+	for i := 0; i < 12; i++ {
+		cand := 0.85
+		base := 0.55
+		pairs[i] = stats.PairedSampleScore{
+			ID:             fmt.Sprintf("sample-%d", i+1),
+			BaseScore:      base,
+			CandidateScore: cand,
+			Delta:          cand - base,
+		}
+	}
+
+	taskID := "task/test-eval"
+	fixtureArtifact := artifacts.ComparisonArtifact{
+		Comparison: "comp-history-fixture",
+		Namespace:  "eval-runner",
+		Verdict:    "IMPROVED",
+		Tasks: []artifacts.ComparisonTaskArtifact{
+			{
+				ID:         taskID,
+				Pairs:      12,
+				PairsTable: pairs,
+			},
+		},
+		Batches: []v1alpha1.ComparisonBatchStatus{
+			{Index: 1, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+			{Index: 2, SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8}},
+			{Index: 3, SampleRange: &v1alpha1.SampleRange{Start: 9, End: 12}},
+		},
+	}
+	artBytes, err := json.Marshal(fixtureArtifact)
+	if err != nil {
+		t.Fatalf("failed to marshal fixture artifact: %v", err)
+	}
+
+	summaryPath, err := sink.StoreComparison(t.Context(), "comp-history-fixture", artBytes)
+	if err != nil {
+		t.Fatalf("failed to store comparison fixture: %v", err)
+	}
+
+	compFixture := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-history-fixture",
+			Namespace: "eval-runner",
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:       v1alpha1.ComparisonPhaseCompleted,
+			Verdict:     v1alpha1.ComparisonVerdictImproved,
+			SummaryPath: summaryPath,
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:         taskID,
+					SamplesRun: 12,
+					Decision:   v1alpha1.ComparisonTaskLabelImproved,
+				},
+			},
+			Batches: []v1alpha1.ComparisonBatchStatus{
+				{Index: 1, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+				{Index: 2, SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8}},
+				{Index: 3, SampleRange: &v1alpha1.SampleRange{Start: 9, End: 12}},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compFixture).Build()
+	server := NewServer(Config{Client: client, ArtifactSink: sink})
+
+	t.Run("Positive_3Batches_12Pairs", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-history-fixture", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		if !strings.Contains(body, "Confidence Interval History") {
+			t.Errorf("expected 'Confidence Interval History' section in HTML, got:\n%s", body)
+		}
+
+		// Assert SVG numeric attributes
+		circleRegex := regexp.MustCompile(`<circle\s+cx="([^"]+)"\s+cy="([^"]+)"\s+r="([^"]+)"`)
+		circleMatches := circleRegex.FindAllStringSubmatch(body, -1)
+		if len(circleMatches) != 3 {
+			t.Fatalf("expected 3 circle points in SVG, got %d", len(circleMatches))
+		}
+
+		for idx, m := range circleMatches {
+			cx, err1 := strconv.ParseFloat(m[1], 64)
+			cy, err2 := strconv.ParseFloat(m[2], 64)
+			r, err3 := strconv.ParseFloat(m[3], 64)
+			if err1 != nil || err2 != nil || err3 != nil || math.IsNaN(cx) || math.IsNaN(cy) || math.IsNaN(r) {
+				t.Errorf("point %d: invalid numeric SVG circle attribute cx=%q cy=%q r=%q", idx, m[1], m[2], m[3])
+			}
+		}
+
+		lineRegex := regexp.MustCompile(`<line\s+x1="([^"]+)"\s+y1="([^"]+)"\s+x2="([^"]+)"\s+y2="([^"]+)"`)
+		lineMatches := lineRegex.FindAllStringSubmatch(body, -1)
+		if len(lineMatches) == 0 {
+			t.Fatalf("expected SVG line elements, found none")
+		}
+		for idx, m := range lineMatches {
+			x1, err1 := strconv.ParseFloat(m[1], 64)
+			y1, err2 := strconv.ParseFloat(m[2], 64)
+			x2, err3 := strconv.ParseFloat(m[3], 64)
+			y2, err4 := strconv.ParseFloat(m[4], 64)
+			if err1 != nil || err2 != nil || err3 != nil || err4 != nil || math.IsNaN(x1) || math.IsNaN(y1) || math.IsNaN(x2) || math.IsNaN(y2) {
+				t.Errorf("line %d: invalid numeric SVG line attribute x1=%q y1=%q x2=%q y2=%q", idx, m[1], m[2], m[3], m[4])
+			}
+		}
+
+		if !strings.Contains(body, "margin ±0.05") {
+			t.Errorf("expected equivalence margin reference line label, got:\n%s", body)
+		}
+		if !strings.Contains(body, "n=12") {
+			t.Errorf("expected final point label containing n=12, got:\n%s", body)
+		}
+
+		// Assert table rows and monotone n
+		tableRowRegex := regexp.MustCompile(`<td class="num">(\d+)</td>\s*<td class="num">([^<]+)</td>\s*<td class="num">([^<]+)</td>\s*<td><span class="chip [^"]+"><span class="dot"></span>([^<]+)</span></td>`)
+		rowMatches := tableRowRegex.FindAllStringSubmatch(body, -1)
+		if len(rowMatches) != 3 {
+			t.Fatalf("expected 3 history table rows, got %d", len(rowMatches))
+		}
+
+		expectedNs := []int{4, 8, 12}
+		lastN := 0
+		for i, rm := range rowMatches {
+			nVal, err := strconv.Atoi(rm[1])
+			if err != nil {
+				t.Fatalf("row %d: invalid n integer %q", i, rm[1])
+			}
+			if nVal != expectedNs[i] {
+				t.Errorf("row %d: expected n=%d, got %d", i, expectedNs[i], nVal)
+			}
+			if nVal <= lastN {
+				t.Errorf("expected strictly monotone increasing n, got row %d n=%d <= lastN=%d", i, nVal, lastN)
+			}
+			lastN = nVal
+			deltaStr := rm[2]
+			ciStr := rm[3]
+			decisionStr := rm[4]
+			if deltaStr == "" || ciStr == "" || decisionStr == "" {
+				t.Errorf("row %d: missing values delta=%q ci=%q decision=%q", i, deltaStr, ciStr, decisionStr)
+			}
+		}
+	})
+
+	t.Run("Negative_MissingArtifact", func(t *testing.T) {
+		compMissing := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "comp-missing",
+				Namespace: "eval-runner",
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:       v1alpha1.ComparisonPhaseCompleted,
+				SummaryPath: filepath.Join(baseDir, "comparisons", "missing.json"),
+			},
+		}
+		clMissing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compMissing).Build()
+		srvMissing := NewServer(Config{Client: clMissing, ArtifactSink: sink})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-missing", nil)
+		w := httptest.NewRecorder()
+		srvMissing.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for missing artifact, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "history not available") {
+			t.Errorf("expected 'history not available' note, got:\n%s", body)
+		}
+		if strings.Contains(body, "history-table") {
+			t.Errorf("expected no history table when artifact is missing")
+		}
+	})
+
+	t.Run("Negative_OversizedArtifact", func(t *testing.T) {
+		// Create artifact file that exceeds DefaultMaxLoadBytes (4 MiB)
+		oversizedFile := filepath.Join(baseDir, "comparisons", "comp-oversized.json")
+		f, err := os.Create(oversizedFile)
+		if err != nil {
+			t.Fatalf("failed to create oversized file: %v", err)
+		}
+		oversizedData := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
+		_, _ = f.Write(oversizedData)
+		_ = f.Close()
+
+		compOversized := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "comp-oversized",
+				Namespace: "eval-runner",
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:       v1alpha1.ComparisonPhaseCompleted,
+				SummaryPath: oversizedFile,
+			},
+		}
+		clOversized := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compOversized).Build()
+		srvOversized := NewServer(Config{Client: clOversized, ArtifactSink: sink})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-oversized", nil)
+		w := httptest.NewRecorder()
+		srvOversized.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for oversized artifact, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "history not available") {
+			t.Errorf("expected 'history not available' note for oversized artifact, got:\n%s", body)
+		}
+		if strings.Contains(body, "history-table") {
+			t.Errorf("expected no history table when artifact is oversized")
+		}
+	})
+
+	t.Run("Negative_PairsLessThan2", func(t *testing.T) {
+		singlePairArtifact := artifacts.ComparisonArtifact{
+			Comparison: "comp-single-pair",
+			Namespace:  "eval-runner",
+			Verdict:    "INCONCLUSIVE",
+			Tasks: []artifacts.ComparisonTaskArtifact{
+				{
+					ID:    taskID,
+					Pairs: 1,
+					PairsTable: []stats.PairedSampleScore{
+						{ID: "sample-1", BaseScore: 0.5, CandidateScore: 0.8, Delta: 0.3},
+					},
+				},
+			},
+		}
+		artBytes, err := json.Marshal(singlePairArtifact)
+		if err != nil {
+			t.Fatalf("failed to marshal single pair artifact: %v", err)
+		}
+		p, err := sink.StoreComparison(t.Context(), "comp-single-pair", artBytes)
+		if err != nil {
+			t.Fatalf("failed to store single pair comparison: %v", err)
+		}
+
+		compSingle := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "comp-single-pair",
+				Namespace: "eval-runner",
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:       v1alpha1.ComparisonPhaseCompleted,
+				Verdict:     v1alpha1.ComparisonVerdictInconclusive,
+				SummaryPath: p,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         taskID,
+						SamplesRun: 1,
+						Decision:   v1alpha1.ComparisonTaskLabelInconclusive,
+					},
+				},
+			},
+		}
+		clSingle := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compSingle).Build()
+		srvSingle := NewServer(Config{Client: clSingle, ArtifactSink: sink})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-single-pair", nil)
+		w := httptest.NewRecorder()
+		srvSingle.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for pairs < 2, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, "history-table") {
+			t.Errorf("expected no history table for pairs < 2, got body:\n%s", body)
+		}
+	})
+
+	t.Run("Negative_ArtifactStorageUnavailable", func(t *testing.T) {
+		srvNilSink := NewServer(Config{Client: client, ArtifactSink: nil})
+
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-history-fixture", nil)
+		w := httptest.NewRecorder()
+		srvNilSink.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK when storage unavailable, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "artifact storage unavailable") {
+			t.Errorf("expected 'artifact storage unavailable' note, got:\n%s", body)
+		}
+		if strings.Contains(body, "history-table") {
+			t.Errorf("expected no history table when artifact storage is unavailable")
+		}
+	})
 }
