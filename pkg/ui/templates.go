@@ -949,6 +949,8 @@ var (
 	tmplSampleTranscript = template.Must(template.New("sample_transcript").Parse(sampleTranscriptTemplate))
 	tmplPullsList        = template.Must(template.New("pulls_list").Parse(pullsListTemplate))
 	tmplPullDetail       = template.Must(template.New("pull_detail").Parse(pullDetailTemplate))
+	tmplSeriesList       = template.Must(template.New("series_list").Parse(seriesListTemplate))
+	tmplSeriesDetail     = template.Must(template.New("series_detail").Parse(seriesDetailTemplate))
 
 	// TmplComparisonTable is the parsed template for the comparison table sub-template.
 	TmplComparisonTable = tmplComparisonTable
@@ -1143,4 +1145,211 @@ func RenderComparisonTable(w io.Writer, view ComparisonTableView) error {
 		}
 	}
 	return tmplComparisonTable.ExecuteTemplate(w, "comparison_table", view)
+}
+
+const seriesListTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Series · eval-runner</title>
+  <style>` + baseCSS + `</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
+        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+        <a href="/series" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Main-Branch Series</h1>
+        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Repository</th>
+              <th>Branch</th>
+              <th>Runs</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range .Series }}
+            <tr>
+              <td><a href="{{ .Link }}" style="font-weight:600">{{ .Repository }}</a></td>
+              <td><span class="mono" style="font-size:13px">{{ .Branch }}</span></td>
+              <td class="num">{{ .RunCount }}</td>
+              <td><a href="{{ .Link }}" class="mono" style="font-size:13px">view series →</a></td>
+            </tr>
+            {{ else }}
+            <tr>
+              <td colspan="4" class="empty-state">No series found in namespace {{ .Namespace }}.</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+`
+
+const seriesDetailTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .Repository }} ({{ .Branch }}) · Series · eval-runner</title>
+  <style>` + baseCSS + `</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
+        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+        <a href="/series" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h1 class="card-title">
+            <span>{{ .Repository }}</span>
+            <span class="mono" style="font-size:16px;color:var(--muted);font-weight:normal">({{ .Branch }})</span>
+          </h1>
+          <div style="font-size:13px;color:var(--muted);margin-top:4px"><a href="{{ .BackLink }}">← Back to Series</a></div>
+        </div>
+        <span style="font-size:13px;color:var(--muted)">showing last {{ len .Items }} of {{ .TotalRuns }} commits</span>
+      </div>
+      <div class="card-body">
+        {{- if .OrderedNote }}
+        <div style="font-size:13px;color:var(--muted);margin-bottom:12px">{{ .OrderedNote }}</div>
+        {{- end }}
+
+        {{- if .Tasks }}
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+          <span style="font-size:13px;font-weight:600;color:var(--muted)">Task:</span>
+          {{ range .Tasks }}
+          <a href="{{ .Link }}" class="chip {{ if .Active }}good{{ else }}neutral{{ end }} mono" style="font-size:12px">{{ .ID }}</a>
+          {{ end }}
+        </div>
+        {{- end }}
+
+        {{- if .SelectedTask }}
+        <div class="mono" style="font-weight:600;font-size:15px;margin-bottom:12px">{{ .SelectedTask }}</div>
+        {{- end }}
+
+        <div style="overflow-x:auto">
+          <svg viewBox="{{ .SVG.ViewBox }}" width="100%" height="220" style="max-width:640px;display:block">
+            <!-- Y-Axis Grid Lines & Labels -->
+            {{ range .SVG.YAxisTicks }}
+            <line x1="{{ $.SVG.X0 }}" y1="{{ .Y1 }}" x2="{{ $.SVG.X1 }}" y2="{{ .Y1 }}" stroke="var(--line)" stroke-width="1" stroke-dasharray="3,3"/>
+            <text x="{{ .X }}" y="{{ .Y }}" text-anchor="end" font-size="11" fill="var(--muted)" font-family="var(--mono)">{{ .Text }}</text>
+            {{ end }}
+
+            <!-- Axes -->
+            <line x1="{{ .SVG.X0 }}" y1="{{ .SVG.Y1 }}" x2="{{ .SVG.X1 }}" y2="{{ .SVG.Y1 }}" stroke="var(--line)" stroke-width="1"/>
+            <line x1="{{ .SVG.X0 }}" y1="{{ .SVG.Y0 }}" x2="{{ .SVG.X0 }}" y2="{{ .SVG.Y1 }}" stroke="var(--line)" stroke-width="1"/>
+
+            <!-- Shaded CI Polygons -->
+            {{ range .SVG.Polygons }}
+            <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+            {{ end }}
+
+            <!-- Polylines -->
+            {{ range .SVG.Polylines }}
+            <polyline points="{{ . }}" fill="none" stroke="var(--indigo)" stroke-width="2"/>
+            {{ end }}
+
+            <!-- Data Points -->
+            {{ range .SVG.Circles }}
+            <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)" stroke="#fff" stroke-width="2"/>
+            {{ end }}
+
+            <!-- X-Axis Ticks & Labels -->
+            {{ range .SVG.XAxisTicks }}
+            <line x1="{{ .X }}" y1="{{ .Y1 }}" x2="{{ .X }}" y2="{{ .Y2 }}" stroke="var(--line)" stroke-width="1"/>
+            <text x="{{ .X }}" y="{{ .TextY }}" text-anchor="middle" font-size="11" fill="var(--muted)" font-family="var(--mono)">{{ .Text }}</text>
+            {{ end }}
+          </svg>
+        </div>
+
+        <div style="overflow-x:auto;margin-top:20px">
+          <table class="ci">
+            <thead>
+              <tr>
+                <th>Commit</th>
+                <th>Time</th>
+                <th>Phase</th>
+                <th>Samples</th>
+                <th>Rate</th>
+                <th>95% CI</th>
+                <th>Tokens</th>
+                <th>Cost</th>
+                <th>Run</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{ range .Items }}
+              <tr>
+                <td><span class="mono" style="font-size:13px">{{ .CommitSHAShort }}</span></td>
+                <td><span style="color:var(--muted);font-size:13px">{{ .CommitTimeStr }}</span></td>
+                <td><span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span></td>
+                <td class="num">{{ .Samples }}</td>
+                <td class="num">{{ .RateStr }}</td>
+                <td class="num" style="font-size:13px">{{ .CIStr }}</td>
+                <td class="num">{{ .TokensStr }}</td>
+                <td class="num">{{ .CostStr }}</td>
+                <td><a href="{{ .RunLink }}" class="mono" style="font-size:13px">{{ .RunName }}</a></td>
+              </tr>
+              {{ else }}
+              <tr>
+                <td colspan="9" class="empty-state">No runs recorded for this series.</td>
+              </tr>
+              {{ end }}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span><b>Repository:</b> {{ .Repository }}</span>
+        <span><b>Branch:</b> {{ .Branch }}</span>
+        <span><b>Total Runs:</b> {{ .TotalRuns }}</span>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+`
+
+// RenderSeriesList renders the series list template to the given writer.
+func RenderSeriesList(w io.Writer, view SeriesListView) error {
+	return tmplSeriesList.Execute(w, view)
+}
+
+// RenderSeriesDetail renders the series detail template to the given writer.
+func RenderSeriesDetail(w io.Writer, view SeriesDetailView) error {
+	return tmplSeriesDetail.Execute(w, view)
 }

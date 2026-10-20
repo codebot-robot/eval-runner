@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -2757,6 +2759,526 @@ func TestComparisonCIHistory(t *testing.T) {
 		}
 		if strings.Contains(body, "history-table") {
 			t.Errorf("expected no history table when summaryPath lacks comparisons/ prefix")
+		}
+	})
+}
+
+func TestServerSeries_Selection(t *testing.T) {
+	scheme := newTestScheme(t)
+	r10 := 0.8
+	ratePtr := &r10
+
+	runValid := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-1111111",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":     "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch":   "main",
+				"evalrunner.gke-labs.dev/head-sha": "1111111222222233333334444444555555556666",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": "2026-10-20T01:00:00Z",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "1111111222222233333334444444555555556666",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "task-a",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					SuccessRate: ratePtr,
+					Samples:     10,
+				},
+			},
+		},
+	}
+
+	// Excluded: branch is dev, not main
+	runOtherBranch := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-2222222",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":     "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch":   "dev",
+				"evalrunner.gke-labs.dev/head-sha": "2222222333333344444445555555666666667777",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "2222222333333344444445555555666666667777",
+			},
+		},
+	}
+
+	// Excluded: pre-existing run lacking branch label
+	runPreExisting := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-3333333",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":     "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/head-sha": "3333333444444455555556666666777777778888",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "3333333444444455555556666666777777778888",
+			},
+		},
+	}
+
+	// Excluded: not starting with base-
+	runCandidate := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-42-4444444",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":     "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch":   "main",
+				"evalrunner.gke-labs.dev/head-sha": "4444444555555566666667777777888888889999",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "4444444555555566666667777777888888889999",
+			},
+		},
+	}
+
+	// Excluded: other repo
+	runOtherRepo := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-5555555",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":     "other-org_other-repo",
+				"evalrunner.gke-labs.dev/branch":   "main",
+				"evalrunner.gke-labs.dev/head-sha": "5555555666666677777778888888999999990000",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/other-org/other-repo.git",
+				Commit: "5555555666666677777778888888999999990000",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		runValid, runOtherBranch, runPreExisting, runCandidate, runOtherRepo,
+	).Build()
+	server := NewServer(Config{Client: cl})
+
+	t.Run("SeriesList", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "gke-labs/eval-runner") {
+			t.Errorf("expected gke-labs/eval-runner in series list")
+		}
+		if !strings.Contains(body, "/series/2cc24c2/main") {
+			t.Errorf("expected link to /series/2cc24c2/main in series list")
+		}
+	})
+
+	t.Run("SeriesDetail_FiltersCorrectly", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "base-1111111") {
+			t.Errorf("expected base-1111111 in series detail")
+		}
+		if strings.Contains(body, "base-2222222") {
+			t.Errorf("did not expect base-2222222 (branch dev) in series detail")
+		}
+		if strings.Contains(body, "base-3333333") {
+			t.Errorf("did not expect base-3333333 (pre-existing) in series detail")
+		}
+		if strings.Contains(body, "pr-42-4444444") {
+			t.Errorf("did not expect candidate run in series detail")
+		}
+		if strings.Contains(body, "base-5555555") {
+			t.Errorf("did not expect other repo in series detail")
+		}
+	})
+
+	t.Run("SeriesDetail_NotFound", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/nonexistent", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for nonexistent series, got %d", w.Code)
+		}
+	})
+}
+
+func TestServerSeries_Ordering(t *testing.T) {
+	scheme := newTestScheme(t)
+	rate := 0.9
+
+	t.Run("OrderedByCommitTimeAnnotation", func(t *testing.T) {
+		// runA was created at 10:00 but commitTime is 02:00
+		runA := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "base-aaaaaaa",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)),
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+					"evalrunner.gke-labs.dev/branch": "main",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": "2026-10-20T02:00:00Z",
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/gke-labs/eval-runner.git",
+					Commit: "aaaaaaa111111111111111111111111111111111",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate}},
+			},
+		}
+
+		// runB was created at 11:00 but commitTime is 01:00 (earlier commit!)
+		runB := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "base-bbbbbbb",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)),
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+					"evalrunner.gke-labs.dev/branch": "main",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": "2026-10-20T01:00:00Z",
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/gke-labs/eval-runner.git",
+					Commit: "bbbbbbb222222222222222222222222222222222",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runA, runB).Build()
+		server := NewServer(Config{Client: cl})
+
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, "ordered by creation time") {
+			t.Errorf("did not expect 'ordered by creation time' note when commit-time annotations are present")
+		}
+
+		idxA := strings.Index(body, "base-aaaaaaa")
+		idxB := strings.Index(body, "base-bbbbbbb")
+		if idxB == -1 || idxA == -1 {
+			t.Fatalf("expected both runs in body")
+		}
+		if idxB > idxA {
+			t.Errorf("expected runB (commitTime 01:00) before runA (commitTime 02:00), got idxB=%d idxA=%d", idxB, idxA)
+		}
+	})
+
+	t.Run("FallbackToCreationTimeWithVisibleNote", func(t *testing.T) {
+		runNoAnnotation := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "base-cccccc",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)),
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+					"evalrunner.gke-labs.dev/branch": "main",
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/gke-labs/eval-runner.git",
+					Commit: "cccccc111111111111111111111111111111111",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runNoAnnotation).Build()
+		server := NewServer(Config{Client: cl})
+
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "ordered by creation time") {
+			t.Errorf("expected visible note 'ordered by creation time', got body:\n%s", body)
+		}
+	})
+}
+
+func TestServerSeries_NCap(t *testing.T) {
+	scheme := newTestScheme(t)
+	rate := 0.85
+
+	var runs []client.Object
+	baseTime := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	for i := 1; i <= 60; i++ {
+		cTime := baseTime.Add(time.Duration(i) * time.Hour).Format(time.RFC3339)
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("base-%07d", i),
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+					"evalrunner.gke-labs.dev/branch": "main",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": cTime,
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/gke-labs/eval-runner.git",
+					Commit: fmt.Sprintf("%040d", i),
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{{ID: "eval-task", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate}},
+			},
+		}
+		runs = append(runs, run)
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runs...).Build()
+	server := NewServer(Config{Client: cl})
+
+	t.Run("DefaultCap50", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, "base-0000001") {
+			t.Errorf("did not expect oldest commit base-0000001 when capped at 50")
+		}
+		if !strings.Contains(body, "base-0000060") {
+			t.Errorf("expected newest commit base-0000060")
+		}
+		if !strings.Contains(body, "base-0000011") {
+			t.Errorf("expected commit base-0000011")
+		}
+		if !strings.Contains(body, "showing last 50 of 60 commits") {
+			t.Errorf("expected 'showing last 50 of 60 commits' in body")
+		}
+	})
+
+	t.Run("NCapOver50_ClampedTo50", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?n=100", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		body := w.Body.String()
+		if strings.Contains(body, "base-0000001") {
+			t.Errorf("expected n=100 to be capped at 50, but base-0000001 was included")
+		}
+	})
+
+	t.Run("ExplicitSmallerN", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?n=10", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		body := w.Body.String()
+		if strings.Contains(body, "base-0000050") {
+			t.Errorf("did not expect base-0000050 when n=10 (commits 51-60)")
+		}
+		if !strings.Contains(body, "base-0000051") {
+			t.Errorf("expected base-0000051 when n=10")
+		}
+		if !strings.Contains(body, "base-0000060") {
+			t.Errorf("expected base-0000060 when n=10")
+		}
+	})
+}
+
+func TestServerSeries_CohortFilter(t *testing.T) {
+	scheme := newTestScheme(t)
+	rate := 0.7
+
+	runA := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-cohort-a",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Cohort: "cohort-alpha",
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "aaaa111111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Tasks: []v1alpha1.TaskStatus{{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate}},
+		},
+	}
+
+	runB := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-cohort-b",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Cohort: "cohort-beta",
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "bbbb222222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Tasks: []v1alpha1.TaskStatus{{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runA, runB).Build()
+	server := NewServer(Config{Client: cl})
+
+	t.Run("ListFilteredByCohort", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series?cohort=cohort-alpha", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "1 total") {
+			t.Errorf("expected 1 total row for cohort-alpha filter, got body:\n%s", body)
+		}
+	})
+
+	t.Run("DetailFilteredByCohort", func(t *testing.T) {
+		reqAlpha := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?cohort=cohort-alpha", nil)
+		wAlpha := httptest.NewRecorder()
+		server.ServeHTTP(wAlpha, reqAlpha)
+
+		if wAlpha.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", wAlpha.Code)
+		}
+		bodyAlpha := wAlpha.Body.String()
+		if !strings.Contains(bodyAlpha, "base-cohort-a") {
+			t.Errorf("expected base-cohort-a in filtered series")
+		}
+		if strings.Contains(bodyAlpha, "base-cohort-b") {
+			t.Errorf("did not expect base-cohort-b in filtered series")
+		}
+	})
+}
+
+func TestServerSeries_HostileEscaping(t *testing.T) {
+	scheme := newTestScheme(t)
+	rate := 0.5
+
+	hostilePayload := "<script>alert('xss')</script>"
+	runHostile := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-hostile",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Cohort: hostilePayload,
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "1111111222222233333334444444555555556666",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          hostilePayload,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					SuccessRate: &rate,
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runHostile).Build()
+	server := NewServer(Config{Client: cl})
+
+	t.Run("ListEscaping", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series?cohort="+url.QueryEscape(hostilePayload), nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		body := w.Body.String()
+		if strings.Contains(body, "<script>") {
+			t.Errorf("found unescaped <script> in list response")
+		}
+	})
+
+	t.Run("DetailEscaping", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		body := w.Body.String()
+		if strings.Contains(body, "<script>") {
+			t.Errorf("found unescaped <script> in detail response")
+		}
+		if !strings.Contains(body, html.EscapeString(hostilePayload)) {
+			t.Errorf("expected escaped hostile payload in detail response")
 		}
 	})
 }

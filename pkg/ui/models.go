@@ -36,6 +36,7 @@ const (
 	NavTabPulls       NavTab = "pulls"
 	NavTabRuns        NavTab = "runs"
 	NavTabComparisons NavTab = "comparisons"
+	NavTabSeries      NavTab = "series"
 )
 
 // RunListItem represents a single run row in the /runs list view.
@@ -804,6 +805,266 @@ func BuildComparisonHistorySVG(points []ComparisonHistoryPoint, margin float64) 
 		FinalLabel:  finalLabel,
 		XAxisTicks:  xTicks,
 		YAxisTicks:  yTicks,
+	}
+}
+
+// CleanRepo normalizes a repository clone URL or path to "owner/repo".
+func CleanRepo(repoOrURL string) string {
+	s := strings.TrimSpace(repoOrURL)
+	s = strings.TrimPrefix(s, "https://github.com/")
+	s = strings.TrimPrefix(s, "http://github.com/")
+	s = strings.TrimPrefix(s, "git@github.com:")
+	s = strings.TrimPrefix(s, "git://github.com/")
+	s = strings.TrimSuffix(s, ".git")
+	return strings.Trim(s, "/")
+}
+
+// SeriesListRow represents a repository and branch entry in the /series list view.
+type SeriesListRow struct {
+	Repository string
+	RepoHash   string
+	Branch     string
+	RunCount   int
+	Link       string
+}
+
+// SeriesListView is the view model for GET /series.
+type SeriesListView struct {
+	ActiveTab  NavTab
+	Namespace  string
+	Cohort     string
+	Series     []SeriesListRow
+	TotalCount int
+}
+
+// SeriesTaskLink represents a task link in the task selector.
+type SeriesTaskLink struct {
+	ID     string
+	Link   string
+	Active bool
+}
+
+// SeriesItem holds the data for one commit run in the series view.
+type SeriesItem struct {
+	CommitSHA      string
+	CommitSHAShort string
+	CommitTime     time.Time
+	CommitTimeStr  string
+	RunName        string
+	Namespace      string
+	Phase          v1alpha1.TaskPhase
+	PhaseChip      string
+	Samples        string
+	RateStr        string
+	CIStr          string
+	TokensStr      string
+	CostStr        string
+	RunLink        string
+
+	HasPoint    bool
+	SuccessRate *float64
+	CI          *v1alpha1.ConfidenceInterval
+}
+
+// SeriesDetailView is the view model for GET /series/{repohash}/{branch}.
+type SeriesDetailView struct {
+	ActiveTab             NavTab
+	Namespace             string
+	Repository            string
+	RepoHash              string
+	Branch                string
+	SelectedTask          string
+	Tasks                 []SeriesTaskLink
+	N                     int
+	Cohort                string
+	OrderedByCreationTime bool
+	OrderedNote           string
+	SVG                   SeriesSVG
+	Items                 []SeriesItem
+	TotalRuns             int
+	BackLink              string
+}
+
+// SeriesSVG holds precomputed numeric coordinates for inline SVG rendering of a task series.
+type SeriesSVG struct {
+	ViewBox    string
+	X0         float64
+	Y0         float64
+	X1         float64
+	Y1         float64
+	Polylines  []string    // list of "x1,y1 x2,y2 ..." for each contiguous polyline segment
+	Polygons   []string    // list of "x0,yu0 ... xk,yuk xk,ylk ... x0,yl0" for shaded CI band
+	Circles    []SVGCircle // data points
+	XAxisTicks []SVGTick   // ticks for commits along X-axis
+	YAxisTicks []SVGTick   // ticks for success rate along Y-axis
+}
+
+// BuildSeriesSVG generates server-side numeric SVG coordinates for success rate vs commit series.
+func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
+	const (
+		viewBox = "0 0 640 220"
+		x0      = 60.0
+		x1      = 580.0
+		y0      = 25.0
+		y1      = 175.0
+	)
+
+	yTicks := []SVGTick{
+		{X: x0 - 8.0, Y: y1 + 4.0, Y1: y1, Text: "0.00"},
+		{X: x0 - 8.0, Y: (y0+y1)/2.0 + 4.0, Y1: (y0 + y1) / 2.0, Text: "0.50"},
+		{X: x0 - 8.0, Y: y0 + 4.0, Y1: y0, Text: "1.00"},
+	}
+
+	if len(items) == 0 {
+		return SeriesSVG{
+			ViewBox:    viewBox,
+			X0:         x0,
+			Y0:         y0,
+			X1:         x1,
+			Y1:         y1,
+			YAxisTicks: yTicks,
+		}
+	}
+
+	N := len(items)
+	var xTicks []SVGTick
+	if N <= 8 {
+		for i, it := range items {
+			cx := x0
+			if N > 1 {
+				cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
+			} else {
+				cx = (x0 + x1) / 2.0
+			}
+			xTicks = append(xTicks, SVGTick{X: cx, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: it.CommitSHAShort})
+		}
+	} else {
+		cx0 := x0
+		cxMid := x0 + (float64(N/2)/float64(N-1))*(x1-x0)
+		cxLast := x1
+		xTicks = append(xTicks, SVGTick{X: cx0, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: items[0].CommitSHAShort})
+		xTicks = append(xTicks, SVGTick{X: cxMid, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: items[N/2].CommitSHAShort})
+		xTicks = append(xTicks, SVGTick{X: cxLast, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: items[N-1].CommitSHAShort})
+	}
+
+	var polylines []string
+	var polygons []string
+	var circles []SVGCircle
+
+	type pt2D struct {
+		x float64
+		y float64
+	}
+	type ci2D struct {
+		x      float64
+		yUpper float64
+		yLower float64
+	}
+
+	var curLine []pt2D
+	var curCI []ci2D
+
+	flushLine := func() {
+		if len(curLine) >= 2 {
+			var sb strings.Builder
+			for j, p := range curLine {
+				if j > 0 {
+					sb.WriteByte(' ')
+				}
+				sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.y))
+			}
+			polylines = append(polylines, sb.String())
+		}
+		curLine = nil
+	}
+
+	flushCI := func() {
+		if len(curCI) >= 2 {
+			var sb strings.Builder
+			for j, p := range curCI {
+				if j > 0 {
+					sb.WriteByte(' ')
+				}
+				sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.yUpper))
+			}
+			for j := len(curCI) - 1; j >= 0; j-- {
+				sb.WriteByte(' ')
+				sb.WriteString(fmt.Sprintf("%.1f,%.1f", curCI[j].x, curCI[j].yLower))
+			}
+			polygons = append(polygons, sb.String())
+		} else if len(curCI) == 1 {
+			p := curCI[0]
+			poly := fmt.Sprintf("%.1f,%.1f %.1f,%.1f %.1f,%.1f %.1f,%.1f",
+				p.x-2.0, p.yUpper,
+				p.x+2.0, p.yUpper,
+				p.x+2.0, p.yLower,
+				p.x-2.0, p.yLower,
+			)
+			polygons = append(polygons, poly)
+		}
+		curCI = nil
+	}
+
+	for i, it := range items {
+		cx := x0
+		if N > 1 {
+			cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
+		} else {
+			cx = (x0 + x1) / 2.0
+		}
+
+		if !it.HasPoint || it.SuccessRate == nil {
+			flushLine()
+			flushCI()
+			continue
+		}
+
+		rate := *it.SuccessRate
+		if rate < 0.0 {
+			rate = 0.0
+		} else if rate > 1.0 {
+			rate = 1.0
+		}
+		cy := y1 - rate*(y1-y0)
+
+		circles = append(circles, SVGCircle{CX: cx, CY: cy, R: 4.0})
+		curLine = append(curLine, pt2D{x: cx, y: cy})
+
+		if it.CI != nil {
+			lo := it.CI.Lower
+			if lo < 0.0 {
+				lo = 0.0
+			} else if lo > 1.0 {
+				lo = 1.0
+			}
+			hi := it.CI.Upper
+			if hi < 0.0 {
+				hi = 0.0
+			} else if hi > 1.0 {
+				hi = 1.0
+			}
+			yUpper := y1 - hi*(y1-y0)
+			yLower := y1 - lo*(y1-y0)
+			curCI = append(curCI, ci2D{x: cx, yUpper: yUpper, yLower: yLower})
+		} else {
+			flushCI()
+		}
+	}
+
+	flushLine()
+	flushCI()
+
+	return SeriesSVG{
+		ViewBox:    viewBox,
+		X0:         x0,
+		Y0:         y0,
+		X1:         x1,
+		Y1:         y1,
+		Polylines:  polylines,
+		Polygons:   polygons,
+		Circles:    circles,
+		XAxisTicks: xTicks,
+		YAxisTicks: yTicks,
 	}
 }
 

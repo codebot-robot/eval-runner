@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,6 +272,145 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 
 	// Baseline Run must be preserved for future PR reuse
 	_ = harness.WaitForRunExists("eval-runner", baseRunName, 5*time.Second)
+
+	// 10. POST two signed push payloads and verify /series shows two rows and two points
+	push1Payload := []byte(`{
+		"ref": "refs/heads/main",
+		"after": "d111111111111111111111111111111111111111",
+		"head_commit": {
+			"id": "d111111111111111111111111111111111111111",
+			"timestamp": "2026-10-20T04:00:00Z"
+		},
+		"repository": {
+			"name": "eval-runner",
+			"full_name": "gke-labs/eval-runner",
+			"clone_url": "https://github.com/gke-labs/eval-runner.git",
+			"default_branch": "main",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	push1Sig := webhook.ComputeSignature(push1Payload, webhookSecret)
+	reqPush1, err := http.NewRequest(http.MethodPost, baseURL+"/webhook", bytes.NewReader(push1Payload))
+	if err != nil {
+		t.Fatalf("failed to create push 1 HTTP request: %v", err)
+	}
+	reqPush1.Header.Set("Content-Type", "application/json")
+	reqPush1.Header.Set(webhook.HeaderGitHubEvent, webhook.EventPush)
+	reqPush1.Header.Set(webhook.HeaderHubSignature256, push1Sig)
+	reqPush1.Header.Set(webhook.HeaderGitHubDelivery, "e2e-smoke-push-1-delivery")
+
+	respPush1, err := http.DefaultClient.Do(reqPush1)
+	if err != nil {
+		t.Fatalf("failed to POST push 1 payload: %v", err)
+	}
+	respPush1.Body.Close()
+	if respPush1.StatusCode != http.StatusOK {
+		t.Fatalf("push 1 returned status %d", respPush1.StatusCode)
+	}
+
+	push2Payload := []byte(`{
+		"ref": "refs/heads/main",
+		"after": "d222222222222222222222222222222222222222",
+		"head_commit": {
+			"id": "d222222222222222222222222222222222222222",
+			"timestamp": "2026-10-20T05:00:00Z"
+		},
+		"repository": {
+			"name": "eval-runner",
+			"full_name": "gke-labs/eval-runner",
+			"clone_url": "https://github.com/gke-labs/eval-runner.git",
+			"default_branch": "main",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	push2Sig := webhook.ComputeSignature(push2Payload, webhookSecret)
+	reqPush2, err := http.NewRequest(http.MethodPost, baseURL+"/webhook", bytes.NewReader(push2Payload))
+	if err != nil {
+		t.Fatalf("failed to create push 2 HTTP request: %v", err)
+	}
+	reqPush2.Header.Set("Content-Type", "application/json")
+	reqPush2.Header.Set(webhook.HeaderGitHubEvent, webhook.EventPush)
+	reqPush2.Header.Set(webhook.HeaderHubSignature256, push2Sig)
+	reqPush2.Header.Set(webhook.HeaderGitHubDelivery, "e2e-smoke-push-2-delivery")
+
+	respPush2, err := http.DefaultClient.Do(reqPush2)
+	if err != nil {
+		t.Fatalf("failed to POST push 2 payload: %v", err)
+	}
+	respPush2.Body.Close()
+	if respPush2.StatusCode != http.StatusOK {
+		t.Fatalf("push 2 returned status %d", respPush2.StatusCode)
+	}
+
+	push1RunName := "base-d111111"
+	push2RunName := "base-d222222"
+	harness.WaitForRunExists("eval-runner", push1RunName, 15*time.Second)
+	harness.WaitForRunExists("eval-runner", push2RunName, 15*time.Second)
+
+	t.Cleanup(func() {
+		harness.runCmd("kubectl", "delete", "run", push1RunName, "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "run", push2RunName, "-n", "eval-runner", "--ignore-not-found")
+	})
+
+	// Patch status with completed task so that SVG points and table rows render
+	patchStatus := `{"status":{"phase":"Completed","tasks":[{"id":"smoke/task1","phase":"Completed","samples":10,"successes":8,"successRate":0.8,"successRateCI":{"lower":0.6,"upper":0.9,"confidence":0.95,"method":"wilson"}}]}}`
+	harness.runCmd("kubectl", "patch", "run", push1RunName, "-n", "eval-runner", "--subresource=status", "--type=merge", "-p", patchStatus)
+	harness.runCmd("kubectl", "patch", "run", push2RunName, "-n", "eval-runner", "--subresource=status", "--type=merge", "-p", patchStatus)
+
+	// Port forward to UI service
+	lUI, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on local port for UI: %v", err)
+	}
+	uiPort := lUI.Addr().(*net.TCPAddr).Port
+	_ = lUI.Close()
+
+	cmdUI := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-ui", fmt.Sprintf("%d:80", uiPort))
+	if err := cmdUI.Start(); err != nil {
+		t.Fatalf("failed to start UI port-forward: %v", err)
+	}
+	defer func() {
+		_ = cmdUI.Process.Kill()
+	}()
+
+	uiBaseURL := fmt.Sprintf("http://127.0.0.1:%d", uiPort)
+	uiReady := false
+	for i := 0; i < 30; i++ {
+		resp, err := http.Get(uiBaseURL + "/healthz")
+		if err == nil && resp.StatusCode == http.StatusOK {
+			uiReady = true
+			resp.Body.Close()
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !uiReady {
+		t.Fatalf("eval-runner-ui port-forward failed to become ready")
+	}
+
+	repoHash := webhook.RepoHash("gke-labs/eval-runner")
+	seriesURL := fmt.Sprintf("%s/series/%s/main?task=smoke/task1", uiBaseURL, repoHash)
+	seriesResp, err := http.Get(seriesURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", seriesURL, err)
+	}
+	seriesBody, err := io.ReadAll(seriesResp.Body)
+	seriesResp.Body.Close()
+	if seriesResp.StatusCode != http.StatusOK {
+		t.Fatalf("series page returned status %d: %s", seriesResp.StatusCode, string(seriesBody))
+	}
+
+	bodyStr := string(seriesBody)
+	if !strings.Contains(bodyStr, "d111111") || !strings.Contains(bodyStr, "d222222") {
+		t.Errorf("expected two commit rows (d111111, d222222) in series HTML, got:\n%s", bodyStr)
+	}
+	circleCount := strings.Count(bodyStr, "<circle ")
+	if circleCount != 2 {
+		t.Errorf("expected 2 SVG circles (points), got %d in body:\n%s", circleCount, bodyStr)
+	}
 }
 
 // TestWebhookSmoke is retained for backwards compatibility with `go test -run TestWebhookSmoke`.
