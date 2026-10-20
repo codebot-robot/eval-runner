@@ -704,6 +704,12 @@ func TestParseInspectSamples(t *testing.T) {
 		if !strings.Contains(s1.Output, "Cleared CDN cache") {
 			t.Errorf("unexpected output: %q", s1.Output)
 		}
+		if s1.Target != "Resolved" {
+			t.Errorf("expected target 'Resolved', got %q", s1.Target)
+		}
+		if s1.Explanation != "pass: the reply names the cache purge and the HTTP 200 recheck" {
+			t.Errorf("expected the scorer explanation, got %q", s1.Explanation)
+		}
 
 		// Verify transcript rows for s1
 		if len(s1.Transcript) == 0 {
@@ -746,6 +752,12 @@ func TestParseInspectSamples(t *testing.T) {
 		if s2.TotalTokens != 41200 {
 			t.Errorf("expected tokens 41200, got %d", s2.TotalTokens)
 		}
+		if s2.Target != "Resolved via runbook" {
+			t.Errorf("expected target 'Resolved via runbook', got %q", s2.Target)
+		}
+		if s2.Explanation != "failed runbook check" {
+			t.Errorf("expected the scorer reason as the explanation fallback, got %q", s2.Explanation)
+		}
 
 		// Verify transcript has tool_calls for classify_severity and page_oncall
 		var kinds []string
@@ -761,6 +773,51 @@ func TestParseInspectSamples(t *testing.T) {
 			if kinds[i] != exp {
 				t.Errorf("at row %d, expected kind %q, got %q", i, exp, kinds[i])
 			}
+		}
+	})
+
+	t.Run("TargetAndExplanationShapes", func(t *testing.T) {
+		raw := `{
+			"version": 2,
+			"status": "success",
+			"eval": {"task": "docs/readme", "scorers": [{"name": "rubric"}]},
+			"samples": [
+				{
+					"id": "structured",
+					"target": ["mentions the install command", "links the quickstart"],
+					"scores": {
+						"rubric": {"value": "C", "explanation": {"text": "incorrect: the install command is missing"}},
+						"aux": {"value": 1, "explanation": "aux scorer, not primary"}
+					}
+				},
+				{
+					"id": "missing",
+					"scores": {"rubric": {"value": 1}}
+				},
+				{
+					"id": "unscored",
+					"target": "exact answer"
+				}
+			]
+		}`
+		samples, err := ParseInspectSamples([]byte(raw))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(samples) != 3 {
+			t.Fatalf("expected 3 samples, got %d", len(samples))
+		}
+		if got := samples[0].Target; got != "mentions the install command\nlinks the quickstart" {
+			t.Errorf("expected list target joined by newlines, got %q", got)
+		}
+		if got := samples[0].Explanation; got != "incorrect: the install command is missing" {
+			t.Errorf("expected the primary scorer's structured explanation, got %q", got)
+		}
+		if samples[1].Target != "" || samples[1].Explanation != "" {
+			t.Errorf("expected empty target and explanation, got %q and %q", samples[1].Target, samples[1].Explanation)
+		}
+		if samples[2].Target != "exact answer" || samples[2].Explanation != "" {
+			t.Errorf("expected target without explanation for an unscored sample, got %q and %q", samples[2].Target, samples[2].Explanation)
 		}
 	})
 

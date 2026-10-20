@@ -229,6 +229,9 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .ev.tool .k { color: var(--indigo); }
 .ev.bad { background: var(--bad-soft); border-color: #FECACA; }
 .ev.bad .k { color: var(--bad); }
+.note-cell { max-width: 240px; }
+.ev.note { background: var(--surface); }
+.ev.note .k { width: 120px; color: var(--ink-2); }
 </style>
 </head>
 <body>
@@ -265,6 +268,8 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
             <th style="width:90px">score</th>
             <th>input preview</th>
             <th>output preview</th>
+            <th>pass rule</th>
+            <th>grader reason</th>
             <th style="width:90px">latency</th>
             <th style="width:90px">tokens</th>
           </tr>
@@ -283,6 +288,8 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
             </td>
             <td class="preview-cell"><pre class="preview-text">Customer reports checkout returns HTTP 200 but images fail to load.</pre></td>
             <td class="preview-cell"><pre class="preview-text">Cleared CDN cache. Images loading.</pre></td>
+            <td class="note-cell"><pre class="preview-text" title="Resolved">Resolved</pre></td>
+            <td class="note-cell"><pre class="preview-text" title="pass: the reply names the cache purge and the HTTP 200 recheck">pass: the reply names the cache purge and the HTTP 200 recheck</pre></td>
             <td class="mono num">3.0s</td>
             <td class="mono num">1,500</td>
           </tr>
@@ -299,6 +306,8 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
             </td>
             <td class="preview-cell"><pre class="preview-text">Customer reports checkout returns HTTP 502 for EU users since 09:40 UTC.</pre></td>
             <td class="preview-cell"><pre class="preview-text">Escalated to on-call. Severity high. No further action.</pre></td>
+            <td class="note-cell"><pre class="preview-text" title="Resolved via runbook">Resolved via runbook</pre></td>
+            <td class="note-cell"><pre class="preview-text" title="failed runbook check">failed runbook check</pre></td>
             <td class="mono num">13.0s</td>
             <td class="mono num">41,200</td>
           </tr>

@@ -775,6 +775,9 @@ const trajectoryCSS = `
 .ev.tool .k { color: var(--indigo); }
 .ev.bad { background: var(--bad-soft); border-color: #FECACA; }
 .ev.bad .k { color: var(--bad); }
+.note-cell { max-width: 240px; }
+.ev.note { background: var(--surface); }
+.ev.note .k { width: 120px; color: var(--ink-2); }
 `
 
 const taskSamplesListTemplate = `
@@ -824,6 +827,8 @@ const taskSamplesListTemplate = `
             <th style="width:90px">score</th>
             <th>input preview</th>
             <th>output preview</th>
+            <th>pass rule</th>
+            <th>grader reason</th>
             <th style="width:90px">latency</th>
             <th style="width:90px">tokens</th>
           </tr>
@@ -842,12 +847,14 @@ const taskSamplesListTemplate = `
             </td>
             <td class="preview-cell"><pre class="preview-text">{{ .InputPreview }}</pre></td>
             <td class="preview-cell"><pre class="preview-text">{{ .OutputPreview }}</pre></td>
+            <td class="note-cell">{{ if .Target }}<pre class="preview-text" title="{{ .Target }}">{{ .TargetPreview }}</pre>{{ else }}<span style="color:var(--muted)">—</span>{{ end }}</td>
+            <td class="note-cell">{{ if .Explanation }}<pre class="preview-text" title="{{ .Explanation }}">{{ .ExplanationPreview }}</pre>{{ else }}<span style="color:var(--muted)">—</span>{{ end }}</td>
             <td class="mono num">{{ .LatencyStr }}</td>
             <td class="mono num">{{ .TokensStr }}</td>
           </tr>
           {{ else }}
           <tr>
-            <td colspan="6" class="empty-state">No samples recorded for this task.</td>
+            <td colspan="8" class="empty-state">No samples recorded for this task.</td>
           </tr>
           {{ end }}
         </tbody>
@@ -917,6 +924,23 @@ const sampleTranscriptTemplate = `
         <strong>Log Truncated:</strong> {{ .TruncatedMessage }}
       </div>
       {{ else }}
+
+      {{- if or .Target .Explanation }}
+      <div class="eval-notes" style="margin-top:20px">
+        {{- if .Target }}
+        <div class="ev note">
+          <span class="k">pass rule</span>
+          <pre class="b">{{ .Target }}</pre>
+        </div>
+        {{- end }}
+        {{- if .Explanation }}
+        <div class="ev note">
+          <span class="k">grader reason</span>
+          <pre class="b">{{ .Explanation }}</pre>
+        </div>
+        {{- end }}
+      </div>
+      {{- end }}
 
       <div class="transcript" style="margin-top:20px">
         {{ range .Rows }}

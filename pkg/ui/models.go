@@ -1372,10 +1372,20 @@ type TaskSampleRow struct {
 	StatusClass   string // "good", "bad", "neutral"
 	InputPreview  string
 	OutputPreview string
-	LatencyStr    string
-	TokensStr     string
-	Link          string
+	// Target is the sample target ("Pass rule"); TargetPreview is its truncated form.
+	Target        string
+	TargetPreview string
+	// Explanation is the scorer's explanation ("Grader reason"); ExplanationPreview is its truncated form.
+	Explanation        string
+	ExplanationPreview string
+	LatencyStr         string
+	TokensStr          string
+	Link               string
 }
+
+// sampleNotePreviewRunes caps the pass rule and grader reason shown per row on the task
+// samples list; the full text is kept in a title attribute and on the transcript page.
+const sampleNotePreviewRunes = 140
 
 // TaskSamplesListView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples.
 type TaskSamplesListView struct {
@@ -1425,6 +1435,8 @@ type SampleTranscriptView struct {
 	LatencyStr             string
 	TokensStr              string
 	LogPath                string
+	Target                 string // sample target, shown in full as "Pass rule"
+	Explanation            string // scorer explanation, shown in full as "Grader reason"
 	Rows                   []TranscriptRowView
 	TotalEvents            int
 	IsEventsTruncated      bool

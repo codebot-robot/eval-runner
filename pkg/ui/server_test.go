@@ -1962,6 +1962,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 			"41,200",
 			"Cleared CDN cache",
 			"Escalated to on-call",
+			"<th>pass rule</th>",
+			"<th>grader reason</th>",
+			`<pre class="preview-text" title="Resolved via runbook">Resolved via runbook</pre>`,
+			`<pre class="preview-text" title="failed runbook check">failed runbook check</pre>`,
+			`title="pass: the reply names the cache purge and the HTTP 200 recheck"`,
 		} {
 			if !strings.Contains(body, expected) {
 				t.Errorf("expected samples list to contain %q, got body:\n%s", expected, body)
@@ -1996,6 +2001,8 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 			"assistant",
 			"Escalated to on-call. Severity high. No further action.",
 			"class=\"ev bad\"",
+			"<span class=\"k\">pass rule</span>\n          <pre class=\"b\">Resolved via runbook</pre>",
+			"<span class=\"k\">grader reason</span>\n          <pre class=\"b\">failed runbook check</pre>",
 		} {
 			if !strings.Contains(body, expected) {
 				t.Errorf("expected sample transcript to contain %q, got body:\n%s", expected, body)

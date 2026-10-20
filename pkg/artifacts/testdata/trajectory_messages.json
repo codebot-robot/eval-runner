@@ -84,7 +84,8 @@
       ],
       "scores": {
         "accuracy": {
-          "value": 1.0
+          "value": 1.0,
+          "explanation": "pass: the reply names the cache purge and the HTTP 200 recheck"
         }
       },
       "model_usage": {

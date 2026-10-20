@@ -920,13 +920,17 @@ func TestEscapingHostileFixtures(t *testing.T) {
 			LogPath:       "gs://bucket/" + hostileScript,
 			Samples: []TaskSampleRow{
 				{
-					ID:            "sample-" + hostileScript,
-					Score:         "0.00",
-					InputPreview:  "input " + hostileScript,
-					OutputPreview: "output " + hostileImg,
-					LatencyStr:    "1.0s",
-					TokensStr:     "100",
-					Link:          "/runs/eval-runner/hostile/samples/1",
+					ID:                 "sample-" + hostileScript,
+					Score:              "0.00",
+					InputPreview:       "input " + hostileScript,
+					OutputPreview:      "output " + hostileImg,
+					Target:             "rule \"" + hostileIframe,
+					TargetPreview:      "rule " + hostileScript,
+					Explanation:        "reason \"" + hostileImg,
+					ExplanationPreview: "reason " + hostileIframe,
+					LatencyStr:         "1.0s",
+					TokensStr:          "100",
+					Link:               "/runs/eval-runner/hostile/samples/1",
 				},
 			},
 		}
@@ -961,6 +965,8 @@ func TestEscapingHostileFixtures(t *testing.T) {
 			LatencyStr:  "1.0s",
 			TokensStr:   "100",
 			LogPath:     "gs://bucket/" + hostileScript,
+			Target:      "rule " + hostileIframe,
+			Explanation: "reason " + hostileImg,
 			Rows: []TranscriptRowView{
 				{Kind: "user", Content: "user " + hostileScript},
 				{Kind: "tool_call", Class: "tool", Content: "call " + hostileImg},

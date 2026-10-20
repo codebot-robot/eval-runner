@@ -166,14 +166,18 @@ type InspectSample struct {
 
 // ParsedInspectSample contains the full parsed details for a sample.
 type ParsedInspectSample struct {
-	ID           string
-	Epoch        int
-	Score        *float64
-	HasScore     bool
-	ScoreStr     string
-	Status       string // "pass", "fail", "unknown"
-	Input        string
-	Target       string
+	ID       string
+	Epoch    int
+	Score    *float64
+	HasScore bool
+	ScoreStr string
+	Status   string // "pass", "fail", "unknown"
+	Input    string
+	// Target is the sample's target as text: the expected answer or the rule the scorer applies.
+	Target string
+	// Explanation is the primary scorer's explanation for this sample's score, falling back
+	// to its "reason" field. It is empty when the scorer recorded neither.
+	Explanation  string
 	Output       string
 	Latency      *float64
 	TotalTokens  int
@@ -632,6 +636,7 @@ func ParseInspectSamples(data []byte) ([]ParsedInspectSample, error) {
 		var hasScore bool
 		scoreStr := "—"
 		status := "unknown"
+		explanation := ""
 
 		if targetScore, found := selectPrimaryScore(s.Scores, primaryScorer); found {
 			if scoreVal, valid := ScoreToFloat(targetScore.Value); valid {
@@ -643,6 +648,10 @@ func ParseInspectSamples(data []byte) ([]ParsedInspectSample, error) {
 				} else {
 					status = "fail"
 				}
+			}
+			explanation = strings.TrimSpace(extractStringOrJSON(targetScore.Explanation))
+			if explanation == "" {
+				explanation = strings.TrimSpace(targetScore.Reason)
 			}
 		}
 
@@ -758,6 +767,7 @@ func ParseInspectSamples(data []byte) ([]ParsedInspectSample, error) {
 			Status:       status,
 			Input:        inputStr,
 			Target:       targetStr,
+			Explanation:  explanation,
 			Output:       outputStr,
 			Latency:      latency,
 			TotalTokens:  totalTokens,

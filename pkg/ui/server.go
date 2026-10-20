@@ -1822,16 +1822,20 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 		}
 
 		sampleRows = append(sampleRows, TaskSampleRow{
-			ID:            sRecord.ID,
-			EscapedID:     url.PathEscape(sRecord.ID),
-			Score:         sRecord.ScoreStr,
-			Status:        sRecord.Status,
-			StatusClass:   statusClass,
-			InputPreview:  TruncateRunes(sRecord.Input, 200),
-			OutputPreview: TruncateRunes(sRecord.Output, 200),
-			LatencyStr:    FormatLatency(sRecord.Latency),
-			TokensStr:     FormatTokens(sRecord.TotalTokens),
-			Link:          BuildTaskSampleLink(ns, name, taskID, sRecord.ID),
+			ID:                 sRecord.ID,
+			EscapedID:          url.PathEscape(sRecord.ID),
+			Score:              sRecord.ScoreStr,
+			Status:             sRecord.Status,
+			StatusClass:        statusClass,
+			InputPreview:       TruncateRunes(sRecord.Input, 200),
+			OutputPreview:      TruncateRunes(sRecord.Output, 200),
+			Target:             sRecord.Target,
+			TargetPreview:      TruncateRunes(sRecord.Target, sampleNotePreviewRunes),
+			Explanation:        sRecord.Explanation,
+			ExplanationPreview: TruncateRunes(sRecord.Explanation, sampleNotePreviewRunes),
+			LatencyStr:         FormatLatency(sRecord.Latency),
+			TokensStr:          FormatTokens(sRecord.TotalTokens),
+			Link:               BuildTaskSampleLink(ns, name, taskID, sRecord.ID),
 		})
 	}
 	view.Samples = sampleRows
@@ -1948,6 +1952,8 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 	view.StatusClass = statusClass
 	view.LatencyStr = FormatLatency(matchedSample.Latency)
 	view.TokensStr = FormatTokens(matchedSample.TotalTokens)
+	view.Target = matchedSample.Target
+	view.Explanation = matchedSample.Explanation
 
 	totalEvents := len(matchedSample.Transcript)
 	view.TotalEvents = totalEvents
