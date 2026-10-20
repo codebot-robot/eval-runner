@@ -72,6 +72,10 @@ spec:
           spec:
             description: RunSpec defines the desired state of Run.
             properties:
+              cohort:
+                description: Cohort is an optional cohort identifier grouping runs
+                  across suite expansions or configurations.
+                type: string
               limit:
                 description: |-
                   Limit is an optional per-task cap on samples (passed to Inspect as --limit).

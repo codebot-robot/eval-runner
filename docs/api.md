@@ -113,6 +113,7 @@ status:
 | `sampleRange` | `*SampleRange` | Optional 1-based inclusive window of samples to evaluate (`{start, end}`). Passed to Inspect as `--limit START-END`. Mutually exclusive with `limit`. |
 | `sampleRange.start` | `int` | 1-based inclusive start index in the dataset order ($\ge 1$). |
 | `sampleRange.end` | `int` | 1-based inclusive end index in the dataset order ($\ge \text{start}$). |
+| `cohort` | `string` | Optional cohort identifier grouping runs across suite expansions or configurations. |
 
 ## Status (`status`)
 
@@ -383,6 +384,7 @@ Comparisons, candidate Runs, and baseline Runs created automatically by `eval-ru
 
 - **Single repository**: `pr-<number>` for Comparisons, `pr-<number>-<headSHA7>` for candidate Runs, and `base-<sha7>` for baseline Runs.
 - **Multiple repositories or wildcard (`*`)**: `pr-<repoHash>-<number>` for Comparisons, `pr-<repoHash>-<number>-<headSHA7>` for candidate Runs, and `base-<repoHash>-<sha7>` for baseline Runs, where `<repoHash>` is a 7-character hexadecimal SHA-256 hash of the normalized repository name (`owner/repo`). This guarantees RFC 1123 DNS subdomain compliance and prevents collisions when multiple allow-listed repositories share the same pull request number or commit SHA.
+- **Branch and Commit-Time Tracking**: Baseline Runs created on pushes to the default branch carry the label `evalrunner.gke-labs.dev/branch=<defaultBranch>` and the annotation `evalrunner.gke-labs.dev/commit-time=<RFC3339>`. The web UI uses these to power the main-branch series page (`/series/{repohash}/{branch}`), ordering commits chronologically by commit-time (falling back to `creationTimestamp` with a visible note if absent). Pre-existing Runs lacking the branch label are excluded.
 - **Label-based resolution**: Webhook lookups (synchronization, `/eval more` comment commands, and PR closure cleanup) resolve objects by labels (`evalrunner.gke-labs.dev/pr` and `evalrunner.gke-labs.dev/repo`), preserving compatibility with existing single-repo or pre-upgrade objects. Baseline reuse keys on repository URL, commit, model, tasks, and window via labels, never on name alone.
 
 ## Retention and Cleanup

@@ -253,6 +253,10 @@ type RunSpec struct {
 	// Passed to Inspect as --limit START-END. Mutually exclusive with Limit.
 	// +optional
 	SampleRange *SampleRange `json:"sampleRange,omitempty"`
+
+	// Cohort is an optional cohort identifier grouping runs across suite expansions or configurations.
+	// +optional
+	Cohort string `json:"cohort,omitempty"`
 }
 
 // ManifestResource describes a resource needed by an eval task.
