@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/affinity"
 )
 
 const (
@@ -109,6 +110,9 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 			}
 			if len(p) > MaxPathLength {
 				return fmt.Errorf("task %q path pattern exceeds maximum length (%d)", id, MaxPathLength)
+			}
+			if err := affinity.ValidatePattern(p); err != nil {
+				return fmt.Errorf("task %q has invalid path pattern %q: %w", id, p, err)
 			}
 		}
 	}

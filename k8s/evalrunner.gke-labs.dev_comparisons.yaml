@@ -169,6 +169,11 @@ spec:
                 description: Affinity records changed-file affinity metadata for pull
                   requests.
                 properties:
+                  fallbackReason:
+                    description: |-
+                      FallbackReason records why changed-file affinity fell back to order mode with all tasks always
+                      (e.g. GitHub API error or permissions).
+                    type: string
                   filesCount:
                     description: FilesCount is the count of changed files retrieved
                       from GitHub.
@@ -432,6 +437,7 @@ spec:
                       - inconclusive
                       - running
                       - continue
+                      - skipped
                       type: string
                     delta:
                       description: Delta is the sample mean difference (candidate
@@ -483,6 +489,7 @@ spec:
                       - inconclusive
                       - running
                       - continue
+                      - skipped
                       type: string
                     latency:
                       description: Latency records sample latency percentiles (p50

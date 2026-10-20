@@ -189,6 +189,15 @@ func TestValidateManifest(t *testing.T) {
 			expectError: true,
 		},
 		{
+			name: "invalid glob pattern in paths",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Paths: []string{"docs/["}},
+				},
+			},
+			expectError: true,
+		},
+		{
 			name: "path pattern exceeds max length",
 			manifest: &v1alpha1.Manifest{
 				Tasks: []v1alpha1.ManifestTask{

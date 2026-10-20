@@ -31,7 +31,7 @@ const (
 )
 
 // ComparisonTaskLabel represents the statistical decision label for a single task.
-// +kubebuilder:validation:Enum=improved;regressed;unchanged;inconclusive;running;continue
+// +kubebuilder:validation:Enum=improved;regressed;unchanged;inconclusive;running;continue;skipped
 type ComparisonTaskLabel string
 
 const (
@@ -41,6 +41,7 @@ const (
 	ComparisonTaskLabelInconclusive ComparisonTaskLabel = "inconclusive"
 	ComparisonTaskLabelRunning      ComparisonTaskLabel = "running"
 	ComparisonTaskLabelContinue     ComparisonTaskLabel = "continue"
+	ComparisonTaskLabelSkipped      ComparisonTaskLabel = "skipped"
 )
 
 // ComparisonVerdict represents the aggregate run-level verdict.
@@ -309,6 +310,11 @@ type ComparisonAffinityStatus struct {
 	// Truncated is true if the changed file count reached the maximum cap (300).
 	// +optional
 	Truncated bool `json:"truncated,omitempty"`
+
+	// FallbackReason records why changed-file affinity fell back to order mode with all tasks always
+	// (e.g. GitHub API error or permissions).
+	// +optional
+	FallbackReason string `json:"fallbackReason,omitempty"`
 }
 
 // ComparisonSummary provides aggregate statistics across tasks in a Comparison.
