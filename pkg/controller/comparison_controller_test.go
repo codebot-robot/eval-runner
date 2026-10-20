@@ -32,6 +32,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/internal/fakes"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -10013,5 +10014,347 @@ func TestComparisonReconciler_MissingBatchRunMessage(t *testing.T) {
 	}
 	if !strings.Contains(compUpdated.Status.Message, "missing batch run: shared-base-b2") {
 		t.Errorf("Expected status.Message to explicitly name missing shared run, got %q", compUpdated.Status.Message)
+	}
+}
+
+func TestComparisonReconciler_BaselineReuse_SkipsMismatchedSinkPrefix(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/readme_comprehension"
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+
+	candCommit := "cand-commit"
+	baseCommit := "base-commit"
+	repoURL := "git://repo"
+	model := "mockllm/model"
+	b2Window := v1alpha1.SampleRange{Start: 5, End: 8}
+	batchKey := ComputeBatchKey(repoURL, baseCommit, model, []string{taskID}, b2Window)
+
+	// Write batch 1 Inspect logs into the LocalDir sink
+	var b1Scores []stats.SampleScore
+	for i := 1; i <= 4; i++ {
+		b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.8})
+	}
+	candB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       candCommit,
+		RunName:      "cand-b1",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "b1.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store candidate b1 log: %v", err)
+	}
+	baseB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       baseCommit,
+		RunName:      "base-b1",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "b1.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store baseline b1 log: %v", err)
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: candCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     candB1Path,
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     baseB1Path,
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+				},
+			},
+		},
+	}
+
+	// Labelled Completed Run matching the batch key, but with gs:// log paths under LocalDir sink
+	existingGCSBaseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gcs-reused-base-run",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelBatchKey: batchKey,
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &b2Window,
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     "gs://test-bucket/runs/base-commit/" + taskID + "/pre_existing.json",
+					Samples:     4,
+					SampleRange: &b2Window,
+				},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-sink-skip", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-b1"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-b1"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         4,
+				MaxSamplesPerTask: 16,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, existingGCSBaseRun, comp).
+		WithStatusSubresource(candRun, baseRun, existingGCSBaseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+	// Reconcile 1: evaluates batch 1 and schedules batch 2
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	// Existing GCS run should have been skipped, and a fresh baseline created
+	var createdBase v1alpha1.Run
+	freshBaseName := fmt.Sprintf("%s-b2-base", comp.Name)
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: freshBaseName}, &createdBase); err != nil {
+		t.Fatalf("Expected fresh baseline run %q to be created, got error: %v", freshBaseName, err)
+	}
+
+	// The old GCS run must not have been adopted/reused with owner references
+	var checkOldBase v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "gcs-reused-base-run"}, &checkOldBase); err != nil {
+		t.Fatalf("Failed to get gcs-reused-base-run: %v", err)
+	}
+	if len(checkOldBase.OwnerReferences) > 0 {
+		t.Errorf("Expected gcs-reused-base-run not to be reused (no owner references), got: %+v", checkOldBase.OwnerReferences)
+	}
+}
+
+func TestComparisonReconciler_ReferencedBatchRun_PrefixMismatchTerminatesInconclusive(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/readme_comprehension"
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+
+	candCommit := "cand-commit"
+	baseCommit := "base-commit"
+	repoURL := "git://repo"
+	model := "mockllm/model"
+
+	// Write batch 1 and batch 2 candidate Inspect logs into the LocalDir sink
+	var b1Scores []stats.SampleScore
+	for i := 1; i <= 4; i++ {
+		b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.8})
+	}
+	candB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       candCommit,
+		RunName:      "cand-b1",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "b1.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store candidate b1 log: %v", err)
+	}
+	baseB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       baseCommit,
+		RunName:      "base-b1",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "b1.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store baseline b1 log: %v", err)
+	}
+
+	candB2Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       candCommit,
+		RunName:      "cand-b2",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "b2.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store candidate b2 log: %v", err)
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: candCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     candB1Path,
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     baseB1Path,
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+				},
+			},
+		},
+	}
+
+	candB2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-b2", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: candCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     candB2Path,
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8},
+				},
+			},
+		},
+	}
+
+	// Referenced batch Run with mismatched paths (gs:// under LocalDir sink)
+	mismatchedBaseB2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "reused-base-b2", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     "gs://test-bucket/runs/base-commit/" + taskID + "/b2.json",
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 5, End: 8},
+				},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-batch-mismatch", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-b1"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-b1"},
+			Sampling:  &v1alpha1.ComparisonSamplingSpec{BatchSize: 4, MaxSamplesPerTask: 16},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase: v1alpha1.ComparisonPhaseRunning,
+			Batches: []v1alpha1.ComparisonBatchStatus{
+				{Index: 1, CandidateRun: "cand-b1", BaselineRun: "base-b1", Phase: v1alpha1.ComparisonPhaseCompleted},
+				{Index: 2, CandidateRun: "cand-b2", BaselineRun: "reused-base-b2", Phase: v1alpha1.ComparisonPhaseRunning},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, candB2, mismatchedBaseB2, comp).
+		WithStatusSubresource(candRun, baseRun, candB2, mismatchedBaseB2, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile should terminate without error, got: %v", err)
+	}
+
+	var compUpdated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &compUpdated); err != nil {
+		t.Fatalf("Get comparison failed: %v", err)
+	}
+
+	if compUpdated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("Expected comparison to terminate Completed, got %s", compUpdated.Status.Phase)
+	}
+	if compUpdated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+		t.Errorf("Expected verdict Inconclusive, got %s", compUpdated.Status.Verdict)
+	}
+	if !strings.Contains(compUpdated.Status.Message, "reused-base-b2") {
+		t.Errorf("Expected status.Message to explicitly name mismatched run %q, got %q", "reused-base-b2", compUpdated.Status.Message)
+	}
+	if !strings.Contains(compUpdated.Status.Message, "failed batch run: reused-base-b2") {
+		t.Errorf("Expected status.Message to contain 'failed batch run: reused-base-b2', got %q", compUpdated.Status.Message)
 	}
 }

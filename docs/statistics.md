@@ -428,6 +428,7 @@ To avoid redundant evaluation when multiple pull requests or extra sample reques
   Baseline batch Runs are labeled with `evalrunner.gke-labs.dev/batch-key: <hash>`.
 - **Reuse Lookup**: The controller looks for an existing `Completed` Run in the namespace matching the batch key label. Because all baseline clones carry this label, subsequent comparisons with identical configuration and windows reuse the completed baseline evaluation without scanning every Run in the namespace.
 - **Multiple Owner References**: Reused baseline Runs are updated to include owner references for each consuming Comparison (`controller: false`, `blockOwnerDeletion: true`), preventing garbage collection from deleting a shared baseline Run when an earlier Comparison is deleted.
+- **Artifact Sink Matching**: Baseline reuse additionally requires that the candidate Run's task log paths all match the current artifact sink's commit prefix; Runs evaluated under a different sink are skipped and trigger creation of a fresh baseline Run.
 - **Cache Invalidation**: Any change in commit, model, task set, or sample range alters the batch key, automatically triggering creation of a fresh baseline Run.
 
 ### 5.6 Cost Accounting & Token Pricing

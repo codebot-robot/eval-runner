@@ -648,6 +648,7 @@ func ComputeBatchKey(repoURL, commit, model string, tasks []string, window v1alp
 }
 
 func (r *ComparisonReconciler) findCompletedBaselineRun(ctx context.Context, namespace, repoURL, commit, model string, tasks []string, window v1alpha1.SampleRange) (*v1alpha1.Run, error) {
+	logger := log.FromContext(ctx)
 	batchKey := ComputeBatchKey(repoURL, commit, model, tasks, window)
 
 	var runList v1alpha1.RunList
@@ -656,9 +657,25 @@ func (r *ComparisonReconciler) findCompletedBaselineRun(ctx context.Context, nam
 	}); err != nil {
 		return nil, fmt.Errorf("failed to list runs by batch-key: %w", err)
 	}
-	for _, run := range runList.Items {
+
+	expectedPrefix := r.artifactSink().ArtifactPrefix(commit)
+	for i := range runList.Items {
+		run := &runList.Items[i]
 		if run.Status.Phase == v1alpha1.RunPhaseCompleted && run.DeletionTimestamp == nil {
-			return &run, nil
+			if expectedPrefix != "" {
+				allMatch := len(run.Status.Tasks) > 0
+				for _, task := range run.Status.Tasks {
+					if !strings.HasPrefix(task.LogPath, expectedPrefix) {
+						allMatch = false
+						break
+					}
+				}
+				if !allMatch {
+					logger.V(1).Info("skipping baseline run whose task log paths do not match sink artifact prefix", "run", run.Name, "expectedPrefix", expectedPrefix)
+					continue
+				}
+			}
+			return run, nil
 		}
 	}
 
@@ -1112,6 +1129,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	batchRuns := make([]batchRunPair, len(batches))
 	allBatchesTerminal := true
 	var missingBatchRuns []string
+	var failedBatchRuns []string
 
 	for i := range batches {
 		var bCand, bBase v1alpha1.Run
@@ -1148,6 +1166,13 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				} else {
 					return ctrl.Result{}, fmt.Errorf("failed to get baseline batch run %q: %w", batches[i].BaselineRun, bErr)
 				}
+			}
+
+			if bCand.Status.Phase == v1alpha1.RunPhaseFailed && !containsTask(missingBatchRuns, batches[i].CandidateRun) && !containsTask(failedBatchRuns, batches[i].CandidateRun) {
+				failedBatchRuns = append(failedBatchRuns, batches[i].CandidateRun)
+			}
+			if bBase.Status.Phase == v1alpha1.RunPhaseFailed && !containsTask(missingBatchRuns, batches[i].BaselineRun) && !containsTask(failedBatchRuns, batches[i].BaselineRun) {
+				failedBatchRuns = append(failedBatchRuns, batches[i].BaselineRun)
 			}
 		}
 
@@ -1350,25 +1375,42 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			// Verify that log paths match the commit prefixes of the respective runs
 			candPrefix := r.artifactSink().ArtifactPrefix(pair.candRun.Spec.Repo.Commit)
-			if candPrefix != "" && !strings.HasPrefix(candTask.LogPath, candPrefix) {
-				msg := fmt.Sprintf("candidate log path %q does not match commit prefix %q", candTask.LogPath, candPrefix)
-				logger.Error(nil, msg, "task", taskID)
-				err := fmt.Errorf("%s", msg)
-				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
-					status.Message = msg
-				}); statusErr != nil {
-					return ctrl.Result{}, errors.Join(err, statusErr)
-				}
-				return ctrl.Result{}, err
-			}
-
 			basePrefix := r.artifactSink().ArtifactPrefix(pair.baseRun.Spec.Repo.Commit)
-			if basePrefix != "" && !strings.HasPrefix(baseTask.LogPath, basePrefix) {
-				msg := fmt.Sprintf("baseline log path %q does not match commit prefix %q", baseTask.LogPath, basePrefix)
-				logger.Error(nil, msg, "task", taskID)
-				err := fmt.Errorf("%s", msg)
+
+			candMismatch := candPrefix != "" && !strings.HasPrefix(candTask.LogPath, candPrefix)
+			baseMismatch := basePrefix != "" && !strings.HasPrefix(baseTask.LogPath, basePrefix)
+
+			if candMismatch || baseMismatch {
+				if batchIdx > 0 {
+					if candMismatch {
+						logger.V(1).Info("candidate batch run log path does not match sink artifact prefix; treating batch as failed", "run", pair.candRun.Name, "task", taskID, "logPath", candTask.LogPath, "expectedPrefix", candPrefix)
+						if !containsTask(failedBatchRuns, pair.candRun.Name) {
+							failedBatchRuns = append(failedBatchRuns, pair.candRun.Name)
+						}
+						pair.candRun.Status.Phase = v1alpha1.RunPhaseFailed
+					}
+					if baseMismatch {
+						logger.V(1).Info("baseline batch run log path does not match sink artifact prefix; treating batch as failed", "run", pair.baseRun.Name, "task", taskID, "logPath", baseTask.LogPath, "expectedPrefix", basePrefix)
+						if !containsTask(failedBatchRuns, pair.baseRun.Name) {
+							failedBatchRuns = append(failedBatchRuns, pair.baseRun.Name)
+						}
+						pair.baseRun.Status.Phase = v1alpha1.RunPhaseFailed
+					}
+					batches[batchIdx].Phase = v1alpha1.ComparisonPhaseCompleted
+					taskFailed = true
+					continue
+				}
+
+				var mismatchMsg string
+				if candMismatch {
+					mismatchMsg = fmt.Sprintf("candidate log path %q does not match commit prefix %q", candTask.LogPath, candPrefix)
+				} else {
+					mismatchMsg = fmt.Sprintf("baseline log path %q does not match commit prefix %q", baseTask.LogPath, basePrefix)
+				}
+				logger.Error(nil, mismatchMsg, "task", taskID)
+				err := fmt.Errorf("%s", mismatchMsg)
 				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
-					status.Message = msg
+					status.Message = mismatchMsg
 				}); statusErr != nil {
 					return ctrl.Result{}, errors.Join(err, statusErr)
 				}
@@ -2027,6 +2069,14 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			runWord = "runs"
 		}
 		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("missing batch %s: %s", runWord, github.FormatIDList(missingBatchRuns, github.MaxIDList)))
+	}
+	if len(failedBatchRuns) > 0 {
+		sort.Strings(failedBatchRuns)
+		runWord := "run"
+		if len(failedBatchRuns) > 1 {
+			runWord = "runs"
+		}
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("failed batch %s: %s", runWord, github.FormatIDList(failedBatchRuns, github.MaxIDList)))
 	}
 	if len(candFailed) > 0 && !capped {
 		taskWord := "task"
