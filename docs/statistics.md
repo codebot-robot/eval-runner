@@ -428,7 +428,7 @@ To avoid redundant evaluation when multiple pull requests or extra sample reques
   Baseline batch Runs are labeled with `evalrunner.gke-labs.dev/batch-key: <hash>`.
 - **Reuse Lookup**: The controller looks for an existing `Completed` Run in the namespace matching the batch key label. Because all baseline clones carry this label, subsequent comparisons with identical configuration and windows reuse the completed baseline evaluation without scanning every Run in the namespace.
 - **Multiple Owner References**: Reused baseline Runs are updated to include owner references for each consuming Comparison (`controller: false`, `blockOwnerDeletion: true`), preventing garbage collection from deleting a shared baseline Run when an earlier Comparison is deleted.
-- **Artifact Sink Matching**: Baseline reuse additionally requires that the candidate Run's task log paths all match the current artifact sink's commit prefix; Runs evaluated under a different sink are skipped and trigger creation of a fresh baseline Run.
+- **Artifact Sink Matching**: Baseline reuse requires the matched tasks' artifacts to be in the current sink (under the sink's commit prefix); Runs evaluated under a different sink are skipped and trigger creation of a fresh baseline Run.
 - **Cache Invalidation**: Any change in commit, model, task set, or sample range alters the batch key, automatically triggering creation of a fresh baseline Run.
 
 ### 5.6 Cost Accounting & Token Pricing
@@ -466,7 +466,7 @@ Sample latency and dataset progress metrics provide operational observability ac
 To give reviewers intuition into whether evaluating more samples would help resolve uncertainty (see `docs/concept/ui/budget.html` and `docs/concept/functionality.md` §4.2/§4.6), the web UI Comparison view renders a per-task **CI width vs. $n$** chart and table without storing per-batch histories in Kubernetes CRD status:
 
 - **Bounded Status Invariant**: `Comparison.status` stores only the latest estimate and batch metadata; per-batch history is deliberately omitted from status to prevent unbounded resource bloat.
-- **Recomputation from Stored Pairs**: The complete comparison artifact (`comparisons/<name>.json`) persists the full `pairsTable` containing sample-ordered paired scores for each task. The UI loads this artifact through `ArtifactSink.Load` and reconstructs the CI trajectory server-side on demand.
+- **Recomputation from Stored Pairs**: The complete comparison artifact (`comparisons/<name>.json`) persists the full `pairsTable` containing execution-ordered paired scores for each task. The UI loads this artifact through `ArtifactSink.Load` and reconstructs the CI trajectory server-side on demand.
 - **Batch Boundary Evaluation**: For each task with $n \ge 2$ pairs:
   - Cumulative sample count boundaries $n$ are derived from `status.batches[].sampleRange` widths ($\sum (\text{end}_i - \text{start}_i + 1)$). When batches are absent, boundaries fall back to every 4 pairs ($n = 4, 8, 12, \dots$) plus the final total pair count.
   - At each boundary $n$, the prefix slice `pairsTable[:n]` is evaluated using `stats.ComparePairedWithSeed` with a fixed seed (`DefaultSeed = 42`) for deterministic bootstrap percentile intervals.

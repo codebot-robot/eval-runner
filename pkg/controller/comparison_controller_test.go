@@ -10358,3 +10358,340 @@ func TestComparisonReconciler_ReferencedBatchRun_PrefixMismatchTerminatesInconcl
 		t.Errorf("Expected status.Message to contain 'failed batch run: reused-base-b2', got %q", compUpdated.Status.Message)
 	}
 }
+
+func TestComparisonReconciler_BaselineReuse_MatchedTasksValidation(t *testing.T) {
+	scheme := setupScheme(t)
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+
+	repoURL := "git://repo"
+	commit := "base-commit-hash"
+	model := "mockllm/model"
+	window := v1alpha1.SampleRange{Start: 1, End: 8}
+	goodLogPath := filepath.Join(tempDir, "runs", commit, "task-A", "inspect.json")
+
+	// (a) Run with tasks A Completed (good path) and B Failed (empty path), Comparison needs only A: reused
+	t.Run("NeedsOnlyTaskA_TaskBFailedInOtherSlot_Reused", func(t *testing.T) {
+		tasks := []string{"task-A"}
+		batchKey := ComputeBatchKey(repoURL, commit, model, tasks, window)
+
+		candidateRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "candidate-run-reuse-a",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					LabelBatchKey: batchKey,
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task-A",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: goodLogPath,
+					},
+					{
+						ID:      "task-B",
+						Phase:   v1alpha1.TaskPhaseFailed,
+						LogPath: "",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candidateRun).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		found, err := reconciler.findCompletedBaselineRun(t.Context(), "eval-runner", repoURL, commit, model, tasks, window)
+		if err != nil {
+			t.Fatalf("findCompletedBaselineRun failed: %v", err)
+		}
+		if found == nil {
+			t.Fatalf("Expected candidate run with completed task-A to be reused even though task-B in another slot failed")
+		}
+		if found.Name != candidateRun.Name {
+			t.Errorf("Expected reused run name %q, got %q", candidateRun.Name, found.Name)
+		}
+	})
+
+	// (b) Comparison needs A and B: not reused because matched task B is Failed
+	t.Run("NeedsTaskAAndTaskB_TaskBFailed_NotReused", func(t *testing.T) {
+		tasks := []string{"task-A", "task-B"}
+		batchKey := ComputeBatchKey(repoURL, commit, model, tasks, window)
+
+		candidateRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "candidate-run-reuse-ab",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					LabelBatchKey: batchKey,
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task-A",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: goodLogPath,
+					},
+					{
+						ID:      "task-B",
+						Phase:   v1alpha1.TaskPhaseFailed,
+						LogPath: "",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candidateRun).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		found, err := reconciler.findCompletedBaselineRun(t.Context(), "eval-runner", repoURL, commit, model, tasks, window)
+		if err != nil {
+			t.Fatalf("findCompletedBaselineRun failed: %v", err)
+		}
+		if found != nil {
+			t.Fatalf("Expected run to not be reused when matched task-B is Failed, got: %s", found.Name)
+		}
+	})
+
+	t.Run("NeedsTaskA_TaskAEmptyLogPath_NotReused", func(t *testing.T) {
+		tasks := []string{"task-A"}
+		batchKey := ComputeBatchKey(repoURL, commit, model, tasks, window)
+
+		candidateRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "candidate-run-empty-log",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					LabelBatchKey: batchKey,
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task-A",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candidateRun).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		found, err := reconciler.findCompletedBaselineRun(t.Context(), "eval-runner", repoURL, commit, model, tasks, window)
+		if err != nil {
+			t.Fatalf("findCompletedBaselineRun failed: %v", err)
+		}
+		if found != nil {
+			t.Fatalf("Expected run to not be reused when matched task-A has empty logPath, got: %s", found.Name)
+		}
+	})
+}
+
+func TestComparisonReconciler_BaselineReuse_FailedTaskInOtherSlot_Reconcile(t *testing.T) {
+	scheme := setupScheme(t)
+	taskA := "docs/readme_comprehension"
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+
+	candCommit := "cand-commit"
+	baseCommit := "base-commit"
+	repoURL := "git://repo"
+	model := "mockllm/model"
+	b2Window := v1alpha1.SampleRange{Start: 5, End: 8}
+	batchKey := ComputeBatchKey(repoURL, baseCommit, model, []string{taskA}, b2Window)
+
+	// Write batch 1 Inspect logs into the LocalDir sink
+	var b1Scores []stats.SampleScore
+	for i := 1; i <= 4; i++ {
+		b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.8})
+	}
+	candB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       candCommit,
+		RunName:      "cand-b1",
+		RunNamespace: "eval-runner",
+		TaskID:       taskA,
+	}, "b1.json", makeSyntheticInspectLog(taskA, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store candidate b1 log: %v", err)
+	}
+	baseB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       baseCommit,
+		RunName:      "base-b1",
+		RunNamespace: "eval-runner",
+		TaskID:       taskA,
+	}, "b1.json", makeSyntheticInspectLog(taskA, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store baseline b1 log: %v", err)
+	}
+
+	baseB2TaskAPath, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       baseCommit,
+		RunName:      "reused-base-run",
+		RunNamespace: "eval-runner",
+		TaskID:       taskA,
+	}, "b2.json", makeSyntheticInspectLog(taskA, b1Scores))
+	if err != nil {
+		t.Fatalf("Failed to store baseline b2 taskA log: %v", err)
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: candCommit},
+			Model:       model,
+			Tasks:       []string{taskA},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskA,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     candB1Path,
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-b1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskA},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskA,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     baseB1Path,
+					Samples:     4,
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+				},
+			},
+		},
+	}
+
+	// Labelled Completed Run matching batchKey for taskA, but also containing a Failed taskB in another slot
+	existingBaseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "reused-base-run",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelBatchKey: batchKey,
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+			Model:       model,
+			Tasks:       []string{taskA},
+			SampleRange: &b2Window,
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          taskA,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     baseB2TaskAPath,
+					Samples:     4,
+					SampleRange: &b2Window,
+				},
+				{
+					ID:      "other-task-B",
+					Phase:   v1alpha1.TaskPhaseFailed,
+					LogPath: "",
+				},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-reuse-ok", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-b1"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-b1"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         4,
+				MaxSamplesPerTask: 16,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, existingBaseRun, comp).
+		WithStatusSubresource(candRun, baseRun, existingBaseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+	// Reconcile: evaluates batch 1 and schedules batch 2
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	// existingBaseRun should have been reused (no fresh baseline created)
+	var freshBase v1alpha1.Run
+	freshBaseName := fmt.Sprintf("%s-b2-base", comp.Name)
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: freshBaseName}, &freshBase); err == nil {
+		t.Errorf("Fresh baseline run %q should not have been created; existingBaseRun should have been reused", freshBaseName)
+	}
+
+	// Verify existingBaseRun received an owner reference
+	var updatedBase v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "reused-base-run"}, &updatedBase); err != nil {
+		t.Fatalf("Failed to get reused-base-run: %v", err)
+	}
+	foundOwner := false
+	for _, owner := range updatedBase.OwnerReferences {
+		if owner.Name == comp.Name {
+			foundOwner = true
+			break
+		}
+	}
+	if !foundOwner {
+		t.Errorf("Expected reused-base-run to have owner reference for comparison %s, got: %+v", comp.Name, updatedBase.OwnerReferences)
+	}
+}
