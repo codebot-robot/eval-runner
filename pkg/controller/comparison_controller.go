@@ -662,18 +662,26 @@ func (r *ComparisonReconciler) findCompletedBaselineRun(ctx context.Context, nam
 	for i := range runList.Items {
 		run := &runList.Items[i]
 		if run.Status.Phase == v1alpha1.RunPhaseCompleted && run.DeletionTimestamp == nil {
-			if expectedPrefix != "" {
-				allMatch := len(run.Status.Tasks) > 0
-				for _, task := range run.Status.Tasks {
-					if !strings.HasPrefix(task.LogPath, expectedPrefix) {
-						allMatch = false
-						break
-					}
+			taskMap := make(map[string]v1alpha1.TaskStatus, len(run.Status.Tasks))
+			for _, t := range run.Status.Tasks {
+				taskMap[t.ID] = t
+			}
+
+			allMatch := len(tasks) > 0
+			for _, taskID := range tasks {
+				task, ok := taskMap[taskID]
+				if !ok || task.Phase != v1alpha1.TaskPhaseCompleted || task.LogPath == "" {
+					allMatch = false
+					break
 				}
-				if !allMatch {
-					logger.V(1).Info("skipping baseline run whose task log paths do not match sink artifact prefix", "run", run.Name, "expectedPrefix", expectedPrefix)
-					continue
+				if expectedPrefix != "" && !strings.HasPrefix(task.LogPath, expectedPrefix) {
+					allMatch = false
+					break
 				}
+			}
+			if !allMatch {
+				logger.V(1).Info("skipping baseline run whose task log paths do not match sink artifact prefix", "run", run.Name, "expectedPrefix", expectedPrefix)
+				continue
 			}
 			return run, nil
 		}
