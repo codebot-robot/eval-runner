@@ -396,6 +396,17 @@ Inspect log provider-specific totals are dropped so that `total` is strictly and
 
 Check run titles display per-label counts: `<VERDICT>: N improved, M unchanged, K regressed, J inconclusive` built from `status.tasks[].label` (omitting zero buckets). The check run conclusion for `INCONCLUSIVE` comparisons is governed by the `inconclusivePolicy` cluster ConfigMap key: `"neutral"` (default, non-blocking) or `"failure"` (blocks merging).
 
+## Series Labels
+
+Tools that compare a series of candidate Runs can label each Comparison with the kind of baseline it uses. The controller ignores these labels; the web UI reads them to group Comparisons on `/comparisons`.
+
+| Label | Value | Meaning |
+|---|---|---|
+| `evalrunner.gke-labs.dev/vs-baseline` | `"true"` | The baseline Run is the fixed reference Run for the series. |
+| `evalrunner.gke-labs.dev/vs-previous` | `"true"` | The baseline Run is the Run that preceded the candidate in the series. |
+
+A Comparison may carry both labels, for example when the previous Run is also the reference Run. The UI shows one row per `spec.candidate.run` with the newest Comparison of each kind; Comparisons with neither label are listed individually.
+
 ## Webhook Resource Naming
 
 Comparisons, candidate Runs, and baseline Runs created automatically by `eval-runner-webhook` follow deterministic naming conventions based on the configured `webhookRepositories`:

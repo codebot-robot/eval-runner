@@ -216,6 +216,29 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .filter-chip { font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--neutral-soft); padding: 5px 12px; border-radius: 6px; text-decoration: none; border: 1px solid transparent; transition: all 0.15s ease; }
 .filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
 .filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
+
+ 
+.section-title { font-size: 15px; font-weight: 600; color: var(--ink-2); margin: 0; padding: 16px 24px 4px; }
+.ts { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.reason-line { margin-top: 4px; max-width: 380px; font-size: 12px; line-height: 1.4; color: var(--ink-2); white-space: normal; }
+table.ci td.cell-top, table.ci td.cmp-cell { vertical-align: top; }
+table.ci td.cmp-cell { min-width: 280px; }
+table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 0; }
+.cmp-line { margin-bottom: 4px; }
+.cmp-meta { font-size: 12px; color: var(--muted); }
+.delta-strip { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; margin: 2px 0; }
+.delta-item { white-space: nowrap; }
+.delta-k { color: var(--muted); }
+.delta-v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.delta-good { color: var(--good); }
+.delta-bad { color: var(--bad); }
+.delta-zero { color: var(--neutral); }
+.delta-missing { color: var(--muted); }
+.delta-strip-detail { margin: -8px 0 16px; }
+.delta-strip-detail .delta-strip { font-size: 14px; gap: 4px 20px; }
+.reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
+.reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -235,7 +258,9 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
     <div class="card">
       <div class="card-header">
         <h1 class="card-title">Comparisons</h1>
-        <span style="font-size:13px;color:var(--muted)">1 total</span>
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <span style="font-size:13px;color:var(--muted)">2 total</span>
+        </div>
       </div>
       <div style="overflow-x:auto">
         <table class="ci">
@@ -245,9 +270,11 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
               <th>Namespace</th>
               <th>Verdict</th>
               <th>P(imp)</th>
+              <th>Run deltas</th>
               <th>Tasks</th>
               <th>Baseline Run</th>
               <th>Candidate Run</th>
+              <th>Completed</th>
               <th>Age</th>
             </tr>
           </thead>
@@ -258,10 +285,33 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
               <td><span class="mono" style="font-size:13px">eval-runner</span></td>
               <td><span class="chip good"><span class="dot"></span>IMPROVED</span></td>
               <td class="num">0.98</td>
+              <td class="delta-cell"><div class="delta-strip">
+<span class="delta-item"><span class="delta-k">Quality</span> <span class="delta-v delta-good" title="Mean success rate 61.0% → 84.0% over 1 shared task (Run success rates)">&#43;23.0 pp</span></span>
+<span class="delta-item"><span class="delta-k">Tokens</span> <span class="delta-v delta-good" title="−1.2K tokens (37.5K → 36.3K) over 1 shared task">−3.2%</span></span>
+<span class="delta-item"><span class="delta-k">Cost</span> <span class="delta-v delta-bad" title="$3.8900 → $3.9600 over 1 shared task">&#43;$0.07 (&#43;1.8%)</span></span>
+</div></td>
               <td class="num">1/1</td>
               <td><a href="/runs/eval-runner/docs-eval-base-05ce4d8" class="mono" style="font-size:13px">docs-eval-base-05ce4d8</a></td>
               <td><a href="/runs/eval-runner/docs-eval-cand-05ce4d8" class="mono" style="font-size:13px">docs-eval-cand-05ce4d8</a></td>
+              <td class="ts">2026-10-20 10:35 UTC</td>
               <td style="color:var(--muted);font-size:13px">5m</td>
+            </tr>
+            
+            <tr>
+              <td><a href="/comparisons/eval-runner/docs-eval-regressed" class="mono" style="font-weight:600">docs-eval-regressed</a></td>
+              <td><span class="mono" style="font-size:13px">eval-runner</span></td>
+              <td><span class="chip bad"><span class="dot"></span>REGRESSED</span><div class="reason-line" title="Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)">Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)</div></td>
+              <td class="num">0.05</td>
+              <td class="delta-cell"><div class="delta-strip">
+<span class="delta-item"><span class="delta-k">Quality</span> <span class="delta-v delta-zero">0.0 pp</span></span>
+<span class="delta-item"><span class="delta-k">Tokens</span> <span class="delta-v delta-missing" title="Token counts are missing from one or both Runs">—</span></span>
+<span class="delta-item"><span class="delta-k">Cost</span> <span class="delta-v delta-zero">$0.00 (0.0%)</span></span>
+</div></td>
+              <td class="num">3/3</td>
+              <td><a href="/runs/eval-runner/docs-eval-base-a81d0c4" class="mono" style="font-size:13px">docs-eval-base-a81d0c4</a></td>
+              <td><a href="/runs/eval-runner/docs-eval-cand-9f1e2d3" class="mono" style="font-size:13px">docs-eval-cand-9f1e2d3</a></td>
+              <td class="ts">—</td>
+              <td style="color:var(--muted);font-size:13px">2h</td>
             </tr>
             
           </tbody>

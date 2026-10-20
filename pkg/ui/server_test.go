@@ -3605,3 +3605,333 @@ func TestServerComparisonDetail_MetricFilter(t *testing.T) {
 		}
 	})
 }
+
+func TestServerComparisonsList_CompletedReasonAndDeltas(t *testing.T) {
+	scheme := newTestScheme(t)
+	comp, baseRun, candRun := regressedComparisonFixture()
+	comp.Status.Message = ""
+	comp.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	comp.Labels = nil
+
+	long := "The candidate answers the readme questions without the install section, " +
+		"and the runbook lookups cite a retired page; both changes trace to the prompt rewrite in this release."
+	running := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "eval-running", Namespace: "eval-runner", CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute))},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "eval-run-v1"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "eval-run-missing"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseRunning,
+			Verdict: v1alpha1.ComparisonVerdictRunning,
+			Message: long,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, baseRun, candRun, running).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/comparisons", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+
+	if !strings.Contains(body, "<th>Completed</th>") || !strings.Contains(body, "<th>Age</th>") {
+		t.Errorf("expected Completed and Age columns")
+	}
+	if !strings.Contains(body, `<td class="ts">2026-10-20 10:35 UTC</td>`) {
+		t.Errorf("expected absolute UTC completion time for the completed comparison")
+	}
+	if !strings.Contains(body, `<td class="ts">—</td>`) {
+		t.Errorf("expected an em dash for the running comparison's completion time")
+	}
+
+	// REGRESSED without a message: reason derived from status.tasks.
+	if !strings.Contains(body, "Regressed on 2 of 4 tasks: docs/readme_comprehension (80% → 40%), triage/runbook_lookup (70% → 54%)") {
+		t.Errorf("expected the derived regression reason, got:\n%s", body)
+	}
+	// A long message is truncated in the cell and kept whole in the title attribute.
+	if !strings.Contains(body, `title="`+long+`"`) {
+		t.Errorf("expected the full message in a title attribute")
+	}
+	if !strings.Contains(body, ">The candidate answers the readme questions without the install section, and the runbook lookups cite a retired page; both changes trace to…</div>") {
+		t.Errorf("expected the message truncated near 140 characters, got:\n%s", body)
+	}
+
+	// Run deltas for the comparison whose Runs exist: four shared tasks, quality 72.5% → 63.5%.
+	if !strings.Contains(body, `<span class="delta-k">Quality</span> <span class="delta-v delta-bad" title="Mean success rate 72.5% → 63.5% over 4 shared tasks (Run success rates)">−9.0 pp</span>`) {
+		t.Errorf("expected the quality delta from both Runs, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<span class="delta-v delta-good" title="−3.0K tokens (0.10M → 97.0K) over 4 shared tasks">−3.0%</span>`) {
+		t.Errorf("expected the token delta from both Runs")
+	}
+	if !strings.Contains(body, `<span class="delta-v delta-good" title="$0.0200 → $0.0194 over 4 shared tasks">−$0.0006 (−3.0%)</span>`) {
+		t.Errorf("expected the cost delta from both Runs")
+	}
+	// The running comparison's candidate Run does not exist: deltas are missing.
+	if !strings.Contains(body, `title="Token counts are missing from one or both Runs">—</span>`) {
+		t.Errorf("expected missing token delta for the comparison without a candidate Run")
+	}
+	// Unlabeled comparisons: no grouped view and no kind filter.
+	if strings.Contains(body, "By candidate run") || strings.Contains(body, `class="filter-chip`) {
+		t.Errorf("did not expect grouped view or kind filter without labeled comparisons")
+	}
+}
+
+func TestServerComparisonsList_StructuredReasonShowsHeadline(t *testing.T) {
+	scheme := newTestScheme(t)
+	comp, baseRun, candRun := regressedComparisonFixture()
+	comp.Labels = nil
+	comp.Status.Message = structuredReasonMessage
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, baseRun, candRun).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/comparisons", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+
+	headline := "Pass rate fell on 2 of 4 tasks and rose on 1; the largest drop is docs/readme_comprehension, 80% -&gt; 40%."
+	if !strings.Contains(body, `">`+headline+`</div>`) {
+		t.Errorf("expected only the headline in the reason line, got:\n%s", body)
+	}
+	if strings.Contains(body, headline+" Every task") {
+		t.Errorf("did not expect text after the headline in the reason line")
+	}
+	if !strings.Contains(body, `title="Pass rate fell on 2 of 4 tasks`) || !strings.Contains(body, `Code changes: https://github.com/example/repo/compare/a81d0c4...05ce4d8">`+headline) {
+		t.Errorf("expected the full message in the title attribute")
+	}
+}
+
+func groupedServerFixtures(now time.Time) []client.Object {
+	objs := []client.Object{}
+	items, runs := groupingFixtures(now)
+	for i := range items {
+		item := items[i]
+		objs = append(objs, &item)
+	}
+	for _, run := range runs {
+		objs = append(objs, run)
+	}
+	return objs
+}
+
+func TestServerComparisonsList_GroupedByCandidateRun(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(groupedServerFixtures(now)...).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	get := func(t *testing.T, path string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s: expected 200 OK, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	t.Run("all", func(t *testing.T) {
+		body := get(t, "/comparisons")
+		for _, want := range []string{
+			`<a href="/comparisons" class="filter-chip active">All</a>`,
+			`<a href="/comparisons?kind=baseline" class="filter-chip ">vs baseline</a>`,
+			`<a href="/comparisons?kind=previous" class="filter-chip ">vs previous</a>`,
+			"<th>vs baseline</th>",
+			"<th>vs previous</th>",
+			`<h2 class="section-title">By candidate run</h2>`,
+			`<h2 class="section-title">Other comparisons</h2>`,
+			"7 total",
+			"Older: ",
+			`<a href="/comparisons/eval-runner/v3-vs-v1-old" class="mono">v3-vs-v1-old</a>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("expected %q in body", want)
+			}
+		}
+
+		// Groups ordered by candidate Run creation time, newest first; the deleted Run's group
+		// uses its newest Comparison's creation time.
+		idxV4 := strings.Index(body, `<a href="/runs/eval-runner/run-v4-deleted" class="mono" style="font-weight:600">`)
+		idxV3 := strings.Index(body, `<a href="/runs/eval-runner/run-v3" class="mono" style="font-weight:600">`)
+		idxV2 := strings.Index(body, `<a href="/runs/eval-runner/run-v2" class="mono" style="font-weight:600">`)
+		if idxV4 == -1 || idxV3 == -1 || idxV2 == -1 || !(idxV4 < idxV3 && idxV3 < idxV2) {
+			t.Errorf("expected group order v4, v3, v2: v4=%d v3=%d v2=%d", idxV4, idxV3, idxV2)
+		}
+		// The comparison with both labels appears in both cells of its row.
+		if n := strings.Count(body, `<a href="/comparisons/eval-runner/v2-vs-v1" class="mono" style="font-size:13px">v2-vs-v1</a>`); n != 2 {
+			t.Errorf("expected v2-vs-v1 in both cells, found %d", n)
+		}
+		// Unlabeled comparisons keep the flat table, including the one labeled vs-baseline=no.
+		otherIdx := strings.Index(body, "Other comparisons")
+		if otherIdx == -1 || !strings.Contains(body[otherIdx:], "/comparisons/eval-runner/pr-7") || !strings.Contains(body[otherIdx:], "/comparisons/eval-runner/pr-8") {
+			t.Errorf("expected pr-7 and pr-8 in the unlabeled table")
+		}
+		if strings.Contains(body[otherIdx:], "/comparisons/eval-runner/v3-vs-v2") {
+			t.Errorf("did not expect labeled comparisons in the unlabeled table")
+		}
+	})
+
+	t.Run("baseline filter", func(t *testing.T) {
+		body := get(t, "/comparisons?kind=baseline")
+		if !strings.Contains(body, `<a href="/comparisons?kind=baseline" class="filter-chip active">vs baseline</a>`) {
+			t.Errorf("expected the vs baseline chip to be active")
+		}
+		if strings.Contains(body, "<th>vs previous</th>") || !strings.Contains(body, "<th>vs baseline</th>") {
+			t.Errorf("expected only the vs baseline column")
+		}
+		if strings.Contains(body, "/comparisons/eval-runner/v3-vs-v2") || strings.Contains(body, "/comparisons/eval-runner/pr-7") {
+			t.Errorf("expected vs-previous-only and unlabeled comparisons to be hidden")
+		}
+		if !strings.Contains(body, "4 total") {
+			t.Errorf("expected 4 vs-baseline comparisons in the total")
+		}
+	})
+
+	t.Run("previous filter", func(t *testing.T) {
+		body := get(t, "/comparisons?kind=previous")
+		if strings.Contains(body, "<th>vs baseline</th>") || !strings.Contains(body, "<th>vs previous</th>") {
+			t.Errorf("expected only the vs previous column")
+		}
+		if !strings.Contains(body, "/comparisons/eval-runner/v3-vs-v2") || strings.Contains(body, "/comparisons/eval-runner/v3-vs-v1\"") {
+			t.Errorf("expected vs-previous comparisons only")
+		}
+		if !strings.Contains(body, "2 total") {
+			t.Errorf("expected 2 vs-previous comparisons in the total")
+		}
+	})
+
+	t.Run("unknown kind shows all", func(t *testing.T) {
+		body := get(t, "/comparisons?kind=bogus")
+		if !strings.Contains(body, `<a href="/comparisons" class="filter-chip active">All</a>`) || !strings.Contains(body, "7 total") {
+			t.Errorf("expected an unknown kind to fall back to All")
+		}
+	})
+
+	t.Run("kind links keep the namespace and reset the offset", func(t *testing.T) {
+		body := get(t, "/comparisons?namespace=eval-runner&offset=1&limit=2")
+		if !strings.Contains(body, `<a href="/comparisons?kind=baseline&amp;limit=2&amp;namespace=eval-runner" class="filter-chip ">vs baseline</a>`) {
+			t.Errorf("expected the kind link to keep namespace and limit and drop offset, got:\n%s", body)
+		}
+	})
+
+	t.Run("pagination counts rows", func(t *testing.T) {
+		body := get(t, "/comparisons?limit=2")
+		if !strings.Contains(body, "Showing 1–2 of 5") {
+			t.Errorf("expected 5 rows (3 groups, 2 unlabeled) in the pagination range")
+		}
+		if !strings.Contains(body, "run-v4-deleted") || !strings.Contains(body, "/comparisons/eval-runner/pr-7") || strings.Contains(body, `href="/runs/eval-runner/run-v3" class="mono" style="font-weight:600"`) {
+			t.Errorf("expected page one to hold the v4 group and pr-7 only")
+		}
+	})
+}
+
+// runListErrorClient fails RunList calls and delegates everything else.
+type runListErrorClient struct {
+	client.Reader
+}
+
+func (c *runListErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*v1alpha1.RunList); ok {
+		return apierrors.NewForbidden(schema.GroupResource{Group: "evalrunner.gke-labs.dev", Resource: "runs"}, "", fmt.Errorf("access denied"))
+	}
+	return c.Reader.List(ctx, list, opts...)
+}
+
+func TestServerComparisonsList_RunListFailureDegrades(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(groupedServerFixtures(now)...).Build()
+	server := NewServer(Config{Client: &runListErrorClient{Reader: fakeClient}})
+
+	req := httptest.NewRequest(http.MethodGet, "/comparisons", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK when runs cannot be listed, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "By candidate run") {
+		t.Errorf("expected the grouped view without Run data")
+	}
+	if strings.Contains(body, `class="delta-v delta-good"`) || strings.Contains(body, `class="delta-v delta-bad"`) {
+		t.Errorf("expected no directional deltas without Run data")
+	}
+	// Groups fall back to Comparison creation times: v2's newest Comparison (-5m) is newer than v3's (-20m).
+	idxV3 := strings.Index(body, `<a href="/runs/eval-runner/run-v3" class="mono" style="font-weight:600">`)
+	idxV2 := strings.Index(body, `<a href="/runs/eval-runner/run-v2" class="mono" style="font-weight:600">`)
+	if idxV3 == -1 || idxV2 == -1 || idxV2 > idxV3 {
+		t.Errorf("expected v2 before v3 when ordering by Comparison creation time: v2=%d v3=%d", idxV2, idxV3)
+	}
+}
+
+func TestServerComparisonDetail_ReasonPanelRegressedTasksAndDeltas(t *testing.T) {
+	scheme := newTestScheme(t)
+	comp, baseRun, candRun := regressedComparisonFixture()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, baseRun, candRun).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/eval-v3-vs-v1", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	if strings.Contains(body, `class="msg-alert"`) {
+		t.Errorf("expected no error alert for the status message")
+	}
+	if !strings.Contains(body, `<div class="reason-headline">Two tasks regressed after the prompt rewrite.</div>`) ||
+		!strings.Contains(body, `<p class="reason-para">readme comprehension answers omit the install section in 3 of 5 samples.</p>`) {
+		t.Errorf("expected the message as a headline and a paragraph in the reason panel")
+	}
+	if !strings.Contains(body, `Regressed tasks <span style="font-size:13px;font-weight:500;color:var(--muted)">2 of 4</span>`) {
+		t.Errorf("expected the regressed tasks heading with counts")
+	}
+	for _, want := range []string{
+		`<td class="num">0.80 → 0.40</td>`,
+		`<td class="num">-0.40</td>`,
+		`<td class="num" style="font-size:13px;color:var(--muted)">[-0.60, -0.20]</td>`,
+		`<td class="num">0.70 → 0.54</td>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in the regressed tasks table", want)
+		}
+	}
+	if !strings.Contains(body, `<div class="delta-strip-detail"><div class="delta-strip">`) {
+		t.Errorf("expected the run delta strip at the top of the detail page")
+	}
+	if !strings.Contains(body, ">−9.0 pp</span>") || !strings.Contains(body, ">−3.0%</span>") || !strings.Contains(body, ">−$0.0006 (−3.0%)</span>") {
+		t.Errorf("expected quality, tokens and cost deltas in the strip")
+	}
+
+	t.Run("no regressed tasks list without regressed tasks", func(t *testing.T) {
+		_, baseRun, candRun := sampleFixtures()
+		_, _, improved := sampleFixtures()
+		improved.Name = "improved-comp"
+		fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(improved, baseRun, candRun).Build()
+		s := NewServer(Config{Client: fc})
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/improved-comp", nil)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		if strings.Contains(w.Body.String(), "Regressed tasks") {
+			t.Errorf("did not expect a regressed tasks list for an IMPROVED comparison")
+		}
+		if strings.Contains(w.Body.String(), `class="reason-panel"`) {
+			t.Errorf("did not expect a reason panel without a status message")
+		}
+	})
+}

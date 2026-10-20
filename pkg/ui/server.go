@@ -655,6 +655,7 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid pagination params", "invalid pagination query params", err)
 		return
 	}
+	kind := ParseComparisonKind(r.URL.Query().Get("kind"))
 
 	var compList v1alpha1.ComparisonList
 	if err := s.cfg.Client.List(ctx, &compList, client.InNamespace(ns)); err != nil {
@@ -666,52 +667,35 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sort comparisons by CreationTimestamp descending (newest first), with name tiebreaker
-	sort.Slice(compList.Items, func(i, j int) bool {
-		if !compList.Items[i].CreationTimestamp.Equal(&compList.Items[j].CreationTimestamp) {
-			return compList.Items[i].CreationTimestamp.After(compList.Items[j].CreationTimestamp.Time)
-		}
-		return compList.Items[i].Name < compList.Items[j].Name
-	})
+	var runs map[string]*v1alpha1.Run
+	if len(compList.Items) > 0 {
+		runs = s.runsByName(ctx, ns)
+	}
 
-	totalCount := len(compList.Items)
+	// Rows are labeled candidate groups and unlabeled Comparisons, newest first.
+	rows, totalCount := comparisonListRows(compList.Items, kind, runs)
+
+	totalRows := len(rows)
 	start := offset
-	if start > totalCount {
-		start = totalCount
+	if start > totalRows {
+		start = totalRows
 	}
 	end := start + limit
-	if end > totalCount {
-		end = totalCount
+	if end > totalRows {
+		end = totalRows
 	}
 
-	pageComps := compList.Items[start:end]
-	items := make([]ComparisonListItem, 0, len(pageComps))
-	for _, comp := range pageComps {
-		pImp := "—"
-		if comp.Status.PImprovement != nil {
-			pImp = fmt.Sprintf("%.2f", *comp.Status.PImprovement)
+	var items []ComparisonListItem
+	var groups []ComparisonGroupRow
+	for _, row := range rows[start:end] {
+		if row.isGroup() {
+			groups = append(groups, row.groupRow(runs))
+		} else {
+			items = append(items, row.listItem(runs))
 		}
-
-		tasks := "—"
-		if comp.Status.Summary != nil && comp.Status.Summary.Tasks != "" {
-			tasks = comp.Status.Summary.Tasks
-		}
-
-		items = append(items, ComparisonListItem{
-			Name:         comp.Name,
-			Namespace:    comp.Namespace,
-			Verdict:      comp.Status.Verdict,
-			VerdictChip:  verdictChipClass(comp.Status.Verdict),
-			PImprovement: pImp,
-			Tasks:        tasks,
-			BaselineRun:  comp.Spec.Baseline.Run,
-			CandidateRun: comp.Spec.Candidate.Run,
-			Age:          FormatAge(comp.CreationTimestamp),
-			Link:         fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name),
-		})
 	}
 
-	hasMore := end < totalCount
+	hasMore := end < totalRows
 	hasPrev := start > 0
 
 	var nextLink, prevLink string
@@ -727,28 +711,57 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	showingRange := ""
-	if totalCount > 0 {
-		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalCount)
+	if totalRows > 0 {
+		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalRows)
 	}
 
+	query := r.URL.Query()
 	view := ComparisonsListView{
-		ActiveTab:    NavTabComparisons,
-		Namespace:    ns,
-		Comparisons:  items,
-		TotalCount:   totalCount,
-		Offset:       start,
-		Limit:        limit,
-		HasMore:      hasMore,
-		NextLink:     nextLink,
-		HasPrev:      hasPrev,
-		PrevLink:     prevLink,
-		ShowingRange: showingRange,
+		ActiveTab:          NavTabComparisons,
+		Namespace:          ns,
+		Comparisons:        items,
+		TotalCount:         totalCount,
+		Offset:             start,
+		Limit:              limit,
+		HasMore:            hasMore,
+		NextLink:           nextLink,
+		HasPrev:            hasPrev,
+		PrevLink:           prevLink,
+		ShowingRange:       showingRange,
+		Kind:               kind,
+		KindLabelKey:       kindLabelKey(kind),
+		ShowKindFilter:     kind != ComparisonKindAll || hasLabeledComparison(compList.Items),
+		KindAllLink:        comparisonsKindLink(query, ComparisonKindAll),
+		KindBaselineLink:   comparisonsKindLink(query, ComparisonKindBaseline),
+		KindPreviousLink:   comparisonsKindLink(query, ComparisonKindPrevious),
+		Groups:             groups,
+		ShowGroups:         len(groups) > 0 || kind != ComparisonKindAll,
+		ShowBaselineColumn: kind != ComparisonKindPrevious,
+		ShowPreviousColumn: kind != ComparisonKindBaseline,
+		// The flat table also carries the empty state when a page has no rows at all.
+		ShowFlat: kind == ComparisonKindAll && (len(items) > 0 || len(groups) == 0),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplComparisonsList.Execute(w, view); err != nil {
 		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
+}
+
+// runsByName lists the Runs in ns once per request so that each Comparison row can resolve
+// its baseline and candidate Runs. A failed list is logged and returns nil: rows then show
+// missing run deltas, and candidate groups are ordered by Comparison creation time.
+func (s *Server) runsByName(ctx context.Context, ns string) map[string]*v1alpha1.Run {
+	var runList v1alpha1.RunList
+	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		log.Printf("failed to list runs in namespace %s for the comparisons page: %v", ns, err)
+		return nil
+	}
+	runs := make(map[string]*v1alpha1.Run, len(runList.Items))
+	for i := range runList.Items {
+		runs[runList.Items[i].Name] = &runList.Items[i]
+	}
+	return runs
 }
 
 func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) {

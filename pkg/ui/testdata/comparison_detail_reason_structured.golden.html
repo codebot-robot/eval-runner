@@ -1,0 +1,386 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>docs-eval-same-commit · Comparison · eval-runner</title>
+  <style>
+:root {
+  --indigo: #4F46E5;
+  --indigo-soft: #EEF2FF;
+  --teal: #14B8A6;
+  --teal-soft: #CCFBF1;
+  --ink: #111827;
+  --ink-2: #374151;
+  --muted: #6B7280;
+  --line: #E5E7EB;
+  --surface: #FFFFFF;
+  --canvas: #F8FAFC;
+  --good: #15803D;
+  --good-soft: #DCFCE7;
+  --bad: #B91C1C;
+  --bad-soft: #FEE2E2;
+  --warn: #B45309;
+  --warn-soft: #FEF3C7;
+  --neutral: #6B7280;
+  --neutral-soft: #F3F4F6;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--canvas);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.header-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.header-logo {
+  font-weight: 700;
+  font-size: 20px;
+  color: var(--indigo);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.header-logo:hover { text-decoration: none; }
+.nav-links {
+  display: flex;
+  gap: 8px;
+}
+.nav-link {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+.nav-link:hover {
+  color: var(--ink);
+  background: var(--neutral-soft);
+  text-decoration: none;
+}
+.nav-link.active {
+  color: var(--indigo);
+  background: var(--indigo-soft);
+  font-weight: 600;
+}
+
+.container {
+  max-width: 1320px;
+  margin: 28px auto;
+  padding: 0 24px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 2px 6px rgba(17,24,39,.04);
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.card-header {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.card-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.card-body {
+  padding: 24px;
+}
+.card-footer {
+  padding: 16px 24px;
+  background: var(--canvas);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  align-items: center;
+}
+
+.mono { font-family: var(--mono); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.chip.good { background: var(--good-soft); color: var(--good); }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+.chip.neutral { background: var(--neutral-soft); color: var(--neutral); }
+.chip.pending { background: var(--warn-soft); color: var(--warn); }
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+}
+
+ 
+.cibar { position: relative; height: 26px; width: 340px; }
+.cibar .axis { position: absolute; left: 0; right: 0; top: 12px; height: 2px; background: var(--line); }
+.cibar .zero { position: absolute; top: 2px; width: 2px; height: 22px; background: var(--muted); }
+.cibar .range { position: absolute; top: 11px; height: 4px; border-radius: 2px; }
+.cibar .pt { position: absolute; top: 6px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-sizing: border-box; }
+.good-c { background: var(--good); }
+.bad-c { background: var(--bad); }
+.warn-c { background: var(--warn); }
+.neutral-c { background: var(--neutral); }
+.indigo-c { background: var(--indigo); }
+.teal-c { background: var(--teal); }
+
+ 
+.cibar-01 { position: relative; height: 26px; width: 240px; }
+.cibar-01 .axis { position: absolute; left: 0; right: 0; top: 12px; height: 2px; background: var(--line); }
+.cibar-01 .tick-0 { position: absolute; left: 0; top: 5px; width: 1px; height: 15px; background: var(--muted); }
+.cibar-01 .tick-50 { position: absolute; left: 120px; top: 8px; width: 1px; height: 10px; background: var(--line); }
+.cibar-01 .tick-100 { position: absolute; right: 0; top: 5px; width: 1px; height: 15px; background: var(--muted); }
+.cibar-01 .range { position: absolute; top: 11px; height: 4px; border-radius: 2px; background: var(--indigo); }
+.cibar-01 .pt { position: absolute; top: 6px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-sizing: border-box; background: var(--indigo); }
+
+ 
+.progress-container { display: flex; align-items: center; gap: 8px; }
+.progress-bar { position: relative; height: 8px; width: 140px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--teal); border-radius: 999px; }
+.progress-text { font-size: 12px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+
+table.ci { width: 100%; border-collapse: collapse; font-size: 15px; }
+table.ci th { text-align: left; color: var(--muted); font-weight: 500; font-size: 13px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+table.ci td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.ci tbody tr:hover { background: #FAFBFD; }
+table.ci tbody tr:last-child td { border-bottom: none; }
+
+.verdict { font-size: 20px; margin: 4px 0 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.verdict-headline { font-size: 17px; color: var(--ink-2); }
+
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 22px; }
+.meta-tile { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; background: var(--canvas); }
+.meta-tile .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.meta-tile .value { font-size: 14px; font-weight: 600; color: var(--ink); word-break: break-all; }
+
+.empty-state { text-align: center; padding: 48px 16px; color: var(--muted); font-size: 15px; }
+.log-path { font-size: 12px; background: var(--neutral-soft); padding: 2px 6px; border-radius: 4px; display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.log-path { color: var(--indigo); text-decoration: none; }
+a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
+.msg-alert { margin-top: 14px; padding: 10px 14px; background: var(--bad-soft); color: var(--bad); border-radius: 6px; font-size: 14px; }
+
+ 
+.metric-filter-bar { display: flex; align-items: center; gap: 8px; margin: 18px 0 16px; flex-wrap: wrap; }
+.filter-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
+.filter-chip { font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--neutral-soft); padding: 5px 12px; border-radius: 6px; text-decoration: none; border: 1px solid transparent; transition: all 0.15s ease; }
+.filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
+.filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
+
+ 
+.section-title { font-size: 15px; font-weight: 600; color: var(--ink-2); margin: 0; padding: 16px 24px 4px; }
+.ts { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.reason-line { margin-top: 4px; max-width: 380px; font-size: 12px; line-height: 1.4; color: var(--ink-2); white-space: normal; }
+table.ci td.cell-top, table.ci td.cmp-cell { vertical-align: top; }
+table.ci td.cmp-cell { min-width: 280px; }
+table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 0; }
+.cmp-line { margin-bottom: 4px; }
+.cmp-meta { font-size: 12px; color: var(--muted); }
+.delta-strip { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; margin: 2px 0; }
+.delta-item { white-space: nowrap; }
+.delta-k { color: var(--muted); }
+.delta-v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.delta-good { color: var(--good); }
+.delta-bad { color: var(--bad); }
+.delta-zero { color: var(--neutral); }
+.delta-missing { color: var(--muted); }
+.delta-strip-detail { margin: -8px 0 16px; }
+.delta-strip-detail .delta-strip { font-size: 14px; gap: 4px 20px; }
+.reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
+.reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
+
+.reason-panel .reason-headline { font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+.reason-panel .reason-block { margin-top: 10px; }
+.reason-panel .reason-block-heading { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 8px 0 2px; }
+.reason-panel .reason-para { margin: 0; line-height: 1.5; }
+.reason-panel .reason-list { margin: 2px 0 0; padding-left: 20px; line-height: 1.5; }
+.reason-panel a { overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="/runs" class="header-logo">eval-runner</a>
+      <nav class="nav-links">
+        <a href="/pulls" class="nav-link ">Pull Requests</a>
+        <a href="/runs" class="nav-link ">Runs</a>
+        <a href="/comparisons" class="nav-link active">Comparisons</a>
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <div style="display:flex;align-items:center;gap:12px">
+          <h1 class="card-title mono">docs-eval-same-commit</h1>
+        </div>
+        <div style="font-size:13px;color:var(--muted)"><a href="/comparisons">← Back to Comparisons</a></div>
+      </div>
+      <div class="card-body">
+        <div class="verdict">
+          <span class="chip good" style="font-size:16px;padding:4px 14px"><span class="dot"></span>IMPROVED</span>
+          <span class="verdict-headline">05ce4d8 vs a81d0c4 · P(improvement) = 0.98</span>
+        </div>
+
+        <div class="delta-strip-detail"><div class="delta-strip">
+<span class="delta-item"><span class="delta-k">Quality</span> <span class="delta-v delta-missing">—</span></span>
+<span class="delta-item"><span class="delta-k">Tokens</span> <span class="delta-v delta-missing">—</span></span>
+<span class="delta-item"><span class="delta-k">Cost</span> <span class="delta-v delta-missing">—</span></span>
+</div></div>
+
+        
+        <div class="reason-panel"><div class="reason-label">Reason</div>
+          <div class="reason-headline">Pass rate fell on 2 of 4 tasks and rose on 1; the largest drop is docs/readme_comprehension, 80% -&gt; 40%.</div>
+          <div class="reason-block">
+            <p class="reason-para">Every task has 5 paired samples, below the 8 pairs needed to label a task, so all tasks are inconclusive.<br>The headline P(improvement) is the lowest per-task value.</p>
+          </div>
+          <div class="reason-block">
+            <div class="reason-block-heading">Largest drops:</div>
+            <ul class="reason-list">
+              <li>docs/readme_comprehension 80% -&gt; 40% (3 timeouts)</li>
+              <li>triage/runbook_lookup 70% -&gt; 54% (1 incorrect)</li>
+            </ul>
+          </div>
+          <div class="reason-block">
+            <div class="reason-block-heading">Candidate failures:</div>
+            <ul class="reason-list">
+              <li>4 timeouts at 120 s</li>
+              <li>1 incorrect &lt;b&gt;answer&lt;/b&gt; &amp; &#34;quoted&#34; text</li>
+            </ul>
+          </div>
+          <div class="reason-block">
+            <p class="reason-para">Code changes: <a href="https://github.com/example/repo/compare/a81d0c4...05ce4d8" target="_blank" rel="noopener noreferrer">https://github.com/example/repo/compare/a81d0c4...05ce4d8</a></p>
+          </div>
+        </div>
+        
+
+        
+
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:16px 0 8px;gap:12px">
+          <h2 style="font-size:17px;font-weight:600;margin:0">Task Comparisons</h2>
+          <div class="metric-filter-bar" style="margin:0">
+            <span class="filter-label">View:</span>
+            <a href="?metric=all" class="filter-chip active">All Metrics</a>
+            <a href="?metric=rate" class="filter-chip ">Accuracy / Rate</a>
+            <a href="?metric=latency" class="filter-chip ">Latency (p50/p95)</a>
+            <a href="?metric=tokens" class="filter-chip ">Tokens</a>
+            <a href="?metric=cost" class="filter-chip ">Cost ($ USD)</a>
+          </div>
+        </div>
+
+        
+<div style="overflow-x:auto;margin-top:16px">
+  <table class="ci">
+    <thead>
+      
+      <tr>
+        <th>eval</th>
+        <th>base</th>
+        <th>this PR</th>
+        <th colspan="2">Δ (95% CI)</th>
+        <th>label</th>
+        <th>samples</th>
+        
+        
+        
+      </tr>
+      
+    </thead>
+    <tbody>
+      
+      <tr>
+        <td class="mono" style="font-weight:600">triage/runbook_lookup</td>
+        
+        <td class="num">0.61</td>
+        <td class="num">0.84</td>
+        <td class="num">&#43;0.23 <span style="font-size:13px;color:var(--muted)">[&#43;0.11, &#43;0.35]</span></td>
+        <td>
+          
+          <div class="cibar" title="Δ: &#43;0.23 [&#43;0.11, &#43;0.35]">
+            <div class="axis"></div>
+            <div class="zero" style="left:170px"></div>
+            <div class="range good-c" style="left:207.4px; width:81.6px"></div>
+            <div class="pt good-c" style="left:241.2px"></div>
+          </div>
+          
+        </td>
+        <td><span class="chip good"><span class="dot"></span>improved</span></td>
+        <td class="num">
+          48
+          
+        </td>
+        
+        
+        
+        
+      </tr>
+      
+    </tbody>
+  </table>
+</div>
+
+      </div>
+
+      <div class="card-footer">
+        <span><b>Base:</b> commit <span class="mono">a81d0c4</span> (<a href="/runs/eval-runner/docs-eval-base-05ce4d8">docs-eval-base-05ce4d8</a>)</span>
+        <span><b>Candidate:</b> commit <span class="mono">05ce4d8</span> (<a href="/runs/eval-runner/docs-eval-cand-05ce4d8">docs-eval-cand-05ce4d8</a>)</span>
+        <span><b>Samples:</b> 96 run · 48 paired</span>
+        
+      </div>
+    </div>
+  </main>
+</body>
+</html>

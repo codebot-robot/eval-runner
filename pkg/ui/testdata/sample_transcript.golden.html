@@ -217,6 +217,29 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
 .filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
 
+ 
+.section-title { font-size: 15px; font-weight: 600; color: var(--ink-2); margin: 0; padding: 16px 24px 4px; }
+.ts { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.reason-line { margin-top: 4px; max-width: 380px; font-size: 12px; line-height: 1.4; color: var(--ink-2); white-space: normal; }
+table.ci td.cell-top, table.ci td.cmp-cell { vertical-align: top; }
+table.ci td.cmp-cell { min-width: 280px; }
+table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 0; }
+.cmp-line { margin-bottom: 4px; }
+.cmp-meta { font-size: 12px; color: var(--muted); }
+.delta-strip { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; margin: 2px 0; }
+.delta-item { white-space: nowrap; }
+.delta-k { color: var(--muted); }
+.delta-v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.delta-good { color: var(--good); }
+.delta-bad { color: var(--bad); }
+.delta-zero { color: var(--neutral); }
+.delta-missing { color: var(--muted); }
+.delta-strip-detail { margin: -8px 0 16px; }
+.delta-strip-detail .delta-strip { font-size: 14px; gap: 4px 20px; }
+.reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
+.reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
+
 .breadcrumb { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
 .breadcrumb a { color: var(--indigo); text-decoration: none; }
 .breadcrumb a:hover { text-decoration: underline; }

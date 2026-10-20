@@ -230,6 +230,29 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .filter-chip { font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--neutral-soft); padding: 5px 12px; border-radius: 6px; text-decoration: none; border: 1px solid transparent; transition: all 0.15s ease; }
 .filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
 .filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
+
+/* Comparisons: timestamps, reason lines, candidate groups, and run deltas */
+.section-title { font-size: 15px; font-weight: 600; color: var(--ink-2); margin: 0; padding: 16px 24px 4px; }
+.ts { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.reason-line { margin-top: 4px; max-width: 380px; font-size: 12px; line-height: 1.4; color: var(--ink-2); white-space: normal; }
+table.ci td.cell-top, table.ci td.cmp-cell { vertical-align: top; }
+table.ci td.cmp-cell { min-width: 280px; }
+table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 0; }
+.cmp-line { margin-bottom: 4px; }
+.cmp-meta { font-size: 12px; color: var(--muted); }
+.delta-strip { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; margin: 2px 0; }
+.delta-item { white-space: nowrap; }
+.delta-k { color: var(--muted); }
+.delta-v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.delta-good { color: var(--good); }
+.delta-bad { color: var(--bad); }
+.delta-zero { color: var(--neutral); }
+.delta-missing { color: var(--muted); }
+.delta-strip-detail { margin: -8px 0 16px; }
+.delta-strip-detail .delta-strip { font-size: 14px; gap: 4px 20px; }
+.reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
+.reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
 `
 
 const runsListTemplate = `
@@ -558,8 +581,61 @@ const comparisonsListTemplate = `
     <div class="card">
       <div class="card-header">
         <h1 class="card-title">Comparisons</h1>
-        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          {{- if .ShowKindFilter }}
+          <div class="metric-filter-bar" style="margin:0">
+            <span class="filter-label">Show:</span>
+            <a href="{{ .KindAllLink }}" class="filter-chip {{ if eq .Kind "" }}active{{ end }}">All</a>
+            <a href="{{ .KindBaselineLink }}" class="filter-chip {{ if eq .Kind "baseline" }}active{{ end }}">vs baseline</a>
+            <a href="{{ .KindPreviousLink }}" class="filter-chip {{ if eq .Kind "previous" }}active{{ end }}">vs previous</a>
+          </div>
+          {{- end }}
+          <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
+        </div>
       </div>
+      {{- if .ShowGroups }}
+      {{- if .ShowFlat }}
+      <h2 class="section-title">By candidate run</h2>
+      {{- end }}
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Candidate Run</th>
+              <th>Candidate Created</th>
+              {{- if .ShowBaselineColumn }}
+              <th>vs baseline</th>
+              {{- end }}
+              {{- if .ShowPreviousColumn }}
+              <th>vs previous</th>
+              {{- end }}
+            </tr>
+          </thead>
+          <tbody>
+            {{- range .Groups }}
+            <tr>
+              <td class="cell-top"><a href="{{ .CandidateLink }}" class="mono" style="font-weight:600">{{ .CandidateRun }}</a></td>
+              <td class="cell-top ts">{{ .Created }}</td>
+              {{- if $.ShowBaselineColumn }}
+              <td class="cmp-cell">{{ template "comparison_cell" .VsBaseline }}</td>
+              {{- end }}
+              {{- if $.ShowPreviousColumn }}
+              <td class="cmp-cell">{{ template "comparison_cell" .VsPrevious }}</td>
+              {{- end }}
+            </tr>
+            {{- else }}
+            <tr>
+              <td colspan="4" class="empty-state">No Comparisons with label {{ $.KindLabelKey }}=true in namespace {{ $.Namespace }}.</td>
+            </tr>
+            {{- end }}
+          </tbody>
+        </table>
+      </div>
+      {{- end }}
+      {{- if .ShowFlat }}
+      {{- if .ShowGroups }}
+      <h2 class="section-title">Other comparisons</h2>
+      {{- end }}
       <div style="overflow-x:auto">
         <table class="ci">
           <thead>
@@ -568,9 +644,11 @@ const comparisonsListTemplate = `
               <th>Namespace</th>
               <th>Verdict</th>
               <th>P(imp)</th>
+              <th>Run deltas</th>
               <th>Tasks</th>
               <th>Baseline Run</th>
               <th>Candidate Run</th>
+              <th>Completed</th>
               <th>Age</th>
             </tr>
           </thead>
@@ -579,21 +657,24 @@ const comparisonsListTemplate = `
             <tr>
               <td><a href="{{ .Link }}" class="mono" style="font-weight:600">{{ .Name }}</a></td>
               <td><span class="mono" style="font-size:13px">{{ .Namespace }}</span></td>
-              <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span></td>
+              <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span>{{ if .Reason }}<div class="reason-line" title="{{ .ReasonFull }}">{{ .Reason }}</div>{{ end }}</td>
               <td class="num">{{ .PImprovement }}</td>
+              <td class="delta-cell">{{ template "delta_strip" .Deltas }}</td>
               <td class="num">{{ .Tasks }}</td>
               <td><a href="/runs/{{ .Namespace }}/{{ .BaselineRun }}" class="mono" style="font-size:13px">{{ .BaselineRun }}</a></td>
               <td><a href="/runs/{{ .Namespace }}/{{ .CandidateRun }}" class="mono" style="font-size:13px">{{ .CandidateRun }}</a></td>
+              <td class="ts">{{ .Completed }}</td>
               <td style="color:var(--muted);font-size:13px">{{ .Age }}</td>
             </tr>
             {{ else }}
             <tr>
-              <td colspan="8" class="empty-state">No Comparisons found in namespace {{ .Namespace }}.</td>
+              <td colspan="10" class="empty-state">No Comparisons found in namespace {{ .Namespace }}.</td>
             </tr>
             {{ end }}
           </tbody>
         </table>
       </div>
+      {{- end }}
       {{ if or .HasPrev .HasMore }}
       <div class="pagination" style="padding:14px 24px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;font-size:13px">
         <div>
@@ -610,6 +691,48 @@ const comparisonsListTemplate = `
 </body>
 </html>
 `
+
+// reasonCSS styles the structured Reason panel on the Comparison detail page.
+const reasonCSS = `
+.reason-panel .reason-headline { font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+.reason-panel .reason-block { margin-top: 10px; }
+.reason-panel .reason-block-heading { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 8px 0 2px; }
+.reason-panel .reason-para { margin: 0; line-height: 1.5; }
+.reason-panel .reason-list { margin: 2px 0 0; padding-left: 20px; line-height: 1.5; }
+.reason-panel a { overflow-wrap: anywhere; }
+`
+
+// reasonSegmentsTemplate renders a []ReasonSegment. Link segments become anchors that open in
+// a new tab; html/template escapes both the text and the URL.
+const reasonSegmentsTemplate = `{{ define "reason_segments" }}{{ range . }}{{ if .URL }}<a href="{{ .URL }}" target="_blank" rel="noopener noreferrer">{{ .Text }}</a>{{ else }}{{ .Text }}{{ end }}{{ end }}{{ end }}`
+
+// deltaStripTemplate renders the Quality, Tokens and Cost changes of a RunDeltas value.
+// Colors encode direction only; the verdict chip carries statistical significance.
+const deltaStripTemplate = `{{ define "delta_strip" }}<div class="delta-strip">
+<span class="delta-item"><span class="delta-k">Quality</span> {{ template "delta_value" .Quality }}</span>
+<span class="delta-item"><span class="delta-k">Tokens</span> {{ template "delta_value" .Tokens }}</span>
+<span class="delta-item"><span class="delta-k">Cost</span> {{ template "delta_value" .Cost }}</span>
+</div>{{ end }}
+{{- define "delta_value" }}{{ if .Text }}<span class="delta-v {{ .Class }}"{{ if .Title }} title="{{ .Title }}"{{ end }}>{{ .Text }}</span>{{ else }}<span class="delta-v delta-missing">—</span>{{ end }}{{ end }}`
+
+// comparisonCellTemplate renders one ComparisonCell of the grouped /comparisons view, or an
+// em dash when the candidate Run has no Comparison of that kind.
+const comparisonCellTemplate = `{{ define "comparison_cell" }}
+{{- if . }}
+<div class="cmp-line"><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span> <span class="num cmp-meta">P(imp) {{ .PImprovement }}</span></div>
+<div class="cmp-line"><a href="{{ .Link }}" class="mono" style="font-size:13px">{{ .Name }}</a>{{ if .BaselineRun }} <span class="cmp-meta">against <a href="{{ .BaselineLink }}" class="mono">{{ .BaselineRun }}</a></span>{{ end }}</div>
+<div class="cmp-line cmp-meta">Completed <span class="ts">{{ .Completed }}</span></div>
+{{ template "delta_strip" .Deltas }}
+{{- if .Reason }}
+<div class="reason-line" title="{{ .ReasonFull }}">{{ .Reason }}</div>
+{{- end }}
+{{- if .Older }}
+<div class="cmp-line cmp-meta" style="margin-top:4px">Older: {{ range $i, $o := .Older }}{{ if $i }}, {{ end }}<a href="{{ $o.Link }}" class="mono">{{ $o.Name }}</a>{{ end }}</div>
+{{- end }}
+{{- else }}
+<span style="color:var(--muted)">—</span>
+{{- end }}
+{{ end }}`
 
 const ComparisonTableTemplate = `{{ define "comparison_table" }}
 <div style="overflow-x:auto;margin-top:16px">
@@ -768,7 +891,7 @@ const comparisonDetailTemplate = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ .Name }} · Comparison · eval-runner</title>
-  <style>` + baseCSS + `</style>
+  <style>` + baseCSS + reasonCSS + `</style>
 </head>
 <body>
   <header class="header-bar">
@@ -798,9 +921,56 @@ const comparisonDetailTemplate = `
           <span class="chip neutral" style="font-size:13px;padding:2px 8px">{{ .AffinityMatched }} matched</span>{{ end }}
         </div>
 
-        {{ if .Message }}
-        <div class="msg-alert"><b>Status:</b> {{ .Message }}</div>
+        <div class="delta-strip-detail">{{ template "delta_strip" .Deltas }}</div>
+
+        {{ if .Message }}{{ $reason := .ReasonBody }}
+        <div class="reason-panel"><div class="reason-label">Reason</div>{{ if $reason.Headline }}
+          <div class="reason-headline">{{ template "reason_segments" $reason.Headline }}</div>
+          {{- range $reason.Blocks }}
+          <div class="reason-block">
+            {{- range .Parts }}
+            {{- if .Heading }}
+            <div class="reason-block-heading">{{ template "reason_segments" .Heading }}</div>
+            {{- else if .Items }}
+            <ul class="reason-list">
+              {{- range .Items }}
+              <li>{{ template "reason_segments" . }}</li>
+              {{- end }}
+            </ul>
+            {{- else }}
+            <p class="reason-para">{{ range $i, $line := .Lines }}{{ if $i }}<br>{{ end }}{{ template "reason_segments" $line }}{{ end }}</p>
+            {{- end }}
+            {{- end }}
+          </div>
+          {{- end }}
+        {{ else }}<div class="reason-text">{{ template "reason_segments" $reason.Plain }}</div>{{ end }}</div>
         {{ end }}
+
+        {{- if .RegressedTasks }}
+        <h2 style="font-size:17px;font-weight:600;margin:20px 0 8px">Regressed tasks <span style="font-size:13px;font-weight:500;color:var(--muted)">{{ len .RegressedTasks }} of {{ .EvaluatedTasks }}</span></h2>
+        <div style="overflow-x:auto">
+          <table class="ci">
+            <thead>
+              <tr>
+                <th>task</th>
+                <th>base → candidate</th>
+                <th>Δ</th>
+                <th>95% CI</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{- range .RegressedTasks }}
+              <tr>
+                <td class="mono" style="font-weight:600">{{ .ID }}</td>
+                <td class="num">{{ .BaseRate }} → {{ .CandRate }}</td>
+                <td class="num">{{ .Delta }}</td>
+                <td class="num" style="font-size:13px;color:var(--muted)">{{ .CILabel }}</td>
+              </tr>
+              {{- end }}
+            </tbody>
+          </table>
+        </div>
+        {{- end }}
 
         {{ if or .TotalCostStr .TotalTokensStr }}
         <div class="meta-grid" style="margin-top:16px">
@@ -1169,9 +1339,9 @@ const sampleTranscriptTemplate = `
 var (
 	tmplRunsList         = template.Must(template.New("runs_list").Parse(runsListTemplate))
 	tmplRunDetail        = template.Must(template.New("run_detail").Parse(runDetailTemplate))
-	tmplComparisonsList  = template.Must(template.New("comparisons_list").Parse(comparisonsListTemplate))
+	tmplComparisonsList  = template.Must(template.Must(template.Must(template.New("comparisons_list").Parse(comparisonsListTemplate)).Parse(comparisonCellTemplate)).Parse(deltaStripTemplate))
 	tmplComparisonTable  = template.Must(template.New("comparison_table").Parse(ComparisonTableTemplate))
-	tmplComparisonDetail = template.Must(template.Must(template.New("comparison_detail").Parse(ComparisonTableTemplate)).Parse(comparisonDetailTemplate))
+	tmplComparisonDetail = template.Must(template.Must(template.Must(template.Must(template.New("comparison_detail").Parse(ComparisonTableTemplate)).Parse(deltaStripTemplate)).Parse(reasonSegmentsTemplate)).Parse(comparisonDetailTemplate))
 	tmplTaskSamplesList  = template.Must(template.New("task_samples_list").Parse(taskSamplesListTemplate))
 	tmplSampleTranscript = template.Must(template.New("sample_transcript").Parse(sampleTranscriptTemplate))
 	tmplPullsList        = template.Must(template.New("pulls_list").Parse(pullsListTemplate))

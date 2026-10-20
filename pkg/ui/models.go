@@ -186,8 +186,18 @@ type ComparisonListItem struct {
 	Tasks        string
 	BaselineRun  string
 	CandidateRun string
+	Completed    string // status.completionTime in UTC, e.g. "2026-10-20 10:35 UTC", or "—"
 	Age          string
 	Link         string
+
+	// Reason is status.message, or a regression summary derived from status.tasks when the
+	// verdict is REGRESSED and the message is empty, truncated for display.
+	Reason string
+	// ReasonFull is the untruncated Reason for the title attribute.
+	ReasonFull string
+
+	// Deltas are the Quality, Tokens and Cost changes from the baseline Run to the candidate Run.
+	Deltas RunDeltas
 }
 
 // ComparisonsListView is the view model for the /comparisons list page.
@@ -203,6 +213,26 @@ type ComparisonsListView struct {
 	HasPrev      bool
 	PrevLink     string
 	ShowingRange string
+
+	// Kind is the selected ?kind= filter.
+	Kind ComparisonKind
+	// KindLabelKey is the label selected by Kind, used in the empty state of filtered views.
+	KindLabelKey string
+	// ShowKindFilter shows the All | vs baseline | vs previous links. It is set when the
+	// namespace has labeled Comparisons or a filter is active.
+	ShowKindFilter   bool
+	KindAllLink      string
+	KindBaselineLink string
+	KindPreviousLink string
+
+	// Groups holds one row per candidate Run for Comparisons labeled vs-baseline or vs-previous.
+	Groups             []ComparisonGroupRow
+	ShowGroups         bool
+	ShowBaselineColumn bool
+	ShowPreviousColumn bool
+
+	// ShowFlat shows the table of Comparisons that carry neither label.
+	ShowFlat bool
 }
 
 // PullRequestListItem represents a single aggregated pull request row in the /pulls list view.
@@ -823,6 +853,14 @@ type ComparisonDetailView struct {
 	Batches []ComparisonBatchRow
 	Actions []ComparisonActionRow
 
+	// Deltas are the Quality, Tokens and Cost changes from the baseline Run to the candidate Run.
+	Deltas RunDeltas
+
+	// RegressedTasks lists tasks labeled regressed, most negative delta first.
+	RegressedTasks []RegressedTaskRow
+	// EvaluatedTasks counts the tasks in status.tasks that were not skipped.
+	EvaluatedTasks int
+
 	// Summary contains aggregate comparison headline and footer data.
 	Summary ComparisonSummaryData
 
@@ -1372,6 +1410,9 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 		TotalTokensStr:   totalTokensFormatted,
 		Batches:          ComparisonBatches(comp),
 		Actions:          ComparisonActions(comp),
+		Deltas:           ComputeRunDeltas(comp, baseRun, candRun),
+		RegressedTasks:   RegressedTaskRows(comp),
+		EvaluatedTasks:   evaluatedTaskCount(comp),
 		Summary:          summary,
 		BaseRun:          summary.BaseRun,
 		BaseCommit:       summary.BaseCommit,

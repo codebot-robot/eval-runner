@@ -216,6 +216,36 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .filter-chip { font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--neutral-soft); padding: 5px 12px; border-radius: 6px; text-decoration: none; border: 1px solid transparent; transition: all 0.15s ease; }
 .filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
 .filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
+
+ 
+.section-title { font-size: 15px; font-weight: 600; color: var(--ink-2); margin: 0; padding: 16px 24px 4px; }
+.ts { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.reason-line { margin-top: 4px; max-width: 380px; font-size: 12px; line-height: 1.4; color: var(--ink-2); white-space: normal; }
+table.ci td.cell-top, table.ci td.cmp-cell { vertical-align: top; }
+table.ci td.cmp-cell { min-width: 280px; }
+table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 0; }
+.cmp-line { margin-bottom: 4px; }
+.cmp-meta { font-size: 12px; color: var(--muted); }
+.delta-strip { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; margin: 2px 0; }
+.delta-item { white-space: nowrap; }
+.delta-k { color: var(--muted); }
+.delta-v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.delta-good { color: var(--good); }
+.delta-bad { color: var(--bad); }
+.delta-zero { color: var(--neutral); }
+.delta-missing { color: var(--muted); }
+.delta-strip-detail { margin: -8px 0 16px; }
+.delta-strip-detail .delta-strip { font-size: 14px; gap: 4px 20px; }
+.reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
+.reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
+
+.reason-panel .reason-headline { font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+.reason-panel .reason-block { margin-top: 10px; }
+.reason-panel .reason-block-heading { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 8px 0 2px; }
+.reason-panel .reason-para { margin: 0; line-height: 1.5; }
+.reason-panel .reason-list { margin: 2px 0 0; padding-left: 20px; line-height: 1.5; }
+.reason-panel a { overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -245,8 +275,14 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
           <span class="verdict-headline">05ce4d8 vs a81d0c4</span>
         </div>
 
+        <div class="delta-strip-detail"><div class="delta-strip">
+<span class="delta-item"><span class="delta-k">Quality</span> <span class="delta-v delta-good" title="Mean success rate 40.0% → 52.5% over 2 shared tasks (Comparison task rates)">&#43;12.5 pp</span></span>
+<span class="delta-item"><span class="delta-k">Tokens</span> <span class="delta-v delta-missing" title="Token counts are missing from one or both Runs">—</span></span>
+<span class="delta-item"><span class="delta-k">Cost</span> <span class="delta-v delta-missing" title="Cost is missing from one or both Runs">—</span></span>
+</div></div>
+
         
-        <div class="msg-alert"><b>Status:</b> Running batch 2 (1 tasks continuing)</div>
+        <div class="reason-panel"><div class="reason-label">Reason</div><div class="reason-text">Running batch 2 (1 tasks continuing)</div></div>
         
 
         

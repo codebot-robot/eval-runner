@@ -320,16 +320,141 @@ func sampleComparisonsListView() ComparisonsListView {
 				Tasks:        "1/1",
 				BaselineRun:  "docs-eval-base-05ce4d8",
 				CandidateRun: "docs-eval-cand-05ce4d8",
+				Completed:    "2026-10-20 10:35 UTC",
 				Age:          "5m",
 				Link:         "/comparisons/eval-runner/docs-eval-same-commit",
+				Deltas: RunDeltas{
+					Quality: MetricDelta{Text: "+23.0 pp", Title: "Mean success rate 61.0% → 84.0% over 1 shared task (Run success rates)", Class: deltaClassGood},
+					Tokens:  MetricDelta{Text: "−3.2%", Title: "−1.2K tokens (37.5K → 36.3K) over 1 shared task", Class: deltaClassGood},
+					Cost:    MetricDelta{Text: "+$0.07 (+1.8%)", Title: "$3.8900 → $3.9600 over 1 shared task", Class: deltaClassBad},
+				},
+			},
+			{
+				Name:         "docs-eval-regressed",
+				Namespace:    "eval-runner",
+				Verdict:      v1alpha1.ComparisonVerdictRegressed,
+				VerdictChip:  "bad",
+				PImprovement: "0.05",
+				Tasks:        "3/3",
+				BaselineRun:  "docs-eval-base-a81d0c4",
+				CandidateRun: "docs-eval-cand-9f1e2d3",
+				Completed:    "—",
+				Age:          "2h",
+				Link:         "/comparisons/eval-runner/docs-eval-regressed",
+				Reason:       "Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)",
+				ReasonFull:   "Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)",
+				Deltas: RunDeltas{
+					Quality: MetricDelta{Text: "0.0 pp", Class: deltaClassZero},
+					Tokens:  MetricDelta{Text: "—", Title: "Token counts are missing from one or both Runs", Class: deltaClassMissing},
+					Cost:    MetricDelta{Text: "$0.00 (0.0%)", Class: deltaClassZero},
+				},
 			},
 		},
-		TotalCount:   1,
+		TotalCount:   2,
 		Offset:       0,
 		Limit:        100,
 		HasMore:      false,
 		HasPrev:      false,
-		ShowingRange: "Showing 1–1 of 1",
+		ShowingRange: "Showing 1–2 of 2",
+		ShowFlat:     true,
+	}
+}
+
+// sampleComparisonsListGroupedView is a /comparisons page with labeled Comparisons grouped
+// by candidate Run above one unlabeled Comparison.
+func sampleComparisonsListGroupedView() ComparisonsListView {
+	regressedReason := "Two tasks regressed after the prompt rewrite: readme comprehension answers omit the install section in 3 of 5 samples, and runbook lookups cite a retired page."
+	return ComparisonsListView{
+		ActiveTab:          NavTabComparisons,
+		Namespace:          "eval-runner",
+		TotalCount:         4,
+		Limit:              100,
+		ShowingRange:       "Showing 1–3 of 3",
+		ShowKindFilter:     true,
+		KindAllLink:        "/comparisons",
+		KindBaselineLink:   "/comparisons?kind=baseline",
+		KindPreviousLink:   "/comparisons?kind=previous",
+		ShowGroups:         true,
+		ShowBaselineColumn: true,
+		ShowPreviousColumn: true,
+		ShowFlat:           true,
+		Groups: []ComparisonGroupRow{
+			{
+				CandidateRun:  "eval-run-v3",
+				CandidateLink: "/runs/eval-runner/eval-run-v3",
+				Created:       "2026-10-20 02:14 UTC",
+				VsBaseline: &ComparisonCell{
+					Name:         "eval-v3-vs-v1",
+					Link:         "/comparisons/eval-runner/eval-v3-vs-v1",
+					Verdict:      v1alpha1.ComparisonVerdictRegressed,
+					VerdictChip:  "bad",
+					PImprovement: "0.05",
+					Completed:    "2026-10-20 10:35 UTC",
+					BaselineRun:  "eval-run-v1",
+					BaselineLink: "/runs/eval-runner/eval-run-v1",
+					Reason:       TruncateAtWord(regressedReason, reasonMaxRunes),
+					ReasonFull:   regressedReason,
+					Deltas: RunDeltas{
+						Quality: MetricDelta{Text: "−4.8 pp", Class: deltaClassBad},
+						Tokens:  MetricDelta{Text: "+2.1%", Class: deltaClassBad},
+						Cost:    MetricDelta{Text: "−$0.01 (−0.9%)", Class: deltaClassGood},
+					},
+					Older: []ComparisonRef{{Name: "eval-v3-vs-v1-rerun", Link: "/comparisons/eval-runner/eval-v3-vs-v1-rerun"}},
+				},
+				VsPrevious: &ComparisonCell{
+					Name:         "eval-v3-vs-v2",
+					Link:         "/comparisons/eval-runner/eval-v3-vs-v2",
+					Verdict:      v1alpha1.ComparisonVerdictUnchanged,
+					VerdictChip:  "neutral",
+					PImprovement: "0.48",
+					Completed:    "2026-10-20 11:02 UTC",
+					BaselineRun:  "eval-run-v2",
+					BaselineLink: "/runs/eval-runner/eval-run-v2",
+					Deltas: RunDeltas{
+						Quality: MetricDelta{Text: "0.0 pp", Class: deltaClassZero},
+						Tokens:  MetricDelta{Text: "0.0%", Class: deltaClassZero},
+						Cost:    MetricDelta{Text: "$0.00 (0.0%)", Class: deltaClassZero},
+					},
+				},
+			},
+			{
+				CandidateRun:  "eval-run-v2",
+				CandidateLink: "/runs/eval-runner/eval-run-v2",
+				Created:       "2026-10-20 02:12 UTC",
+				VsBaseline: &ComparisonCell{
+					Name:         "eval-v2-vs-v1",
+					Link:         "/comparisons/eval-runner/eval-v2-vs-v1",
+					Verdict:      v1alpha1.ComparisonVerdictImproved,
+					VerdictChip:  "good",
+					PImprovement: "0.99",
+					Completed:    "2026-10-20 06:33 UTC",
+					BaselineRun:  "eval-run-v1",
+					BaselineLink: "/runs/eval-runner/eval-run-v1",
+					Deltas: RunDeltas{
+						Quality: MetricDelta{Text: "+6.7 pp", Class: deltaClassGood},
+						Tokens:  MetricDelta{Text: "—", Class: deltaClassMissing},
+						Cost:    MetricDelta{Text: "—", Class: deltaClassMissing},
+					},
+				},
+			},
+		},
+		Comparisons: []ComparisonListItem{
+			{
+				Name:         "pr-42",
+				Namespace:    "eval-runner",
+				Verdict:      v1alpha1.ComparisonVerdictRunning,
+				VerdictChip:  "pending",
+				PImprovement: "—",
+				Tasks:        "1/3",
+				BaselineRun:  "base-a81d0c4",
+				CandidateRun: "pr-42-05ce4d8",
+				Completed:    "—",
+				Age:          "3m",
+				Link:         "/comparisons/eval-runner/pr-42",
+				Reason:       "Running batch 2 (1 tasks continuing)",
+				ReasonFull:   "Running batch 2 (1 tasks continuing)",
+			},
+		},
 	}
 }
 
@@ -606,6 +731,205 @@ func TestTemplateRenderingComparisonsListGolden(t *testing.T) {
 	assertGolden(t, "comparisons_list.golden.html", buf.String())
 }
 
+func TestTemplateRenderingComparisonsListGroupedGolden(t *testing.T) {
+	view := sampleComparisonsListGroupedView()
+
+	var buf bytes.Buffer
+	if err := tmplComparisonsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute comparisons list template: %v", err)
+	}
+
+	assertGolden(t, "comparisons_list_grouped.golden.html", buf.String())
+}
+
+func TestTemplateRenderingComparisonsList_FilteredEmptyState(t *testing.T) {
+	view := ComparisonsListView{
+		ActiveTab:          NavTabComparisons,
+		Namespace:          "eval-runner",
+		Kind:               ComparisonKindPrevious,
+		KindLabelKey:       LabelVsPrevious,
+		ShowKindFilter:     true,
+		KindAllLink:        "/comparisons",
+		KindBaselineLink:   "/comparisons?kind=baseline",
+		KindPreviousLink:   "/comparisons?kind=previous",
+		ShowGroups:         true,
+		ShowPreviousColumn: true,
+	}
+
+	var buf bytes.Buffer
+	if err := tmplComparisonsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute comparisons list template: %v", err)
+	}
+	body := buf.String()
+
+	if !strings.Contains(body, "No Comparisons with label evalrunner.gke-labs.dev/vs-previous=true in namespace eval-runner.") {
+		t.Errorf("expected filtered empty state naming the label, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<a href="/comparisons?kind=previous" class="filter-chip active">vs previous</a>`) {
+		t.Errorf("expected the vs previous filter chip to be active")
+	}
+	if strings.Contains(body, "<th>vs baseline</th>") {
+		t.Errorf("did not expect a vs baseline column when filtering by previous")
+	}
+	if strings.Contains(body, "Other comparisons") || strings.Contains(body, "<th>Comparison</th>") {
+		t.Errorf("did not expect the unlabeled table in a filtered view")
+	}
+}
+
+func TestTemplateRenderingComparisonDetail_StructuredReasonGolden(t *testing.T) {
+	view := sampleComparisonDetailView()
+	view.Message = structuredReasonMessage
+
+	var buf bytes.Buffer
+	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute comparison detail template: %v", err)
+	}
+	body := buf.String()
+
+	for _, want := range []string{
+		`<div class="reason-headline">Pass rate fell on 2 of 4 tasks and rose on 1; the largest drop is docs/readme_comprehension, 80% -&gt; 40%.</div>`,
+		`<p class="reason-para">Every task has 5 paired samples, below the 8 pairs needed to label a task, so all tasks are inconclusive.<br>The headline P(improvement) is the lowest per-task value.</p>`,
+		`<div class="reason-block-heading">Largest drops:</div>`,
+		`<li>docs/readme_comprehension 80% -&gt; 40% (3 timeouts)</li>`,
+		`<li>1 incorrect &lt;b&gt;answer&lt;/b&gt; &amp; &#34;quoted&#34; text</li>`,
+		`<p class="reason-para">Code changes: <a href="https://github.com/example/repo/compare/a81d0c4...05ce4d8" target="_blank" rel="noopener noreferrer">https://github.com/example/repo/compare/a81d0c4...05ce4d8</a></p>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in the structured reason panel", want)
+		}
+	}
+	if strings.Contains(body, `class="reason-text"`) {
+		t.Errorf("did not expect the plain reason block for a structured message")
+	}
+
+	assertGolden(t, "comparison_detail_reason_structured.golden.html", body)
+}
+
+func TestTemplateRenderingComparisonDetail_SingleParagraphReason(t *testing.T) {
+	render := func(t *testing.T, message string) string {
+		t.Helper()
+		view := sampleComparisonDetailView()
+		view.Message = message
+		var buf bytes.Buffer
+		if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute comparison detail template: %v", err)
+		}
+		return buf.String()
+	}
+
+	t.Run("markup is unchanged", func(t *testing.T) {
+		body := render(t, "Running batch 2 (1 tasks continuing) <i>now</i>")
+		want := "        \n        <div class=\"reason-panel\"><div class=\"reason-label\">Reason</div><div class=\"reason-text\">Running batch 2 (1 tasks continuing) &lt;i&gt;now&lt;/i&gt;</div></div>\n        \n"
+		if !strings.Contains(body, want) {
+			t.Errorf("expected the single-paragraph panel markup to match the unstructured layout, got:\n%s", body)
+		}
+		if strings.Contains(body, `class="reason-headline"`) {
+			t.Errorf("did not expect a headline for a message without line breaks")
+		}
+	})
+
+	t.Run("URL becomes a link", func(t *testing.T) {
+		body := render(t, "Code changes: https://example.com/compare/a...b.")
+		want := `<div class="reason-text">Code changes: <a href="https://example.com/compare/a...b" target="_blank" rel="noopener noreferrer">https://example.com/compare/a...b</a>.</div>`
+		if !strings.Contains(body, want) {
+			t.Errorf("expected a link inside the plain reason block, got:\n%s", body)
+		}
+	})
+}
+
+// regressedComparisonFixture returns a REGRESSED Comparison with a publisher message and
+// the two Runs it references, with per-task tokens and cost on both Runs.
+func regressedComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
+	f := func(v float64) *float64 { return &v }
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "eval-v3-vs-v1",
+			Namespace: "eval-runner",
+			Labels:    map[string]string{LabelVsBaseline: "true"},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "eval-run-v1"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "eval-run-v3"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:          v1alpha1.ComparisonPhaseCompleted,
+			Verdict:        v1alpha1.ComparisonVerdictRegressed,
+			PImprovement:   f(0.05),
+			CompletionTime: &metav1.Time{Time: time.Date(2026, 10, 20, 10, 35, 14, 0, time.UTC)},
+			Message:        "Two tasks regressed after the prompt rewrite.\nreadme comprehension answers omit the install section in 3 of 5 samples.",
+			Summary:        &v1alpha1.ComparisonSummary{Tasks: "4/4"},
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "docs/readme_summary", BaseRate: f(0.90), CandidateRate: f(0.90), Delta: f(0), DeltaCI: &v1alpha1.DeltaConfidenceInterval{Lower: -0.10, Upper: 0.10}, Label: v1alpha1.ComparisonTaskLabelUnchanged, Pairs: 5},
+				{ID: "triage/runbook_lookup", BaseRate: f(0.70), CandidateRate: f(0.54), Delta: f(-0.16), DeltaCI: &v1alpha1.DeltaConfidenceInterval{Lower: -0.26, Upper: -0.06}, Label: v1alpha1.ComparisonTaskLabelRegressed, Pairs: 5},
+				{ID: "docs/readme_comprehension", BaseRate: f(0.80), CandidateRate: f(0.40), Delta: f(-0.40), DeltaCI: &v1alpha1.DeltaConfidenceInterval{Lower: -0.60, Upper: -0.20}, Label: v1alpha1.ComparisonTaskLabelRegressed, Pairs: 5},
+				{ID: "triage/escalation_policy", BaseRate: f(0.50), CandidateRate: f(0.70), Delta: f(0.20), DeltaCI: &v1alpha1.DeltaConfidenceInterval{Lower: 0.10, Upper: 0.30}, Label: v1alpha1.ComparisonTaskLabelImproved, Pairs: 5},
+			},
+		},
+	}
+	task := func(id string, rate float64, tokens int, cost float64) v1alpha1.TaskStatus {
+		return v1alpha1.TaskStatus{
+			ID:          id,
+			Phase:       v1alpha1.TaskPhaseCompleted,
+			Samples:     5,
+			SuccessRate: f(rate),
+			Tokens:      &v1alpha1.TaskTokens{Total: tokens},
+			CostUSD:     f(cost),
+		}
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "eval-run-v1", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "a81d0c4111111111111111111111111111111111"}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				task("docs/readme_summary", 0.90, 10000, 0.0020),
+				task("triage/runbook_lookup", 0.70, 20000, 0.0040),
+				task("docs/readme_comprehension", 0.80, 30000, 0.0060),
+				task("triage/escalation_policy", 0.50, 40000, 0.0080),
+			},
+		},
+	}
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "eval-run-v3", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "05ce4d8222222222222222222222222222222222"}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				task("docs/readme_summary", 0.90, 9000, 0.0018),
+				task("triage/runbook_lookup", 0.54, 21000, 0.0042),
+				task("docs/readme_comprehension", 0.40, 26000, 0.0052),
+				task("triage/escalation_policy", 0.70, 41000, 0.0082),
+			},
+		},
+	}
+	return comp, baseRun, candRun
+}
+
+func TestTemplateRenderingComparisonDetail_RegressedGolden(t *testing.T) {
+	comp, baseRun, candRun := regressedComparisonFixture()
+	view := NewComparisonDetailView(comp, baseRun, candRun)
+
+	var buf bytes.Buffer
+	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute comparison detail template: %v", err)
+	}
+	body := buf.String()
+
+	if strings.Contains(body, `class="msg-alert"`) {
+		t.Errorf("expected the status message in a neutral reason panel, not an error alert")
+	}
+	if !strings.Contains(body, `<div class="reason-headline">Two tasks regressed after the prompt rewrite.</div>`) {
+		t.Errorf("expected the first line of the status message as the reason headline")
+	}
+	idxComprehension := strings.Index(body, `<td class="mono" style="font-weight:600">docs/readme_comprehension</td>`)
+	idxRunbook := strings.Index(body, `<td class="mono" style="font-weight:600">triage/runbook_lookup</td>`)
+	if idxComprehension == -1 || idxRunbook == -1 || idxComprehension > idxRunbook {
+		t.Errorf("expected regressed tasks ordered by most negative delta first: comprehension=%d runbook=%d", idxComprehension, idxRunbook)
+	}
+
+	assertGolden(t, "comparison_detail_regressed.golden.html", body)
+}
+
 func TestTemplateRenderingPullsListGolden(t *testing.T) {
 	view := samplePullRequestsListView()
 
@@ -871,6 +1195,123 @@ func TestEscapingHostileFixtures(t *testing.T) {
 		}
 		if !strings.Contains(html, "&lt;iframe") {
 			t.Errorf("expected escaped &lt;iframe in HTML")
+		}
+	})
+
+	t.Run("ComparisonsListEscaping", func(t *testing.T) {
+		hostileDeltas := RunDeltas{
+			Quality: MetricDelta{Text: "+1.0 pp" + hostileScript, Title: "title" + hostileImg, Class: deltaClassGood},
+			Tokens:  MetricDelta{Text: "—", Title: hostileIframe, Class: deltaClassMissing},
+			Cost:    MetricDelta{Text: "$0.00" + hostileImg, Class: deltaClassZero},
+		}
+		cell := &ComparisonCell{
+			Name:         "comp" + hostileScript,
+			Link:         "/comparisons/eval-runner/" + hostileImg,
+			Verdict:      v1alpha1.ComparisonVerdictRegressed,
+			VerdictChip:  "bad",
+			PImprovement: "0.05" + hostileIframe,
+			Completed:    "2026-10-20 10:35 UTC" + hostileScript,
+			BaselineRun:  "base" + hostileScript,
+			BaselineLink: "/runs/eval-runner/" + hostileImg,
+			Reason:       "reason " + hostileScript,
+			ReasonFull:   "full reason " + hostileImg,
+			Deltas:       hostileDeltas,
+			Older:        []ComparisonRef{{Name: "older" + hostileScript, Link: "/comparisons/eval-runner/" + hostileIframe}},
+		}
+		view := ComparisonsListView{
+			ActiveTab:          NavTabComparisons,
+			Namespace:          "eval-runner",
+			ShowKindFilter:     true,
+			KindAllLink:        "/comparisons?namespace=" + hostileImg,
+			KindBaselineLink:   "/comparisons?kind=baseline",
+			KindPreviousLink:   "/comparisons?kind=previous",
+			ShowGroups:         true,
+			ShowBaselineColumn: true,
+			ShowPreviousColumn: true,
+			ShowFlat:           true,
+			Groups: []ComparisonGroupRow{{
+				CandidateRun:  "cand" + hostileScript,
+				CandidateLink: "/runs/eval-runner/" + hostileImg,
+				Created:       "2026-10-20 02:14 UTC" + hostileIframe,
+				VsBaseline:    cell,
+				VsPrevious:    cell,
+			}},
+			Comparisons: []ComparisonListItem{{
+				Name:         "comp" + hostileScript,
+				Namespace:    "eval-runner",
+				Verdict:      v1alpha1.ComparisonVerdictRegressed,
+				VerdictChip:  "bad",
+				PImprovement: "0.05",
+				Tasks:        "1/1",
+				BaselineRun:  "base" + hostileScript,
+				CandidateRun: "cand" + hostileScript,
+				Completed:    "—" + hostileImg,
+				Age:          "1m",
+				Link:         "/comparisons/eval-runner/" + hostileIframe,
+				Reason:       "reason " + hostileScript,
+				ReasonFull:   "full reason \"" + hostileImg,
+				Deltas:       hostileDeltas,
+			}},
+		}
+
+		var buf bytes.Buffer
+		if err := tmplComparisonsList.Execute(&buf, view); err != nil {
+			t.Fatalf("template render error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous tag found in ComparisonsList HTML: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, "&lt;script&gt;") {
+			t.Errorf("expected escaped &lt;script&gt; in HTML")
+		}
+	})
+
+	t.Run("ComparisonDetailStructuredReasonEscaping", func(t *testing.T) {
+		view := sampleComparisonDetailView()
+		view.Message = "Headline " + hostileScript + "\n\n" +
+			"Heading " + hostileImg + ":\n" +
+			"- bullet " + hostileIframe + "\n" +
+			"- link https://evil.example/x" + hostileImg + "\n\n" +
+			"javascript:alert('x') " + hostileScript
+		var buf bytes.Buffer
+		if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("template render error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe", `href="javascript`} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous content in structured reason panel: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, `<a href="https://evil.example/x" target="_blank" rel="noopener noreferrer">https://evil.example/x</a>&#39;&#34;&gt;&lt;img`) {
+			t.Errorf("expected the link to stop at the quote and the rest to stay escaped text")
+		}
+	})
+
+	t.Run("ComparisonDetailRegressedTasksEscaping", func(t *testing.T) {
+		comp, baseRun, candRun := regressedComparisonFixture()
+		comp.Status.Message = "reason " + hostileScript + hostileIframe
+		comp.Status.Tasks[1].ID = "task/" + hostileImg
+		view := NewComparisonDetailView(comp, baseRun, candRun)
+
+		var buf bytes.Buffer
+		if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("template render error: %v", err)
+		}
+		html := buf.String()
+
+		for _, dangerous := range []string{"<script", "<img", "<iframe"} {
+			if strings.Contains(html, dangerous) {
+				t.Errorf("unescaped dangerous tag found in ComparisonDetail HTML: %q", dangerous)
+			}
+		}
+		if !strings.Contains(html, "&lt;img") {
+			t.Errorf("expected escaped regressed task ID in HTML")
 		}
 	})
 
