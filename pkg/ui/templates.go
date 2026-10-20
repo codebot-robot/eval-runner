@@ -541,7 +541,8 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
   <table class="ci">
     <thead>
       <tr>
-        <th>eval</th>
+        <th>eval</th>{{ if .HasAffinity }}
+        <th>affinity</th>{{ end }}
         <th>base</th>
         <th>this PR</th>
         <th colspan="2">Δ (95% CI)</th>
@@ -553,7 +554,8 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
     <tbody>
       {{ range .Tasks }}
       <tr>
-        <td class="mono" style="font-weight:600">{{ .ID }}</td>
+        <td class="mono" style="font-weight:600">{{ .ID }}</td>{{ if $.HasAffinity }}
+        <td class="mono">{{ .Affinity }}</td>{{ end }}
         <td class="num">{{ .BaseRate }}</td>
         <td class="num">{{ .CandRate }}</td>
         <td class="num">{{ .Delta }}{{ if .HasCI }} <span style="font-size:13px;color:var(--muted)">{{ .CILabel }}</span>{{ end }}</td>
@@ -580,7 +582,7 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
       </tr>
       {{ else }}
       <tr>
-        <td colspan="{{ if .HasTokens }}8{{ else }}7{{ end }}" class="empty-state">No task comparisons recorded.</td>
+        <td colspan="{{ if and .HasTokens .HasAffinity }}9{{ else if or .HasTokens .HasAffinity }}8{{ else }}7{{ end }}" class="empty-state">No task comparisons recorded.</td>
       </tr>
       {{ end }}
     </tbody>
@@ -621,7 +623,8 @@ const comparisonDetailTemplate = `
       <div class="card-body">
         <div class="verdict">
           <span class="chip {{ .VerdictChip }}" style="font-size:16px;padding:4px 14px"><span class="dot"></span>{{ .Verdict }}</span>
-          <span class="verdict-headline">{{ .Headline }}</span>
+          <span class="verdict-headline">{{ .Headline }}</span>{{ if .HasAffinity }}
+          <span class="chip neutral" style="font-size:13px;padding:2px 8px">{{ .AffinityMatched }} matched</span>{{ end }}
         </div>
 
         {{ if .Message }}

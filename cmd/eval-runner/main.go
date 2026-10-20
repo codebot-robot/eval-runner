@@ -25,6 +25,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/pki"
@@ -94,6 +95,7 @@ func main() {
 	var comparisonTTL time.Duration
 	var commandUsers string
 	var pollProgressInterval time.Duration
+	var affinityMode string
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -119,6 +121,7 @@ func main() {
 	flag.BoolVar(&strictConfig, "strict-config", false, "Fail startup if eval-runner-config contains unrecognised keys")
 	flag.Int64Var(&artifactMaxUploadBytes, "artifact-max-upload-bytes", gcs.DefaultMaxUploadBytes, "Maximum size in bytes of an uploaded Inspect log before truncation (sets capped in summary.json if exceeded)")
 	flag.DurationVar(&comparisonTTL, "comparison-ttl", 0, "TTL duration for retaining Completed Comparisons (default 0 = disabled)")
+	flag.StringVar(&affinityMode, "affinity-mode", configkeys.AffinityModeOrder, "Changed-file task affinity mode (\"order\" or \"prune\")")
 
 	opts := zap.Options{
 		Development: true,
@@ -147,6 +150,7 @@ func main() {
 		comparisonTTL,
 		commandUsers,
 		pollProgressInterval,
+		affinityMode,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -346,6 +350,7 @@ func main() {
 		ComparisonTTL:       clusterConfig.ComparisonTTL,
 		ModelPrices:         clusterConfig.ModelPrices,
 		CommandUsers:        clusterConfig.CommandUsers,
+		AffinityMode:        clusterConfig.AffinityMode,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {

@@ -30,6 +30,12 @@ const (
 	// MaxTasks is the maximum number of tasks allowed in a discovered manifest.
 	MaxTasks = 1000
 
+	// MaxTaskPaths is the maximum number of path globs allowed per task in a discovered manifest.
+	MaxTaskPaths = 100
+
+	// MaxPathLength is the maximum character length for a single path glob pattern.
+	MaxPathLength = 1024
+
 	// MaxMessageBytes is the maximum byte length for Run status.message on failure.
 	MaxMessageBytes = 4096
 

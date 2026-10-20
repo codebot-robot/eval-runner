@@ -17,8 +17,8 @@
 cat <<'EOF'
 {
   "tasks": [
-    { "id": "docs/readme_comprehension",       "workdir": "evals", "spec": "docs_comprehension.py@readme_comprehension",       "resources": [] },
-    { "id": "docs/readme_comprehension_blind", "workdir": "evals", "spec": "docs_comprehension.py@readme_comprehension_blind", "resources": [] }
+    { "id": "docs/readme_comprehension",       "workdir": "evals", "spec": "docs_comprehension.py@readme_comprehension",       "paths": ["docs/**", "README.md", "evals/**"], "resources": [] },
+    { "id": "docs/readme_comprehension_blind", "workdir": "evals", "spec": "docs_comprehension.py@readme_comprehension_blind", "paths": ["docs/**", "README.md", "evals/**"], "resources": [] }
   ]
 }
 EOF

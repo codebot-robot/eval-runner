@@ -271,6 +271,23 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Preserves the zero-trust credential isolation model by eliminating GitHub credentials and outbound calls from the internet-facing webhook pod. Authorization and GitHub interactions are centralized in the controller alongside reporting.
 
+### ADR-027: Changed-File Task Affinity via Per-Task Path Globs (#224)
+- **Date**: 2026-10-20
+- **Status**: Accepted
+- **Decision**:
+  1. **Manifest Path Globs (`ManifestTask.paths`)**: Discovered evaluation tasks optionally declare a list of repository-relative glob patterns (`tasks[].paths: []string`, e.g. `["docs/**", "evals/docs_*"]`) indicating the repository paths the task is sensitive to. Globs support `**` and `{a,b}` via `github.com/bmatcuk/doublestar/v4`, normalized with stripped leading `./`, forward slashes, and case-sensitivity. Globs are bounded by manifest validation limits (`MaxTaskPaths = 100`, `MaxPathLength = 1024`). Empty or omitted `paths` implies sensitivity to all files (`always`); repository workdirs do not imply path boundaries.
+  2. **Controller Changed-File Fetching**: For Comparisons specifying `spec.pullRequest`, the controller calls GitHub's `GET /repos/{owner}/{repo}/pulls/{number}/files` using existing controller credentials (no webhook credentials). Results are paginated and capped at 300 files (`MaxPullRequestFiles`). Beyond 300 files, all tasks declaring paths are treated as `matched`. Changed files are fetched at most once per `(headSHA, baseSHA)` pair and recorded in `status.affinity {filesHash, filesCount, truncated}`; the raw file list is never stored in etcd.
+  3. **Per-Task Affinity Labels**: Each evaluated task is classified as `always` (no paths declared), `matched` (one or more path globs matched a changed file, or cap exceeded), or `unmatched` (globs declared but none matched changed files). Recorded in `status.tasks[].affinity` and summarized in `status.summary.affinityMatched`.
+  4. **Scheduling and Pruning Modes (`affinityMode`)**: Configured cluster-wide via ConfigMap key `affinityMode` (default: `"order"`):
+     - `order` (default): Stable sorts each batch's `spec.tasks` so that `matched` and `always` tasks are evaluated first, followed by `unmatched` tasks.
+     - `prune`: Drops `unmatched` tasks from batch execution and comparison evaluation; pruned tasks are reported as skipped with reason `skipped (unmatched): <tasks>` in `status.message` and counted in `status.summary.skipped`.
+     The seed batch created by the webhook still runs every discovered task (since the manifest is not yet discovered when seed Runs are enqueued); prune and order apply to subsequent batches (batch 2 onward) scheduled by the controller. Comparisons without `spec.pullRequest`, or where no tasks declare `paths`, remain completely unchanged.
+  5. **Fault Tolerance and Fallback**: If GitHub's pull request files API returns an error (e.g. 403, 404, 500), the controller logs the failure once, records `status.affinity.fallbackReason` and caches the fallback to avoid calling GitHub on every reconcile, and gracefully falls back to `order` mode with all tasks assigned `always` affinity, avoiding pipeline breakage.
+  6. **Surfaces**: An `affinity` column is displayed in the PR comment table (`RenderComparisonMarkdown`) and the UI Comparison view when task affinity is present. PR Comparisons also surface the count of matched tasks (`N matched`).
+- **Rationale**:
+  Implements the first step of ROI-driven task selection (Concept §4.3). Prioritizes evals relevant to code changes under test without complex learning or historical tracking, while preserving full backward compatibility for repositories without declared paths.
+
+
 
 
 

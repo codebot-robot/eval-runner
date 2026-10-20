@@ -15,7 +15,9 @@
 package discovery
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -167,6 +169,61 @@ func TestValidateManifest(t *testing.T) {
 				},
 			},
 			expectError: false,
+		},
+		{
+			name: "valid paths",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Paths: []string{"docs/**", "README.md"}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "empty path pattern in paths",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Paths: []string{""}},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "invalid glob pattern in paths",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Paths: []string{"docs/["}},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "path pattern exceeds max length",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task1", Spec: "eval.py@task", Paths: []string{strings.Repeat("a", MaxPathLength+1)}},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "too many paths in task",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:   "task1",
+						Spec: "eval.py@task",
+						Paths: func() []string {
+							p := make([]string, MaxTaskPaths+1)
+							for i := range p {
+								p[i] = fmt.Sprintf("path/%d", i)
+							}
+							return p
+						}(),
+					},
+				},
+			},
+			expectError: true,
 		},
 		{
 			name: "too many tasks",

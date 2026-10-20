@@ -44,6 +44,7 @@ type IssueComment struct {
 type Client interface {
 	CurrentUser(ctx context.Context) (string, error)
 	ListIssueComments(ctx context.Context, owner, repo string, number int) ([]IssueComment, error)
+	ListPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]string, bool, error)
 	CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) (int64, error)
 	UpdateIssueComment(ctx context.Context, owner, repo string, commentID int64, body string) error
 	CreateCheckRun(ctx context.Context, owner, repo string, headSHA string, state CheckRunState) (int64, error)
@@ -51,6 +52,11 @@ type Client interface {
 	GetRepoPermission(ctx context.Context, owner, repo string, username string) (string, error)
 	CreateCommentReaction(ctx context.Context, owner, repo string, commentID int64, reaction string) error
 }
+
+const (
+	// MaxPullRequestFiles is the maximum number of changed files retrieved for a PR (300).
+	MaxPullRequestFiles = 300
+)
 
 // HasWriteAccess reports whether a GitHub collaborator permission level allows write operations.
 func HasWriteAccess(permission string) bool {
@@ -322,6 +328,51 @@ func (c *HTTPClient) ListIssueComments(ctx context.Context, owner, repo string, 
 		path = next
 	}
 	return allComments, nil
+}
+
+type pullRequestFileResponse struct {
+	Filename string `json:"filename"`
+}
+
+// ListPullRequestFiles fetches changed files for a pull request, following Link pagination headers,
+// up to MaxPullRequestFiles (300). If more files exist beyond the cap, truncated is returned as true.
+func (c *HTTPClient) ListPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]string, bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, number)
+	var allFiles []string
+	const maxPages = 100
+	truncated := false
+	for page := 0; page < maxPages && path != ""; page++ {
+		var pageFiles []pullRequestFileResponse
+		headers, err := c.doRequestHeader(ctx, http.MethodGet, path, nil, &pageFiles)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, f := range pageFiles {
+			if len(allFiles) < MaxPullRequestFiles {
+				allFiles = append(allFiles, f.Filename)
+			} else {
+				truncated = true
+				break
+			}
+		}
+		if truncated {
+			break
+		}
+		next := parseNextLink(headers.Get("Link"))
+		if next != "" {
+			if len(allFiles) >= MaxPullRequestFiles {
+				truncated = true
+				break
+			}
+			if strings.HasPrefix(next, "http://") || strings.HasPrefix(next, "https://") {
+				if !strings.HasPrefix(next, c.baseURL) {
+					return nil, false, fmt.Errorf("refusing to follow link header outside base URL %q: %s", c.baseURL, next)
+				}
+			}
+		}
+		path = next
+	}
+	return allFiles, truncated, nil
 }
 
 type commentPayload struct {

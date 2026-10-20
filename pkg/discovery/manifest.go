@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/affinity"
 )
 
 const (
@@ -97,6 +98,21 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 			cleanWorkdir := filepath.Clean(task.Workdir)
 			if filepath.IsAbs(task.Workdir) || strings.HasPrefix(cleanWorkdir, "..") || cleanWorkdir == ".." || strings.Contains(task.Workdir, "..") {
 				return fmt.Errorf("task %q has invalid workdir %q: must be relative and not contain '..'", id, task.Workdir)
+			}
+		}
+
+		if len(task.Paths) > MaxTaskPaths {
+			return fmt.Errorf("task %q has %d paths, exceeding maximum allowed (%d)", id, len(task.Paths), MaxTaskPaths)
+		}
+		for _, p := range task.Paths {
+			if len(p) == 0 {
+				return fmt.Errorf("task %q has empty path pattern", id)
+			}
+			if len(p) > MaxPathLength {
+				return fmt.Errorf("task %q path pattern exceeds maximum length (%d)", id, MaxPathLength)
+			}
+			if err := affinity.ValidatePattern(p); err != nil {
+				return fmt.Errorf("task %q has invalid path pattern %q: %w", id, p, err)
 			}
 		}
 	}

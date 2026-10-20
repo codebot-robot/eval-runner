@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,8 +33,10 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/internal/fakes"
+	"github.com/gke-labs/eval-runner/pkg/affinity"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
@@ -10694,4 +10697,456 @@ func TestComparisonReconciler_BaselineReuse_FailedTaskInOtherSlot_Reconcile(t *t
 	if !foundOwner {
 		t.Errorf("Expected reused-base-run to have owner reference for comparison %s, got: %+v", comp.Name, updatedBase.OwnerReferences)
 	}
+}
+
+func TestComparisonReconciler_TaskAffinity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	repoURL := "https://github.com/gke-labs/eval-runner.git"
+	candCommit := "cand-commit-sha"
+	baseCommit := "base-commit-sha"
+	model := "google/gemini-pro"
+
+	taskDocs := "docs/readme_comprehension"
+	taskSrc := "src/core_logic"
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: taskDocs, Paths: []string{"docs/**"}, Spec: "docs.py@eval"},
+			{ID: taskSrc, Paths: []string{"src/**"}, Spec: "src.py@eval"},
+		},
+	}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("failed to marshal manifest: %v", err)
+	}
+
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+
+	setupFixture := func(t *testing.T, affinityMode string) (*github.FakeGitHubServer, *ComparisonReconciler, client.Client, *v1alpha1.Comparison, *fakes.FakeStorageClient) {
+		server := github.NewFakeGitHubServer()
+		server.SetPullRequestFiles("gke-labs", "eval-runner", 123, []string{"docs/readme.md"})
+
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("failed to create GCS sink: %v", err)
+		}
+
+		fakeGCS.Objects["test-bucket/runs/cand-commit-sha/manifest.json"] = fakes.FakeObject{Data: manifestBytes}
+
+		scores := []stats.SampleScore{
+			{ID: "1", Score: 1.0},
+			{ID: "2", Score: 0.0},
+			{ID: "3", Score: 1.0},
+			{ID: "4", Score: 0.0},
+		}
+		fakeGCS.Objects["test-bucket/runs/cand-commit-sha/docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, scores)}
+		fakeGCS.Objects["test-bucket/runs/base-commit-sha/docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, scores)}
+		fakeGCS.Objects["test-bucket/runs/cand-commit-sha/src.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskSrc, scores)}
+		fakeGCS.Objects["test-bucket/runs/base-commit-sha/src.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskSrc, scores)}
+
+		b1Range := v1alpha1.SampleRange{Start: 1, End: 4}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: candCommit},
+				Model:       model,
+				Tasks:       []string{taskSrc, taskDocs}, // Seed order has taskSrc first
+				SampleRange: &b1Range,
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					ManifestPath: "gs://test-bucket/runs/cand-commit-sha/manifest.json",
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskSrc, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/src.json", Samples: 4, SampleRange: &b1Range},
+					{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/docs.json", Samples: 4, SampleRange: &b1Range},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-b1", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: repoURL, Commit: baseCommit},
+				Model:       model,
+				Tasks:       []string{taskSrc, taskDocs},
+				SampleRange: &b1Range,
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskSrc, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/src.json", Samples: 4, SampleRange: &b1Range},
+					{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/docs.json", Samples: 4, SampleRange: &b1Range},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-affinity", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-b1"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-b1"},
+				Sampling: &v1alpha1.ComparisonSamplingSpec{
+					BatchSize:         4,
+					MaxSamplesPerTask: 16,
+				},
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     123,
+					HeadSHA:    candCommit,
+					BaseSHA:    baseCommit,
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			AffinityMode:        affinityMode,
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		return server, reconciler, cl, comp, fakeGCS
+	}
+
+	t.Run("order mode (default): sorts batch spec.tasks matched first then unmatched, records status", func(t *testing.T) {
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
+		defer server.Close()
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile failed: %v", err)
+		}
+
+		// Verify status fields
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("Get comparison failed: %v", err)
+		}
+
+		if updatedComp.Status.Affinity == nil {
+			t.Fatalf("expected non-nil Status.Affinity")
+		}
+		if updatedComp.Status.Affinity.FilesCount != 1 {
+			t.Errorf("expected FilesCount 1, got %d", updatedComp.Status.Affinity.FilesCount)
+		}
+		if updatedComp.Status.Affinity.Truncated {
+			t.Errorf("expected Truncated false, got true")
+		}
+		expectedHash := affinity.ComputeFilesHash([]string{"docs/readme.md"})
+		if updatedComp.Status.Affinity.FilesHash != expectedHash {
+			t.Errorf("expected FilesHash %q, got %q", expectedHash, updatedComp.Status.Affinity.FilesHash)
+		}
+
+		if updatedComp.Status.Summary == nil || updatedComp.Status.Summary.AffinityMatched != 1 {
+			t.Errorf("expected AffinityMatched 1, got %+v", updatedComp.Status.Summary)
+		}
+
+		// Verify per-task affinity
+		for _, task := range updatedComp.Status.Tasks {
+			switch task.ID {
+			case taskDocs:
+				if task.Affinity != v1alpha1.ComparisonTaskAffinityMatched {
+					t.Errorf("expected taskDocs affinity 'matched', got %q", task.Affinity)
+				}
+			case taskSrc:
+				if task.Affinity != v1alpha1.ComparisonTaskAffinityUnmatched {
+					t.Errorf("expected taskSrc affinity 'unmatched', got %q", task.Affinity)
+				}
+			}
+		}
+
+		// Verify batch 2 Runs have spec.tasks with matched first then unmatched
+		var b2Cand v1alpha1.Run
+		b2CandName := fmt.Sprintf("%s-b2-cand", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandName}, &b2Cand); err != nil {
+			t.Fatalf("failed to get batch 2 candidate run: %v", err)
+		}
+		if len(b2Cand.Spec.Tasks) != 2 {
+			t.Fatalf("expected 2 tasks in batch 2, got %v", b2Cand.Spec.Tasks)
+		}
+		if b2Cand.Spec.Tasks[0] != taskDocs {
+			t.Errorf("expected matched task %q first in batch 2 spec.tasks, got %q", taskDocs, b2Cand.Spec.Tasks[0])
+		}
+		if b2Cand.Spec.Tasks[1] != taskSrc {
+			t.Errorf("expected unmatched task %q second in batch 2 spec.tasks, got %q", taskSrc, b2Cand.Spec.Tasks[1])
+		}
+	})
+
+	t.Run("prune mode: drops unmatched tasks from batch spec.tasks and reports as skipped", func(t *testing.T) {
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModePrune)
+		defer server.Close()
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile failed: %v", err)
+		}
+
+		// Verify batch 2 has ONLY matched task
+		var b2Cand v1alpha1.Run
+		b2CandName := fmt.Sprintf("%s-b2-cand", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandName}, &b2Cand); err != nil {
+			t.Fatalf("failed to get batch 2 candidate run: %v", err)
+		}
+		if len(b2Cand.Spec.Tasks) != 1 || b2Cand.Spec.Tasks[0] != taskDocs {
+			t.Errorf("expected batch 2 spec.tasks to contain only matched task [%s], got %v", taskDocs, b2Cand.Spec.Tasks)
+		}
+
+		// Verify comparison status reports taskSrc as skipped with reason unmatched
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("Get comparison failed: %v", err)
+		}
+		if updatedComp.Status.Summary == nil || updatedComp.Status.Summary.Skipped != 1 {
+			t.Errorf("expected Skipped count 1, got %+v", updatedComp.Status.Summary)
+		}
+		if !strings.Contains(updatedComp.Status.Message, "skipped (unmatched): "+taskSrc) {
+			t.Errorf("expected message to contain 'skipped (unmatched): %s', got %q", taskSrc, updatedComp.Status.Message)
+		}
+	})
+
+	t.Run("API 500 error: falls back to order mode with all tasks always", func(t *testing.T) {
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModePrune) // configured as prune, but should fall back to order
+		defer server.Close()
+
+		// Inject 500 error on PR files endpoint
+		server.InjectPathError("GET", "/repos/gke-labs/eval-runner/pulls/123/files", 500, `{"message": "internal error"}`)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile should not fail on files API 500 error, got %v", err)
+		}
+
+		// Verify batch 2 includes both tasks (not pruned because fell back to order)
+		var b2Cand v1alpha1.Run
+		b2CandName := fmt.Sprintf("%s-b2-cand", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandName}, &b2Cand); err != nil {
+			t.Fatalf("failed to get batch 2 candidate run: %v", err)
+		}
+		if len(b2Cand.Spec.Tasks) != 2 {
+			t.Errorf("expected both tasks in batch 2 after fallback, got %v", b2Cand.Spec.Tasks)
+		}
+
+		// Verify status tasks have affinity "always"
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("Get comparison failed: %v", err)
+		}
+		for _, task := range updatedComp.Status.Tasks {
+			if task.Affinity != v1alpha1.ComparisonTaskAffinityAlways {
+				t.Errorf("expected task %s affinity 'always' after API error fallback, got %q", task.ID, task.Affinity)
+			}
+		}
+		if updatedComp.Status.Summary != nil && updatedComp.Status.Summary.AffinityMatched != 0 {
+			t.Errorf("expected AffinityMatched 0 after API fallback, got %d", updatedComp.Status.Summary.AffinityMatched)
+		}
+	})
+
+	t.Run("Comparison without pullRequest or without task paths is unchanged", func(t *testing.T) {
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
+		defer server.Close()
+
+		comp.Spec.PullRequest = nil
+		if err := cl.Update(t.Context(), comp); err != nil {
+			t.Fatalf("Update failed: %v", err)
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile failed: %v", err)
+		}
+
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if updatedComp.Status.Affinity != nil {
+			t.Errorf("expected nil Status.Affinity without pullRequest, got %+v", updatedComp.Status.Affinity)
+		}
+	})
+
+	t.Run("one files API call per head/base pair across multiple reconciles", func(t *testing.T) {
+		server, reconciler, _, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
+		defer server.Close()
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		// First reconcile
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("first Reconcile failed: %v", err)
+		}
+		// Second reconcile
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("second Reconcile failed: %v", err)
+		}
+
+		// Check request log on fake server: exactly 1 GET to /files
+		fileCalls := 0
+		for _, logEntry := range server.RequestLog() {
+			if strings.Contains(logEntry, "/files") {
+				fileCalls++
+			}
+		}
+		if fileCalls != 1 {
+			t.Errorf("expected exactly 1 files API call, got %d", fileCalls)
+		}
+	})
+
+	t.Run("two-batch prune survives multiple batches without rescheduling unmatched task", func(t *testing.T) {
+		server, reconciler, cl, comp, fakeGCS := setupFixture(t, configkeys.AffinityModePrune)
+		defer server.Close()
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		// Reconcile 1: batch 1 complete -> schedules batch 2 with [taskDocs] only
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("first Reconcile failed: %v", err)
+		}
+
+		var b2Cand v1alpha1.Run
+		b2CandName := fmt.Sprintf("%s-b2-cand", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandName}, &b2Cand); err != nil {
+			t.Fatalf("failed to get batch 2 candidate run: %v", err)
+		}
+		if len(b2Cand.Spec.Tasks) != 1 || b2Cand.Spec.Tasks[0] != taskDocs {
+			t.Fatalf("expected batch 2 spec.tasks to be [%s], got %v", taskDocs, b2Cand.Spec.Tasks)
+		}
+
+		// Simulate batch 2 completing with inconclusive samples for taskDocs
+		b2Range := v1alpha1.SampleRange{Start: 5, End: 8}
+		b2CandScores := []stats.SampleScore{
+			{ID: "5", Score: 1.0},
+			{ID: "6", Score: 0.0},
+			{ID: "7", Score: 1.0},
+			{ID: "8", Score: 0.0},
+		}
+		b2BaseScores := []stats.SampleScore{
+			{ID: "5", Score: 0.0},
+			{ID: "6", Score: 1.0},
+			{ID: "7", Score: 0.0},
+			{ID: "8", Score: 1.0},
+		}
+		fakeGCS.Objects["test-bucket/runs/cand-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, b2CandScores)}
+		fakeGCS.Objects["test-bucket/runs/base-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, b2BaseScores)}
+
+		b2Cand.Status.Phase = v1alpha1.RunPhaseCompleted
+		b2Cand.Status.Tasks = []v1alpha1.TaskStatus{
+			{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+		}
+		if err := cl.Status().Update(t.Context(), &b2Cand); err != nil {
+			t.Fatalf("failed to update b2Cand status: %v", err)
+		}
+
+		var b2Base v1alpha1.Run
+		b2BaseName := fmt.Sprintf("%s-b2-base", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2BaseName}, &b2Base); err != nil {
+			t.Fatalf("failed to get batch 2 baseline run: %v", err)
+		}
+		b2Base.Status.Phase = v1alpha1.RunPhaseCompleted
+		b2Base.Status.Tasks = []v1alpha1.TaskStatus{
+			{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+		}
+		if err := cl.Status().Update(t.Context(), &b2Base); err != nil {
+			t.Fatalf("failed to update b2Base status: %v", err)
+		}
+
+		// Reconcile 2: evaluates batch 2 -> schedules batch 3
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("second Reconcile failed: %v", err)
+		}
+
+		// Verify batch 3 still excludes taskSrc and contains only taskDocs
+		var b3Cand v1alpha1.Run
+		b3CandName := fmt.Sprintf("%s-b3-cand", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b3CandName}, &b3Cand); err != nil {
+			t.Fatalf("failed to get batch 3 candidate run: %v", err)
+		}
+		if len(b3Cand.Spec.Tasks) != 1 || b3Cand.Spec.Tasks[0] != taskDocs {
+			t.Errorf("expected batch 3 spec.tasks to still contain ONLY [%s], got %v", taskDocs, b3Cand.Spec.Tasks)
+		}
+
+		// Verify comparison status still reports taskSrc as skipped
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("Get comparison failed: %v", err)
+		}
+		if updatedComp.Status.Summary == nil || updatedComp.Status.Summary.Skipped != 1 {
+			t.Errorf("expected Skipped count to stay 1, got %+v", updatedComp.Status.Summary)
+		}
+		if !strings.Contains(updatedComp.Status.Message, "skipped (unmatched): "+taskSrc) {
+			t.Errorf("expected message to still contain 'skipped (unmatched): %s', got %q", taskSrc, updatedComp.Status.Message)
+		}
+	})
+
+	t.Run("persistent 403 API failure is cached and does not retry across reconciles or controller restarts", func(t *testing.T) {
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
+		defer server.Close()
+
+		// Inject persistent 403 Forbidden error
+		server.InjectPathError("GET", "/repos/gke-labs/eval-runner/pulls/123/files", http.StatusForbidden, `{"message": "Resource not accessible by integration"}`)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		// Reconcile 1
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("reconcile 1 failed: %v", err)
+		}
+
+		// Verify status records FallbackReason
+		var compAfter1 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &compAfter1); err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if compAfter1.Status.Affinity == nil || compAfter1.Status.Affinity.FallbackReason == "" {
+			t.Fatalf("expected FallbackReason in Status.Affinity, got %+v", compAfter1.Status.Affinity)
+		}
+
+		// Reconcile 2 with same reconciler
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("reconcile 2 failed: %v", err)
+		}
+
+		// Reconcile 3 with brand new reconciler (simulating controller restart, in-memory cache empty)
+		freshReconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              reconciler.Scheme,
+			ArtifactSink:        reconciler.ArtifactSink,
+			ControllerNamespace: reconciler.ControllerNamespace,
+			GitHubTokenSecret:   reconciler.GitHubTokenSecret,
+			AffinityMode:        reconciler.AffinityMode,
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+		if _, err := freshReconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("reconcile 3 (restart) failed: %v", err)
+		}
+
+		// Assert exactly 1 call was made to files API despite 3 reconciles and a controller restart
+		fileCalls := 0
+		for _, logEntry := range server.RequestLog() {
+			if strings.Contains(logEntry, "/files") {
+				fileCalls++
+			}
+		}
+		if fileCalls != 1 {
+			t.Errorf("expected exactly 1 files API call across reconciles and restart, got %d", fileCalls)
+		}
+	})
 }

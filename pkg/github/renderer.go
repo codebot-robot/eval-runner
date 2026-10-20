@@ -37,6 +37,7 @@ var idListPrefixes = []string{
 	"tasks not executed: ",
 	"failed in both runs: ",
 	"skipped (not planned): ",
+	"skipped (unmatched): ",
 	"candidate tasks failed: ",
 	"candidate task failed: ",
 }
@@ -172,16 +173,23 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 
 	// 3. Table
 	hasTokens := false
+	hasAffinity := false
 	rows := ui.ComparisonRows(comp)
 	for _, row := range rows {
 		if row.Tokens != nil {
 			hasTokens = true
-			break
+		}
+		if row.Affinity != "" {
+			hasAffinity = true
 		}
 	}
 
 	var tableHeader string
-	if hasTokens {
+	if hasAffinity && hasTokens {
+		tableHeader = "| eval | affinity | base | this PR | Δ (95% CI) | label | samples | tokens |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+	} else if hasAffinity {
+		tableHeader = "| eval | affinity | base | this PR | Δ (95% CI) | label | samples |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+	} else if hasTokens {
 		tableHeader = "| eval | base | this PR | Δ (95% CI) | label | samples | tokens |\n| --- | --- | --- | --- | --- | --- | --- |\n"
 	} else {
 		tableHeader = "| eval | base | this PR | Δ (95% CI) | label | samples |\n| --- | --- | --- | --- | --- | --- |\n"
@@ -204,15 +212,42 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 			samplesStr = fmt.Sprintf("%d", row.Pairs)
 		}
 
-		if hasTokens {
-			tokensStr := "—"
-			if row.Tokens != nil {
-				if row.Tokens.Reasoning > 0 {
-					tokensStr = fmt.Sprintf("%d (+R %d)", row.Tokens.Total, row.Tokens.Reasoning)
-				} else {
-					tokensStr = fmt.Sprintf("%d", row.Tokens.Total)
-				}
+		tokensStr := "—"
+		if hasTokens && row.Tokens != nil {
+			if row.Tokens.Reasoning > 0 {
+				tokensStr = fmt.Sprintf("%d (+R %d)", row.Tokens.Total, row.Tokens.Reasoning)
+			} else {
+				tokensStr = fmt.Sprintf("%d", row.Tokens.Total)
 			}
+		}
+
+		affinityStr := row.Affinity
+		if affinityStr == "" {
+			affinityStr = "—"
+		}
+
+		if hasAffinity && hasTokens {
+			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s | %s |\n",
+				escapedID,
+				affinityStr,
+				row.BaseRate,
+				row.CandRate,
+				deltaStr,
+				row.Label,
+				samplesStr,
+				tokensStr,
+			)
+		} else if hasAffinity {
+			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
+				escapedID,
+				affinityStr,
+				row.BaseRate,
+				row.CandRate,
+				deltaStr,
+				row.Label,
+				samplesStr,
+			)
+		} else if hasTokens {
 			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
 				escapedID,
 				row.BaseRate,
@@ -258,7 +293,11 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		linkStr = fmt.Sprintf("[web view](%s%s)", baseURL, webPath)
 	}
 
-	footerParts := []string{samplesStr, pairedAgainstStr, linkStr}
+	footerParts := []string{samplesStr, pairedAgainstStr}
+	if hasAffinity && comp.Status.Summary != nil {
+		footerParts = append(footerParts, fmt.Sprintf("%d matched", comp.Status.Summary.AffinityMatched))
+	}
+	footerParts = append(footerParts, linkStr)
 	if comp.Status.SummaryPath != "" {
 		footerParts = append(footerParts, EscapeCell(comp.Status.SummaryPath))
 	}

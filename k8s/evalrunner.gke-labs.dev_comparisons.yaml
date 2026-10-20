@@ -165,6 +165,28 @@ spec:
           status:
             description: ComparisonStatus defines the observed state of Comparison.
             properties:
+              affinity:
+                description: Affinity records changed-file affinity metadata for pull
+                  requests.
+                properties:
+                  fallbackReason:
+                    description: |-
+                      FallbackReason records why changed-file affinity fell back to order mode with all tasks always
+                      (e.g. GitHub API error or permissions).
+                    type: string
+                  filesCount:
+                    description: FilesCount is the count of changed files retrieved
+                      from GitHub.
+                    type: integer
+                  filesHash:
+                    description: FilesHash is the SHA-256 checksum of the sorted changed
+                      files list.
+                    type: string
+                  truncated:
+                    description: Truncated is true if the changed file count reached
+                      the maximum cap (300).
+                    type: boolean
+                type: object
               batches:
                 description: Batches records the status of each paired batch of Runs
                   evaluated for this Comparison.
@@ -361,6 +383,10 @@ spec:
                 description: Summary provides aggregate statistics across tasks in
                   the Comparison.
                 properties:
+                  affinityMatched:
+                    description: AffinityMatched is the count of tasks with affinity
+                      "matched".
+                    type: integer
                   skipped:
                     description: Skipped is the count of tasks discovered in the manifest
                       but not planned by either Run.
@@ -381,6 +407,10 @@ spec:
                   description: ComparisonTaskStatus records the paired comparison
                     results for a single task.
                   properties:
+                    affinity:
+                      description: 'Affinity is the changed-file affinity for this
+                        task: always, matched, or unmatched.'
+                      type: string
                     baseRate:
                       description: BaseRate is the mean score or success rate of baseline
                         samples.
@@ -407,6 +437,7 @@ spec:
                       - inconclusive
                       - running
                       - continue
+                      - skipped
                       type: string
                     delta:
                       description: Delta is the sample mean difference (candidate
@@ -458,6 +489,7 @@ spec:
                       - inconclusive
                       - running
                       - continue
+                      - skipped
                       type: string
                     latency:
                       description: Latency records sample latency percentiles (p50

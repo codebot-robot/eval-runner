@@ -639,6 +639,52 @@ func TestTemplateRenderingComparisonTableGolden(t *testing.T) {
 	assertGolden(t, "comparison_table.golden.html", buf.String())
 }
 
+func TestTemplateRenderingComparisonTable_WithAffinity(t *testing.T) {
+	tasks := []ComparisonTaskRow{
+		{
+			ID:          "docs/readme_comprehension",
+			Affinity:    "matched",
+			BaseRate:    "0.60",
+			CandRate:    "0.80",
+			Delta:       "+0.20",
+			HasCI:       true,
+			CILeftPx:    160.0,
+			CIWidthPx:   40.0,
+			CIDotPx:     180.0,
+			CILabel:     "[+0.05, +0.35]",
+			StatusClass: "good",
+			Label:       "improved",
+			SamplesRun:  16,
+		},
+		{
+			ID:          "src/other_task",
+			Affinity:    "unmatched",
+			BaseRate:    "0.50",
+			CandRate:    "0.50",
+			Delta:       "+0.00",
+			StatusClass: "neutral",
+			Label:       "unchanged",
+			SamplesRun:  16,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := RenderComparisonTable(&buf, ComparisonTableView{Tasks: tasks, HasAffinity: true}); err != nil {
+		t.Fatalf("failed to execute comparison table with affinity: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "<th>affinity</th>") {
+		t.Errorf("expected <th>affinity</th> in table header, got:\n%s", output)
+	}
+	if !strings.Contains(output, "<td class=\"mono\">matched</td>") {
+		t.Errorf("expected matched affinity cell, got:\n%s", output)
+	}
+	if !strings.Contains(output, "<td class=\"mono\">unmatched</td>") {
+		t.Errorf("expected unmatched affinity cell, got:\n%s", output)
+	}
+}
+
 func TestTemplateRenderingRunDetail_RunningProgress(t *testing.T) {
 	view := sampleRunDetailView()
 	view.Phase = v1alpha1.RunPhaseRunning

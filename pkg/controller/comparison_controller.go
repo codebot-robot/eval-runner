@@ -27,7 +27,9 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/affinity"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -95,12 +97,57 @@ type ComparisonReconciler struct {
 	ComparisonTTL        time.Duration
 	CommandRetryInterval time.Duration
 	CommandUsers         []string
+	AffinityMode         string
 	Now                  func() time.Time
 	ModelPrices          map[string]ModelPrice
 
 	cachedAppMu   sync.Mutex
 	cachedAppKey  string
 	cachedAppAuth *github.AppTokenProvider
+
+	affinityMu     sync.Mutex
+	cachedAffinity map[string]cachedPRFiles
+}
+
+const maxCachedAffinityEntries = 100
+
+type cachedPRFiles struct {
+	files          []string
+	truncated      bool
+	fallbackReason string
+}
+
+func (r *ComparisonReconciler) getCachedAffinity(key string) (cachedPRFiles, bool) {
+	r.affinityMu.Lock()
+	defer r.affinityMu.Unlock()
+	if r.cachedAffinity == nil {
+		return cachedPRFiles{}, false
+	}
+	entry, ok := r.cachedAffinity[key]
+	return entry, ok
+}
+
+func (r *ComparisonReconciler) recordCachedAffinity(key string, entry cachedPRFiles) {
+	r.affinityMu.Lock()
+	defer r.affinityMu.Unlock()
+	if r.cachedAffinity == nil {
+		r.cachedAffinity = make(map[string]cachedPRFiles)
+	}
+	if len(r.cachedAffinity) >= maxCachedAffinityEntries {
+		for k := range r.cachedAffinity {
+			delete(r.cachedAffinity, k)
+			break
+		}
+	}
+	r.cachedAffinity[key] = entry
+}
+
+func (r *ComparisonReconciler) evictCachedAffinity(key string) {
+	r.affinityMu.Lock()
+	defer r.affinityMu.Unlock()
+	if r.cachedAffinity != nil {
+		delete(r.cachedAffinity, key)
+	}
 }
 
 func (r *ComparisonReconciler) commandBackoff(attempts int, err error) time.Duration {
@@ -1011,6 +1058,237 @@ func findTaskStatus(tasks []v1alpha1.TaskStatus, taskID string) *v1alpha1.TaskSt
 	return nil
 }
 
+type resolvedAffinity struct {
+	active       bool
+	status       *v1alpha1.ComparisonAffinityStatus
+	taskAffinity map[string]string
+	matchedCount int
+	mode         string
+}
+
+func (r *ComparisonReconciler) loadManifest(ctx context.Context, candRun, baseRun *v1alpha1.Run) (*v1alpha1.Manifest, error) {
+	if r.ArtifactSink == nil {
+		return nil, nil
+	}
+	manifestPath := ""
+	if candRun != nil && candRun.Status.Discovery != nil && candRun.Status.Discovery.ManifestPath != "" {
+		manifestPath = candRun.Status.Discovery.ManifestPath
+	} else if baseRun != nil && baseRun.Status.Discovery != nil && baseRun.Status.Discovery.ManifestPath != "" {
+		manifestPath = baseRun.Status.Discovery.ManifestPath
+	}
+	if manifestPath == "" {
+		return nil, nil
+	}
+	data, err := r.ArtifactSink.Load(ctx, manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	return discovery.ParseManifest(data)
+}
+
+func (r *ComparisonReconciler) effectiveAffinityMode() string {
+	if strings.ToLower(strings.TrimSpace(r.AffinityMode)) == configkeys.AffinityModePrune {
+		return configkeys.AffinityModePrune
+	}
+	return configkeys.AffinityModeOrder
+}
+
+func (r *ComparisonReconciler) sortTasksByAffinity(tasks []string, taskAffinity map[string]string) []string {
+	if len(taskAffinity) == 0 {
+		return tasks
+	}
+	var matchedAlways []string
+	var unmatched []string
+	for _, t := range tasks {
+		if taskAffinity[t] == v1alpha1.ComparisonTaskAffinityUnmatched {
+			unmatched = append(unmatched, t)
+		} else {
+			matchedAlways = append(matchedAlways, t)
+		}
+	}
+	return append(matchedAlways, unmatched...)
+}
+
+func (r *ComparisonReconciler) applyAffinityToBatchTasks(tasks []string, taskAffinity map[string]string, mode string) []string {
+	if len(taskAffinity) == 0 {
+		return tasks
+	}
+	if mode == configkeys.AffinityModePrune {
+		var kept []string
+		for _, t := range tasks {
+			if taskAffinity[t] != v1alpha1.ComparisonTaskAffinityUnmatched {
+				kept = append(kept, t)
+			}
+		}
+		return kept
+	}
+	return r.sortTasksByAffinity(tasks, taskAffinity)
+}
+
+func (r *ComparisonReconciler) fallbackAffinity(manifest *v1alpha1.Manifest, comp *v1alpha1.Comparison, reason string) resolvedAffinity {
+	taskAff := make(map[string]string)
+	if manifest != nil {
+		for _, t := range manifest.Tasks {
+			taskAff[t.ID] = v1alpha1.ComparisonTaskAffinityAlways
+		}
+	} else if comp != nil && len(comp.Status.Tasks) > 0 {
+		for _, t := range comp.Status.Tasks {
+			taskAff[t.ID] = v1alpha1.ComparisonTaskAffinityAlways
+		}
+	}
+	boundedReason := reason
+	if len(boundedReason) > 256 {
+		boundedReason = boundedReason[:256]
+	}
+	var statusAff *v1alpha1.ComparisonAffinityStatus
+	if boundedReason != "" {
+		statusAff = &v1alpha1.ComparisonAffinityStatus{
+			FallbackReason: boundedReason,
+		}
+	}
+	return resolvedAffinity{
+		active:       true,
+		status:       statusAff,
+		taskAffinity: taskAff,
+		matchedCount: 0,
+		mode:         configkeys.AffinityModeOrder,
+	}
+}
+
+func (r *ComparisonReconciler) resolveAffinity(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	candRun, baseRun *v1alpha1.Run,
+) resolvedAffinity {
+	logger := log.FromContext(ctx)
+
+	if comp.Spec.PullRequest == nil {
+		return resolvedAffinity{mode: r.effectiveAffinityMode()}
+	}
+
+	mode := r.effectiveAffinityMode()
+	cacheKey := fmt.Sprintf("%s#%d:%s:%s", comp.Spec.PullRequest.Repository, comp.Spec.PullRequest.Number, comp.Spec.PullRequest.HeadSHA, comp.Spec.PullRequest.BaseSHA)
+
+	// 1. If affinity status is already recorded, reuse it directly WITHOUT loading manifest from sink
+	if comp.Status.Affinity != nil {
+		r.evictCachedAffinity(cacheKey)
+		if comp.Status.Affinity.FallbackReason != "" {
+			return r.fallbackAffinity(nil, comp, comp.Status.Affinity.FallbackReason)
+		}
+		if len(comp.Status.Tasks) > 0 {
+			taskAff := make(map[string]string, len(comp.Status.Tasks))
+			matched := 0
+			for _, t := range comp.Status.Tasks {
+				if t.Affinity != "" {
+					taskAff[t.ID] = t.Affinity
+					if t.Affinity == v1alpha1.ComparisonTaskAffinityMatched {
+						matched++
+					}
+				}
+			}
+			if len(taskAff) > 0 {
+				return resolvedAffinity{
+					active:       true,
+					status:       comp.Status.Affinity,
+					taskAffinity: taskAff,
+					matchedCount: matched,
+					mode:         mode,
+				}
+			}
+		}
+	}
+
+	// 2. Check in-memory cache
+	cached, found := r.getCachedAffinity(cacheKey)
+	if found && cached.fallbackReason != "" {
+		return r.fallbackAffinity(nil, comp, cached.fallbackReason)
+	}
+
+	// 3. Load manifest to check if any task declares paths
+	manifest, err := r.loadManifest(ctx, candRun, baseRun)
+	if err != nil {
+		logger.Info("unable to load manifest for affinity check", "error", err)
+	}
+
+	hasDeclaredPaths := false
+	if manifest != nil {
+		for _, t := range manifest.Tasks {
+			if len(t.Paths) > 0 {
+				hasDeclaredPaths = true
+				break
+			}
+		}
+	}
+
+	if !hasDeclaredPaths && comp.Status.Affinity == nil {
+		return resolvedAffinity{mode: r.effectiveAffinityMode()}
+	}
+
+	// 4. Fetch changed files from GitHub if not already in cache
+	if !found {
+		ghClient, clientErr := r.getGitHubClient(ctx)
+		if clientErr != nil || ghClient == nil {
+			reason := "github client unavailable"
+			if clientErr != nil {
+				reason = clientErr.Error()
+			}
+			logger.Info("failed to get GitHub client for affinity; falling back to order mode with all tasks always", "error", clientErr)
+			r.recordCachedAffinity(cacheKey, cachedPRFiles{fallbackReason: reason})
+			return r.fallbackAffinity(manifest, comp, reason)
+		}
+
+		parts := strings.Split(comp.Spec.PullRequest.Repository, "/")
+		if len(parts) != 2 {
+			reason := fmt.Sprintf("invalid repository %q in pullRequest spec", comp.Spec.PullRequest.Repository)
+			logger.Info(reason)
+			r.recordCachedAffinity(cacheKey, cachedPRFiles{fallbackReason: reason})
+			return r.fallbackAffinity(manifest, comp, reason)
+		}
+		owner, repo := parts[0], parts[1]
+
+		files, truncated, listErr := ghClient.ListPullRequestFiles(ctx, owner, repo, comp.Spec.PullRequest.Number)
+		if listErr != nil {
+			logger.Info("failed to list pull request files from GitHub; falling back to order mode with all tasks always", "error", listErr)
+			r.recordCachedAffinity(cacheKey, cachedPRFiles{fallbackReason: listErr.Error()})
+			return r.fallbackAffinity(manifest, comp, listErr.Error())
+		}
+
+		cached = cachedPRFiles{files: files, truncated: truncated}
+		r.recordCachedAffinity(cacheKey, cached)
+	}
+
+	filesHash := affinity.ComputeFilesHash(cached.files)
+	statusAff := &v1alpha1.ComparisonAffinityStatus{
+		FilesHash:  filesHash,
+		FilesCount: len(cached.files),
+		Truncated:  cached.truncated,
+	}
+
+	taskAff := make(map[string]string)
+	matched := 0
+	if manifest != nil {
+		for _, t := range manifest.Tasks {
+			aff := affinity.DetermineAffinity(t.Paths, cached.files, cached.truncated)
+			taskAff[t.ID] = aff
+			if aff == v1alpha1.ComparisonTaskAffinityMatched {
+				matched++
+			}
+		}
+	} else if len(comp.Status.Tasks) > 0 {
+		for _, t := range comp.Status.Tasks {
+			taskAff[t.ID] = v1alpha1.ComparisonTaskAffinityAlways
+		}
+	}
+
+	return resolvedAffinity{
+		active:       true,
+		status:       statusAff,
+		taskAffinity: taskAff,
+		matchedCount: matched,
+		mode:         mode,
+	}
+}
+
 // Reconcile handles a reconciliation request for a Comparison.
 func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -1206,7 +1484,22 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	// If any batch Run is not terminal, the Comparison is RUNNING and re-evaluates on Run updates
 	if !allBatchesTerminal {
+		aff := r.resolveAffinity(ctx, &comp, &candidateRun, &baselineRun)
 		taskIDs := determineRunningTaskIDs(&comp, &baselineRun, &candidateRun)
+		if aff.active {
+			if aff.mode == configkeys.AffinityModePrune {
+				var kept []string
+				for _, id := range taskIDs {
+					if aff.taskAffinity[id] != v1alpha1.ComparisonTaskAffinityUnmatched {
+						kept = append(kept, id)
+					}
+				}
+				taskIDs = kept
+			} else {
+				taskIDs = r.sortTasksByAffinity(taskIDs, aff.taskAffinity)
+			}
+		}
+
 		runningTasks := make(map[string]bool)
 		var runningBatchIndex int
 		for i, b := range batches {
@@ -1235,20 +1528,70 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				} else if tasks[i].Decision != "" && tasks[i].Decision != v1alpha1.ComparisonTaskLabelContinue {
 					tasks[i].Label = tasks[i].Decision
 				}
+				if aff.active {
+					if a, ok := aff.taskAffinity[tasks[i].ID]; ok {
+						tasks[i].Affinity = a
+					} else if tasks[i].Affinity == "" {
+						tasks[i].Affinity = v1alpha1.ComparisonTaskAffinityAlways
+					}
+					if aff.mode == configkeys.AffinityModePrune && tasks[i].Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						tasks[i].Label = v1alpha1.ComparisonTaskLabelSkipped
+						tasks[i].Decision = v1alpha1.ComparisonTaskLabelSkipped
+					}
+				}
+			}
+			if aff.active {
+				var matchedAlways []v1alpha1.ComparisonTaskStatus
+				var unmatched []v1alpha1.ComparisonTaskStatus
+				for _, t := range tasks {
+					if t.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						unmatched = append(unmatched, t)
+					} else {
+						matchedAlways = append(matchedAlways, t)
+					}
+				}
+				tasks = append(matchedAlways, unmatched...)
 			}
 		} else {
 			for _, id := range taskIDs {
-				tasks = append(tasks, v1alpha1.ComparisonTaskStatus{
+				taskStatus := v1alpha1.ComparisonTaskStatus{
 					ID:       id,
 					Label:    v1alpha1.ComparisonTaskLabelRunning,
 					Decision: v1alpha1.ComparisonTaskLabelContinue,
-				})
+				}
+				if aff.active {
+					if a, ok := aff.taskAffinity[id]; ok {
+						taskStatus.Affinity = a
+					} else {
+						taskStatus.Affinity = v1alpha1.ComparisonTaskAffinityAlways
+					}
+					if aff.mode == configkeys.AffinityModePrune && taskStatus.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						taskStatus.Label = v1alpha1.ComparisonTaskLabelSkipped
+						taskStatus.Decision = v1alpha1.ComparisonTaskLabelSkipped
+					}
+				}
+				tasks = append(tasks, taskStatus)
+			}
+			if aff.active {
+				var matchedAlways []v1alpha1.ComparisonTaskStatus
+				var unmatched []v1alpha1.ComparisonTaskStatus
+				for _, t := range tasks {
+					if t.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						unmatched = append(unmatched, t)
+					} else {
+						matchedAlways = append(matchedAlways, t)
+					}
+				}
+				tasks = append(matchedAlways, unmatched...)
 			}
 		}
 
 		completedTasks := 0
+		prunedTasksCount := 0
 		for _, t := range tasks {
-			if t.Label != v1alpha1.ComparisonTaskLabelRunning {
+			if t.Label == v1alpha1.ComparisonTaskLabelSkipped && t.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+				prunedTasksCount++
+			} else if t.Label != v1alpha1.ComparisonTaskLabelRunning {
 				completedTasks++
 			}
 		}
@@ -1267,15 +1610,39 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			status.Batches = batches
 			status.Tasks = tasks
 			status.Summary = &v1alpha1.ComparisonSummary{
-				Tasks: fmt.Sprintf("%d/%d", completedTasks, len(tasks)),
+				Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(tasks)-prunedTasksCount),
+				Skipped: prunedTasksCount,
+			}
+			if aff.active {
+				status.Affinity = aff.status
+				status.Summary.AffinityMatched = aff.matchedCount
 			}
 			status.Message = msg
 		})
 	}
 
 	// All current batch Runs are terminal; perform pairing and comparison
+	aff := r.resolveAffinity(ctx, &comp, &candidateRun, &baselineRun)
+
 	taskIDs, unexecuted, candFailed := determineCompletedTaskIDs(&comp, &baselineRun, &candidateRun)
 	skippedNotPlanned := determineSkippedTaskIDs(&comp, &baselineRun, &candidateRun)
+
+	var prunedTasks []string
+	if aff.active {
+		if aff.mode == configkeys.AffinityModePrune {
+			var kept []string
+			for _, id := range taskIDs {
+				if aff.taskAffinity[id] == v1alpha1.ComparisonTaskAffinityUnmatched {
+					prunedTasks = append(prunedTasks, id)
+				} else {
+					kept = append(kept, id)
+				}
+			}
+			taskIDs = kept
+		} else {
+			taskIDs = r.sortTasksByAffinity(taskIDs, aff.taskAffinity)
+		}
+	}
 
 	if batches[0].SampleRange == nil {
 		maxObs := 0
@@ -1722,12 +2089,17 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		} else {
 			batchRange := v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
 
-			baseRunName, err := r.ensureBatchRun(ctx, &comp, &baselineRun, RoleBaseline, continueTasks, batchRange, nextBatchIndex)
+			tasksToRun := continueTasks
+			if aff.active {
+				tasksToRun = r.applyAffinityToBatchTasks(continueTasks, aff.taskAffinity, aff.mode)
+			}
+
+			baseRunName, err := r.ensureBatchRun(ctx, &comp, &baselineRun, RoleBaseline, tasksToRun, batchRange, nextBatchIndex)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 
-			candCloneName, err := r.ensureBatchRun(ctx, &comp, &candidateRun, RoleCandidate, continueTasks, batchRange, nextBatchIndex)
+			candCloneName, err := r.ensureBatchRun(ctx, &comp, &candidateRun, RoleCandidate, tasksToRun, batchRange, nextBatchIndex)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -1742,7 +2114,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			var partialStatuses []v1alpha1.ComparisonTaskStatus
 			for _, te := range taskEvals {
-				partialStatuses = append(partialStatuses, v1alpha1.ComparisonTaskStatus{
+				ts := v1alpha1.ComparisonTaskStatus{
 					ID:            te.taskID,
 					BaseRate:      &te.est.BaseMean,
 					CandidateRate: &te.est.CandidateMean,
@@ -1767,7 +2139,25 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					Latency:         te.latency,
 					CostUSD:         te.costUSD,
 					PossibleSamples: te.possibleSamples,
-				})
+				}
+				if aff.active {
+					if a, ok := aff.taskAffinity[te.taskID]; ok {
+						ts.Affinity = a
+					} else {
+						ts.Affinity = v1alpha1.ComparisonTaskAffinityAlways
+					}
+				}
+				partialStatuses = append(partialStatuses, ts)
+			}
+
+			for _, id := range prunedTasks {
+				ts := v1alpha1.ComparisonTaskStatus{
+					ID:       id,
+					Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+					Label:    v1alpha1.ComparisonTaskLabelSkipped,
+					Decision: v1alpha1.ComparisonTaskLabelSkipped,
+				}
+				partialStatuses = append(partialStatuses, ts)
 			}
 
 			var partialCompCost *float64
@@ -1790,6 +2180,12 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				partialCompCost = &partialTotalCompCost
 			}
 
+			batchMsg := fmt.Sprintf("Running batch %d (%d tasks continuing)", nextBatchIndex, len(continueTasks))
+			if len(prunedTasks) > 0 {
+				sort.Strings(prunedTasks)
+				batchMsg = fmt.Sprintf("%s; skipped (unmatched): %s", batchMsg, github.FormatIDList(prunedTasks, github.MaxIDList))
+			}
+
 			return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Phase = v1alpha1.ComparisonPhaseRunning
 				status.CompletionTime = nil
@@ -1801,9 +2197,14 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					status.PossibleSamples = partialPossibleSamples
 				}
 				status.Summary = &v1alpha1.ComparisonSummary{
-					Tasks: fmt.Sprintf("%d/%d", len(taskIDs)-len(continueTasks), len(taskIDs)),
+					Tasks:   fmt.Sprintf("%d/%d", len(taskIDs)-len(continueTasks), len(taskIDs)),
+					Skipped: len(skippedNotPlanned) + len(prunedTasks),
 				}
-				status.Message = fmt.Sprintf("Running batch %d (%d tasks continuing)", nextBatchIndex, len(continueTasks))
+				if aff.active {
+					status.Affinity = aff.status
+					status.Summary.AffinityMatched = aff.matchedCount
+				}
+				status.Message = batchMsg
 			})
 		}
 	}
@@ -1850,12 +2251,17 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			batchRange := v1alpha1.SampleRange{Start: nextStart, End: nextEnd}
 
-			baseRunName, err := r.ensureBatchRun(ctx, &comp, &baselineRun, RoleBaseline, extraTasks, batchRange, nextBatchIndex)
+			tasksToRun := extraTasks
+			if aff.active {
+				tasksToRun = r.applyAffinityToBatchTasks(extraTasks, aff.taskAffinity, aff.mode)
+			}
+
+			baseRunName, err := r.ensureBatchRun(ctx, &comp, &baselineRun, RoleBaseline, tasksToRun, batchRange, nextBatchIndex)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 
-			candCloneName, err := r.ensureBatchRun(ctx, &comp, &candidateRun, RoleCandidate, extraTasks, batchRange, nextBatchIndex)
+			candCloneName, err := r.ensureBatchRun(ctx, &comp, &candidateRun, RoleCandidate, tasksToRun, batchRange, nextBatchIndex)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -1872,7 +2278,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			var partialStatuses []v1alpha1.ComparisonTaskStatus
 			for _, te := range taskEvals {
-				partialStatuses = append(partialStatuses, v1alpha1.ComparisonTaskStatus{
+				ts := v1alpha1.ComparisonTaskStatus{
 					ID:            te.taskID,
 					BaseRate:      &te.est.BaseMean,
 					CandidateRate: &te.est.CandidateMean,
@@ -1897,7 +2303,25 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					Latency:         te.latency,
 					CostUSD:         te.costUSD,
 					PossibleSamples: te.possibleSamples,
-				})
+				}
+				if aff.active {
+					if a, ok := aff.taskAffinity[te.taskID]; ok {
+						ts.Affinity = a
+					} else {
+						ts.Affinity = v1alpha1.ComparisonTaskAffinityAlways
+					}
+				}
+				partialStatuses = append(partialStatuses, ts)
+			}
+
+			for _, id := range prunedTasks {
+				ts := v1alpha1.ComparisonTaskStatus{
+					ID:       id,
+					Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+					Label:    v1alpha1.ComparisonTaskLabelSkipped,
+					Decision: v1alpha1.ComparisonTaskLabelSkipped,
+				}
+				partialStatuses = append(partialStatuses, ts)
 			}
 
 			var partialCompCost *float64
@@ -1920,6 +2344,12 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				partialCompCost = &partialTotalCompCost
 			}
 
+			extraMsg := fmt.Sprintf("Running extra batch %d (%d tasks)", nextBatchIndex, len(extraTasks))
+			if len(prunedTasks) > 0 {
+				sort.Strings(prunedTasks)
+				extraMsg = fmt.Sprintf("%s; skipped (unmatched): %s", extraMsg, github.FormatIDList(prunedTasks, github.MaxIDList))
+			}
+
 			return r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 				status.Phase = v1alpha1.ComparisonPhaseRunning
 				status.CompletionTime = nil
@@ -1932,9 +2362,14 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					status.PossibleSamples = partialPossibleSamples
 				}
 				status.Summary = &v1alpha1.ComparisonSummary{
-					Tasks: fmt.Sprintf("%d/%d", len(taskIDs)-len(extraTasks), len(taskIDs)),
+					Tasks:   fmt.Sprintf("%d/%d", len(taskIDs)-len(extraTasks), len(taskIDs)),
+					Skipped: len(skippedNotPlanned) + len(prunedTasks),
 				}
-				status.Message = fmt.Sprintf("Running extra batch %d (%d tasks)", nextBatchIndex, len(extraTasks))
+				if aff.active {
+					status.Affinity = aff.status
+					status.Summary.AffinityMatched = aff.matchedCount
+				}
+				status.Message = extraMsg
 			})
 		}
 	}
@@ -1970,6 +2405,13 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			Latency:         te.latency,
 			CostUSD:         te.costUSD,
 			PossibleSamples: te.possibleSamples,
+		}
+		if aff.active {
+			if a, ok := aff.taskAffinity[te.taskID]; ok {
+				taskStatus.Affinity = a
+			} else {
+				taskStatus.Affinity = v1alpha1.ComparisonTaskAffinityAlways
+			}
 		}
 		taskStatuses = append(taskStatuses, taskStatus)
 
@@ -2007,7 +2449,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 		}
 
-		taskArtifacts = append(taskArtifacts, ComparisonTaskArtifact{
+		taskArt := ComparisonTaskArtifact{
 			ID:            te.taskID,
 			BaseRate:      te.est.BaseMean,
 			CandidateRate: te.est.CandidateMean,
@@ -2040,7 +2482,29 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			BaseCostUSD:      te.baseCostUSD,
 			PossibleSamples:  te.possibleSamples,
 			PairsTable:       pairsTable,
-		})
+		}
+		if aff.active {
+			taskArt.Affinity = aff.taskAffinity[te.taskID]
+		}
+		taskArtifacts = append(taskArtifacts, taskArt)
+	}
+
+	for _, id := range prunedTasks {
+		ts := v1alpha1.ComparisonTaskStatus{
+			ID:       id,
+			Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+			Label:    v1alpha1.ComparisonTaskLabelSkipped,
+			Decision: v1alpha1.ComparisonTaskLabelSkipped,
+		}
+		taskStatuses = append(taskStatuses, ts)
+
+		taskArt := ComparisonTaskArtifact{
+			ID:       id,
+			Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+			Label:    string(v1alpha1.ComparisonTaskLabelSkipped),
+			Decision: string(v1alpha1.ComparisonTaskLabelSkipped),
+		}
+		taskArtifacts = append(taskArtifacts, taskArt)
 	}
 
 	var compCost *float64
@@ -2134,6 +2598,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	if len(skippedNotPlanned) > 0 {
 		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("skipped (not planned): %s", github.FormatIDList(skippedNotPlanned, github.MaxIDList)))
 	}
+	if len(prunedTasks) > 0 {
+		sort.Strings(prunedTasks)
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("skipped (unmatched): %s", github.FormatIDList(prunedTasks, github.MaxIDList)))
+	}
 
 	message := runVerdict.Summary
 	if len(unexecutedNotes) > 0 {
@@ -2160,10 +2628,13 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		Batches:               batches,
 		CreatedAt:             time.Now().UTC(),
 		SkippedNotPlanned:     skippedNotPlanned,
+		SkippedUnmatched:      prunedTasks,
 		NotExecuted:           unattempted,
 		NotExecutedByBothRuns: notBothExecuted,
 		FailedInBothRuns:      failedBoth,
 		CandidateFailed:       candFailed,
+		Affinity:              aff.status,
+		AffinityMatched:       aff.matchedCount,
 	}
 
 	var summaryPath string
@@ -2181,7 +2652,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	completedTasks := 0
 	for _, t := range taskStatuses {
-		if t.Label != v1alpha1.ComparisonTaskLabelRunning {
+		if t.Label != v1alpha1.ComparisonTaskLabelRunning && t.Label != v1alpha1.ComparisonTaskLabelSkipped {
 			completedTasks++
 		}
 	}
@@ -2216,7 +2687,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		status.ExtraSamplesApplied = comp.Status.ExtraSamplesApplied
 		status.Summary = &v1alpha1.ComparisonSummary{
 			Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)),
-			Skipped: len(skippedNotPlanned),
+			Skipped: len(skippedNotPlanned) + len(prunedTasks),
+		}
+		if aff.active {
+			status.Affinity = aff.status
+			status.Summary.AffinityMatched = aff.matchedCount
 		}
 		status.SummaryPath = summaryPath
 		status.Message = message
