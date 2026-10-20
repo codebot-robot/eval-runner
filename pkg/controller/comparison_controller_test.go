@@ -11149,4 +11149,354 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 			t.Errorf("expected exactly 1 files API call across reconciles and restart, got %d", fileCalls)
 		}
 	})
+
+	t.Run("status.summary.tasks denominator is consistent between Running and Completed", func(t *testing.T) {
+		t.Run("prune mode: planned denominator is identical while Running and Completed", func(t *testing.T) {
+			server, reconciler, cl, comp, fakeGCS := setupFixture(t, configkeys.AffinityModePrune)
+			defer server.Close()
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+
+			// Reconcile 1: batch 1 complete but inconclusive -> schedules batch 2 for taskDocs (prunes taskSrc)
+			if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("first Reconcile failed: %v", err)
+			}
+
+			var compRunning v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &compRunning); err != nil {
+				t.Fatalf("Get comparison failed: %v", err)
+			}
+			if compRunning.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+				t.Fatalf("expected Phase %q, got %q", v1alpha1.ComparisonPhaseRunning, compRunning.Status.Phase)
+			}
+			if compRunning.Status.Summary == nil {
+				t.Fatalf("expected non-nil Status.Summary")
+			}
+			if compRunning.Status.Summary.Tasks != "0/1" {
+				t.Errorf("expected Running summary.tasks '0/1', got %q", compRunning.Status.Summary.Tasks)
+			}
+			if compRunning.Status.Summary.Skipped != 1 {
+				t.Errorf("expected Running summary.skipped 1, got %d", compRunning.Status.Summary.Skipped)
+			}
+
+			runningParts := strings.Split(compRunning.Status.Summary.Tasks, "/")
+			if len(runningParts) != 2 {
+				t.Fatalf("malformed running summary.tasks: %q", compRunning.Status.Summary.Tasks)
+			}
+			runningDenominator := runningParts[1]
+
+			// Also verify while batch 2 runs are in Running phase
+			var b2Cand v1alpha1.Run
+			b2CandName := fmt.Sprintf("%s-b2-cand", comp.Name)
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandName}, &b2Cand); err != nil {
+				t.Fatalf("failed to get batch 2 candidate run: %v", err)
+			}
+			b2Cand.Status.Phase = v1alpha1.RunPhaseRunning
+			if err := cl.Status().Update(t.Context(), &b2Cand); err != nil {
+				t.Fatalf("failed to set b2Cand to Running: %v", err)
+			}
+
+			if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("Reconcile while batch 2 running failed: %v", err)
+			}
+
+			if err := cl.Get(t.Context(), req.NamespacedName, &compRunning); err != nil {
+				t.Fatalf("Get comparison failed: %v", err)
+			}
+			if compRunning.Status.Summary.Tasks != "0/1" {
+				t.Errorf("expected summary.tasks '0/1' while batch 2 executes, got %q", compRunning.Status.Summary.Tasks)
+			}
+
+			// Complete batch 2 with decisive scores for taskDocs
+			b2Range := v1alpha1.SampleRange{Start: 5, End: 8}
+			decisiveCandScores := []stats.SampleScore{
+				{ID: "5", Score: 1.0},
+				{ID: "6", Score: 1.0},
+				{ID: "7", Score: 1.0},
+				{ID: "8", Score: 1.0},
+			}
+			decisiveBaseScores := []stats.SampleScore{
+				{ID: "5", Score: 0.0},
+				{ID: "6", Score: 0.0},
+				{ID: "7", Score: 0.0},
+				{ID: "8", Score: 0.0},
+			}
+			fakeGCS.Objects["test-bucket/runs/cand-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, decisiveCandScores)}
+			fakeGCS.Objects["test-bucket/runs/base-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, decisiveBaseScores)}
+
+			b2Cand.Status.Phase = v1alpha1.RunPhaseCompleted
+			b2Cand.Status.Tasks = []v1alpha1.TaskStatus{
+				{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+			}
+			if err := cl.Status().Update(t.Context(), &b2Cand); err != nil {
+				t.Fatalf("failed to update b2Cand status: %v", err)
+			}
+
+			var b2Base v1alpha1.Run
+			b2BaseName := fmt.Sprintf("%s-b2-base", comp.Name)
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2BaseName}, &b2Base); err != nil {
+				t.Fatalf("failed to get batch 2 baseline run: %v", err)
+			}
+			b2Base.Status.Phase = v1alpha1.RunPhaseCompleted
+			b2Base.Status.Tasks = []v1alpha1.TaskStatus{
+				{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+			}
+			if err := cl.Status().Update(t.Context(), &b2Base); err != nil {
+				t.Fatalf("failed to update b2Base status: %v", err)
+			}
+
+			// Terminal reconcile
+			if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("terminal Reconcile failed: %v", err)
+			}
+
+			var compTerminal v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &compTerminal); err != nil {
+				t.Fatalf("Get terminal comparison failed: %v", err)
+			}
+			if compTerminal.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+				t.Fatalf("expected terminal Phase %q, got %q", v1alpha1.ComparisonPhaseCompleted, compTerminal.Status.Phase)
+			}
+			if compTerminal.Status.Summary == nil {
+				t.Fatalf("expected non-nil terminal Status.Summary")
+			}
+			if compTerminal.Status.Summary.Tasks != "1/1" {
+				t.Errorf("expected Completed summary.tasks '1/1', got %q", compTerminal.Status.Summary.Tasks)
+			}
+			if compTerminal.Status.Summary.Skipped != 1 {
+				t.Errorf("expected Completed summary.skipped 1, got %d", compTerminal.Status.Summary.Skipped)
+			}
+
+			terminalParts := strings.Split(compTerminal.Status.Summary.Tasks, "/")
+			if len(terminalParts) != 2 {
+				t.Fatalf("malformed terminal summary.tasks: %q", compTerminal.Status.Summary.Tasks)
+			}
+			terminalDenominator := terminalParts[1]
+
+			if runningDenominator != terminalDenominator {
+				t.Errorf("expected running denominator %q to match terminal denominator %q in prune mode", runningDenominator, terminalDenominator)
+			}
+		})
+
+		t.Run("non-prune mode: total denominator is identical while Running and Completed", func(t *testing.T) {
+			server, reconciler, cl, comp, fakeGCS := setupFixture(t, configkeys.AffinityModeOrder)
+			defer server.Close()
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+
+			// Reconcile 1: batch 1 complete but inconclusive -> schedules batch 2 for both tasks
+			if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("first Reconcile failed: %v", err)
+			}
+
+			var compRunning v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &compRunning); err != nil {
+				t.Fatalf("Get comparison failed: %v", err)
+			}
+			if compRunning.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+				t.Fatalf("expected Phase %q, got %q", v1alpha1.ComparisonPhaseRunning, compRunning.Status.Phase)
+			}
+			if compRunning.Status.Summary == nil {
+				t.Fatalf("expected non-nil Status.Summary")
+			}
+			if compRunning.Status.Summary.Tasks != "0/2" {
+				t.Errorf("expected Running summary.tasks '0/2', got %q", compRunning.Status.Summary.Tasks)
+			}
+			if compRunning.Status.Summary.Skipped != 0 {
+				t.Errorf("expected Running summary.skipped 0, got %d", compRunning.Status.Summary.Skipped)
+			}
+
+			runningParts := strings.Split(compRunning.Status.Summary.Tasks, "/")
+			if len(runningParts) != 2 {
+				t.Fatalf("malformed running summary.tasks: %q", compRunning.Status.Summary.Tasks)
+			}
+			runningDenominator := runningParts[1]
+
+			// Complete batch 2 with decisive scores for both tasks
+			b2Range := v1alpha1.SampleRange{Start: 5, End: 8}
+			decisiveCandScores := []stats.SampleScore{
+				{ID: "5", Score: 1.0},
+				{ID: "6", Score: 1.0},
+				{ID: "7", Score: 1.0},
+				{ID: "8", Score: 1.0},
+			}
+			decisiveBaseScores := []stats.SampleScore{
+				{ID: "5", Score: 0.0},
+				{ID: "6", Score: 0.0},
+				{ID: "7", Score: 0.0},
+				{ID: "8", Score: 0.0},
+			}
+			fakeGCS.Objects["test-bucket/runs/cand-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, decisiveCandScores)}
+			fakeGCS.Objects["test-bucket/runs/base-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, decisiveBaseScores)}
+			fakeGCS.Objects["test-bucket/runs/cand-commit-sha/b2-src.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskSrc, decisiveCandScores)}
+			fakeGCS.Objects["test-bucket/runs/base-commit-sha/b2-src.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskSrc, decisiveBaseScores)}
+
+			var b2Cand v1alpha1.Run
+			b2CandName := fmt.Sprintf("%s-b2-cand", comp.Name)
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandName}, &b2Cand); err != nil {
+				t.Fatalf("failed to get batch 2 candidate run: %v", err)
+			}
+			b2Cand.Status.Phase = v1alpha1.RunPhaseCompleted
+			b2Cand.Status.Tasks = []v1alpha1.TaskStatus{
+				{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+				{ID: taskSrc, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/b2-src.json", Samples: 4, SampleRange: &b2Range},
+			}
+			if err := cl.Status().Update(t.Context(), &b2Cand); err != nil {
+				t.Fatalf("failed to update b2Cand status: %v", err)
+			}
+
+			var b2Base v1alpha1.Run
+			b2BaseName := fmt.Sprintf("%s-b2-base", comp.Name)
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2BaseName}, &b2Base); err != nil {
+				t.Fatalf("failed to get batch 2 baseline run: %v", err)
+			}
+			b2Base.Status.Phase = v1alpha1.RunPhaseCompleted
+			b2Base.Status.Tasks = []v1alpha1.TaskStatus{
+				{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+				{ID: taskSrc, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/b2-src.json", Samples: 4, SampleRange: &b2Range},
+			}
+			if err := cl.Status().Update(t.Context(), &b2Base); err != nil {
+				t.Fatalf("failed to update b2Base status: %v", err)
+			}
+
+			// Terminal reconcile
+			if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("terminal Reconcile failed: %v", err)
+			}
+
+			var compTerminal v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &compTerminal); err != nil {
+				t.Fatalf("Get terminal comparison failed: %v", err)
+			}
+			if compTerminal.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+				t.Fatalf("expected terminal Phase %q, got %q", v1alpha1.ComparisonPhaseCompleted, compTerminal.Status.Phase)
+			}
+			if compTerminal.Status.Summary == nil {
+				t.Fatalf("expected non-nil terminal Status.Summary")
+			}
+			if compTerminal.Status.Summary.Tasks != "2/2" {
+				t.Errorf("expected Completed summary.tasks '2/2', got %q", compTerminal.Status.Summary.Tasks)
+			}
+			if compTerminal.Status.Summary.Skipped != 0 {
+				t.Errorf("expected Completed summary.skipped 0, got %d", compTerminal.Status.Summary.Skipped)
+			}
+
+			terminalParts := strings.Split(compTerminal.Status.Summary.Tasks, "/")
+			if len(terminalParts) != 2 {
+				t.Fatalf("malformed terminal summary.tasks: %q", compTerminal.Status.Summary.Tasks)
+			}
+			terminalDenominator := terminalParts[1]
+
+			if runningDenominator != terminalDenominator {
+				t.Errorf("expected running denominator %q to match terminal denominator %q in non-prune mode", runningDenominator, terminalDenominator)
+			}
+		})
+
+		t.Run("prune mode: initial running reconcile before runs complete preserves denominator to completion", func(t *testing.T) {
+			server, reconciler, cl, comp, fakeGCS := setupFixture(t, configkeys.AffinityModePrune)
+			defer server.Close()
+
+			// Set initial candidate and baseline runs to Running phase (not yet completed)
+			var candRun v1alpha1.Run
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "cand-b1"}, &candRun); err != nil {
+				t.Fatalf("Get cand-b1 failed: %v", err)
+			}
+			candRun.Status.Phase = v1alpha1.RunPhaseRunning
+			candRun.Status.Tasks = nil
+			if err := cl.Status().Update(t.Context(), &candRun); err != nil {
+				t.Fatalf("Update cand-b1 failed: %v", err)
+			}
+
+			var baseRun v1alpha1.Run
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "base-b1"}, &baseRun); err != nil {
+				t.Fatalf("Get base-b1 failed: %v", err)
+			}
+			baseRun.Status.Phase = v1alpha1.RunPhaseRunning
+			baseRun.Status.Tasks = nil
+			if err := cl.Status().Update(t.Context(), &baseRun); err != nil {
+				t.Fatalf("Update base-b1 failed: %v", err)
+			}
+
+			// Clear sampling so single batch run decides completion
+			comp.Spec.Sampling = nil
+			if err := cl.Update(t.Context(), comp); err != nil {
+				t.Fatalf("Update comp spec failed: %v", err)
+			}
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+
+			// Reconcile 1: runs are still running
+			if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("running Reconcile failed: %v", err)
+			}
+
+			var compRunning v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &compRunning); err != nil {
+				t.Fatalf("Get comparison failed: %v", err)
+			}
+			if compRunning.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+				t.Fatalf("expected Phase %q, got %q", v1alpha1.ComparisonPhaseRunning, compRunning.Status.Phase)
+			}
+			if compRunning.Status.Summary == nil || compRunning.Status.Summary.Tasks != "0/1" {
+				t.Errorf("expected initial running summary.tasks '0/1', got %+v", compRunning.Status.Summary)
+			}
+			if compRunning.Status.Summary.Skipped != 1 {
+				t.Errorf("expected initial running summary.skipped 1, got %d", compRunning.Status.Summary.Skipped)
+			}
+
+			// Complete batch 1 runs decisively for taskDocs
+			decisiveCandScores := []stats.SampleScore{
+				{ID: "1", Score: 1.0},
+				{ID: "2", Score: 1.0},
+				{ID: "3", Score: 1.0},
+				{ID: "4", Score: 1.0},
+			}
+			decisiveBaseScores := []stats.SampleScore{
+				{ID: "1", Score: 0.0},
+				{ID: "2", Score: 0.0},
+				{ID: "3", Score: 0.0},
+				{ID: "4", Score: 0.0},
+			}
+			fakeGCS.Objects["test-bucket/runs/cand-commit-sha/docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, decisiveCandScores)}
+			fakeGCS.Objects["test-bucket/runs/base-commit-sha/docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, decisiveBaseScores)}
+
+			b1Range := v1alpha1.SampleRange{Start: 1, End: 4}
+			candRun.Status.Phase = v1alpha1.RunPhaseCompleted
+			candRun.Status.Tasks = []v1alpha1.TaskStatus{
+				{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/docs.json", Samples: 4, SampleRange: &b1Range},
+				{ID: taskSrc, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/src.json", Samples: 4, SampleRange: &b1Range},
+			}
+			if err := cl.Status().Update(t.Context(), &candRun); err != nil {
+				t.Fatalf("Update candRun to Completed failed: %v", err)
+			}
+
+			baseRun.Status.Phase = v1alpha1.RunPhaseCompleted
+			baseRun.Status.Tasks = []v1alpha1.TaskStatus{
+				{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/docs.json", Samples: 4, SampleRange: &b1Range},
+				{ID: taskSrc, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/src.json", Samples: 4, SampleRange: &b1Range},
+			}
+			if err := cl.Status().Update(t.Context(), &baseRun); err != nil {
+				t.Fatalf("Update baseRun to Completed failed: %v", err)
+			}
+
+			// Terminal reconcile
+			if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("terminal Reconcile failed: %v", err)
+			}
+
+			var compTerminal v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &compTerminal); err != nil {
+				t.Fatalf("Get terminal comparison failed: %v", err)
+			}
+			if compTerminal.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+				t.Fatalf("expected terminal Phase %q, got %q", v1alpha1.ComparisonPhaseCompleted, compTerminal.Status.Phase)
+			}
+			if compTerminal.Status.Summary == nil || compTerminal.Status.Summary.Tasks != "1/1" {
+				t.Errorf("expected Completed summary.tasks '1/1', got %+v", compTerminal.Status.Summary)
+			}
+			if compTerminal.Status.Summary.Skipped != 1 {
+				t.Errorf("expected Completed summary.skipped 1, got %d", compTerminal.Status.Summary.Skipped)
+			}
+		})
+	})
 }

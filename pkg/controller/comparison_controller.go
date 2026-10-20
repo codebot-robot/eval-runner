@@ -1485,18 +1485,19 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	// If any batch Run is not terminal, the Comparison is RUNNING and re-evaluates on Run updates
 	if !allBatchesTerminal {
 		aff := r.resolveAffinity(ctx, &comp, &candidateRun, &baselineRun)
-		taskIDs := determineRunningTaskIDs(&comp, &baselineRun, &candidateRun)
+		allTaskIDs := determineRunningTaskIDs(&comp, &baselineRun, &candidateRun)
+		taskIDs := allTaskIDs
 		if aff.active {
 			if aff.mode == configkeys.AffinityModePrune {
 				var kept []string
-				for _, id := range taskIDs {
+				for _, id := range allTaskIDs {
 					if aff.taskAffinity[id] != v1alpha1.ComparisonTaskAffinityUnmatched {
 						kept = append(kept, id)
 					}
 				}
 				taskIDs = kept
 			} else {
-				taskIDs = r.sortTasksByAffinity(taskIDs, aff.taskAffinity)
+				taskIDs = r.sortTasksByAffinity(allTaskIDs, aff.taskAffinity)
 			}
 		}
 
@@ -1553,7 +1554,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				tasks = append(matchedAlways, unmatched...)
 			}
 		} else {
-			for _, id := range taskIDs {
+			for _, id := range allTaskIDs {
 				taskStatus := v1alpha1.ComparisonTaskStatus{
 					ID:       id,
 					Label:    v1alpha1.ComparisonTaskLabelRunning,
@@ -2686,7 +2687,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 		status.ExtraSamplesApplied = comp.Status.ExtraSamplesApplied
 		status.Summary = &v1alpha1.ComparisonSummary{
-			Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)),
+			Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)-len(prunedTasks)),
 			Skipped: len(skippedNotPlanned) + len(prunedTasks),
 		}
 		if aff.active {
