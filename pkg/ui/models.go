@@ -71,33 +71,34 @@ type RunsListView struct {
 
 // RunTaskRow represents a single eval task in the /runs/<ns>/<name> detail view.
 type RunTaskRow struct {
-	ID             string
-	Phase          v1alpha1.TaskPhase
-	PhaseChip      string // good, bad, warn, neutral, pending
-	RateStr        string // e.g. "0.84"
-	HasCI          bool
-	CILeftPx       float64
-	CIWidthPx      float64
-	CIDotPx        float64
-	CILabel        string // e.g. "[0.72, 0.95]"
-	Samples        int
-	Successes      int
-	Method         string // e.g. "wilson", "t"
-	LogPath        string // text path or URI
-	SamplesLink    string // e.g. "/runs/<ns>/<name>/tasks/<task>/samples"
-	Message        string
-	SampleRange    string // e.g. "samples 9-16"
-	SamplesDone    int
-	SamplesPlanned int
-	ProgressPct    float64
-	ProgressText   string // e.g. "8 of 96 samples"
-	LatencyStr     string // e.g. "6.01s / 9.78s"
-	TokensStr      string // e.g. "4399"
-	InputTokens    string
-	OutputTokens   string
-	ReasoningStr   string // e.g. "133"
-	CacheReadStr   string // e.g. "0"
-	CostStr        string // e.g. "$0.0013"
+	ID                   string
+	Phase                v1alpha1.TaskPhase
+	PhaseChip            string // good, bad, warn, neutral, pending
+	RateStr              string // e.g. "0.84"
+	HasCI                bool
+	CILeftPx             float64
+	CIWidthPx            float64
+	CIDotPx              float64
+	CILabel              string // e.g. "[0.72, 0.95]"
+	Samples              int
+	Successes            int
+	Method               string // e.g. "wilson", "t"
+	LogPath              string // text path or URI
+	SamplesLink          string // e.g. "/runs/<ns>/<name>/tasks/<task>/samples"
+	Message              string
+	SampleRange          string // e.g. "samples 9-16"
+	SamplesDone          int
+	SamplesPlanned       int
+	ProgressPct          float64
+	ProgressText         string // e.g. "8 of 96 samples"
+	LatencyStr           string // e.g. "6.01s / 9.78s"
+	TokensStr            string // e.g. "4399"
+	InputTokens          string
+	OutputTokens         string
+	ReasoningStr         string // e.g. "133"
+	CacheReadStr         string // e.g. "0"
+	CostStr              string // e.g. "$0.0013"
+	ArtifactsUnavailable bool
 }
 
 // LogURL returns a browsable web URL for the task's LogPath if it is a gs:// or http(s):// URI.
@@ -156,6 +157,7 @@ type RunDetailView struct {
 	Model           string
 	Age             string
 	ArtifactsPrefix string
+	ArtifactFooter  string
 	Message         string
 	Metric          MetricFilter
 	TotalCost       string
@@ -390,9 +392,11 @@ type ComparisonTaskRow struct {
 	CandTokensStr  string // e.g. "4399"
 	DeltaTokensStr string // e.g. "+1199"
 
-	BaseCostStr  string // e.g. "$0.0010"
-	CandCostStr  string // e.g. "$0.0013"
-	DeltaCostStr string // e.g. "+$0.0003"
+	BaseCostStr     string // e.g. "$0.0010"
+	CandCostStr     string // e.g. "$0.0013"
+	DeltaCostStr    string // e.g. "+$0.0003"
+	BaseSamplesLink string // link to baseline task samples list
+	CandSamplesLink string // link to candidate task samples list
 }
 
 // ComparisonRows maps a Comparison resource into a slice of ComparisonTaskRow
@@ -426,13 +430,21 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 		leftPx, widthPx, dotPx, hasCI := CalculateComparisonBarGeometry(task.Delta, task.DeltaCI, 340.0)
 
 		baseRate := "—"
+		var baseLink string
 		if task.BaseRate != nil {
 			baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
+			if comp.Spec.Baseline.Run != "" {
+				baseLink = BuildTaskSamplesListLink(comp.Namespace, comp.Spec.Baseline.Run, task.ID)
+			}
 		}
 
 		candRate := "—"
+		var candLink string
 		if task.CandidateRate != nil {
 			candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
+			if comp.Spec.Candidate.Run != "" {
+				candLink = BuildTaskSamplesListLink(comp.Namespace, comp.Spec.Candidate.Run, task.ID)
+			}
 		}
 
 		deltaStr := "—"
@@ -561,6 +573,8 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 			BaseCostStr:     baseCostStr,
 			CandCostStr:     candCostStr,
 			DeltaCostStr:    deltaCostStr,
+			BaseSamplesLink: baseLink,
+			CandSamplesLink: candLink,
 		})
 	}
 	return rows
@@ -1660,6 +1674,8 @@ type TaskSamplesListView struct {
 	NextLink         string
 	IsTruncatedLog   bool
 	TruncatedMessage string
+	StorageMessage   string
+	ArtifactFooter   string
 }
 
 // TranscriptRowView represents a single rendered transcript entry row.
@@ -1693,6 +1709,8 @@ type SampleTranscriptView struct {
 	EventsTruncatedMessage string
 	IsTruncatedLog         bool
 	TruncatedMessage       string
+	StorageMessage         string
+	ArtifactFooter         string
 }
 
 // TruncateRunes truncates string s to maxRunes, appending "..." if truncated.

@@ -302,11 +302,33 @@ func TestServerRunDetail(t *testing.T) {
 		t.Errorf("expected 0-1 CI bar element")
 	}
 	expectedLink := "/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples"
-	if !strings.Contains(body, expectedLink) {
-		t.Errorf("expected link to task samples list %q in table", expectedLink)
+	if strings.Contains(body, expectedLink) {
+		t.Errorf("expected NO link to task samples list when ArtifactSink is nil")
+	}
+	if !strings.Contains(body, "artifacts unavailable") {
+		t.Errorf("expected 'artifacts unavailable' note when ArtifactSink is nil")
+	}
+	if !strings.Contains(body, "artifacts: none") {
+		t.Errorf("expected 'artifacts: none' in footer when ArtifactSink is nil")
 	}
 	if !strings.Contains(body, "gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json") {
 		t.Errorf("expected log path in table")
+	}
+
+	// When ArtifactSink is configured, samples list link is present
+	sinkDir := t.TempDir()
+	serverWithSink := NewServer(Config{Client: fakeClient, ArtifactSink: &artifacts.LocalDirSink{BaseDir: sinkDir}})
+	wWithSink := httptest.NewRecorder()
+	serverWithSink.ServeHTTP(wWithSink, req)
+	bodyWithSink := wWithSink.Body.String()
+	if !strings.Contains(bodyWithSink, expectedLink) {
+		t.Errorf("expected link to task samples list %q in table when sink configured", expectedLink)
+	}
+	if strings.Contains(bodyWithSink, "artifacts unavailable") {
+		t.Errorf("expected NO 'artifacts unavailable' note when sink configured")
+	}
+	if !strings.Contains(bodyWithSink, fmt.Sprintf("artifacts: dir %s", sinkDir)) {
+		t.Errorf("expected 'artifacts: dir %s' in footer", sinkDir)
 	}
 
 	// Test 404 for missing run
@@ -2097,7 +2119,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		}
 	})
 
-	t.Run("Negative_NilSink_404", func(t *testing.T) {
+	t.Run("NilSink_RendersGuidance", func(t *testing.T) {
 		serverNoSink := NewServer(Config{
 			Client:           fakeClient,
 			DefaultNamespace: "eval-runner",
@@ -2107,12 +2129,18 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		w := httptest.NewRecorder()
 		serverNoSink.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404 when ArtifactSink is nil, got %d", w.Code)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 OK when ArtifactSink is nil, got %d", w.Code)
 		}
-		if !strings.Contains(w.Body.String(), "artifact storage not configured") {
-			t.Errorf("expected 'artifact storage not configured' message, got %q", w.Body.String())
+		expectedMsg := "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config"
+		if !strings.Contains(w.Body.String(), expectedMsg) {
+			t.Errorf("expected %q in body, got %q", expectedMsg, w.Body.String())
 		}
+		if !strings.Contains(w.Body.String(), "artifacts: none") {
+			t.Errorf("expected 'artifacts: none' in body, got %q", w.Body.String())
+		}
+		normalizedBody := strings.ReplaceAll(w.Body.String(), baseDir, "/tmp/eval-runner-sink")
+		assertGolden(t, "task_samples_nil_sink.golden.html", normalizedBody)
 	})
 
 	t.Run("Negative_PrefixMismatch_403", func(t *testing.T) {
@@ -2367,6 +2395,211 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		}
 		if strings.Contains(bodyTranscript, "<iframe src=bad>") {
 			t.Errorf("raw unescaped iframe tag found in transcript page HTML:\n%s", bodyTranscript)
+		}
+	})
+}
+
+func TestServerTaskSamples_InMemorySink_Drilldown(t *testing.T) {
+	scheme := newTestScheme(t)
+	sink := artifacts.NewInMemorySink()
+
+	commit := "05ce4d8222222222222222222222222222222222"
+	taskID := "docs/readme_comprehension"
+	sampleIDWithEpoch := "sample-017#2"
+	normalSampleID := "sample-019"
+
+	logJSON := `{
+		"version": 2,
+		"status": "success",
+		"eval": {
+			"task": "docs/readme_comprehension",
+			"model": "gemini-2.5-pro",
+			"scorers": [{"name": "accuracy"}]
+		},
+		"results": {
+			"total_samples": 2,
+			"completed_samples": 2,
+			"scores": [{"name": "accuracy", "scorer": "accuracy", "scored_samples": 2, "metrics": {"accuracy": {"name": "accuracy", "value": 1.0}}}]
+		},
+		"samples": [
+			{
+				"id": "sample-017",
+				"epoch": 2,
+				"input": "How do I configure eval runner?",
+				"target": "See README",
+				"output": {"model": "gemini-2.5-pro", "completion": "Check README instructions."},
+				"scores": {"accuracy": {"value": 1.0, "answer": "Check README instructions."}},
+				"messages": [
+					{"role": "user", "content": "How do I configure eval runner?"},
+					{"role": "assistant", "content": "Check README instructions."}
+				]
+			},
+			{
+				"id": "sample-019",
+				"epoch": 1,
+				"input": "Where is the UI hosted?",
+				"target": "Port 80",
+				"output": {"model": "gemini-2.5-pro", "completion": "Port 80 on cluster."},
+				"scores": {"accuracy": {"value": 1.0, "answer": "Port 80 on cluster."}},
+				"messages": [
+					{"role": "user", "content": "Where is the UI hosted?"},
+					{"role": "assistant", "content": "Port 80 on cluster."}
+				]
+			}
+		]
+	}`
+
+	now := time.Now()
+	meta := artifacts.RunMetadata{
+		TaskID:     taskID,
+		Commit:     commit,
+		Model:      "gemini-2.5-pro",
+		Samples:    2,
+		StartedAt:  &now,
+		FinishedAt: &now,
+	}
+
+	uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(logJSON))
+	if err != nil {
+		t.Fatalf("failed to store artifact: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: commit,
+			},
+			Model: "gemini-2.5-pro",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: uri,
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	server := NewServer(Config{Client: client, ArtifactSink: sink})
+
+	t.Run("MultiSegment_DecodedAndEncoded_IdenticalBodies", func(t *testing.T) {
+		// Encoded %2F
+		reqEncoded := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs%2Freadme_comprehension/samples", nil)
+		wEncoded := httptest.NewRecorder()
+		server.ServeHTTP(wEncoded, reqEncoded)
+		if wEncoded.Code != http.StatusOK {
+			t.Fatalf("expected 200 for encoded path, got %d: %s", wEncoded.Code, wEncoded.Body.String())
+		}
+
+		// Decoded multi-segment
+		reqDecoded := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs/readme_comprehension/samples", nil)
+		wDecoded := httptest.NewRecorder()
+		server.ServeHTTP(wDecoded, reqDecoded)
+		if wDecoded.Code != http.StatusOK {
+			t.Fatalf("expected 200 for decoded path, got %d: %s", wDecoded.Code, wDecoded.Body.String())
+		}
+
+		if wEncoded.Body.String() != wDecoded.Body.String() {
+			t.Errorf("expected identical bodies for encoded and decoded task samples list path")
+		}
+
+		// Sample transcript: encoded vs decoded
+		reqTranscriptEncoded := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs%2Freadme_comprehension/samples/"+normalSampleID, nil)
+		wTranscriptEncoded := httptest.NewRecorder()
+		server.ServeHTTP(wTranscriptEncoded, reqTranscriptEncoded)
+		if wTranscriptEncoded.Code != http.StatusOK {
+			t.Fatalf("expected 200 for transcript encoded path, got %d", wTranscriptEncoded.Code)
+		}
+
+		reqTranscriptDecoded := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs/readme_comprehension/samples/"+normalSampleID, nil)
+		wTranscriptDecoded := httptest.NewRecorder()
+		server.ServeHTTP(wTranscriptDecoded, reqTranscriptDecoded)
+		if wTranscriptDecoded.Code != http.StatusOK {
+			t.Fatalf("expected 200 for transcript decoded path, got %d", wTranscriptDecoded.Code)
+		}
+
+		if wTranscriptEncoded.Body.String() != wTranscriptDecoded.Body.String() {
+			t.Errorf("expected identical bodies for encoded and decoded transcript path")
+		}
+
+		// Escape hatch: ?task=&sample=
+		reqEscapeHatch := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks?task=docs/readme_comprehension&sample="+normalSampleID, nil)
+		wEscapeHatch := httptest.NewRecorder()
+		server.ServeHTTP(wEscapeHatch, reqEscapeHatch)
+		if wEscapeHatch.Code != http.StatusOK {
+			t.Fatalf("expected 200 for escape hatch query params, got %d", wEscapeHatch.Code)
+		}
+		if wEscapeHatch.Body.String() != wTranscriptEncoded.Body.String() {
+			t.Errorf("expected identical bodies for query params escape hatch and path")
+		}
+	})
+
+	t.Run("PoundSuffixedSampleID_RoundTrips", func(t *testing.T) {
+		reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs/readme_comprehension/samples", nil)
+		wList := httptest.NewRecorder()
+		server.ServeHTTP(wList, reqList)
+		expectedHref := "/runs/eval-runner/test-run/tasks/docs%2Freadme_comprehension/samples/" + url.PathEscape(sampleIDWithEpoch)
+		if !strings.Contains(wList.Body.String(), expectedHref) {
+			t.Errorf("expected samples list to link to %q, got body:\n%s", expectedHref, wList.Body.String())
+		}
+
+		// GET with %23 in sample segment
+		reqEscaped := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs/readme_comprehension/samples/sample-017%232", nil)
+		wEscaped := httptest.NewRecorder()
+		server.ServeHTTP(wEscaped, reqEscaped)
+		if wEscaped.Code != http.StatusOK {
+			t.Fatalf("expected 200 for escaped #-suffixed sample, got %d: %s", wEscaped.Code, wEscaped.Body.String())
+		}
+		if !strings.Contains(wEscaped.Body.String(), sampleIDWithEpoch) {
+			t.Errorf("expected body to contain %q, got:\n%s", sampleIDWithEpoch, wEscaped.Body.String())
+		}
+
+		// GET with raw # in URL
+		reqRaw := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs/readme_comprehension/samples/sample-017#2", nil)
+		wRaw := httptest.NewRecorder()
+		server.ServeHTTP(wRaw, reqRaw)
+		if wRaw.Code != http.StatusOK {
+			t.Fatalf("expected 200 for raw #-suffixed sample, got %d: %s", wRaw.Code, wRaw.Body.String())
+		}
+		if !strings.Contains(wRaw.Body.String(), sampleIDWithEpoch) {
+			t.Errorf("expected body to contain %q, got:\n%s", sampleIDWithEpoch, wRaw.Body.String())
+		}
+	})
+
+	t.Run("MissingSample_Still404WithOwnText", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs/readme_comprehension/samples/no-such-sample", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for missing sample, got %d", w.Code)
+		}
+		if strings.TrimSpace(w.Body.String()) != "sample not found" {
+			t.Errorf("expected 'sample not found', got %q", w.Body.String())
+		}
+	})
+
+	t.Run("NilSink_RendersGuidance", func(t *testing.T) {
+		serverNoSink := NewServer(Config{Client: client, ArtifactSink: nil})
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/test-run/tasks/docs/readme_comprehension/samples", nil)
+		w := httptest.NewRecorder()
+		serverNoSink.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK when sink is nil, got %d: %s", w.Code, w.Body.String())
+		}
+		expectedMsg := "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config"
+		if !strings.Contains(w.Body.String(), expectedMsg) {
+			t.Errorf("expected %q in body, got:\n%s", expectedMsg, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "artifacts: none") {
+			t.Errorf("expected 'artifacts: none' in body, got:\n%s", w.Body.String())
 		}
 	})
 }

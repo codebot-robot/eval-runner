@@ -204,6 +204,7 @@ func sampleRunDetailView() RunDetailView {
 		Model:           "google/gemini-3.5-flash-lite",
 		Age:             "10m",
 		ArtifactsPrefix: "gs://eval-bucket/runs/05ce4d8/",
+		ArtifactFooter:  "artifacts: gs://eval-bucket",
 		TasksSummary:    "1/1",
 		TasksCompleted:  1,
 		TasksFailed:     0,
