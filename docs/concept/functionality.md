@@ -217,6 +217,8 @@ eval-runner chooses *which* evals to run and in what order, prioritising:
   changed files (`pulls/{n}/files`, capped at 300) and assigns per-task affinity (`always`, `matched`, `unmatched`).
   Under `affinityMode=order` (default), matched and always tasks are ordered first in subsequent batches;
   under `affinityMode=prune`, unmatched tasks are dropped and reported as skipped (see ADR-027).
+  The seed batch created by the webhook runs every discovered task (since the manifest is discovered during seed Run execution);
+  prune and order apply to subsequent batches (batch 2 onward) scheduled by the controller.
 - **Remaining uncertainty**: evals whose current CI on Δ is still wide get more samples;
   evals already conclusive get none. (Implemented via adaptive batch sampling in ADR-026, where decided tasks stop sampling and are excluded from subsequent batches).
 

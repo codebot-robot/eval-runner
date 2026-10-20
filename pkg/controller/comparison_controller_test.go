@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10727,7 +10728,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 		Data:       map[string][]byte{"token": []byte("test-token")},
 	}
 
-	setupFixture := func(t *testing.T, affinityMode string) (*github.FakeGitHubServer, *ComparisonReconciler, client.Client, *v1alpha1.Comparison) {
+	setupFixture := func(t *testing.T, affinityMode string) (*github.FakeGitHubServer, *ComparisonReconciler, client.Client, *v1alpha1.Comparison, *fakes.FakeStorageClient) {
 		server := github.NewFakeGitHubServer()
 		server.SetPullRequestFiles("gke-labs", "eval-runner", 123, []string{"docs/readme.md"})
 
@@ -10824,11 +10825,11 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 			},
 		}
 
-		return server, reconciler, cl, comp
+		return server, reconciler, cl, comp, fakeGCS
 	}
 
 	t.Run("order mode (default): sorts batch spec.tasks matched first then unmatched, records status", func(t *testing.T) {
-		server, reconciler, cl, comp := setupFixture(t, configkeys.AffinityModeOrder)
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
 		defer server.Close()
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
@@ -10892,7 +10893,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 	})
 
 	t.Run("prune mode: drops unmatched tasks from batch spec.tasks and reports as skipped", func(t *testing.T) {
-		server, reconciler, cl, comp := setupFixture(t, configkeys.AffinityModePrune)
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModePrune)
 		defer server.Close()
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
@@ -10924,7 +10925,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 	})
 
 	t.Run("API 500 error: falls back to order mode with all tasks always", func(t *testing.T) {
-		server, reconciler, cl, comp := setupFixture(t, "prune") // configured as prune, but should fall back to order
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModePrune) // configured as prune, but should fall back to order
 		defer server.Close()
 
 		// Inject 500 error on PR files endpoint
@@ -10961,7 +10962,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 	})
 
 	t.Run("Comparison without pullRequest or without task paths is unchanged", func(t *testing.T) {
-		server, reconciler, cl, comp := setupFixture(t, configkeys.AffinityModeOrder)
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
 		defer server.Close()
 
 		comp.Spec.PullRequest = nil
@@ -10984,7 +10985,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 	})
 
 	t.Run("one files API call per head/base pair across multiple reconciles", func(t *testing.T) {
-		server, reconciler, _, comp := setupFixture(t, configkeys.AffinityModeOrder)
+		server, reconciler, _, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
 		defer server.Close()
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
@@ -11006,6 +11007,146 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 		}
 		if fileCalls != 1 {
 			t.Errorf("expected exactly 1 files API call, got %d", fileCalls)
+		}
+	})
+
+	t.Run("two-batch prune survives multiple batches without rescheduling unmatched task", func(t *testing.T) {
+		server, reconciler, cl, comp, fakeGCS := setupFixture(t, configkeys.AffinityModePrune)
+		defer server.Close()
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		// Reconcile 1: batch 1 complete -> schedules batch 2 with [taskDocs] only
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("first Reconcile failed: %v", err)
+		}
+
+		var b2Cand v1alpha1.Run
+		b2CandName := fmt.Sprintf("%s-b2-cand", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandName}, &b2Cand); err != nil {
+			t.Fatalf("failed to get batch 2 candidate run: %v", err)
+		}
+		if len(b2Cand.Spec.Tasks) != 1 || b2Cand.Spec.Tasks[0] != taskDocs {
+			t.Fatalf("expected batch 2 spec.tasks to be [%s], got %v", taskDocs, b2Cand.Spec.Tasks)
+		}
+
+		// Simulate batch 2 completing with inconclusive samples for taskDocs
+		b2Range := v1alpha1.SampleRange{Start: 5, End: 8}
+		b2CandScores := []stats.SampleScore{
+			{ID: "5", Score: 1.0},
+			{ID: "6", Score: 0.0},
+			{ID: "7", Score: 1.0},
+			{ID: "8", Score: 0.0},
+		}
+		b2BaseScores := []stats.SampleScore{
+			{ID: "5", Score: 0.0},
+			{ID: "6", Score: 1.0},
+			{ID: "7", Score: 0.0},
+			{ID: "8", Score: 1.0},
+		}
+		fakeGCS.Objects["test-bucket/runs/cand-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, b2CandScores)}
+		fakeGCS.Objects["test-bucket/runs/base-commit-sha/b2-docs.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(taskDocs, b2BaseScores)}
+
+		b2Cand.Status.Phase = v1alpha1.RunPhaseCompleted
+		b2Cand.Status.Tasks = []v1alpha1.TaskStatus{
+			{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+		}
+		if err := cl.Status().Update(t.Context(), &b2Cand); err != nil {
+			t.Fatalf("failed to update b2Cand status: %v", err)
+		}
+
+		var b2Base v1alpha1.Run
+		b2BaseName := fmt.Sprintf("%s-b2-base", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2BaseName}, &b2Base); err != nil {
+			t.Fatalf("failed to get batch 2 baseline run: %v", err)
+		}
+		b2Base.Status.Phase = v1alpha1.RunPhaseCompleted
+		b2Base.Status.Tasks = []v1alpha1.TaskStatus{
+			{ID: taskDocs, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit-sha/b2-docs.json", Samples: 4, SampleRange: &b2Range},
+		}
+		if err := cl.Status().Update(t.Context(), &b2Base); err != nil {
+			t.Fatalf("failed to update b2Base status: %v", err)
+		}
+
+		// Reconcile 2: evaluates batch 2 -> schedules batch 3
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("second Reconcile failed: %v", err)
+		}
+
+		// Verify batch 3 still excludes taskSrc and contains only taskDocs
+		var b3Cand v1alpha1.Run
+		b3CandName := fmt.Sprintf("%s-b3-cand", comp.Name)
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b3CandName}, &b3Cand); err != nil {
+			t.Fatalf("failed to get batch 3 candidate run: %v", err)
+		}
+		if len(b3Cand.Spec.Tasks) != 1 || b3Cand.Spec.Tasks[0] != taskDocs {
+			t.Errorf("expected batch 3 spec.tasks to still contain ONLY [%s], got %v", taskDocs, b3Cand.Spec.Tasks)
+		}
+
+		// Verify comparison status still reports taskSrc as skipped
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("Get comparison failed: %v", err)
+		}
+		if updatedComp.Status.Summary == nil || updatedComp.Status.Summary.Skipped != 1 {
+			t.Errorf("expected Skipped count to stay 1, got %+v", updatedComp.Status.Summary)
+		}
+		if !strings.Contains(updatedComp.Status.Message, "skipped (unmatched): "+taskSrc) {
+			t.Errorf("expected message to still contain 'skipped (unmatched): %s', got %q", taskSrc, updatedComp.Status.Message)
+		}
+	})
+
+	t.Run("persistent 403 API failure is cached and does not retry across reconciles or controller restarts", func(t *testing.T) {
+		server, reconciler, cl, comp, _ := setupFixture(t, configkeys.AffinityModeOrder)
+		defer server.Close()
+
+		// Inject persistent 403 Forbidden error
+		server.InjectPathError("GET", "/repos/gke-labs/eval-runner/pulls/123/files", http.StatusForbidden, `{"message": "Resource not accessible by integration"}`)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+		// Reconcile 1
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("reconcile 1 failed: %v", err)
+		}
+
+		// Verify status records FallbackReason
+		var compAfter1 v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &compAfter1); err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if compAfter1.Status.Affinity == nil || compAfter1.Status.Affinity.FallbackReason == "" {
+			t.Fatalf("expected FallbackReason in Status.Affinity, got %+v", compAfter1.Status.Affinity)
+		}
+
+		// Reconcile 2 with same reconciler
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("reconcile 2 failed: %v", err)
+		}
+
+		// Reconcile 3 with brand new reconciler (simulating controller restart, in-memory cache empty)
+		freshReconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              reconciler.Scheme,
+			ArtifactSink:        reconciler.ArtifactSink,
+			ControllerNamespace: reconciler.ControllerNamespace,
+			GitHubTokenSecret:   reconciler.GitHubTokenSecret,
+			AffinityMode:        reconciler.AffinityMode,
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+		if _, err := freshReconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("reconcile 3 (restart) failed: %v", err)
+		}
+
+		// Assert exactly 1 call was made to files API despite 3 reconciles and a controller restart
+		fileCalls := 0
+		for _, logEntry := range server.RequestLog() {
+			if strings.Contains(logEntry, "/files") {
+				fileCalls++
+			}
+		}
+		if fileCalls != 1 {
+			t.Errorf("expected exactly 1 files API call across reconciles and restart, got %d", fileCalls)
 		}
 	})
 }

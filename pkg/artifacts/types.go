@@ -143,6 +143,7 @@ type ComparisonArtifact struct {
 	Batches               []v1alpha1.ComparisonBatchStatus   `json:"batches,omitempty"`
 	CreatedAt             time.Time                          `json:"createdAt"`
 	SkippedNotPlanned     []string                           `json:"skippedNotPlanned,omitempty"`
+	SkippedUnmatched      []string                           `json:"skippedUnmatched,omitempty"`
 	NotExecuted           []string                           `json:"notExecuted,omitempty"`
 	NotExecutedByBothRuns []string                           `json:"notExecutedByBothRuns,omitempty"`
 	FailedInBothRuns      []string                           `json:"failedInBothRuns,omitempty"`

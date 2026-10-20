@@ -109,9 +109,45 @@ type ComparisonReconciler struct {
 	cachedAffinity map[string]cachedPRFiles
 }
 
+const maxCachedAffinityEntries = 100
+
 type cachedPRFiles struct {
-	files     []string
-	truncated bool
+	files          []string
+	truncated      bool
+	fallbackReason string
+}
+
+func (r *ComparisonReconciler) getCachedAffinity(key string) (cachedPRFiles, bool) {
+	r.affinityMu.Lock()
+	defer r.affinityMu.Unlock()
+	if r.cachedAffinity == nil {
+		return cachedPRFiles{}, false
+	}
+	entry, ok := r.cachedAffinity[key]
+	return entry, ok
+}
+
+func (r *ComparisonReconciler) recordCachedAffinity(key string, entry cachedPRFiles) {
+	r.affinityMu.Lock()
+	defer r.affinityMu.Unlock()
+	if r.cachedAffinity == nil {
+		r.cachedAffinity = make(map[string]cachedPRFiles)
+	}
+	if len(r.cachedAffinity) >= maxCachedAffinityEntries {
+		for k := range r.cachedAffinity {
+			delete(r.cachedAffinity, k)
+			break
+		}
+	}
+	r.cachedAffinity[key] = entry
+}
+
+func (r *ComparisonReconciler) evictCachedAffinity(key string) {
+	r.affinityMu.Lock()
+	defer r.affinityMu.Unlock()
+	if r.cachedAffinity != nil {
+		delete(r.cachedAffinity, key)
+	}
 }
 
 func (r *ComparisonReconciler) commandBackoff(attempts int, err error) time.Duration {
@@ -1089,7 +1125,7 @@ func (r *ComparisonReconciler) applyAffinityToBatchTasks(tasks []string, taskAff
 	return r.sortTasksByAffinity(tasks, taskAffinity)
 }
 
-func (r *ComparisonReconciler) fallbackAffinity(manifest *v1alpha1.Manifest, comp *v1alpha1.Comparison) resolvedAffinity {
+func (r *ComparisonReconciler) fallbackAffinity(manifest *v1alpha1.Manifest, comp *v1alpha1.Comparison, reason string) resolvedAffinity {
 	taskAff := make(map[string]string)
 	if manifest != nil {
 		for _, t := range manifest.Tasks {
@@ -1100,9 +1136,19 @@ func (r *ComparisonReconciler) fallbackAffinity(manifest *v1alpha1.Manifest, com
 			taskAff[t.ID] = v1alpha1.ComparisonTaskAffinityAlways
 		}
 	}
+	boundedReason := reason
+	if len(boundedReason) > 256 {
+		boundedReason = boundedReason[:256]
+	}
+	var statusAff *v1alpha1.ComparisonAffinityStatus
+	if boundedReason != "" {
+		statusAff = &v1alpha1.ComparisonAffinityStatus{
+			FallbackReason: boundedReason,
+		}
+	}
 	return resolvedAffinity{
 		active:       true,
-		status:       nil,
+		status:       statusAff,
 		taskAffinity: taskAff,
 		matchedCount: 0,
 		mode:         configkeys.AffinityModeOrder,
@@ -1120,6 +1166,45 @@ func (r *ComparisonReconciler) resolveAffinity(
 		return resolvedAffinity{mode: r.effectiveAffinityMode()}
 	}
 
+	mode := r.effectiveAffinityMode()
+	cacheKey := fmt.Sprintf("%s#%d:%s:%s", comp.Spec.PullRequest.Repository, comp.Spec.PullRequest.Number, comp.Spec.PullRequest.HeadSHA, comp.Spec.PullRequest.BaseSHA)
+
+	// 1. If affinity status is already recorded, reuse it directly WITHOUT loading manifest from sink
+	if comp.Status.Affinity != nil {
+		r.evictCachedAffinity(cacheKey)
+		if comp.Status.Affinity.FallbackReason != "" {
+			return r.fallbackAffinity(nil, comp, comp.Status.Affinity.FallbackReason)
+		}
+		if len(comp.Status.Tasks) > 0 {
+			taskAff := make(map[string]string, len(comp.Status.Tasks))
+			matched := 0
+			for _, t := range comp.Status.Tasks {
+				if t.Affinity != "" {
+					taskAff[t.ID] = t.Affinity
+					if t.Affinity == v1alpha1.ComparisonTaskAffinityMatched {
+						matched++
+					}
+				}
+			}
+			if len(taskAff) > 0 {
+				return resolvedAffinity{
+					active:       true,
+					status:       comp.Status.Affinity,
+					taskAffinity: taskAff,
+					matchedCount: matched,
+					mode:         mode,
+				}
+			}
+		}
+	}
+
+	// 2. Check in-memory cache
+	cached, found := r.getCachedAffinity(cacheKey)
+	if found && cached.fallbackReason != "" {
+		return r.fallbackAffinity(nil, comp, cached.fallbackReason)
+	}
+
+	// 3. Load manifest to check if any task declares paths
 	manifest, err := r.loadManifest(ctx, candRun, baseRun)
 	if err != nil {
 		logger.Info("unable to load manifest for affinity check", "error", err)
@@ -1139,63 +1224,37 @@ func (r *ComparisonReconciler) resolveAffinity(
 		return resolvedAffinity{mode: r.effectiveAffinityMode()}
 	}
 
-	mode := r.effectiveAffinityMode()
-
-	// If affinity status is already recorded and tasks have affinity, reuse existing data
-	if comp.Status.Affinity != nil && len(comp.Status.Tasks) > 0 {
-		taskAff := make(map[string]string, len(comp.Status.Tasks))
-		matched := 0
-		for _, t := range comp.Status.Tasks {
-			if t.Affinity != "" {
-				taskAff[t.ID] = t.Affinity
-				if t.Affinity == v1alpha1.ComparisonTaskAffinityMatched {
-					matched++
-				}
-			}
-		}
-		if len(taskAff) > 0 {
-			return resolvedAffinity{
-				active:       true,
-				status:       comp.Status.Affinity,
-				taskAffinity: taskAff,
-				matchedCount: matched,
-				mode:         mode,
-			}
-		}
-	}
-
-	cacheKey := fmt.Sprintf("%s#%d:%s:%s", comp.Spec.PullRequest.Repository, comp.Spec.PullRequest.Number, comp.Spec.PullRequest.HeadSHA, comp.Spec.PullRequest.BaseSHA)
-	r.affinityMu.Lock()
-	if r.cachedAffinity == nil {
-		r.cachedAffinity = make(map[string]cachedPRFiles)
-	}
-	cached, found := r.cachedAffinity[cacheKey]
-	r.affinityMu.Unlock()
-
+	// 4. Fetch changed files from GitHub if not already in cache
 	if !found {
 		ghClient, clientErr := r.getGitHubClient(ctx)
 		if clientErr != nil || ghClient == nil {
+			reason := "github client unavailable"
+			if clientErr != nil {
+				reason = clientErr.Error()
+			}
 			logger.Info("failed to get GitHub client for affinity; falling back to order mode with all tasks always", "error", clientErr)
-			return r.fallbackAffinity(manifest, comp)
+			r.recordCachedAffinity(cacheKey, cachedPRFiles{fallbackReason: reason})
+			return r.fallbackAffinity(manifest, comp, reason)
 		}
 
 		parts := strings.Split(comp.Spec.PullRequest.Repository, "/")
 		if len(parts) != 2 {
-			logger.Info("invalid repository in pullRequest spec", "repo", comp.Spec.PullRequest.Repository)
-			return r.fallbackAffinity(manifest, comp)
+			reason := fmt.Sprintf("invalid repository %q in pullRequest spec", comp.Spec.PullRequest.Repository)
+			logger.Info(reason)
+			r.recordCachedAffinity(cacheKey, cachedPRFiles{fallbackReason: reason})
+			return r.fallbackAffinity(manifest, comp, reason)
 		}
 		owner, repo := parts[0], parts[1]
 
 		files, truncated, listErr := ghClient.ListPullRequestFiles(ctx, owner, repo, comp.Spec.PullRequest.Number)
 		if listErr != nil {
 			logger.Info("failed to list pull request files from GitHub; falling back to order mode with all tasks always", "error", listErr)
-			return r.fallbackAffinity(manifest, comp)
+			r.recordCachedAffinity(cacheKey, cachedPRFiles{fallbackReason: listErr.Error()})
+			return r.fallbackAffinity(manifest, comp, listErr.Error())
 		}
 
 		cached = cachedPRFiles{files: files, truncated: truncated}
-		r.affinityMu.Lock()
-		r.cachedAffinity[cacheKey] = cached
-		r.affinityMu.Unlock()
+		r.recordCachedAffinity(cacheKey, cached)
 	}
 
 	filesHash := affinity.ComputeFilesHash(cached.files)
@@ -1475,29 +1534,23 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					} else if tasks[i].Affinity == "" {
 						tasks[i].Affinity = v1alpha1.ComparisonTaskAffinityAlways
 					}
+					if aff.mode == configkeys.AffinityModePrune && tasks[i].Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						tasks[i].Label = v1alpha1.ComparisonTaskLabelSkipped
+						tasks[i].Decision = v1alpha1.ComparisonTaskLabelSkipped
+					}
 				}
 			}
 			if aff.active {
-				if aff.mode == configkeys.AffinityModePrune {
-					var kept []v1alpha1.ComparisonTaskStatus
-					for _, t := range tasks {
-						if t.Affinity != v1alpha1.ComparisonTaskAffinityUnmatched {
-							kept = append(kept, t)
-						}
+				var matchedAlways []v1alpha1.ComparisonTaskStatus
+				var unmatched []v1alpha1.ComparisonTaskStatus
+				for _, t := range tasks {
+					if t.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						unmatched = append(unmatched, t)
+					} else {
+						matchedAlways = append(matchedAlways, t)
 					}
-					tasks = kept
-				} else {
-					var matchedAlways []v1alpha1.ComparisonTaskStatus
-					var unmatched []v1alpha1.ComparisonTaskStatus
-					for _, t := range tasks {
-						if t.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
-							unmatched = append(unmatched, t)
-						} else {
-							matchedAlways = append(matchedAlways, t)
-						}
-					}
-					tasks = append(matchedAlways, unmatched...)
 				}
+				tasks = append(matchedAlways, unmatched...)
 			}
 		} else {
 			for _, id := range taskIDs {
@@ -1512,14 +1565,33 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					} else {
 						taskStatus.Affinity = v1alpha1.ComparisonTaskAffinityAlways
 					}
+					if aff.mode == configkeys.AffinityModePrune && taskStatus.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						taskStatus.Label = v1alpha1.ComparisonTaskLabelSkipped
+						taskStatus.Decision = v1alpha1.ComparisonTaskLabelSkipped
+					}
 				}
 				tasks = append(tasks, taskStatus)
+			}
+			if aff.active {
+				var matchedAlways []v1alpha1.ComparisonTaskStatus
+				var unmatched []v1alpha1.ComparisonTaskStatus
+				for _, t := range tasks {
+					if t.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+						unmatched = append(unmatched, t)
+					} else {
+						matchedAlways = append(matchedAlways, t)
+					}
+				}
+				tasks = append(matchedAlways, unmatched...)
 			}
 		}
 
 		completedTasks := 0
+		prunedTasksCount := 0
 		for _, t := range tasks {
-			if t.Label != v1alpha1.ComparisonTaskLabelRunning {
+			if t.Label == v1alpha1.ComparisonTaskLabelSkipped && t.Affinity == v1alpha1.ComparisonTaskAffinityUnmatched {
+				prunedTasksCount++
+			} else if t.Label != v1alpha1.ComparisonTaskLabelRunning {
 				completedTasks++
 			}
 		}
@@ -1538,7 +1610,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			status.Batches = batches
 			status.Tasks = tasks
 			status.Summary = &v1alpha1.ComparisonSummary{
-				Tasks: fmt.Sprintf("%d/%d", completedTasks, len(tasks)),
+				Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(tasks)-prunedTasksCount),
+				Skipped: prunedTasksCount,
 			}
 			if aff.active {
 				status.Affinity = aff.status
@@ -2077,6 +2150,16 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				partialStatuses = append(partialStatuses, ts)
 			}
 
+			for _, id := range prunedTasks {
+				ts := v1alpha1.ComparisonTaskStatus{
+					ID:       id,
+					Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+					Label:    v1alpha1.ComparisonTaskLabelSkipped,
+					Decision: v1alpha1.ComparisonTaskLabelSkipped,
+				}
+				partialStatuses = append(partialStatuses, ts)
+			}
+
 			var partialCompCost *float64
 			partialTotalCompCost := 0.0
 			hasAnyPartialCost := false
@@ -2227,6 +2310,16 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					} else {
 						ts.Affinity = v1alpha1.ComparisonTaskAffinityAlways
 					}
+				}
+				partialStatuses = append(partialStatuses, ts)
+			}
+
+			for _, id := range prunedTasks {
+				ts := v1alpha1.ComparisonTaskStatus{
+					ID:       id,
+					Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+					Label:    v1alpha1.ComparisonTaskLabelSkipped,
+					Decision: v1alpha1.ComparisonTaskLabelSkipped,
 				}
 				partialStatuses = append(partialStatuses, ts)
 			}
@@ -2396,6 +2489,24 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		taskArtifacts = append(taskArtifacts, taskArt)
 	}
 
+	for _, id := range prunedTasks {
+		ts := v1alpha1.ComparisonTaskStatus{
+			ID:       id,
+			Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+			Label:    v1alpha1.ComparisonTaskLabelSkipped,
+			Decision: v1alpha1.ComparisonTaskLabelSkipped,
+		}
+		taskStatuses = append(taskStatuses, ts)
+
+		taskArt := ComparisonTaskArtifact{
+			ID:       id,
+			Affinity: v1alpha1.ComparisonTaskAffinityUnmatched,
+			Label:    string(v1alpha1.ComparisonTaskLabelSkipped),
+			Decision: string(v1alpha1.ComparisonTaskLabelSkipped),
+		}
+		taskArtifacts = append(taskArtifacts, taskArt)
+	}
+
 	var compCost *float64
 	totalCompCost := 0.0
 	hasAnyTaskCost := false
@@ -2517,6 +2628,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		Batches:               batches,
 		CreatedAt:             time.Now().UTC(),
 		SkippedNotPlanned:     skippedNotPlanned,
+		SkippedUnmatched:      prunedTasks,
 		NotExecuted:           unattempted,
 		NotExecutedByBothRuns: notBothExecuted,
 		FailedInBothRuns:      failedBoth,
@@ -2540,7 +2652,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	completedTasks := 0
 	for _, t := range taskStatuses {
-		if t.Label != v1alpha1.ComparisonTaskLabelRunning {
+		if t.Label != v1alpha1.ComparisonTaskLabelRunning && t.Label != v1alpha1.ComparisonTaskLabelSkipped {
 			completedTasks++
 		}
 	}

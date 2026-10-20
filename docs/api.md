@@ -375,6 +375,7 @@ Inspect log provider-specific totals are dropped so that `total` is strictly and
 | `filesHash` | `string` | SHA-256 checksum of the sorted changed files list (`sha256:<hex>`). |
 | `filesCount` | `int` | Count of changed files retrieved from GitHub (capped at 300). |
 | `truncated` | `bool` | True if changed files exceeded the cap (300 files), causing all tasks with paths to be treated as matched. |
+| `fallbackReason` | `string` | Reason why changed-file affinity fell back to order mode with all tasks always (e.g. GitHub API error or permissions). |
 
 ### ComparisonSummary (`status.summary`)
 

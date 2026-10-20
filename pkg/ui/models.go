@@ -1220,6 +1220,8 @@ func labelStatusClass(label v1alpha1.ComparisonTaskLabel) string {
 		return "warn"
 	case v1alpha1.ComparisonTaskLabelRunning, v1alpha1.ComparisonTaskLabelContinue:
 		return "pending"
+	case v1alpha1.ComparisonTaskLabelSkipped:
+		return "neutral"
 	default:
 		return "neutral"
 	}
