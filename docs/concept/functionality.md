@@ -212,8 +212,11 @@ The budget mockup shows the CI narrowing as paired samples accumulate
 eval-runner chooses *which* evals to run and in what order, prioritising:
 
 - **Changed-file affinity**: evals that touch what the PR changed (e.g. a change under
-  `skills/triage/` prioritises `triage/*`). **[open]** How affinity is declared or inferred
-  (manifest field, path conventions, historical sensitivity) remains explicitly open; today all discovered tasks or explicitly listed `spec.tasks` are evaluated.
+  `docs/**` prioritises documentation evals). Declared via per-task repository-relative `paths`
+  globs in `.evals/list` (`ManifestTask.paths`). When evaluating pull requests, the controller fetches
+  changed files (`pulls/{n}/files`, capped at 300) and assigns per-task affinity (`always`, `matched`, `unmatched`).
+  Under `affinityMode=order` (default), matched and always tasks are ordered first in subsequent batches;
+  under `affinityMode=prune`, unmatched tasks are dropped and reported as skipped (see ADR-027).
 - **Remaining uncertainty**: evals whose current CI on Δ is still wide get more samples;
   evals already conclusive get none. (Implemented via adaptive batch sampling in ADR-026, where decided tasks stop sampling and are excluded from subsequent batches).
 

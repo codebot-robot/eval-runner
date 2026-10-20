@@ -122,6 +122,7 @@ type ComparisonTaskArtifact struct {
 	CandidateCostUSD *float64                         `json:"candidateCostUSD,omitempty"`
 	BaseCostUSD      *float64                         `json:"baseCostUSD,omitempty"`
 	PossibleSamples  int                              `json:"possibleSamples,omitempty"`
+	Affinity         string                           `json:"affinity,omitempty"`
 	// PairsTable records paired scores for each sample in execution order (candidate log order).
 	// Callers (such as the UI CI-history chart) rely on this ordering to reconstruct batch prefix series.
 	PairsTable []stats.PairedSampleScore `json:"pairsTable,omitempty"`
@@ -129,23 +130,25 @@ type ComparisonTaskArtifact struct {
 
 // ComparisonArtifact is the schema stored as comparisons/<name>.json in the artifact sink.
 type ComparisonArtifact struct {
-	Comparison            string                           `json:"comparison"`
-	Namespace             string                           `json:"namespace"`
-	Baseline              string                           `json:"baseline"`
-	Candidate             string                           `json:"candidate"`
-	Verdict               string                           `json:"verdict"`
-	PImprovement          float64                          `json:"pImprovement"`
-	CostUSD               *float64                         `json:"costUSD,omitempty"`
-	PossibleSamples       int                              `json:"possibleSamples,omitempty"`
-	Summary               string                           `json:"summary,omitempty"`
-	Tasks                 []ComparisonTaskArtifact         `json:"tasks"`
-	Batches               []v1alpha1.ComparisonBatchStatus `json:"batches,omitempty"`
-	CreatedAt             time.Time                        `json:"createdAt"`
-	SkippedNotPlanned     []string                         `json:"skippedNotPlanned,omitempty"`
-	NotExecuted           []string                         `json:"notExecuted,omitempty"`
-	NotExecutedByBothRuns []string                         `json:"notExecutedByBothRuns,omitempty"`
-	FailedInBothRuns      []string                         `json:"failedInBothRuns,omitempty"`
-	CandidateFailed       []string                         `json:"candidateFailed,omitempty"`
+	Comparison            string                             `json:"comparison"`
+	Namespace             string                             `json:"namespace"`
+	Baseline              string                             `json:"baseline"`
+	Candidate             string                             `json:"candidate"`
+	Verdict               string                             `json:"verdict"`
+	PImprovement          float64                            `json:"pImprovement"`
+	CostUSD               *float64                           `json:"costUSD,omitempty"`
+	PossibleSamples       int                                `json:"possibleSamples,omitempty"`
+	Summary               string                             `json:"summary,omitempty"`
+	Tasks                 []ComparisonTaskArtifact           `json:"tasks"`
+	Batches               []v1alpha1.ComparisonBatchStatus   `json:"batches,omitempty"`
+	CreatedAt             time.Time                          `json:"createdAt"`
+	SkippedNotPlanned     []string                           `json:"skippedNotPlanned,omitempty"`
+	NotExecuted           []string                           `json:"notExecuted,omitempty"`
+	NotExecutedByBothRuns []string                           `json:"notExecutedByBothRuns,omitempty"`
+	FailedInBothRuns      []string                           `json:"failedInBothRuns,omitempty"`
+	CandidateFailed       []string                           `json:"candidateFailed,omitempty"`
+	Affinity              *v1alpha1.ComparisonAffinityStatus `json:"affinity,omitempty"`
+	AffinityMatched       int                                `json:"affinityMatched,omitempty"`
 }
 
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.

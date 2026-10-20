@@ -77,7 +77,11 @@ const (
 	ConfigMapKeyDefaultMaxSamplesPerTask = configkeys.ConfigMapKeyDefaultMaxSamplesPerTask
 	// ConfigMapKeyCommandUsers is the ConfigMap key for allowed comment command users.
 	ConfigMapKeyCommandUsers = configkeys.ConfigMapKeyCommandUsers
+	// ConfigMapKeyAffinityMode is the ConfigMap key for changed-file task affinity mode ("order" or "prune").
+	ConfigMapKeyAffinityMode = configkeys.ConfigMapKeyAffinityMode
+)
 
+const (
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
 	// a credential or feature that otherwise has a non-empty built-in default.
 	ConfigSentinelDisabled = configkeys.ConfigSentinelDisabled
@@ -116,6 +120,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyDefaultMaxSamplesPerTask: {},
 	configkeys.ConfigMapKeyDefaultCohort:            {},
 	configkeys.ConfigMapKeyCommandUsers:             {},
+	configkeys.ConfigMapKeyAffinityMode:             {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -163,6 +168,7 @@ type ClusterConfig struct {
 	UIBaseURL              string
 	ComparisonTTL          time.Duration
 	CommandUsers           []string
+	AffinityMode           string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -183,6 +189,7 @@ type RawFlags struct {
 	UIBaseURL              string
 	ComparisonTTL          time.Duration
 	CommandUsers           string
+	AffinityMode           string
 	StrictConfig           bool
 	Explicit               map[string]bool
 }
@@ -214,6 +221,7 @@ func DefaultClusterConfig() ClusterConfig {
 		UIBaseURL:              "",
 		ComparisonTTL:          0,
 		CommandUsers:           nil,
+		AffinityMode:           configkeys.AffinityModeOrder,
 	}
 }
 
@@ -229,6 +237,7 @@ func FlagsFromFlagSet(
 	comparisonTTL time.Duration,
 	commandUsers string,
 	pollProgressInterval time.Duration,
+	affinityMode string,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -251,6 +260,7 @@ func FlagsFromFlagSet(
 		UIBaseURL:              uiBaseURL,
 		ComparisonTTL:          comparisonTTL,
 		CommandUsers:           commandUsers,
+		AffinityMode:           affinityMode,
 		StrictConfig:           strictConfig,
 		Explicit:               explicit,
 	}
@@ -524,9 +534,32 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[ConfigMapKeyCommandUsers]; ok {
 			cfg.CommandUsers = ParseUserList(val)
 		}
+
+		// 15. affinityMode
+		if val, ok := cm.Data[ConfigMapKeyAffinityMode]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				lower := strings.ToLower(trimmed)
+				if lower != configkeys.AffinityModeOrder && lower != configkeys.AffinityModePrune {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be %q or %q",
+						ConfigMapKeyAffinityMode, val, ns, name,
+						configkeys.AffinityModeOrder, configkeys.AffinityModePrune)
+				}
+				cfg.AffinityMode = lower
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
+	if flags.IsExplicit("affinity-mode") {
+		trimmed := strings.TrimSpace(flags.AffinityMode)
+		lower := strings.ToLower(trimmed)
+		if lower != configkeys.AffinityModeOrder && lower != configkeys.AffinityModePrune {
+			return cfg, fmt.Errorf("invalid flag --affinity-mode %q: must be %q or %q",
+				flags.AffinityMode, configkeys.AffinityModeOrder, configkeys.AffinityModePrune)
+		}
+		cfg.AffinityMode = lower
+	}
 	if flags.IsExplicit("artifact-bucket") {
 		if strings.EqualFold(flags.ArtifactBucket, ConfigSentinelDisabled) {
 			cfg.ArtifactBucket = ""

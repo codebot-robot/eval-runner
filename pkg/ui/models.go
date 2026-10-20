@@ -265,8 +265,9 @@ func FormatCompletionTime(t *metav1.Time) string {
 
 // ComparisonTableView is the view model for rendering the comparison table sub-template.
 type ComparisonTableView struct {
-	Tasks     []ComparisonTaskRow
-	HasTokens bool
+	Tasks       []ComparisonTaskRow
+	HasTokens   bool
+	HasAffinity bool
 }
 
 // ComparisonTaskRow represents a single task row in the PR-comment table.
@@ -289,6 +290,7 @@ type ComparisonTaskRow struct {
 	Decision      string
 	SuggestedNext int
 	Tokens        *v1alpha1.TaskTokens
+	Affinity      string // always, matched, unmatched
 }
 
 // ComparisonRows maps a Comparison resource into a slice of ComparisonTaskRow
@@ -322,6 +324,11 @@ func ComparisonRows(comp *v1alpha1.Comparison) []ComparisonTaskRow {
 			ciLabel = fmt.Sprintf("[%+.2f, %+.2f]", task.DeltaCI.Lower, task.DeltaCI.Upper)
 		}
 
+		affinity := task.Affinity
+		if affinity == "" && comp.Status.Affinity != nil {
+			affinity = "always"
+		}
+
 		rows = append(rows, ComparisonTaskRow{
 			ID:            task.ID,
 			BaseRate:      baseRate,
@@ -341,6 +348,7 @@ func ComparisonRows(comp *v1alpha1.Comparison) []ComparisonTaskRow {
 			Decision:      string(task.Decision),
 			SuggestedNext: task.SuggestedNext,
 			Tokens:        task.Tokens,
+			Affinity:      affinity,
 		})
 	}
 	return rows
@@ -365,6 +373,8 @@ type ComparisonSummaryData struct {
 	SamplesSummary   string // e.g. "96 run · 48 paired" or "$4.10 spent, 96 of 3,200 possible samples"
 	BaseSummary      string // e.g. "commit a81d0c4 (docs-eval-base-05ce4d8)"
 	CandSummary      string // e.g. "commit 05ce4d8 (docs-eval-cand-05ce4d8)"
+	AffinityMatched  int
+	HasAffinity      bool
 }
 
 // ComparisonSummary computes aggregate headline and footer strings for a Comparison.
@@ -517,6 +527,15 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 		}
 	}
 
+	affinityMatched := 0
+	hasAffinity := false
+	if comp.Status.Summary != nil {
+		affinityMatched = comp.Status.Summary.AffinityMatched
+	}
+	if comp.Status.Affinity != nil || affinityMatched > 0 {
+		hasAffinity = true
+	}
+
 	return ComparisonSummaryData{
 		Headline:         headline,
 		PImprovement:     pImpStr,
@@ -535,6 +554,8 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 		SamplesSummary:   samplesSummary,
 		BaseSummary:      baseSummary,
 		CandSummary:      candSummary,
+		AffinityMatched:  affinityMatched,
+		HasAffinity:      hasAffinity,
 	}
 }
 
@@ -609,8 +630,10 @@ type ComparisonDetailView struct {
 	SummaryPath  string
 	Message      string
 
-	Tasks     []ComparisonTaskRow
-	HasTokens bool
+	Tasks           []ComparisonTaskRow
+	HasTokens       bool
+	HasAffinity     bool
+	AffinityMatched int
 
 	Batches []ComparisonBatchRow
 	Actions []ComparisonActionRow
@@ -1077,11 +1100,19 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 	taskRows := ComparisonRows(comp)
 
 	hasTokens := false
+	hasAffinity := false
 	for _, tr := range taskRows {
 		if tr.Tokens != nil {
 			hasTokens = true
-			break
 		}
+		if tr.Affinity != "" {
+			hasAffinity = true
+		}
+	}
+
+	affinityMatched := 0
+	if comp.Status.Summary != nil {
+		affinityMatched = comp.Status.Summary.AffinityMatched
 	}
 
 	return ComparisonDetailView{
@@ -1096,6 +1127,8 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 		Message:          comp.Status.Message,
 		Tasks:            taskRows,
 		HasTokens:        hasTokens,
+		HasAffinity:      hasAffinity,
+		AffinityMatched:  affinityMatched,
 		Batches:          ComparisonBatches(comp),
 		Actions:          ComparisonActions(comp),
 		Summary:          summary,

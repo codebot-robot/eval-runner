@@ -526,6 +526,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	compTTL := fs.Duration("comparison-ttl", 0, "comparison ttl")
 	commandUsers := fs.String("command-users", "", "command users")
 	pollInterval := fs.Duration("poll-progress-interval", 10*time.Second, "poll progress interval")
+	affinityMode := fs.String("affinity-mode", configkeys.AffinityModeOrder, "affinity mode")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
 	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s"})
@@ -533,7 +534,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -1895,5 +1896,77 @@ func TestResolveConfig_PollProgressInterval(t *testing.T) {
 	}
 	if cfgEmpty.PollProgressInterval != DefaultPollProgressInterval {
 		t.Errorf("expected default PollProgressInterval %v for empty string, got %v", DefaultPollProgressInterval, cfgEmpty.PollProgressInterval)
+	}
+}
+
+func TestResolveConfig_AffinityMode(t *testing.T) {
+	// 1. Built-in default is "order"
+	cfgDef, err := ResolveConfig(nil, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error for nil ConfigMap: %v", err)
+	}
+	if cfgDef.AffinityMode != configkeys.AffinityModeOrder {
+		t.Errorf("expected default AffinityMode %q, got %q", configkeys.AffinityModeOrder, cfgDef.AffinityMode)
+	}
+
+	// 2. ConfigMap "order"
+	cmOrder := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
+		Data:       map[string]string{ConfigMapKeyAffinityMode: "order"},
+	}
+	cfgOrder, err := ResolveConfig(cmOrder, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgOrder.AffinityMode != configkeys.AffinityModeOrder {
+		t.Errorf("expected AffinityMode %q, got %q", configkeys.AffinityModeOrder, cfgOrder.AffinityMode)
+	}
+
+	// 3. ConfigMap "prune" (case-insensitive)
+	cmPrune := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
+		Data:       map[string]string{ConfigMapKeyAffinityMode: "  Prune  "},
+	}
+	cfgPrune, err := ResolveConfig(cmPrune, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgPrune.AffinityMode != configkeys.AffinityModePrune {
+		t.Errorf("expected AffinityMode %q, got %q", configkeys.AffinityModePrune, cfgPrune.AffinityMode)
+	}
+
+	// 4. ConfigMap invalid value returns error
+	cmInvalid := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
+		Data:       map[string]string{ConfigMapKeyAffinityMode: "bogus"},
+	}
+	if _, err := ResolveConfig(cmInvalid, RawFlags{}); err == nil {
+		t.Errorf("expected error for invalid affinityMode, got nil")
+	}
+
+	// 5. Flag override
+	flagsOverride := RawFlags{
+		AffinityMode: configkeys.AffinityModePrune,
+		Explicit: map[string]bool{
+			"affinity-mode": true,
+		},
+	}
+	cfgFlag, err := ResolveConfig(cmOrder, flagsOverride)
+	if err != nil {
+		t.Fatalf("unexpected error with flag override: %v", err)
+	}
+	if cfgFlag.AffinityMode != configkeys.AffinityModePrune {
+		t.Errorf("expected flag override %q, got %q", configkeys.AffinityModePrune, cfgFlag.AffinityMode)
+	}
+
+	// 6. Invalid flag returns error
+	flagsBad := RawFlags{
+		AffinityMode: "invalid-mode",
+		Explicit: map[string]bool{
+			"affinity-mode": true,
+		},
+	}
+	if _, err := ResolveConfig(nil, flagsBad); err == nil {
+		t.Errorf("expected error for invalid --affinity-mode flag, got nil")
 	}
 }

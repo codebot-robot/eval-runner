@@ -80,6 +80,8 @@ const (
 	ConfigMapKeyDefaultCohort = "defaultCohort"
 	// ConfigMapKeyCommandUsers is the ConfigMap key for allowed comment command users (used by eval-runner controller).
 	ConfigMapKeyCommandUsers = "commandUsers"
+	// ConfigMapKeyAffinityMode is the ConfigMap key for changed-file task affinity mode ("order" or "prune").
+	ConfigMapKeyAffinityMode = "affinityMode"
 )
 
 const (
@@ -87,4 +89,11 @@ const (
 	InconclusivePolicyNeutral = "neutral"
 	// InconclusivePolicyFailure maps an INCONCLUSIVE verdict to a "failure" check-run conclusion.
 	InconclusivePolicyFailure = "failure"
+)
+
+const (
+	// AffinityModeOrder sorts each batch's spec.tasks matched/always first then unmatched (default).
+	AffinityModeOrder = "order"
+	// AffinityModePrune drops unmatched tasks from evaluation.
+	AffinityModePrune = "prune"
 )
