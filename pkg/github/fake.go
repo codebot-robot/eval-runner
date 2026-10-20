@@ -43,8 +43,9 @@ type FakeGitHubServer struct {
 	comments       map[int64]*IssueComment
 	issueComments  map[string][]int64 // "owner/repo#number" -> comment IDs
 	checkRuns      map[int64]*FakeCheckRun
-	permissions    map[string]string  // "owner/repo/user" -> permission level
-	reactions      map[int64][]string // commentID -> reactions
+	permissions    map[string]string   // "owner/repo/user" -> permission level
+	reactions      map[int64][]string  // commentID -> reactions
+	prFiles        map[string][]string // "owner/repo#number" -> list of filenames
 	nextCommentID  int64
 	nextCheckRunID int64
 	currentUser    string
@@ -71,6 +72,7 @@ func NewFakeGitHubServer() *FakeGitHubServer {
 		checkRuns:      make(map[int64]*FakeCheckRun),
 		permissions:    make(map[string]string),
 		reactions:      make(map[int64][]string),
+		prFiles:        make(map[string][]string),
 		nextCommentID:  1000,
 		nextCheckRunID: 5000,
 		currentUser:    "test-user",
@@ -177,6 +179,14 @@ func (f *FakeGitHubServer) InjectPathError(method, pathPrefix string, statusCode
 		body:       body,
 		headers:    h,
 	})
+}
+
+// SetPullRequestFiles sets the list of files returned for GET /repos/{owner}/{repo}/pulls/{number}/files.
+func (f *FakeGitHubServer) SetPullRequestFiles(owner, repo string, number int, files []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fmt.Sprintf("%s/%s#%d", strings.ToLower(owner), strings.ToLower(repo), number)
+	f.prFiles[key] = append([]string(nil), files...)
 }
 
 // AddCommentWithAuthor creates a comment directly in the fake server under the given author.
@@ -322,7 +332,75 @@ func (f *FakeGitHubServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 5. List pull request files: /repos/{owner}/{repo}/pulls/{number}/files
+	if strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/pulls/") && strings.HasSuffix(path, "/files") && r.Method == http.MethodGet {
+		f.handleListPullRequestFiles(w, r)
+		return
+	}
+
 	http.NotFound(w, r)
+}
+
+func (f *FakeGitHubServer) handleListPullRequestFiles(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// ["repos", owner, repo, "pulls", number, "files"]
+	if len(parts) != 6 || parts[0] != "repos" || parts[3] != "pulls" || parts[5] != "files" {
+		http.NotFound(w, r)
+		return
+	}
+	owner := parts[1]
+	repo := parts[2]
+	number, err := strconv.Atoi(parts[4])
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	key := fmt.Sprintf("%s/%s#%d", strings.ToLower(owner), strings.ToLower(repo), number)
+	files := f.prFiles[key]
+
+	perPage := 100
+	if pp := r.URL.Query().Get("per_page"); pp != "" {
+		if val, err := strconv.Atoi(pp); err == nil && val > 0 {
+			perPage = val
+		}
+	}
+	page := 1
+	if p := r.URL.Query().Get("page"); p != "" {
+		if val, err := strconv.Atoi(p); err == nil && val > 0 {
+			page = val
+		}
+	}
+
+	start := (page - 1) * perPage
+	if start > len(files) {
+		start = len(files)
+	}
+	end := start + perPage
+	if end > len(files) {
+		end = len(files)
+	}
+
+	if end < len(files) {
+		nextURL := fmt.Sprintf("%s%s?page=%d&per_page=%d", f.server.URL, r.URL.Path, page+1, perPage)
+		w.Header().Set("Link", fmt.Sprintf("<%s>; rel=\"next\"", nextURL))
+	}
+
+	var resp []pullRequestFileResponse
+	for _, filename := range files[start:end] {
+		resp = append(resp, pullRequestFileResponse{Filename: filename})
+	}
+	if resp == nil {
+		resp = []pullRequestFileResponse{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		_ = err
+	}
 }
 
 func (f *FakeGitHubServer) handleIssueComments(w http.ResponseWriter, r *http.Request) {

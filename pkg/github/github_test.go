@@ -2183,3 +2183,142 @@ func TestCreateCommentReaction(t *testing.T) {
 		t.Errorf("expected [confused] on comment 102, got %v", reactions102)
 	}
 }
+
+func TestListPullRequestFiles_LinkPaging(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	// 150 files across two pages (100 per page)
+	files := make([]string, 150)
+	for i := range files {
+		files[i] = fmt.Sprintf("docs/file_%03d.md", i)
+	}
+	server.SetPullRequestFiles("gke-labs", "eval-runner", 42, files)
+
+	client := server.Client("test-token")
+	ctx := t.Context()
+
+	got, truncated, err := client.ListPullRequestFiles(ctx, "gke-labs", "eval-runner", 42)
+	if err != nil {
+		t.Fatalf("ListPullRequestFiles error: %v", err)
+	}
+	if truncated {
+		t.Errorf("expected truncated == false for 150 files, got true")
+	}
+	if len(got) != 150 {
+		t.Fatalf("expected 150 files, got %d", len(got))
+	}
+	for i, f := range got {
+		if f != files[i] {
+			t.Errorf("file[%d] mismatch: got %q, want %q", i, f, files[i])
+		}
+	}
+}
+
+func TestListPullRequestFiles_Cap(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	// 350 files (exceeding MaxPullRequestFiles = 300)
+	files := make([]string, 350)
+	for i := range files {
+		files[i] = fmt.Sprintf("src/file_%03d.go", i)
+	}
+	server.SetPullRequestFiles("gke-labs", "eval-runner", 43, files)
+
+	client := server.Client("test-token")
+	ctx := t.Context()
+
+	got, truncated, err := client.ListPullRequestFiles(ctx, "gke-labs", "eval-runner", 43)
+	if err != nil {
+		t.Fatalf("ListPullRequestFiles error: %v", err)
+	}
+	if !truncated {
+		t.Errorf("expected truncated == true for 350 files, got false")
+	}
+	if len(got) != MaxPullRequestFiles {
+		t.Fatalf("expected capped at %d files, got %d", MaxPullRequestFiles, len(got))
+	}
+	for i, f := range got {
+		if f != files[i] {
+			t.Errorf("file[%d] mismatch: got %q, want %q", i, f, files[i])
+		}
+	}
+}
+
+func TestListPullRequestFiles_InjectableError(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	server.InjectPathError(http.MethodGet, "/repos/gke-labs/eval-runner/pulls/44/files", http.StatusInternalServerError, `{"message": "internal error"}`)
+
+	client := server.Client("test-token")
+	ctx := t.Context()
+
+	_, _, err := client.ListPullRequestFiles(ctx, "gke-labs", "eval-runner", 44)
+	if err == nil {
+		t.Fatal("expected error for injected 500, got nil")
+	}
+}
+
+func TestRenderComparisonMarkdown_WithAffinity(t *testing.T) {
+	delta := 0.20
+	candMean := 0.80
+	baseMean := 0.60
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-affinity-render", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     99,
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictImproved,
+			Phase:   v1alpha1.ComparisonPhaseCompleted,
+			Affinity: &v1alpha1.ComparisonAffinityStatus{
+				FilesCount: 2,
+				FilesHash:  "sha256:123456",
+			},
+			Summary: &v1alpha1.ComparisonSummary{
+				Tasks:           "2/2",
+				AffinityMatched: 1,
+			},
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "docs/readme",
+					Affinity:      "matched",
+					BaseRate:      &baseMean,
+					CandidateRate: &candMean,
+					Delta:         &delta,
+					DeltaCI:       &v1alpha1.DeltaConfidenceInterval{Lower: 0.05, Upper: 0.35},
+					Label:         v1alpha1.ComparisonTaskLabelImproved,
+					SamplesRun:    16,
+				},
+				{
+					ID:         "src/logic",
+					Affinity:   "unmatched",
+					Label:      v1alpha1.ComparisonTaskLabelUnchanged,
+					SamplesRun: 16,
+				},
+			},
+		},
+	}
+
+	markdown := RenderComparisonMarkdown(comp, nil, nil, "https://eval-ui.example.com")
+
+	if !strings.Contains(markdown, "| eval | affinity | base | this PR | Δ (95% CI) | label | samples |") {
+		t.Errorf("expected affinity column in markdown table header, got:\n%s", markdown)
+	}
+	if !strings.Contains(markdown, "| docs/readme | matched |") {
+		t.Errorf("expected row with matched affinity, got:\n%s", markdown)
+	}
+	if !strings.Contains(markdown, "| src/logic | unmatched |") {
+		t.Errorf("expected row with unmatched affinity, got:\n%s", markdown)
+	}
+	if !strings.Contains(markdown, "1 matched") {
+		t.Errorf("expected footer to mention '1 matched', got:\n%s", markdown)
+	}
+}
