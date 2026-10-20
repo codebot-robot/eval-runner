@@ -712,6 +712,8 @@ When an event arrives:
    - **Artifacts**: Artifacts stored in the artifact sink (GCS or local directory) are not purged by PR closure.
 3. **On `push` to the default branch**:
    - **Warm Baseline Run**: `base-<sha7>` (single repository allow-list) or `base-<repoHash>-<sha7>` (multiple repositories or wildcard `*`) is created with initial `sampleRange {1, defaultBatchSize}` so the baseline run is pre-warmed before PRs arrive.
+   - **Branch Label & Commit Time Annotation**: The run is labeled with `evalrunner.gke-labs.dev/branch=<defaultBranch>` and annotated with `evalrunner.gke-labs.dev/commit-time=<RFC3339>`. If configured in ConfigMap key `defaultCohort`, `spec.cohort` is set on the Run.
+   - **Main-Branch Series Page**: Powers `/series` and `/series/{repohash}/{branch}?task=<id>&n=50` displaying commit-by-commit success rates via static SVG with confidence interval bands and commit metadata table. Commits are ordered chronologically by commit-time, falling back to `creationTimestamp` with a visible "ordered by creation time" note. Pre-existing Runs lacking the branch label are excluded.
 4. **On `issue_comment` (`created`)**:
    - **More Samples Command**: Comments of the form `/eval more <n>` on a pull request trigger evaluation of additional samples.
    - **Credential-Free Webhook**: After verifying HMAC and the repository allow-list, the webhook appends `{commentId, login, requested, receivedAt}` to a bounded `status.pendingCommands` on the Comparison (idempotent per comment ID against pending and handled commands). The webhook holds no GitHub tokens and makes no outbound GitHub calls.
@@ -721,6 +723,7 @@ When an event arrives:
    - `evalrunner.gke-labs.dev/pr`: PR number (for PR runs and comparisons)
    - `evalrunner.gke-labs.dev/repo`: Sanitized repository identifier (e.g. `owner_name`)
    - `evalrunner.gke-labs.dev/head-sha`: Commit SHA
+   - `evalrunner.gke-labs.dev/branch`: Default branch name (for push-created baseline Runs)
 
 ### Operational Notes
 

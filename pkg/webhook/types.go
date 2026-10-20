@@ -36,6 +36,12 @@ const (
 	// LabelHeadSHA tracks the git commit SHA on created Runs and Comparisons.
 	LabelHeadSHA = "evalrunner.gke-labs.dev/head-sha"
 
+	// LabelBranch tracks the branch name on created baseline Runs.
+	LabelBranch = "evalrunner.gke-labs.dev/branch"
+
+	// AnnotationCommitTime tracks the commit timestamp (RFC3339) on created baseline Runs.
+	AnnotationCommitTime = "evalrunner.gke-labs.dev/commit-time"
+
 	// HeaderHubSignature256 is the GitHub webhook HMAC-SHA256 signature header.
 	HeaderHubSignature256 = "X-Hub-Signature-256"
 
@@ -130,7 +136,8 @@ type GitHubPushEvent struct {
 	Deleted    bool             `json:"deleted"`
 	Repository GitHubRepository `json:"repository"`
 	HeadCommit *struct {
-		ID string `json:"id"`
+		ID        string `json:"id"`
+		Timestamp string `json:"timestamp"`
 	} `json:"head_commit"`
 }
 
@@ -201,9 +208,11 @@ type PullRequestWorkItem struct {
 
 // PushWorkItem contains pre-validated fields for push reconciliation in the worker.
 type PushWorkItem struct {
-	CommitSHA string
-	CloneURL  string
-	Repo      string // "owner/name"
+	CommitSHA  string
+	CloneURL   string
+	Repo       string // "owner/name"
+	Branch     string
+	CommitTime string
 }
 
 // ValidateRepoComponent validates that an owner or repo name matches ^[A-Za-z0-9_.-]+$.
