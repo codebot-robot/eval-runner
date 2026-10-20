@@ -143,14 +143,20 @@ The `eval-runner-webhook` service (image `eval-runner-webhook`) receives GitHub 
 ### Web Dashboard UI (`cmd/eval-runner-ui`)
 
 The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboard:
-- `GET /pulls`: Overview table of pull requests derived from webhook-created Comparisons, grouped by repository and PR number with latest verdict, samples run, batches, and completion time.
-- `GET /pulls/{repohash}/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression.
-- `GET /runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
-- `GET /runs/{namespace}/{name}`: Detailed per-task breakdown for a single Run.
-- `GET /runs/{namespace}/{name}/tasks/{task}/samples`: Per-task sample list with IDs, scores, preview snippets, latency, and tokens.
-- `GET /runs/{namespace}/{name}/tasks/{task}/samples/{sample}`: Sample transcript viewer rendering multi-turn message and event streams as typed text rows.
-- `GET /comparisons`: Overview of all Comparisons with verdicts, $P(\text{improvement})$, and batch progress.
-- `GET /comparisons/{namespace}/{name}`: Complete paired comparison table mirroring the PR comment layout, plus per-task CI-width-vs-n history chart and stopping rule decision table recomputed from the stored comparison artifact.
+- `GET /`: Repository index listing all discovered repositories across Runs and Comparisons in the namespace with their respective counts.
+- `GET /{host}/{owner}/{repo}`: Repository home page and Overview tab.
+- `GET /{host}/{owner}/{repo}/runs`: Overview of all Runs for the repository with phase, task counts, sample ranges, and success rates.
+- `GET /{host}/{owner}/{repo}/runs/{name}`: Detailed per-task breakdown for a single Run.
+- `GET /{host}/{owner}/{repo}/runs/{name}/tasks/{task}/samples`: Per-task sample list with IDs, scores, preview snippets, latency, and tokens.
+- `GET /{host}/{owner}/{repo}/runs/{name}/tasks/{task}/samples/{sample}`: Sample transcript viewer rendering multi-turn message and event streams as typed text rows.
+- `GET /{host}/{owner}/{repo}/comparisons`: Overview of all Comparisons for the repository with verdicts, $P(\text{improvement})$, and batch progress.
+- `GET /{host}/{owner}/{repo}/comparisons/{name}`: Complete paired comparison table mirroring the PR comment layout, plus per-task CI-width-vs-n history chart and stopping rule decision table recomputed from the stored comparison artifact.
+- `GET /{host}/{owner}/{repo}/pulls`: Overview table of pull requests derived from webhook-created Comparisons, grouped by repository and PR number with latest verdict, samples run, batches, and completion time.
+- `GET /{host}/{owner}/{repo}/pulls/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression.
+- `GET /{host}/{owner}/{repo}/series`: Main-branch series list for the repository.
+- `GET /{host}/{owner}/{repo}/series/{branch}`: Main-branch progression series chart with confidence interval bands and per-task rates over time.
+
+Legacy resource-first routes (`/runs/{namespace}/{name}`, `/comparisons/{namespace}/{name}`, `/pulls/{repohash}/{number}`, `/series/{repohash}/{branch}`) issue 302 redirects to their repository-scoped equivalents upon resolving the object.
 
 The UI loads `artifactBucket` and `artifactDir` configuration from `eval-runner-config` at startup, connecting to the configured `ArtifactSink` (GCS using Application Default Credentials, or a local filesystem directory). An in-process LRU cache (bounded by byte size and TTL) caches immutable Inspect evaluation logs across page requests.
 

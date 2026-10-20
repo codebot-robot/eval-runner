@@ -253,12 +253,20 @@ kubectl -n eval-runner port-forward svc/eval-runner-ui 8080:80
 ```
 
 Then open your browser:
-- `http://localhost:8080/pulls`: view all pull requests derived from Comparisons, grouped by repository and PR number with latest verdicts, samples, batches, and completion time.
-- `http://localhost:8080/pulls/<repohash>/<number>`: view verdict history across pushes for a pull request.
-- `http://localhost:8080/runs`: view all Runs in the namespace with their phase, task completion, sample counts, and rates.
-- `http://localhost:8080/runs/<namespace>/<name>`: view detailed Run statistics with per-task rates, 95% CI bars against a 0–1 axis, sample counts, estimation method, and artifact pointers.
-- `http://localhost:8080/comparisons/<namespace>/<name>`: view paired comparison results in the PR-comment table shape with Δ CI bars drawn against a zero line, verdict chip, P(improvement), and base/candidate commits. The top of the page shows the Quality, Tokens and Cost changes between the two Runs, `status.message` in a Reason panel, and a Regressed tasks table (base → candidate rate, Δ, and 95% CI) when any task is labeled `regressed`. A message with line breaks renders as a headline (its first line) followed by blocks: blank lines separate blocks, consecutive `- ` lines form a list, a line ending in `:` directly above a list is its heading, other lines keep their line breaks, and `http(s)` URLs become links. A message without line breaks renders as one block.
-- `http://localhost:8080/comparisons`: view all Comparisons in the namespace. Each row shows the completion time in UTC, a reason line under the verdict (the first line of `status.message`, or for a `REGRESSED` Comparison without a message, the regressed tasks with the most negative Δ), and the Quality, Tokens and Cost changes between its two Runs. Comparisons labeled `evalrunner.gke-labs.dev/vs-baseline: "true"` or `evalrunner.gke-labs.dev/vs-previous: "true"` are grouped into one row per candidate Run with side-by-side "vs baseline" and "vs previous" cells, ordered by candidate Run creation time; `?kind=baseline` or `?kind=previous` shows one kind only.
+- `http://localhost:8080/`: repository index listing all known repositories across Runs and Comparisons in the namespace with their run and comparison counts.
+- `http://localhost:8080/<host>/<owner>/<repo>`: repository home page and Overview tab.
+- `http://localhost:8080/<host>/<owner>/<repo>/runs`: view all Runs for the repository with their phase, task completion, sample counts, and rates.
+- `http://localhost:8080/<host>/<owner>/<repo>/runs/<name>`: view detailed Run statistics with per-task rates, 95% CI bars against a 0–1 axis, sample counts, estimation method, and artifact pointers.
+- `http://localhost:8080/<host>/<owner>/<repo>/runs/<name>/tasks/<task>/samples`: per-task sample list with scores, preview snippets, latency, and token counts.
+- `http://localhost:8080/<host>/<owner>/<repo>/runs/<name>/tasks/<task>/samples/<sample>`: sample transcript viewer rendering multi-turn message and event streams.
+- `http://localhost:8080/<host>/<owner>/<repo>/comparisons`: view all Comparisons for the repository. Each row shows the completion time in UTC, a reason line under the verdict, and Quality, Tokens and Cost changes between its two Runs. Candidate groups support side-by-side "vs baseline" and "vs previous" views.
+- `http://localhost:8080/<host>/<owner>/<repo>/comparisons/<name>`: view paired comparison results in the PR-comment table shape with Δ CI bars drawn against a zero line, verdict chip, P(improvement), base/candidate commits, reason panel, and structured regressed tasks.
+- `http://localhost:8080/<host>/<owner>/<repo>/pulls`: view all pull requests for the repository with latest verdicts, samples, batches, and completion time.
+- `http://localhost:8080/<host>/<owner>/<repo>/pulls/<number>`: view verdict history across pushes for a pull request.
+- `http://localhost:8080/<host>/<owner>/<repo>/series`: view main-branch progression series for the repository.
+- `http://localhost:8080/<host>/<owner>/<repo>/series/<branch>`: view the main-branch success-rate progression chart for a specific branch.
+
+Legacy resource-first routes (`/runs/<ns>/<name>`, `/comparisons/<ns>/<name>`, `/pulls/<repohash>/<number>`, `/series/<repohash>/<branch>`) automatically issue a 302 redirect to the repository-scoped URL after resolving the object.
 
 #### Running the UI Locally
 
