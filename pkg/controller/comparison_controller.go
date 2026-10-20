@@ -34,6 +34,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -625,6 +626,21 @@ func (r *ComparisonReconciler) reportToGitHub(
 
 func isTerminalRunPhase(phase v1alpha1.RunPhase) bool {
 	return phase == v1alpha1.RunPhaseCompleted || phase == v1alpha1.RunPhaseFailed
+}
+
+func isTerminalComparisonPhase(phase v1alpha1.ComparisonPhase) bool {
+	return phase == v1alpha1.ComparisonPhaseCompleted
+}
+
+func (r *ComparisonReconciler) comparisonAge(comp *v1alpha1.Comparison) (time.Duration, bool) {
+	referenceTime := comp.CreationTimestamp.Time
+	if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
+		referenceTime = comp.Status.CompletionTime.Time
+	}
+	if referenceTime.IsZero() {
+		return 0, false
+	}
+	return r.now().Sub(referenceTime), true
 }
 
 // SetupWithManager sets up the controller with the Manager and watches Runs.
@@ -1314,19 +1330,68 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	// Check TTL expiration for completed comparisons
 	if r.ComparisonTTL > 0 && comp.Status.Phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
-		referenceTime := comp.CreationTimestamp.Time
-		if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
-			referenceTime = comp.Status.CompletionTime.Time
-		}
-		if !referenceTime.IsZero() {
-			age := r.now().Sub(referenceTime)
-			if age >= r.ComparisonTTL {
-				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
-				if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
-					return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
-				}
-				return ctrl.Result{}, nil
+		if age, ok := r.comparisonAge(&comp); ok && age >= r.ComparisonTTL {
+			logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
+			if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
 			}
+			return ctrl.Result{}, nil
+		}
+	}
+
+	if isTerminalComparisonPhase(comp.Status.Phase) {
+		// If extra samples were requested (e.g. via /eval more), the comparison has work
+		// to evaluate and is no longer terminal; proceed to batch execution.
+		if comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied {
+			// Check if GitHub reporting is still pending for this terminal comparison.
+			// Only skip if reporting is disabled or a permanent failure message was recorded.
+			needsReporting := comp.Spec.PullRequest != nil &&
+				(comp.Status.Reporting == nil || comp.Status.Reporting.Message == "")
+			if needsReporting {
+				var bRun, cRun v1alpha1.Run
+				baseErr := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Baseline.Run}, &bRun)
+				candErr := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Candidate.Run}, &cRun)
+				if baseErr == nil && candErr == nil {
+					prevReporting := comp.Status.Reporting.DeepCopy()
+					if err := r.reportToGitHub(ctx, &comp, &bRun, &cRun); err != nil {
+						return ctrl.Result{}, err
+					}
+					if !equality.Semantic.DeepEqual(prevReporting, comp.Status.Reporting) {
+						reportingStatus := comp.Status.Reporting.DeepCopy()
+						key := types.NamespacedName{Namespace: comp.Namespace, Name: comp.Name}
+						if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+							var cur v1alpha1.Comparison
+							if err := r.Get(ctx, key, &cur); err != nil {
+								return err
+							}
+							cur.Status.Reporting = reportingStatus
+							return r.Status().Update(ctx, &cur)
+						}); err != nil {
+							return ctrl.Result{}, fmt.Errorf("failed to update reporting status for comparison %s: %w", comp.Name, err)
+						}
+					}
+				} else {
+					if baseErr != nil && !apierrors.IsNotFound(baseErr) {
+						return ctrl.Result{}, fmt.Errorf("failed to get baseline run %s: %w", comp.Spec.Baseline.Run, baseErr)
+					}
+					if candErr != nil && !apierrors.IsNotFound(candErr) {
+						return ctrl.Result{}, fmt.Errorf("failed to get candidate run %s: %w", comp.Spec.Candidate.Run, candErr)
+					}
+				}
+			}
+
+			var result ctrl.Result
+			if r.ComparisonTTL > 0 && comp.Status.Phase == v1alpha1.ComparisonPhaseCompleted {
+				if age, ok := r.comparisonAge(&comp); ok && age < r.ComparisonTTL {
+					result.RequeueAfter = r.ComparisonTTL - age
+				}
+			}
+			if wait, hasPending := r.earliestPendingCommandWait(&comp); hasPending {
+				if result.RequeueAfter == 0 || wait < result.RequeueAfter {
+					result.RequeueAfter = wait
+				}
+			}
+			return result, nil
 		}
 	}
 
@@ -1784,6 +1849,19 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					mismatchMsg = fmt.Sprintf("baseline log path %q does not match commit prefix %q", baseTask.LogPath, basePrefix)
 				}
 				logger.Error(nil, mismatchMsg, "task", taskID)
+				if isTerminalComparisonPhase(comp.Status.Phase) {
+					if comp.Status.Message != mismatchMsg || comp.Status.ExtraSamplesApplied < comp.Spec.ExtraSamples {
+						if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
+							status.Message = mismatchMsg
+							if status.ExtraSamplesApplied < comp.Spec.ExtraSamples {
+								status.ExtraSamplesApplied = comp.Spec.ExtraSamples
+							}
+						}); statusErr != nil {
+							logger.Error(statusErr, "failed to record prefix mismatch in terminal comparison status", "task", taskID)
+						}
+					}
+					return ctrl.Result{}, nil
+				}
 				err := fmt.Errorf("%s", mismatchMsg)
 				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 					status.Message = mismatchMsg
@@ -2702,12 +2780,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	if r.ComparisonTTL > 0 && phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
-		referenceTime := comp.CreationTimestamp.Time
-		if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
-			referenceTime = comp.Status.CompletionTime.Time
-		}
-		if !referenceTime.IsZero() {
-			age := r.now().Sub(referenceTime)
+		if age, ok := r.comparisonAge(&comp); ok {
 			if age >= r.ComparisonTTL {
 				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
 				if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
