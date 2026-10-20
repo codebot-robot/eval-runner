@@ -790,17 +790,20 @@ func TestProcessPush_DefaultBranch(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	cfg := Config{
-		Namespace:    "eval-runner",
-		DefaultModel: "google/gemini-flash",
-		Client:       cl,
+		Namespace:     "eval-runner",
+		DefaultModel:  "google/gemini-flash",
+		DefaultCohort: "test-cohort",
+		Client:        cl,
 	}
 	worker := NewWorkerPool(cfg)
 	ctx := t.Context()
 
 	item := &PushWorkItem{
-		CommitSHA: "9876543210abcdef9876543210abcdef98765432",
-		CloneURL:  "https://github.com/gke-labs/eval-runner.git",
-		Repo:      "gke-labs/eval-runner",
+		CommitSHA:  "9876543210abcdef9876543210abcdef98765432",
+		CloneURL:   "https://github.com/gke-labs/eval-runner.git",
+		Repo:       "gke-labs/eval-runner",
+		Branch:     "main",
+		CommitTime: "2026-10-20T04:12:00Z",
 	}
 
 	if err := worker.ProcessPush(ctx, item); err != nil {
@@ -818,10 +821,77 @@ func TestProcessPush_DefaultBranch(t *testing.T) {
 	if baseRun.Spec.Model != "google/gemini-flash" {
 		t.Errorf("expected model google/gemini-flash, got %s", baseRun.Spec.Model)
 	}
+	if baseRun.Labels[LabelBranch] != "main" {
+		t.Errorf("expected branch label 'main', got %q", baseRun.Labels[LabelBranch])
+	}
+	if baseRun.Annotations[AnnotationCommitTime] != "2026-10-20T04:12:00Z" {
+		t.Errorf("expected commit-time annotation '2026-10-20T04:12:00Z', got %q", baseRun.Annotations[AnnotationCommitTime])
+	}
+	if baseRun.Spec.Cohort != "test-cohort" {
+		t.Errorf("expected spec.cohort 'test-cohort', got %q", baseRun.Spec.Cohort)
+	}
 
 	// Redelivery should be idempotent
 	if err := worker.ProcessPush(ctx, item); err != nil {
 		t.Fatalf("ProcessPush redelivery failed: %v", err)
+	}
+}
+
+func TestHandler_PushEvent_RecordedFixture(t *testing.T) {
+	secretKey := []byte("push-secret-key")
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := Config{
+		Namespace:           "eval-runner",
+		DefaultModel:        "google/gemini-flash",
+		DefaultCohort:       "gold-cohort",
+		StaticWebhookSecret: secretKey,
+		WebhookRepositories: []string{"gke-labs/eval-runner"},
+		Client:              cl,
+	}
+	server := NewServer(cfg)
+	server.Start()
+	defer server.Stop()
+
+	payload, err := os.ReadFile("testdata/push.json")
+	if err != nil {
+		t.Fatalf("failed to read testdata/push.json: %v", err)
+	}
+
+	sig := computeSignature(payload, secretKey)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	req.Header.Set(HeaderGitHubEvent, EventPush)
+	req.Header.Set(HeaderHubSignature256, sig)
+	rr := httptest.NewRecorder()
+
+	server.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Wait for worker processing
+	var baseRun v1alpha1.Run
+	baseRunName := "base-c0ffee1"
+	ctx := t.Context()
+	for i := 0; i < 50; i++ {
+		err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: baseRunName}, &baseRun)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if baseRun.Name == "" {
+		t.Fatalf("timed out waiting for warm baseline run %s", baseRunName)
+	}
+	if baseRun.Labels[LabelBranch] != "main" {
+		t.Errorf("expected branch label 'main', got %q", baseRun.Labels[LabelBranch])
+	}
+	if baseRun.Annotations[AnnotationCommitTime] != "2026-10-20T04:12:00Z" {
+		t.Errorf("expected commit-time annotation '2026-10-20T04:12:00Z', got %q", baseRun.Annotations[AnnotationCommitTime])
+	}
+	if baseRun.Spec.Cohort != "gold-cohort" {
+		t.Errorf("expected spec.cohort 'gold-cohort', got %q", baseRun.Spec.Cohort)
 	}
 }
 
@@ -1176,6 +1246,7 @@ func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
 		Data: map[string]string{
 			ConfigMapKeyDefaultBatchSize:         "16",
 			ConfigMapKeyDefaultMaxSamplesPerTask: "48",
+			ConfigMapKeyDefaultCohort:            "suite-2026",
 		},
 	}
 
@@ -1188,6 +1259,9 @@ func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
 	}
 	if cfg.DefaultMaxSamplesPerTask != 48 {
 		t.Errorf("expected DefaultMaxSamplesPerTask 48, got %d", cfg.DefaultMaxSamplesPerTask)
+	}
+	if cfg.DefaultCohort != "suite-2026" {
+		t.Errorf("expected DefaultCohort 'suite-2026', got %q", cfg.DefaultCohort)
 	}
 
 	// Malformed batch size

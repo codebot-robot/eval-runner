@@ -381,12 +381,24 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 		cloneURL := BuildCloneURL(repoOwner, repoName)
 
+		var commitTime string
+		if event.HeadCommit != nil && event.HeadCommit.Timestamp != "" {
+			t, err := time.Parse(time.RFC3339, event.HeadCommit.Timestamp)
+			if err != nil {
+				log.Printf("ignoring unparseable head_commit timestamp %q: %v", event.HeadCommit.Timestamp, err)
+			} else {
+				commitTime = t.UTC().Format(time.RFC3339)
+			}
+		}
+
 		item := WorkItem{
 			Event: EventPush,
 			Push: &PushWorkItem{
-				CommitSHA: commitSHA,
-				CloneURL:  cloneURL,
-				Repo:      repoFullName,
+				CommitSHA:  commitSHA,
+				CloneURL:   cloneURL,
+				Repo:       repoFullName,
+				Branch:     defaultBranch,
+				CommitTime: commitTime,
 			},
 		}
 		if !s.worker.Enqueue(item) {

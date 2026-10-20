@@ -409,21 +409,39 @@ func (wp *WorkerPool) ProcessPush(ctx context.Context, item *PushWorkItem) error
 	baseRunName := BaselineRunName(item.Repo, commitSHA, wp.cfg.IsMultiRepo())
 	sanitizedRepo := SanitizeLabelValue(item.Repo)
 
+	branch := item.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	sanitizedBranch := SanitizeLabelValue(branch)
+
+	labels := map[string]string{
+		LabelRepo:    sanitizedRepo,
+		LabelHeadSHA: commitSHA,
+		LabelBranch:  sanitizedBranch,
+	}
+
+	var annotations map[string]string
+	if item.CommitTime != "" {
+		annotations = map[string]string{
+			AnnotationCommitTime: item.CommitTime,
+		}
+	}
+
 	baseRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      baseRunName,
-			Namespace: ns,
-			Labels: map[string]string{
-				LabelRepo:    sanitizedRepo,
-				LabelHeadSHA: commitSHA,
-			},
+			Name:        baseRunName,
+			Namespace:   ns,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: v1alpha1.RunSpec{
 			Repo: v1alpha1.RepoSpec{
 				URL:    item.CloneURL,
 				Commit: commitSHA,
 			},
-			Model: wp.cfg.DefaultModel,
+			Model:  wp.cfg.DefaultModel,
+			Cohort: wp.cfg.DefaultCohort,
 			SampleRange: &v1alpha1.SampleRange{
 				Start: 1,
 				End:   wp.cfg.DefaultBatchSize,
@@ -596,7 +614,7 @@ func (wp *WorkerPool) createOrUpdateRun(ctx context.Context, run *v1alpha1.Run) 
 		}
 	}
 
-	// Run already exists. Only reconcile labels (F2). Do not rewrite spec.
+	// Run already exists. Only reconcile labels and annotations (F2). Do not rewrite spec.
 	needsUpdate := false
 	if existing.Labels == nil {
 		existing.Labels = make(map[string]string)
@@ -605,6 +623,17 @@ func (wp *WorkerPool) createOrUpdateRun(ctx context.Context, run *v1alpha1.Run) 
 		if existing.Labels[k] != v {
 			existing.Labels[k] = v
 			needsUpdate = true
+		}
+	}
+	if len(run.Annotations) > 0 {
+		if existing.Annotations == nil {
+			existing.Annotations = make(map[string]string)
+		}
+		for k, v := range run.Annotations {
+			if existing.Annotations[k] != v {
+				existing.Annotations[k] = v
+				needsUpdate = true
+			}
 		}
 	}
 

@@ -65,6 +65,9 @@ const (
 	// ConfigMapKeyDefaultMaxSamplesPerTask is the ConfigMap key for the default maximum samples per task.
 	ConfigMapKeyDefaultMaxSamplesPerTask = configkeys.ConfigMapKeyDefaultMaxSamplesPerTask
 
+	// ConfigMapKeyDefaultCohort is the ConfigMap key for the default cohort.
+	ConfigMapKeyDefaultCohort = configkeys.ConfigMapKeyDefaultCohort
+
 	// ConfigMapKeyGitHubWebhookSecret is the ConfigMap key for the webhook secret name.
 	ConfigMapKeyGitHubWebhookSecret = configkeys.ConfigMapKeyGitHubWebhookSecret
 
@@ -83,6 +86,7 @@ type Config struct {
 	ListenAddr               string
 	GitHubWebhookSecret      string
 	DefaultModel             string
+	DefaultCohort            string
 	DefaultLimit             *int
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
@@ -104,6 +108,7 @@ type RawWebhookFlags struct {
 	ListenAddr               string
 	GitHubWebhookSecret      string
 	DefaultModel             string
+	DefaultCohort            string
 	DefaultLimit             *int
 	DefaultBatchSize         *int
 	DefaultMaxSamplesPerTask *int
@@ -129,6 +134,7 @@ func DefaultConfig() Config {
 		ListenAddr:               DefaultListenAddr,
 		GitHubWebhookSecret:      DefaultGitHubWebhookSecret,
 		DefaultModel:             "",
+		DefaultCohort:            "",
 		DefaultLimit:             nil,
 		DefaultBatchSize:         DefaultBatchSize,
 		DefaultMaxSamplesPerTask: DefaultMaxSamplesPerTask,
@@ -197,6 +203,16 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 				}
 			}
 		}
+		if val, ok := cm.Data[ConfigMapKeyDefaultCohort]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.DefaultCohort = ""
+				} else {
+					cfg.DefaultCohort = trimmed
+				}
+			}
+		}
 		if val, ok := cm.Data[ConfigMapKeyDefaultLimit]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
@@ -244,6 +260,13 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 			cfg.DefaultModel = ""
 		} else {
 			cfg.DefaultModel = flags.DefaultModel
+		}
+	}
+	if flags.IsExplicit("default-cohort") {
+		if strings.EqualFold(flags.DefaultCohort, ConfigSentinelDisabled) {
+			cfg.DefaultCohort = ""
+		} else {
+			cfg.DefaultCohort = flags.DefaultCohort
 		}
 	}
 	if flags.IsExplicit("default-limit") && flags.DefaultLimit != nil {

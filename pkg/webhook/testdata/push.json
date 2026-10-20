@@ -1,0 +1,19 @@
+{
+  "ref": "refs/heads/main",
+  "before": "bbbbbbb222222222222222222222222222222222",
+  "after": "c0ffee1111111111111111111111111111111111",
+  "deleted": false,
+  "head_commit": {
+    "id": "c0ffee1111111111111111111111111111111111",
+    "timestamp": "2026-10-20T04:12:00Z"
+  },
+  "repository": {
+    "name": "eval-runner",
+    "full_name": "gke-labs/eval-runner",
+    "clone_url": "https://github.com/gke-labs/eval-runner.git",
+    "default_branch": "main",
+    "owner": {
+      "login": "gke-labs"
+    }
+  }
+}

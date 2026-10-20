@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/pmezard/go-difflib/difflib"
@@ -1771,4 +1772,128 @@ func TestComparisonActions(t *testing.T) {
 			t.Errorf("unexpected action: %+v", actions[0])
 		}
 	})
+}
+
+func sampleSeriesListView() SeriesListView {
+	return SeriesListView{
+		ActiveTab: NavTabSeries,
+		Namespace: "eval-runner",
+		Series: []SeriesListRow{
+			{
+				Repository: "gke-labs/eval-runner",
+				RepoHash:   "2cc24c2",
+				Branch:     "main",
+				RunCount:   42,
+				Link:       "/series/2cc24c2/main",
+			},
+		},
+		TotalCount: 1,
+	}
+}
+
+func sampleSeriesDetailView() SeriesDetailView {
+	rate1 := 0.75
+	rate2 := 0.85
+	cost1 := 0.05
+	cost2 := 0.06
+	t1, _ := time.Parse(time.RFC3339, "2026-10-20T01:00:00Z")
+	t2, _ := time.Parse(time.RFC3339, "2026-10-20T02:00:00Z")
+
+	items := []SeriesItem{
+		{
+			CommitSHA:      "1111111222222233333334444444555555556666",
+			CommitSHAShort: "1111111",
+			CommitTime:     t1,
+			CommitTimeStr:  "2026-10-20T01:00:00Z",
+			RunName:        "base-1111111",
+			Namespace:      "eval-runner",
+			Phase:          v1alpha1.TaskPhaseCompleted,
+			PhaseChip:      "good",
+			Samples:        "10",
+			RateStr:        "0.75",
+			CIStr:          "[0.60, 0.88]",
+			TokensStr:      "1,200",
+			CostStr:        "$0.05",
+			RunLink:        "/runs/eval-runner/base-1111111",
+			HasPoint:       true,
+			SuccessRate:    &rate1,
+			CI: &v1alpha1.ConfidenceInterval{
+				Lower:      0.60,
+				Upper:      0.88,
+				Confidence: 0.95,
+				Method:     "wilson",
+			},
+		},
+		{
+			CommitSHA:      "2222222333333344444445555555666666667777",
+			CommitSHAShort: "2222222",
+			CommitTime:     t2,
+			CommitTimeStr:  "2026-10-20T02:00:00Z",
+			RunName:        "base-2222222",
+			Namespace:      "eval-runner",
+			Phase:          v1alpha1.TaskPhaseCompleted,
+			PhaseChip:      "good",
+			Samples:        "10",
+			RateStr:        "0.85",
+			CIStr:          "[0.70, 0.94]",
+			TokensStr:      "1,300",
+			CostStr:        "$0.06",
+			RunLink:        "/runs/eval-runner/base-2222222",
+			HasPoint:       true,
+			SuccessRate:    &rate2,
+			CI: &v1alpha1.ConfidenceInterval{
+				Lower:      0.70,
+				Upper:      0.94,
+				Confidence: 0.95,
+				Method:     "wilson",
+			},
+		},
+	}
+	_ = cost1
+	_ = cost2
+
+	svg := BuildSeriesSVG(items)
+
+	return SeriesDetailView{
+		ActiveTab:    NavTabSeries,
+		Namespace:    "eval-runner",
+		Repository:   "gke-labs/eval-runner",
+		RepoHash:     "2cc24c2",
+		Branch:       "main",
+		SelectedTask: "triage/runbook_lookup",
+		Tasks: []SeriesTaskLink{
+			{
+				ID:     "triage/runbook_lookup",
+				Link:   "/series/2cc24c2/main?task=triage%2Frunbook_lookup",
+				Active: true,
+			},
+		},
+		N:         50,
+		SVG:       svg,
+		Items:     items,
+		TotalRuns: 2,
+		BackLink:  "/series",
+	}
+}
+
+func TestTemplateRenderingSeriesListGolden(t *testing.T) {
+	view := sampleSeriesListView()
+
+	var buf bytes.Buffer
+	if err := tmplSeriesList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute series list template: %v", err)
+	}
+
+	assertGolden(t, "series_list.golden.html", buf.String())
+}
+
+func TestTemplateRenderingSeriesDetailGolden(t *testing.T) {
+	view := sampleSeriesDetailView()
+
+	var buf bytes.Buffer
+	if err := tmplSeriesDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute series detail template: %v", err)
+	}
+
+	assertGolden(t, "series_detail.golden.html", buf.String())
 }

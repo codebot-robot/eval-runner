@@ -52,6 +52,7 @@ func main() {
 	var configMapName string
 	var webhookSecretName string
 	var defaultModel string
+	var defaultCohort string
 	var defaultLimit int
 	var defaultBatchSize int
 	var defaultMaxSamplesPerTask int
@@ -64,6 +65,7 @@ func main() {
 	flag.StringVar(&configMapName, "configmap-name", webhook.DefaultConfigMapName, "Name of ConfigMap containing cluster settings")
 	flag.StringVar(&webhookSecretName, "github-webhook-secret", webhook.DefaultGitHubWebhookSecret, "Name of Secret containing GitHub webhook secret")
 	flag.StringVar(&defaultModel, "default-model", "", "Default model identifier for created Runs (e.g. mockllm/model)")
+	flag.StringVar(&defaultCohort, "default-cohort", "", "Default cohort identifier for created Runs")
 	flag.IntVar(&defaultLimit, "default-limit", 0, "Default sample limit for created Runs (0 = unlimited)")
 	flag.IntVar(&defaultBatchSize, "default-batch-size", webhook.DefaultBatchSize, "Default batch size for paired adaptive sampling")
 	flag.IntVar(&defaultMaxSamplesPerTask, "default-max-samples-per-task", webhook.DefaultMaxSamplesPerTask, "Default maximum samples per task across batches")
@@ -96,6 +98,7 @@ func main() {
 		ListenAddr:               listenAddr,
 		GitHubWebhookSecret:      webhookSecretName,
 		DefaultModel:             defaultModel,
+		DefaultCohort:            defaultCohort,
 		DefaultLimit:             limitPtr,
 		DefaultBatchSize:         batchSizePtr,
 		DefaultMaxSamplesPerTask: maxSamplesPtr,

@@ -114,6 +114,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyDefaultLimit:             {},
 	configkeys.ConfigMapKeyDefaultBatchSize:         {},
 	configkeys.ConfigMapKeyDefaultMaxSamplesPerTask: {},
+	configkeys.ConfigMapKeyDefaultCohort:            {},
 	configkeys.ConfigMapKeyCommandUsers:             {},
 }
 

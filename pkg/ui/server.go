@@ -166,6 +166,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /comparisons/{namespace}/{name}", s.handleComparisonDetail)
 	s.mux.HandleFunc("GET /pulls", s.handlePullsList)
 	s.mux.HandleFunc("GET /pulls/{repohash}/{number}", s.handlePullDetail)
+	s.mux.HandleFunc("GET /series", s.handleSeriesList)
+	s.mux.HandleFunc("GET /series/{repohash}/{branch...}", s.handleSeriesDetail)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -1013,6 +1015,419 @@ func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns st
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplPullDetail.Execute(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
+}
+
+func sanitizeBranchLabel(val string) string {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return ""
+	}
+	var sb strings.Builder
+	for _, r := range val {
+		switch {
+		case r == '/':
+			sb.WriteRune('_')
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.':
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune('_')
+		}
+	}
+	return sb.String()
+}
+
+func runRepository(run *v1alpha1.Run) string {
+	if run == nil {
+		return ""
+	}
+	if run.Spec.Repo.URL != "" {
+		cleaned := CleanRepo(run.Spec.Repo.URL)
+		if cleaned != "" {
+			return cleaned
+		}
+	}
+	if labelVal, ok := run.Labels["evalrunner.gke-labs.dev/repo"]; ok && labelVal != "" {
+		return strings.ReplaceAll(labelVal, "_", "/")
+	}
+	return ""
+}
+
+func runCommitTime(run *v1alpha1.Run) (time.Time, bool) {
+	if run.Annotations != nil {
+		if raw, ok := run.Annotations["evalrunner.gke-labs.dev/commit-time"]; ok && raw != "" {
+			t, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return run.CreationTimestamp.Time, true
+			}
+			return t, false
+		}
+	}
+	return run.CreationTimestamp.Time, true
+}
+
+func (s *Server) handleSeriesList(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
+
+	var runList v1alpha1.RunList
+	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+
+	type groupKey struct {
+		repo   string
+		branch string
+	}
+	counts := make(map[groupKey]int)
+	repoHashes := make(map[string]string)
+
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		if !strings.HasPrefix(run.Name, "base-") {
+			continue
+		}
+		branch := run.Labels["evalrunner.gke-labs.dev/branch"]
+		if branch == "" {
+			continue
+		}
+		if cohortFilter != "" && run.Spec.Cohort != cohortFilter {
+			continue
+		}
+
+		repo := runRepository(run)
+		if repo == "" {
+			continue
+		}
+
+		gk := groupKey{repo: repo, branch: branch}
+		counts[gk]++
+		repoHashes[repo] = RepoHash(repo)
+	}
+
+	var seriesRows []SeriesListRow
+	for gk, count := range counts {
+		rHash := repoHashes[gk.repo]
+		link := fmt.Sprintf("/series/%s/%s", url.PathEscape(rHash), url.PathEscape(gk.branch))
+		q := url.Values{}
+		if ns != s.cfg.DefaultNamespace {
+			q.Set("namespace", ns)
+		}
+		if cohortFilter != "" {
+			q.Set("cohort", cohortFilter)
+		}
+		if len(q) > 0 {
+			link += "?" + q.Encode()
+		}
+
+		seriesRows = append(seriesRows, SeriesListRow{
+			Repository: gk.repo,
+			RepoHash:   rHash,
+			Branch:     gk.branch,
+			RunCount:   count,
+			Link:       link,
+		})
+	}
+
+	sort.Slice(seriesRows, func(i, j int) bool {
+		if seriesRows[i].Repository != seriesRows[j].Repository {
+			return seriesRows[i].Repository < seriesRows[j].Repository
+		}
+		return seriesRows[i].Branch < seriesRows[j].Branch
+	})
+
+	view := SeriesListView{
+		ActiveTab:  NavTabSeries,
+		Namespace:  ns,
+		Cohort:     cohortFilter,
+		Series:     seriesRows,
+		TotalCount: len(seriesRows),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := RenderSeriesList(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
+}
+
+func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	repoOrHash := r.PathValue("repohash")
+	if !isValidRepoHash(repoOrHash) {
+		httpError(w, http.StatusBadRequest, "invalid repo hash", fmt.Sprintf("invalid repo hash: %q", repoOrHash), nil)
+		return
+	}
+
+	branch := r.PathValue("branch")
+	if branch == "" {
+		httpError(w, http.StatusBadRequest, "invalid branch", "empty branch in path", nil)
+		return
+	}
+
+	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
+
+	n := 50
+	if nStr := r.URL.Query().Get("n"); nStr != "" {
+		if parsedN, err := strconv.Atoi(nStr); err == nil && parsedN > 0 {
+			n = parsedN
+		}
+	}
+	if n > 50 {
+		n = 50
+	}
+
+	taskFilter := strings.TrimSpace(r.URL.Query().Get("task"))
+
+	var runList v1alpha1.RunList
+	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+
+	type runWithTime struct {
+		run        *v1alpha1.Run
+		commitTime time.Time
+		isFallback bool
+	}
+
+	var matched []runWithTime
+	var repoDisplay string
+	matchedRepoHash := repoOrHash
+
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		if !strings.HasPrefix(run.Name, "base-") {
+			continue
+		}
+		runBranch := run.Labels["evalrunner.gke-labs.dev/branch"]
+		if runBranch == "" {
+			continue
+		}
+		if runBranch != branch && runBranch != sanitizeBranchLabel(branch) {
+			continue
+		}
+		if cohortFilter != "" && run.Spec.Cohort != cohortFilter {
+			continue
+		}
+
+		repo := runRepository(run)
+		h := RepoHash(repo)
+		if !strings.EqualFold(h, repoOrHash) && !strings.EqualFold(repo, repoOrHash) {
+			continue
+		}
+		if repoDisplay == "" {
+			repoDisplay = repo
+			matchedRepoHash = h
+		}
+
+		cTime, fallback := runCommitTime(run)
+		matched = append(matched, runWithTime{
+			run:        run,
+			commitTime: cTime,
+			isFallback: fallback,
+		})
+	}
+
+	if len(matched) == 0 {
+		httpError(w, http.StatusNotFound, "series not found", fmt.Sprintf("no runs for repo %s branch %s in namespace %s", repoOrHash, branch, ns), nil)
+		return
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].commitTime.Equal(matched[j].commitTime) {
+			return matched[i].commitTime.Before(matched[j].commitTime)
+		}
+		return matched[i].run.Name < matched[j].run.Name
+	})
+
+	totalRuns := len(matched)
+
+	if len(matched) > n {
+		matched = matched[len(matched)-n:]
+	}
+
+	orderedByCreationTime := false
+	for _, m := range matched {
+		if m.isFallback {
+			orderedByCreationTime = true
+			break
+		}
+	}
+	var orderedNote string
+	if orderedByCreationTime {
+		orderedNote = "ordered by creation time"
+	}
+
+	taskSet := make(map[string]bool)
+	for _, m := range matched {
+		for _, t := range m.run.Status.Tasks {
+			if t.ID != "" {
+				taskSet[t.ID] = true
+			}
+		}
+		for _, tid := range m.run.Spec.Tasks {
+			if tid != "" {
+				taskSet[tid] = true
+			}
+		}
+	}
+
+	var allTaskIDs []string
+	for tid := range taskSet {
+		allTaskIDs = append(allTaskIDs, tid)
+	}
+	sort.Strings(allTaskIDs)
+
+	selectedTask := taskFilter
+	if selectedTask == "" && len(allTaskIDs) > 0 {
+		selectedTask = allTaskIDs[0]
+	}
+
+	var taskLinks []SeriesTaskLink
+	for _, tid := range allTaskIDs {
+		tParams := url.Values{}
+		tParams.Set("task", tid)
+		if n != 50 {
+			tParams.Set("n", strconv.Itoa(n))
+		}
+		if ns != s.cfg.DefaultNamespace {
+			tParams.Set("namespace", ns)
+		}
+		if cohortFilter != "" {
+			tParams.Set("cohort", cohortFilter)
+		}
+		link := fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), tParams.Encode())
+		taskLinks = append(taskLinks, SeriesTaskLink{
+			ID:     tid,
+			Link:   link,
+			Active: tid == selectedTask,
+		})
+	}
+
+	var items []SeriesItem
+	for _, m := range matched {
+		run := m.run
+		commit := run.Spec.Repo.Commit
+		if commit == "" {
+			commit = run.Labels["evalrunner.gke-labs.dev/head-sha"]
+		}
+
+		commitTimeStr := "—"
+		if !m.commitTime.IsZero() {
+			commitTimeStr = m.commitTime.UTC().Format(time.RFC3339)
+		}
+
+		var matchedTask *v1alpha1.TaskStatus
+		for idx := range run.Status.Tasks {
+			if run.Status.Tasks[idx].ID == selectedTask {
+				matchedTask = &run.Status.Tasks[idx]
+				break
+			}
+		}
+
+		item := SeriesItem{
+			CommitSHA:      commit,
+			CommitSHAShort: ShortCommit(commit),
+			CommitTime:     m.commitTime,
+			CommitTimeStr:  commitTimeStr,
+			RunName:        run.Name,
+			Namespace:      run.Namespace,
+			Samples:        "—",
+			RateStr:        "—",
+			CIStr:          "—",
+			TokensStr:      "—",
+			CostStr:        "—",
+			RunLink:        fmt.Sprintf("/runs/%s/%s", run.Namespace, run.Name),
+		}
+
+		if matchedTask != nil && matchedTask.Phase == v1alpha1.TaskPhaseCompleted && matchedTask.SuccessRate != nil {
+			item.HasPoint = true
+			item.SuccessRate = matchedTask.SuccessRate
+			item.CI = matchedTask.SuccessRateCI
+			item.Phase = matchedTask.Phase
+			item.PhaseChip = "good"
+			item.Samples = strconv.Itoa(matchedTask.Samples)
+			item.RateStr = fmt.Sprintf("%.2f", *matchedTask.SuccessRate)
+			if matchedTask.SuccessRateCI != nil {
+				item.CIStr = fmt.Sprintf("[%.2f, %.2f]", matchedTask.SuccessRateCI.Lower, matchedTask.SuccessRateCI.Upper)
+			}
+			if matchedTask.Tokens != nil {
+				item.TokensStr = FormatTokens(matchedTask.Tokens.Total)
+			}
+			if matchedTask.CostUSD != nil {
+				item.CostStr = fmt.Sprintf("$%.2f", *matchedTask.CostUSD)
+			}
+		} else {
+			item.HasPoint = false
+			if matchedTask != nil && matchedTask.Phase != "" {
+				item.Phase = matchedTask.Phase
+				item.PhaseChip = taskPhaseChipClass(matchedTask.Phase)
+				if matchedTask.Samples > 0 {
+					item.Samples = strconv.Itoa(matchedTask.Samples)
+				}
+				if matchedTask.Tokens != nil {
+					item.TokensStr = FormatTokens(matchedTask.Tokens.Total)
+				}
+				if matchedTask.CostUSD != nil {
+					item.CostStr = fmt.Sprintf("$%.2f", *matchedTask.CostUSD)
+				}
+			} else {
+				item.Phase = v1alpha1.TaskPhase(run.Status.Phase)
+				item.PhaseChip = phaseChipClass(run.Status.Phase)
+			}
+		}
+
+		items = append(items, item)
+	}
+
+	svg := BuildSeriesSVG(items)
+
+	backLink := "/series"
+	bParams := url.Values{}
+	if ns != s.cfg.DefaultNamespace {
+		bParams.Set("namespace", ns)
+	}
+	if cohortFilter != "" {
+		bParams.Set("cohort", cohortFilter)
+	}
+	if len(bParams) > 0 {
+		backLink += "?" + bParams.Encode()
+	}
+
+	view := SeriesDetailView{
+		ActiveTab:             NavTabSeries,
+		Namespace:             ns,
+		Repository:            repoDisplay,
+		RepoHash:              matchedRepoHash,
+		Branch:                branch,
+		SelectedTask:          selectedTask,
+		Tasks:                 taskLinks,
+		N:                     n,
+		Cohort:                cohortFilter,
+		OrderedByCreationTime: orderedByCreationTime,
+		OrderedNote:           orderedNote,
+		SVG:                   svg,
+		Items:                 items,
+		TotalRuns:             totalRuns,
+		BackLink:              backLink,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := RenderSeriesDetail(w, view); err != nil {
 		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
 }
