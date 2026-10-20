@@ -242,17 +242,29 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 </style>
 </head>
 <body>
+  
   <header class="header-bar">
     <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <div style="display:flex;align-items:center;gap:8px;font-size:16px">
+        <a href="/" class="header-logo">eval-runner</a>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">github.com</span>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">gke-labs</span>
+        <span style="color:var(--muted)">/</span>
+        <a href="/github.com/gke-labs/eval-runner" class="mono" style="font-weight:600;color:var(--ink)">eval-runner</a>
+      </div>
       <nav class="nav-links">
-        <a href="/pulls" class="nav-link ">Pull Requests</a>
-        <a href="/runs" class="nav-link active">Runs</a>
-        <a href="/comparisons" class="nav-link ">Comparisons</a>
+        <a href="/github.com/gke-labs/eval-runner" class="nav-link ">Overview</a>
+        <a href="/github.com/gke-labs/eval-runner/runs" class="nav-link active">Runs</a>
+        <a href="/github.com/gke-labs/eval-runner/pulls" class="nav-link ">Pull requests</a>
+        <a href="/github.com/gke-labs/eval-runner/comparisons" class="nav-link ">Comparisons</a>
+        <a href="/github.com/gke-labs/eval-runner/series" class="nav-link ">Series</a>
       </nav>
     </div>
     <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
   </header>
+
 
   <main class="container">
     <div class="card">
@@ -261,7 +273,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
           <span class="mono">docs-eval-cand-05ce4d8</span>
           <span class="chip good"><span class="dot"></span>Completed</span>
         </h1>
-        <div style="font-size:13px;color:var(--muted)"><a href="/runs">← Back to Runs</a></div>
+        <div style="font-size:13px;color:var(--muted)"><a href="/github.com/gke-labs/eval-runner/runs">← Back to Runs</a></div>
       </div>
       <div class="card-body">
         <div class="meta-grid">
@@ -348,7 +360,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
               
               <tr>
                 <td class="mono" style="font-weight:600">
-                  <a href="/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples">triage/runbook_lookup</a>
+                  <a href="/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples">triage/runbook_lookup</a>
                 </td>
                 <td><span class="chip good"><span class="dot"></span>Completed</span></td>
                 
@@ -384,7 +396,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
                 <td>
                   
                   
-                  <a href="/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples" class="log-path mono" title="gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json">gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json</a>
+                  <a href="/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples" class="log-path mono" title="gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json">gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json</a>
                   
                   <a href="https://console.cloud.google.com/storage/browser/_details/eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json" target="_blank" rel="noopener noreferrer" title="open in Cloud Storage" style="margin-left:4px">&#8599;</a>
                   

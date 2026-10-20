@@ -242,17 +242,22 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 </style>
 </head>
 <body>
+  
   <header class="header-bar">
     <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <div style="display:flex;align-items:center;gap:8px;font-size:16px">
+        <a href="/" class="header-logo">eval-runner</a>
+      </div>
       <nav class="nav-links">
-        <a href="/pulls" class="nav-link ">Pull Requests</a>
         <a href="/runs" class="nav-link ">Runs</a>
+        <a href="/pulls" class="nav-link ">Pull Requests</a>
         <a href="/comparisons" class="nav-link active">Comparisons</a>
+        <a href="/series" class="nav-link ">Series</a>
       </nav>
     </div>
     <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
   </header>
+
 
   <main class="container">
     <div class="card">

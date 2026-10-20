@@ -15,6 +15,7 @@
 package ui
 
 import (
+	"fmt"
 	"html/template"
 	"io"
 )
@@ -255,6 +256,94 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 .reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
 `
 
+const repoHeaderPartial = `{{ define "repo_header" }}
+  <header class="header-bar">
+    <div class="header-brand">
+      <div style="display:flex;align-items:center;gap:8px;font-size:16px">
+        <a href="{{ repoIndexLink .Namespace }}" class="header-logo">eval-runner</a>
+        {{- if .Repo.Host }}
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">{{ .Repo.Host }}</span>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">{{ .Repo.Owner }}</span>
+        <span style="color:var(--muted)">/</span>
+        <a href="{{ repoLink .Repo "" .Namespace }}" class="mono" style="font-weight:600;color:var(--ink)">{{ .Repo.Name }}</a>
+        {{- end }}
+      </div>
+      <nav class="nav-links">
+        {{- if .Repo.Host }}
+        <a href="{{ repoLink .Repo "" .Namespace }}" class="nav-link {{ if eq .ActiveTab "overview" }}active{{ end }}">Overview</a>
+        <a href="{{ repoLink .Repo "/runs" .Namespace }}" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="{{ repoLink .Repo "/pulls" .Namespace }}" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull requests</a>
+        <a href="{{ repoLink .Repo "/comparisons" .Namespace }}" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+        <a href="{{ repoLink .Repo "/series" .Namespace }}" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
+        {{- else }}
+        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
+        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+        <a href="/series" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
+        {{- end }}
+      </nav>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+{{ end }}`
+
+const repoIndexTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repositories · eval-runner</title>
+  <style>` + baseCSS + `</style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="header-brand">
+      <a href="{{ repoIndexLink .Namespace }}" class="header-logo">eval-runner</a>
+    </div>
+    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+  </header>
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Repositories</h1>
+        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Repository</th>
+              <th>Runs</th>
+              <th>Comparisons</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range .Repositories }}
+            <tr>
+              <td><a href="{{ .Link }}" class="mono" style="font-weight:600">{{ .Repository }}</a></td>
+              <td class="num">{{ .RunsCount }}</td>
+              <td class="num">{{ .ComparisonsCount }}</td>
+              <td><a href="{{ .Link }}" class="mono" style="font-size:13px">view repository →</a></td>
+            </tr>
+            {{ else }}
+            <tr>
+              <td colspan="4" class="empty-state">No repositories found in namespace {{ .Namespace }}.</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+`
+
 const runsListTemplate = `
 <!doctype html>
 <html lang="en">
@@ -265,17 +354,7 @@ const runsListTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -347,17 +426,7 @@ const runDetailTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -366,7 +435,7 @@ const runDetailTemplate = `
           <span class="mono">{{ .Name }}</span>
           <span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span>
         </h1>
-        <div style="font-size:13px;color:var(--muted)"><a href="/runs">← Back to Runs</a></div>
+        <div style="font-size:13px;color:var(--muted)"><a href="{{ repoLink .Repo "/runs" .Namespace }}">← Back to Runs</a></div>
       </div>
       <div class="card-body">
         <div class="meta-grid">
@@ -575,17 +644,7 @@ const comparisonsListTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -671,8 +730,8 @@ const comparisonsListTemplate = `
               <td class="num">{{ .PImprovement }}</td>
               <td class="delta-cell">{{ template "delta_strip" .Deltas }}</td>
               <td class="num">{{ .Tasks }}</td>
-              <td><a href="/runs/{{ .Namespace }}/{{ .BaselineRun }}" class="mono" style="font-size:13px">{{ .BaselineRun }}</a></td>
-              <td><a href="/runs/{{ .Namespace }}/{{ .CandidateRun }}" class="mono" style="font-size:13px">{{ .CandidateRun }}</a></td>
+              <td><a href="{{ runLink $.Repo .BaselineRun $.Namespace }}" class="mono" style="font-size:13px">{{ .BaselineRun }}</a></td>
+              <td><a href="{{ runLink $.Repo .CandidateRun $.Namespace }}" class="mono" style="font-size:13px">{{ .CandidateRun }}</a></td>
               <td class="ts">{{ .Completed }}</td>
               <td style="color:var(--muted);font-size:13px">{{ .Age }}</td>
             </tr>
@@ -904,17 +963,7 @@ const comparisonDetailTemplate = `
   <style>` + baseCSS + reasonCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -922,7 +971,7 @@ const comparisonDetailTemplate = `
         <div style="display:flex;align-items:center;gap:12px">
           <h1 class="card-title mono">{{ .Name }}</h1>
         </div>
-        <div style="font-size:13px;color:var(--muted)"><a href="/comparisons">← Back to Comparisons</a></div>
+        <div style="font-size:13px;color:var(--muted)"><a href="{{ repoLink .Repo "/comparisons" .Namespace }}">← Back to Comparisons</a></div>
       </div>
       <div class="card-body">
         <div class="verdict">
@@ -1105,8 +1154,8 @@ const comparisonDetailTemplate = `
                 <td class="mono" style="font-weight:600">batch {{ .Index }}</td>
                 <td><span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span></td>
                 <td class="num">{{ if .SampleRange }}{{ .SampleRange }}{{ else }}—{{ end }}</td>
-                <td><a href="/runs/{{ $.Namespace }}/{{ .CandidateRun }}" class="mono" style="font-size:13px">{{ .CandidateRun }}</a></td>
-                <td><a href="/runs/{{ $.Namespace }}/{{ .BaselineRun }}" class="mono" style="font-size:13px">{{ .BaselineRun }}</a></td>
+                <td><a href="{{ runLink $.Repo .CandidateRun $.Namespace }}" class="mono" style="font-size:13px">{{ .CandidateRun }}</a></td>
+                <td><a href="{{ runLink $.Repo .BaselineRun $.Namespace }}" class="mono" style="font-size:13px">{{ .BaselineRun }}</a></td>
               </tr>
               {{ end }}
             </tbody>
@@ -1116,8 +1165,8 @@ const comparisonDetailTemplate = `
       </div>
 
       <div class="card-footer">
-        <span><b>Base:</b> commit <span class="mono">{{ if .BaseCommitShort }}{{ .BaseCommitShort }}{{ else }}—{{ end }}</span> (<a href="/runs/{{ .Namespace }}/{{ .BaseRun }}">{{ .BaseRun }}</a>)</span>
-        <span><b>Candidate:</b> commit <span class="mono">{{ if .CandCommitShort }}{{ .CandCommitShort }}{{ else }}—{{ end }}</span> (<a href="/runs/{{ .Namespace }}/{{ .CandRun }}">{{ .CandRun }}</a>)</span>
+        <span><b>Base:</b> commit <span class="mono">{{ if .BaseCommitShort }}{{ .BaseCommitShort }}{{ else }}—{{ end }}</span> (<a href="{{ runLink .Repo .BaseRun .Namespace }}">{{ .BaseRun }}</a>)</span>
+        <span><b>Candidate:</b> commit <span class="mono">{{ if .CandCommitShort }}{{ .CandCommitShort }}{{ else }}—{{ end }}</span> (<a href="{{ runLink .Repo .CandRun .Namespace }}">{{ .CandRun }}</a>)</span>
         <span><b>Samples:</b> {{ if .SamplesSummary }}{{ .SamplesSummary }}{{ else }}{{ .TotalSamples }} run · {{ .TotalPairs }} paired{{ if or (gt .TotalDroppedCand 0) (gt .TotalDroppedBase 0) }} · dropped: {{ .TotalDroppedCand }} cand, {{ .TotalDroppedBase }} base{{ end }}{{ end }}</span>
         {{- if .Batches }}
         <span><b>Batches:</b> {{ len .Batches }}</span>
@@ -1167,22 +1216,12 @@ const taskSamplesListTemplate = `
   <style>` + baseCSS + trajectoryCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
       <div class="breadcrumb">
-        <a href="/runs">Runs</a> / <a href="/runs/{{ .Namespace }}/{{ .RunName }}">{{ .RunName }}</a> / <span class="mono">{{ .TaskID }}</span>
+        <a href="{{ repoLink .Repo "/runs" .Namespace }}">Runs</a> / <a href="{{ repoLink .Repo (printf "/runs/%s" .RunName) .Namespace }}">{{ .RunName }}</a> / <span class="mono">{{ .TaskID }}</span>
       </div>
 
       <div class="card-header" style="align-items:flex-start;flex-direction:column;gap:8px">
@@ -1277,22 +1316,12 @@ const sampleTranscriptTemplate = `
   <style>` + baseCSS + trajectoryCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
       <div class="breadcrumb">
-        <a href="/runs">Runs</a> / <a href="/runs/{{ .Namespace }}/{{ .RunName }}">{{ .RunName }}</a> / <a href="/runs/{{ .Namespace }}/{{ .RunName }}/tasks/{{ .EscapedTaskID }}/samples">{{ .TaskID }}</a> / <span class="mono">{{ .SampleID }}</span>
+        <a href="{{ repoLink .Repo "/runs" .Namespace }}">Runs</a> / <a href="{{ repoLink .Repo (printf "/runs/%s" .RunName) .Namespace }}">{{ .RunName }}</a> / <a href="{{ repoLink .Repo (printf "/runs/%s/tasks/%s/samples" .RunName .EscapedTaskID) .Namespace }}">{{ .TaskID }}</a> / <span class="mono">{{ .SampleID }}</span>
       </div>
 
       <div class="card-header" style="align-items:flex-start;flex-direction:column;gap:8px">
@@ -1362,18 +1391,53 @@ const sampleTranscriptTemplate = `
 </html>
 `
 
+var funcMap = template.FuncMap{
+	"repoLink":      repoLink,
+	"repoIndexLink": repoIndexLink,
+	"runLink": func(ref RepoRef, runName string, ns string) string {
+		if ref.Host != "" {
+			return repoLink(ref, "/runs/"+runName, ns)
+		}
+		return fmt.Sprintf("/runs/%s/%s", ns, runName)
+	},
+}
+
+func parseTemplate(name, text string) *template.Template {
+	t := template.New(name).Funcs(funcMap)
+	template.Must(t.Parse(repoHeaderPartial))
+	return template.Must(t.Parse(text))
+}
+
+func parseComparisonsListTemplate(name, text string) *template.Template {
+	t := template.New(name).Funcs(funcMap)
+	template.Must(t.Parse(repoHeaderPartial))
+	template.Must(t.Parse(comparisonCellTemplate))
+	template.Must(t.Parse(deltaStripTemplate))
+	return template.Must(t.Parse(text))
+}
+
+func parseComparisonDetailTemplate(name, text string) *template.Template {
+	t := template.New(name).Funcs(funcMap)
+	template.Must(t.Parse(repoHeaderPartial))
+	template.Must(t.Parse(ComparisonTableTemplate))
+	template.Must(t.Parse(deltaStripTemplate))
+	template.Must(t.Parse(reasonSegmentsTemplate))
+	return template.Must(t.Parse(text))
+}
+
 var (
-	tmplRunsList         = template.Must(template.New("runs_list").Parse(runsListTemplate))
-	tmplRunDetail        = template.Must(template.New("run_detail").Parse(runDetailTemplate))
-	tmplComparisonsList  = template.Must(template.Must(template.Must(template.New("comparisons_list").Parse(comparisonsListTemplate)).Parse(comparisonCellTemplate)).Parse(deltaStripTemplate))
-	tmplComparisonTable  = template.Must(template.New("comparison_table").Parse(ComparisonTableTemplate))
-	tmplComparisonDetail = template.Must(template.Must(template.Must(template.Must(template.New("comparison_detail").Parse(ComparisonTableTemplate)).Parse(deltaStripTemplate)).Parse(reasonSegmentsTemplate)).Parse(comparisonDetailTemplate))
-	tmplTaskSamplesList  = template.Must(template.New("task_samples_list").Parse(taskSamplesListTemplate))
-	tmplSampleTranscript = template.Must(template.New("sample_transcript").Parse(sampleTranscriptTemplate))
-	tmplPullsList        = template.Must(template.New("pulls_list").Parse(pullsListTemplate))
-	tmplPullDetail       = template.Must(template.New("pull_detail").Parse(pullDetailTemplate))
-	tmplSeriesList       = template.Must(template.New("series_list").Parse(seriesListTemplate))
-	tmplSeriesDetail     = template.Must(template.New("series_detail").Parse(seriesDetailTemplate))
+	tmplRepoIndex        = parseTemplate("repo_index", repoIndexTemplate)
+	tmplRunsList         = parseTemplate("runs_list", runsListTemplate)
+	tmplRunDetail        = parseTemplate("run_detail", runDetailTemplate)
+	tmplComparisonsList  = parseComparisonsListTemplate("comparisons_list", comparisonsListTemplate)
+	tmplComparisonTable  = template.Must(template.New("comparison_table").Funcs(funcMap).Parse(ComparisonTableTemplate))
+	tmplComparisonDetail = parseComparisonDetailTemplate("comparison_detail", comparisonDetailTemplate)
+	tmplTaskSamplesList  = parseTemplate("task_samples_list", taskSamplesListTemplate)
+	tmplSampleTranscript = parseTemplate("sample_transcript", sampleTranscriptTemplate)
+	tmplPullsList        = parseTemplate("pulls_list", pullsListTemplate)
+	tmplPullDetail       = parseTemplate("pull_detail", pullDetailTemplate)
+	tmplSeriesList       = parseTemplate("series_list", seriesListTemplate)
+	tmplSeriesDetail     = parseTemplate("series_detail", seriesDetailTemplate)
 
 	// TmplComparisonTable is the parsed template for the comparison table sub-template.
 	TmplComparisonTable = tmplComparisonTable
@@ -1389,17 +1453,7 @@ const pullsListTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -1468,17 +1522,7 @@ const pullDetailTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -1536,6 +1580,11 @@ const pullDetailTemplate = `
 </body>
 </html>
 `
+
+// RenderRepoIndex renders the repository index template to the given writer.
+func RenderRepoIndex(w io.Writer, view RepoIndexView) error {
+	return tmplRepoIndex.Execute(w, view)
+}
 
 // RenderPullsList renders the pull requests list template to the given writer.
 func RenderPullsList(w io.Writer, view PullRequestsListView) error {
@@ -1599,18 +1648,7 @@ const seriesListTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-        <a href="/series" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -1660,18 +1698,7 @@ const seriesDetailTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-        <a href="/series" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">

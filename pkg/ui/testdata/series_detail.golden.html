@@ -242,18 +242,29 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 </style>
 </head>
 <body>
+  
   <header class="header-bar">
     <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <div style="display:flex;align-items:center;gap:8px;font-size:16px">
+        <a href="/" class="header-logo">eval-runner</a>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">github.com</span>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">gke-labs</span>
+        <span style="color:var(--muted)">/</span>
+        <a href="/github.com/gke-labs/eval-runner" class="mono" style="font-weight:600;color:var(--ink)">eval-runner</a>
+      </div>
       <nav class="nav-links">
-        <a href="/pulls" class="nav-link ">Pull Requests</a>
-        <a href="/runs" class="nav-link ">Runs</a>
-        <a href="/comparisons" class="nav-link ">Comparisons</a>
-        <a href="/series" class="nav-link active">Series</a>
+        <a href="/github.com/gke-labs/eval-runner" class="nav-link ">Overview</a>
+        <a href="/github.com/gke-labs/eval-runner/runs" class="nav-link ">Runs</a>
+        <a href="/github.com/gke-labs/eval-runner/pulls" class="nav-link ">Pull requests</a>
+        <a href="/github.com/gke-labs/eval-runner/comparisons" class="nav-link ">Comparisons</a>
+        <a href="/github.com/gke-labs/eval-runner/series" class="nav-link active">Series</a>
       </nav>
     </div>
     <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
   </header>
+
 
   <main class="container">
     <div class="card">
@@ -263,7 +274,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
             <span>gke-labs/eval-runner</span>
             <span class="mono" style="font-size:16px;color:var(--muted);font-weight:normal">(main)</span>
           </h1>
-          <div style="font-size:13px;color:var(--muted);margin-top:4px"><a href="/series">← Back to Series</a></div>
+          <div style="font-size:13px;color:var(--muted);margin-top:4px"><a href="/github.com/gke-labs/eval-runner/series">← Back to Series</a></div>
         </div>
         <span style="font-size:13px;color:var(--muted)">showing last 2 of 2 commits</span>
       </div>
@@ -271,7 +282,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px">
           <span style="font-size:13px;font-weight:600;color:var(--muted)">Task:</span>
           
-          <a href="/series/2cc24c2/main?task=triage%2Frunbook_lookup" class="chip good mono" style="font-size:12px">triage/runbook_lookup</a>
+          <a href="/github.com/gke-labs/eval-runner/series/main?task=triage%2Frunbook_lookup" class="chip good mono" style="font-size:12px">triage/runbook_lookup</a>
           
         </div>
         <div class="mono" style="font-weight:600;font-size:15px;margin-bottom:12px">triage/runbook_lookup</div>
@@ -348,7 +359,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
                 <td class="num" style="font-size:13px">[0.60, 0.88]</td>
                 <td class="num">1,200</td>
                 <td class="num">$0.05</td>
-                <td><a href="/runs/eval-runner/base-1111111" class="mono" style="font-size:13px">base-1111111</a></td>
+                <td><a href="/github.com/gke-labs/eval-runner/runs/base-1111111" class="mono" style="font-size:13px">base-1111111</a></td>
               </tr>
               
               <tr>
@@ -360,7 +371,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
                 <td class="num" style="font-size:13px">[0.70, 0.94]</td>
                 <td class="num">1,300</td>
                 <td class="num">$0.06</td>
-                <td><a href="/runs/eval-runner/base-2222222" class="mono" style="font-size:13px">base-2222222</a></td>
+                <td><a href="/github.com/gke-labs/eval-runner/runs/base-2222222" class="mono" style="font-size:13px">base-2222222</a></td>
               </tr>
               
             </tbody>

@@ -33,11 +33,30 @@ import (
 type NavTab string
 
 const (
+	NavTabOverview    NavTab = "overview"
 	NavTabPulls       NavTab = "pulls"
 	NavTabRuns        NavTab = "runs"
 	NavTabComparisons NavTab = "comparisons"
 	NavTabSeries      NavTab = "series"
 )
+
+// RepoListItem represents a single repository in the repository index view.
+type RepoListItem struct {
+	Host             string
+	Owner            string
+	Name             string
+	Repository       string // "host/owner/name"
+	RunsCount        int
+	ComparisonsCount int
+	Link             string // repo overview link
+}
+
+// RepoIndexView is the view model for the root repository index (GET /).
+type RepoIndexView struct {
+	Namespace    string
+	Repositories []RepoListItem
+	TotalCount   int
+}
 
 // RunListItem represents a single run row in the /runs list view.
 type RunListItem struct {
@@ -57,6 +76,7 @@ type RunListItem struct {
 // RunsListView is the view model for the /runs list page.
 type RunsListView struct {
 	ActiveTab    NavTab
+	Repo         RepoRef
 	Namespace    string
 	Runs         []RunListItem
 	TotalCount   int
@@ -147,6 +167,7 @@ const (
 // RunDetailView is the view model for the /runs/<ns>/<name> detail page.
 type RunDetailView struct {
 	ActiveTab       NavTab
+	Repo            RepoRef
 	Name            string
 	Namespace       string
 	Phase           v1alpha1.RunPhase
@@ -205,6 +226,7 @@ type ComparisonListItem struct {
 // ComparisonsListView is the view model for the /comparisons list page.
 type ComparisonsListView struct {
 	ActiveTab    NavTab
+	Repo         RepoRef
 	Namespace    string
 	Comparisons  []ComparisonListItem
 	TotalCount   int
@@ -260,6 +282,7 @@ type PullRequestListItem struct {
 // PullRequestsListView is the view model for the /pulls list page.
 type PullRequestsListView struct {
 	ActiveTab    NavTab
+	Repo         RepoRef
 	Namespace    string
 	Pulls        []PullRequestListItem
 	TotalCount   int
@@ -293,6 +316,7 @@ type PullRequestHistoryItem struct {
 // PullRequestDetailView is the view model for the /pulls/{repohash}/{number} history page.
 type PullRequestDetailView struct {
 	ActiveTab   NavTab
+	Repo        RepoRef
 	Namespace   string
 	Repository  string
 	RepoHash    string
@@ -315,6 +339,7 @@ func RepoHash(repo string) string {
 func BuildGitHubPRURL(repo string, prNum int) string {
 	cleanRepo := strings.TrimPrefix(strings.TrimSpace(repo), "https://github.com/")
 	cleanRepo = strings.TrimPrefix(cleanRepo, "http://github.com/")
+	cleanRepo = strings.TrimPrefix(cleanRepo, "github.com/")
 	cleanRepo = strings.TrimSuffix(cleanRepo, ".git")
 	cleanRepo = strings.Trim(cleanRepo, "/")
 	return fmt.Sprintf("https://github.com/%s/pull/%d", cleanRepo, prNum)
@@ -847,6 +872,7 @@ func ComparisonActions(comp *v1alpha1.Comparison) []ComparisonActionRow {
 // ComparisonDetailView is the view model for the /comparisons/<ns>/<name> detail page.
 type ComparisonDetailView struct {
 	ActiveTab    NavTab
+	Repo         RepoRef
 	Name         string
 	Namespace    string
 	Verdict      v1alpha1.ComparisonVerdict
@@ -1107,6 +1133,7 @@ type SeriesListRow struct {
 // SeriesListView is the view model for GET /series.
 type SeriesListView struct {
 	ActiveTab  NavTab
+	Repo       RepoRef
 	Namespace  string
 	Cohort     string
 	Series     []SeriesListRow
@@ -1145,6 +1172,7 @@ type SeriesItem struct {
 // SeriesDetailView is the view model for GET /series/{repohash}/{branch}.
 type SeriesDetailView struct {
 	ActiveTab             NavTab
+	Repo                  RepoRef
 	Namespace             string
 	Repository            string
 	RepoHash              string
@@ -1403,8 +1431,23 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 		affinityMatched = comp.Status.Summary.AffinityMatched
 	}
 
+	var ref RepoRef
+	if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Repository != "" {
+		if r, ok := ParseRepoURL(comp.Spec.PullRequest.Repository); ok {
+			ref = r
+		} else if r, ok := RepoRefFromOwnerName(comp.Spec.PullRequest.Repository); ok {
+			ref = r
+		}
+	}
+	if ref.Host == "" && baseRun != nil {
+		if r, ok := runRepoRef(baseRun); ok {
+			ref = r
+		}
+	}
+
 	return ComparisonDetailView{
 		ActiveTab:        NavTabComparisons,
+		Repo:             ref,
 		Name:             comp.Name,
 		Namespace:        comp.Namespace,
 		Verdict:          comp.Status.Verdict,
@@ -1654,6 +1697,7 @@ const sampleNotePreviewRunes = 140
 // TaskSamplesListView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples.
 type TaskSamplesListView struct {
 	ActiveTab        NavTab
+	Repo             RepoRef
 	Namespace        string
 	RunName          string
 	TaskID           string
@@ -1688,6 +1732,7 @@ type TranscriptRowView struct {
 // SampleTranscriptView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples/{sample}.
 type SampleTranscriptView struct {
 	ActiveTab              NavTab
+	Repo                   RepoRef
 	Namespace              string
 	RunName                string
 	TaskID                 string

@@ -242,17 +242,29 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 </style>
 </head>
 <body>
+  
   <header class="header-bar">
     <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <div style="display:flex;align-items:center;gap:8px;font-size:16px">
+        <a href="/" class="header-logo">eval-runner</a>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">github.com</span>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">gke-labs</span>
+        <span style="color:var(--muted)">/</span>
+        <a href="/github.com/gke-labs/eval-runner" class="mono" style="font-weight:600;color:var(--ink)">eval-runner</a>
+      </div>
       <nav class="nav-links">
-        <a href="/pulls" class="nav-link ">Pull Requests</a>
-        <a href="/runs" class="nav-link ">Runs</a>
-        <a href="/comparisons" class="nav-link active">Comparisons</a>
+        <a href="/github.com/gke-labs/eval-runner" class="nav-link ">Overview</a>
+        <a href="/github.com/gke-labs/eval-runner/runs" class="nav-link ">Runs</a>
+        <a href="/github.com/gke-labs/eval-runner/pulls" class="nav-link ">Pull requests</a>
+        <a href="/github.com/gke-labs/eval-runner/comparisons" class="nav-link active">Comparisons</a>
+        <a href="/github.com/gke-labs/eval-runner/series" class="nav-link ">Series</a>
       </nav>
     </div>
     <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
   </header>
+
 
   <main class="container">
     <div class="card">
@@ -281,7 +293,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
           <tbody>
             
             <tr>
-              <td><a href="/comparisons/eval-runner/docs-eval-same-commit" class="mono" style="font-weight:600">docs-eval-same-commit</a></td>
+              <td><a href="/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit" class="mono" style="font-weight:600">docs-eval-same-commit</a></td>
               <td><span class="mono" style="font-size:13px">eval-runner</span></td>
               <td><span class="chip good"><span class="dot"></span>IMPROVED</span></td>
               <td class="num">0.98</td>
@@ -291,14 +303,14 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 <span class="delta-item"><span class="delta-k">Cost</span> <span class="delta-v delta-bad" title="$3.8900 → $3.9600 over 1 shared task">&#43;$0.07 (&#43;1.8%)</span></span>
 </div></td>
               <td class="num">1/1</td>
-              <td><a href="/runs/eval-runner/docs-eval-base-05ce4d8" class="mono" style="font-size:13px">docs-eval-base-05ce4d8</a></td>
-              <td><a href="/runs/eval-runner/docs-eval-cand-05ce4d8" class="mono" style="font-size:13px">docs-eval-cand-05ce4d8</a></td>
+              <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-base-05ce4d8" class="mono" style="font-size:13px">docs-eval-base-05ce4d8</a></td>
+              <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8" class="mono" style="font-size:13px">docs-eval-cand-05ce4d8</a></td>
               <td class="ts">2026-10-20 10:35 UTC</td>
               <td style="color:var(--muted);font-size:13px">5m</td>
             </tr>
             
             <tr>
-              <td><a href="/comparisons/eval-runner/docs-eval-regressed" class="mono" style="font-weight:600">docs-eval-regressed</a></td>
+              <td><a href="/github.com/gke-labs/eval-runner/comparisons/docs-eval-regressed" class="mono" style="font-weight:600">docs-eval-regressed</a></td>
               <td><span class="mono" style="font-size:13px">eval-runner</span></td>
               <td><span class="chip bad"><span class="dot"></span>REGRESSED</span><div class="reason-line" title="Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)">Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)</div></td>
               <td class="num">0.05</td>
@@ -308,8 +320,8 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 <span class="delta-item"><span class="delta-k">Cost</span> <span class="delta-v delta-zero">$0.00 (0.0%)</span></span>
 </div></td>
               <td class="num">3/3</td>
-              <td><a href="/runs/eval-runner/docs-eval-base-a81d0c4" class="mono" style="font-size:13px">docs-eval-base-a81d0c4</a></td>
-              <td><a href="/runs/eval-runner/docs-eval-cand-9f1e2d3" class="mono" style="font-size:13px">docs-eval-cand-9f1e2d3</a></td>
+              <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-base-a81d0c4" class="mono" style="font-size:13px">docs-eval-base-a81d0c4</a></td>
+              <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-cand-9f1e2d3" class="mono" style="font-size:13px">docs-eval-cand-9f1e2d3</a></td>
               <td class="ts">—</td>
               <td style="color:var(--muted);font-size:13px">2h</td>
             </tr>

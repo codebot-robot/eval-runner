@@ -194,6 +194,7 @@ func TestCalculateRunBarGeometry(t *testing.T) {
 func sampleRunDetailView() RunDetailView {
 	return RunDetailView{
 		ActiveTab:       NavTabRuns,
+		Repo:            RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Name:            "docs-eval-cand-05ce4d8",
 		Namespace:       "eval-runner",
 		Phase:           v1alpha1.RunPhaseCompleted,
@@ -226,7 +227,7 @@ func sampleRunDetailView() RunDetailView {
 				Successes:   40,
 				Method:      "wilson",
 				LogPath:     "gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json",
-				SamplesLink: "/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples",
+				SamplesLink: "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples",
 			},
 		},
 	}
@@ -235,6 +236,7 @@ func sampleRunDetailView() RunDetailView {
 func sampleComparisonDetailView() ComparisonDetailView {
 	return ComparisonDetailView{
 		ActiveTab:    NavTabComparisons,
+		Repo:         RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Name:         "docs-eval-same-commit",
 		Namespace:    "eval-runner",
 		Verdict:      v1alpha1.ComparisonVerdictImproved,
@@ -271,6 +273,7 @@ func sampleComparisonDetailView() ComparisonDetailView {
 func sampleRunsListView() RunsListView {
 	return RunsListView{
 		ActiveTab: NavTabRuns,
+		Repo:      RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Namespace: "eval-runner",
 		Runs: []RunListItem{
 			{
@@ -283,7 +286,7 @@ func sampleRunsListView() RunsListView {
 				Rates:     "triage/runbook_lookup=0.84[0.71,0.92]",
 				Commit:    "05ce4d8",
 				Age:       "10m",
-				Link:      "/runs/eval-runner/docs-eval-cand-05ce4d8",
+				Link:      "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8",
 			},
 			{
 				Name:      "docs-eval-base-05ce4d8",
@@ -295,7 +298,7 @@ func sampleRunsListView() RunsListView {
 				Rates:     "triage/runbook_lookup=0.61[0.46,0.74]",
 				Commit:    "a81d0c4",
 				Age:       "15m",
-				Link:      "/runs/eval-runner/docs-eval-base-05ce4d8",
+				Link:      "/github.com/gke-labs/eval-runner/runs/docs-eval-base-05ce4d8",
 			},
 		},
 		TotalCount:   2,
@@ -310,6 +313,7 @@ func sampleRunsListView() RunsListView {
 func sampleComparisonsListView() ComparisonsListView {
 	return ComparisonsListView{
 		ActiveTab: NavTabComparisons,
+		Repo:      RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Namespace: "eval-runner",
 		Comparisons: []ComparisonListItem{
 			{
@@ -323,7 +327,7 @@ func sampleComparisonsListView() ComparisonsListView {
 				CandidateRun: "docs-eval-cand-05ce4d8",
 				Completed:    "2026-10-20 10:35 UTC",
 				Age:          "5m",
-				Link:         "/comparisons/eval-runner/docs-eval-same-commit",
+				Link:         "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit",
 				Deltas: RunDeltas{
 					Quality: MetricDelta{Text: "+23.0 pp", Title: "Mean success rate 61.0% → 84.0% over 1 shared task (Run success rates)", Class: deltaClassGood},
 					Tokens:  MetricDelta{Text: "−3.2%", Title: "−1.2K tokens (37.5K → 36.3K) over 1 shared task", Class: deltaClassGood},
@@ -341,7 +345,7 @@ func sampleComparisonsListView() ComparisonsListView {
 				CandidateRun: "docs-eval-cand-9f1e2d3",
 				Completed:    "—",
 				Age:          "2h",
-				Link:         "/comparisons/eval-runner/docs-eval-regressed",
+				Link:         "/github.com/gke-labs/eval-runner/comparisons/docs-eval-regressed",
 				Reason:       "Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)",
 				ReasonFull:   "Regressed on 1 of 3 tasks: docs/readme_comprehension (80% → 40%)",
 				Deltas: RunDeltas{
@@ -462,6 +466,7 @@ func sampleComparisonsListGroupedView() ComparisonsListView {
 func samplePullRequestsListView() PullRequestsListView {
 	return PullRequestsListView{
 		ActiveTab: NavTabPulls,
+		Repo:      RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Namespace: "eval-runner",
 		Pulls: []PullRequestListItem{
 			{
@@ -478,8 +483,8 @@ func samplePullRequestsListView() PullRequestsListView {
 				Batches:        2,
 				CompletionTime: "5m",
 				ComparisonName: "pr-42",
-				ComparisonLink: "/comparisons/eval-runner/pr-42",
-				HistoryLink:    "/pulls/" + RepoHash("gke-labs/eval-runner") + "/42",
+				ComparisonLink: "/github.com/gke-labs/eval-runner/comparisons/pr-42",
+				HistoryLink:    "/github.com/gke-labs/eval-runner/pulls/42",
 				Namespace:      "eval-runner",
 			},
 		},
@@ -495,12 +500,13 @@ func samplePullRequestsListView() PullRequestsListView {
 func samplePullRequestDetailView() PullRequestDetailView {
 	return PullRequestDetailView{
 		ActiveTab:  NavTabPulls,
+		Repo:       RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Namespace:  "eval-runner",
 		Repository: "gke-labs/eval-runner",
 		RepoHash:   RepoHash("gke-labs/eval-runner"),
 		Number:     42,
 		GitHubURL:  "https://github.com/gke-labs/eval-runner/pull/42",
-		BackLink:   "/pulls",
+		BackLink:   "/github.com/gke-labs/eval-runner/pulls",
 		TotalCount: 2,
 		Comparisons: []PullRequestHistoryItem{
 			{
@@ -517,7 +523,7 @@ func samplePullRequestDetailView() PullRequestDetailView {
 				Batches:        2,
 				CompletionTime: "5m",
 				Age:            "10m",
-				Link:           "/comparisons/eval-runner/pr-42-head2",
+				Link:           "/github.com/gke-labs/eval-runner/comparisons/pr-42-head2",
 			},
 			{
 				Name:           "pr-42-head1",
@@ -533,7 +539,7 @@ func samplePullRequestDetailView() PullRequestDetailView {
 				Batches:        1,
 				CompletionTime: "15m",
 				Age:            "20m",
-				Link:           "/comparisons/eval-runner/pr-42-head1",
+				Link:           "/github.com/gke-labs/eval-runner/comparisons/pr-42-head1",
 			},
 		},
 	}
@@ -2271,6 +2277,7 @@ func TestComparisonActions(t *testing.T) {
 func sampleSeriesListView() SeriesListView {
 	return SeriesListView{
 		ActiveTab: NavTabSeries,
+		Repo:      RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Namespace: "eval-runner",
 		Series: []SeriesListRow{
 			{
@@ -2278,7 +2285,7 @@ func sampleSeriesListView() SeriesListView {
 				RepoHash:   "2cc24c2",
 				Branch:     "main",
 				RunCount:   42,
-				Link:       "/series/2cc24c2/main",
+				Link:       "/github.com/gke-labs/eval-runner/series/main",
 			},
 		},
 		TotalCount: 1,
@@ -2308,7 +2315,7 @@ func sampleSeriesDetailView() SeriesDetailView {
 			CIStr:          "[0.60, 0.88]",
 			TokensStr:      "1,200",
 			CostStr:        "$0.05",
-			RunLink:        "/runs/eval-runner/base-1111111",
+			RunLink:        "/github.com/gke-labs/eval-runner/runs/base-1111111",
 			HasPoint:       true,
 			SuccessRate:    &rate1,
 			CI: &v1alpha1.ConfidenceInterval{
@@ -2332,7 +2339,7 @@ func sampleSeriesDetailView() SeriesDetailView {
 			CIStr:          "[0.70, 0.94]",
 			TokensStr:      "1,300",
 			CostStr:        "$0.06",
-			RunLink:        "/runs/eval-runner/base-2222222",
+			RunLink:        "/github.com/gke-labs/eval-runner/runs/base-2222222",
 			HasPoint:       true,
 			SuccessRate:    &rate2,
 			CI: &v1alpha1.ConfidenceInterval{
@@ -2350,6 +2357,7 @@ func sampleSeriesDetailView() SeriesDetailView {
 
 	return SeriesDetailView{
 		ActiveTab:    NavTabSeries,
+		Repo:         RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Namespace:    "eval-runner",
 		Repository:   "gke-labs/eval-runner",
 		RepoHash:     "2cc24c2",
@@ -2358,7 +2366,7 @@ func sampleSeriesDetailView() SeriesDetailView {
 		Tasks: []SeriesTaskLink{
 			{
 				ID:     "triage/runbook_lookup",
-				Link:   "/series/2cc24c2/main?task=triage%2Frunbook_lookup",
+				Link:   "/github.com/gke-labs/eval-runner/series/main?task=triage%2Frunbook_lookup",
 				Active: true,
 			},
 		},
@@ -2366,8 +2374,37 @@ func sampleSeriesDetailView() SeriesDetailView {
 		SVG:       svg,
 		Items:     items,
 		TotalRuns: 2,
-		BackLink:  "/series",
+		BackLink:  "/github.com/gke-labs/eval-runner/series",
 	}
+}
+
+func sampleRepoIndexView() RepoIndexView {
+	return RepoIndexView{
+		Namespace: "eval-runner",
+		Repositories: []RepoListItem{
+			{
+				Host:             "github.com",
+				Owner:            "gke-labs",
+				Name:             "eval-runner",
+				Repository:       "github.com/gke-labs/eval-runner",
+				RunsCount:        42,
+				ComparisonsCount: 12,
+				Link:             "/github.com/gke-labs/eval-runner",
+			},
+		},
+		TotalCount: 1,
+	}
+}
+
+func TestTemplateRenderingRepoIndexGolden(t *testing.T) {
+	view := sampleRepoIndexView()
+
+	var buf bytes.Buffer
+	if err := tmplRepoIndex.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo index template: %v", err)
+	}
+
+	assertGolden(t, "repo_index.golden.html", buf.String())
 }
 
 func TestTemplateRenderingSeriesListGolden(t *testing.T) {
