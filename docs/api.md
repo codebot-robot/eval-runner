@@ -343,7 +343,7 @@ spec:
 | `costUSD` | `*float64` | Total estimated evaluation cost in USD across all tasks in this Comparison when prices are known. |
 | `possibleSamples` | `int` | Total possible samples across tasks when known from Inspect logs. |
 | `summary` | `*ComparisonSummary` | Aggregate statistics across tasks in the Comparison. |
-| `summary.tasks` | `string` | Compact string representing completed vs total tasks (e.g. `2/2`). |
+| `summary.tasks` | `string` | Compact string representing decided vs planned tasks (e.g. `2/2`, where planned excludes pruned tasks). |
 | `summary.skipped` | `int` | Count of tasks discovered in the manifest but not planned by either Run, or pruned by affinityMode=prune. |
 | `summary.affinityMatched` | `int` | Count of tasks with affinity `matched`. |
 | `affinity` | `*ComparisonAffinityStatus` | Metadata of changed-file PR affinity resolution (`filesHash`, `filesCount`, `truncated`). |
@@ -381,7 +381,7 @@ Inspect log provider-specific totals are dropped so that `total` is strictly and
 
 | Field | Type | Description |
 |---|---|---|
-| `tasks` | `string` | Compact string representing completed vs total tasks (e.g. `"2/2"`). |
+| `tasks` | `string` | Compact string representing decided vs planned tasks (e.g. `"2/2"`, where planned excludes pruned tasks). |
 | `skipped` | `int` | Count of tasks discovered in the manifest but not planned by either Run, or pruned by affinityMode=prune. |
 | `affinityMatched` | `int` | Count of tasks with affinity `"matched"`. |
 
