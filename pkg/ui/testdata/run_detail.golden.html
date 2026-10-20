@@ -206,6 +206,8 @@ table.ci tbody tr:last-child td { border-bottom: none; }
 
 .empty-state { text-align: center; padding: 48px 16px; color: var(--muted); font-size: 15px; }
 .log-path { font-size: 12px; background: var(--neutral-soft); padding: 2px 6px; border-radius: 4px; display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.log-path { color: var(--indigo); text-decoration: none; }
+a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .msg-alert { margin-top: 14px; padding: 10px 14px; background: var(--bad-soft); color: var(--bad); border-radius: 6px; font-size: 14px; }
 </style>
 </head>
@@ -266,7 +268,7 @@ table.ci tbody tr:last-child td { border-bottom: none; }
           </div>
           <div class="meta-tile">
             <div class="label">Artifacts</div>
-            <div class="value mono" style="font-size:12px"><span class="log-path" title="gs://eval-bucket/runs/05ce4d8/">gs://eval-bucket/runs/05ce4d8/</span></div>
+            <div class="value mono" style="font-size:12px"><a class="log-path mono" href="https://console.cloud.google.com/storage/browser/eval-bucket/runs/05ce4d8/" target="_blank" rel="noopener noreferrer" title="gs://eval-bucket/runs/05ce4d8/">gs://eval-bucket/runs/05ce4d8/</a></div>
           </div>
         </div>
 
@@ -312,6 +314,7 @@ table.ci tbody tr:last-child td { border-bottom: none; }
                   
                   <a href="/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples" class="log-path mono" title="gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json">gs://eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json</a>
                   
+                  <a href="https://console.cloud.google.com/storage/browser/_details/eval-bucket/runs/05ce4d8/triage/runbook_lookup/inspect.json" target="_blank" rel="noopener noreferrer" title="open in Cloud Storage" style="margin-left:4px">&#8599;</a>
                   
                 </td>
               </tr>

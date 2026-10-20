@@ -220,6 +220,8 @@ table.ci tbody tr:last-child td { border-bottom: none; }
 
 .empty-state { text-align: center; padding: 48px 16px; color: var(--muted); font-size: 15px; }
 .log-path { font-size: 12px; background: var(--neutral-soft); padding: 2px 6px; border-radius: 4px; display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.log-path { color: var(--indigo); text-decoration: none; }
+a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .msg-alert { margin-top: 14px; padding: 10px 14px; background: var(--bad-soft); color: var(--bad); border-radius: 6px; font-size: 14px; }
 `
 
@@ -371,7 +373,7 @@ const runDetailTemplate = `
           </div>
           <div class="meta-tile">
             <div class="label">Artifacts</div>
-            <div class="value mono" style="font-size:12px">{{ if .ArtifactsPrefix }}<span class="log-path" title="{{ .ArtifactsPrefix }}">{{ .ArtifactsPrefix }}</span>{{ else }}—{{ end }}</div>
+            <div class="value mono" style="font-size:12px">{{ if .ArtifactsPrefix }}{{ if .ArtifactsURL }}<a class="log-path mono" href="{{ .ArtifactsURL }}" target="_blank" rel="noopener noreferrer" title="{{ .ArtifactsPrefix }}">{{ .ArtifactsPrefix }}</a>{{ else }}<span class="log-path" title="{{ .ArtifactsPrefix }}">{{ .ArtifactsPrefix }}</span>{{ end }}{{ else }}—{{ end }}</div>
           </div>
         </div>
 
@@ -430,6 +432,7 @@ const runDetailTemplate = `
                   {{ else }}
                   <span class="log-path mono" title="{{ .LogPath }}">{{ .LogPath }}</span>
                   {{ end }}
+                  {{ if .LogURL }}<a href="{{ .LogURL }}" target="_blank" rel="noopener noreferrer" title="open in Cloud Storage" style="margin-left:4px">&#8599;</a>{{ end }}
                   {{ else }}
                   <span style="color:var(--muted)">—</span>
                   {{ end }}

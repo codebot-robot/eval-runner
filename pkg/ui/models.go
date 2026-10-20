@@ -93,6 +93,38 @@ type RunTaskRow struct {
 	ProgressText   string // e.g. "8 of 96 samples"
 }
 
+// LogURL returns a browsable web URL for the task's LogPath if it is a gs:// or http(s):// URI.
+func (r RunTaskRow) LogURL() string {
+	return FormatLogURL(r.LogPath)
+}
+
+// ArtifactsURL returns a browsable web URL for the run's ArtifactsPrefix if it is a gs:// or http(s):// URI.
+func (v RunDetailView) ArtifactsURL() string {
+	return FormatLogURL(v.ArtifactsPrefix)
+}
+
+// FormatLogURL converts a storage URI or URL to a clickable console or web link.
+// For gs:// URIs, each path segment is URL-escaped to preserve characters such as #, ?, or %.
+func FormatLogURL(uri string) string {
+	uri = strings.TrimSpace(uri)
+	if strings.HasPrefix(uri, "gs://") {
+		trimmed := strings.TrimPrefix(uri, "gs://")
+		isDir := strings.HasSuffix(trimmed, "/")
+		segs := strings.Split(trimmed, "/")
+		for i, s := range segs {
+			segs[i] = url.PathEscape(s)
+		}
+		if isDir {
+			return "https://console.cloud.google.com/storage/browser/" + strings.Join(segs, "/")
+		}
+		return "https://console.cloud.google.com/storage/browser/_details/" + strings.Join(segs, "/")
+	}
+	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+		return uri
+	}
+	return ""
+}
+
 // RunDetailView is the view model for the /runs/<ns>/<name> detail page.
 type RunDetailView struct {
 	ActiveTab       NavTab

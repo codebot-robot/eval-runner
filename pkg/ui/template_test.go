@@ -1943,3 +1943,55 @@ func TestTemplateRenderingSeriesDetailGolden(t *testing.T) {
 
 	assertGolden(t, "series_detail.golden.html", buf.String())
 }
+func TestFormatLogURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "gs file",
+			in:   "gs://my-bucket/runs/ee0a14f/task/inspect.json",
+			want: "https://console.cloud.google.com/storage/browser/_details/my-bucket/runs/ee0a14f/task/inspect.json",
+		},
+		{
+			name: "gs directory",
+			in:   "gs://my-bucket/runs/ee0a14f/",
+			want: "https://console.cloud.google.com/storage/browser/my-bucket/runs/ee0a14f/",
+		},
+		{
+			name: "gs with special characters encoded",
+			in:   "gs://my-bucket/runs/abc/task#frag?query%20space/inspect.json",
+			want: "https://console.cloud.google.com/storage/browser/_details/my-bucket/runs/abc/task%23frag%3Fquery%2520space/inspect.json",
+		},
+		{
+			name: "http url",
+			in:   "http://localhost:8080/log.json",
+			want: "http://localhost:8080/log.json",
+		},
+		{
+			name: "https url",
+			in:   "https://storage.googleapis.com/bucket/log.json",
+			want: "https://storage.googleapis.com/bucket/log.json",
+		},
+		{
+			name: "empty",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "local path",
+			in:   "/var/log/eval/inspect.json",
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatLogURL(tc.in)
+			if got != tc.want {
+				t.Errorf("FormatLogURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
