@@ -209,6 +209,13 @@ table.ci tbody tr:last-child td { border-bottom: none; }
 a.log-path { color: var(--indigo); text-decoration: none; }
 a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .msg-alert { margin-top: 14px; padding: 10px 14px; background: var(--bad-soft); color: var(--bad); border-radius: 6px; font-size: 14px; }
+
+ 
+.metric-filter-bar { display: flex; align-items: center; gap: 8px; margin: 18px 0 16px; flex-wrap: wrap; }
+.filter-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
+.filter-chip { font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--neutral-soft); padding: 5px 12px; border-radius: 6px; text-decoration: none; border: 1px solid transparent; transition: all 0.15s ease; }
+.filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
+.filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
 </style>
 </head>
 <body>
@@ -274,17 +281,43 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 
         
 
-        <h2 style="font-size:17px;font-weight:600;margin:24px 0 12px">Eval Tasks</h2>
+        
+
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:24px 0 12px;gap:12px">
+          <h2 style="font-size:17px;font-weight:600;margin:0">Eval Tasks</h2>
+          <div class="metric-filter-bar" style="margin:0">
+            <span class="filter-label">View:</span>
+            <a href="?metric=all" class="filter-chip active">All Metrics</a>
+            <a href="?metric=rate" class="filter-chip ">Accuracy / Rate</a>
+            <a href="?metric=latency" class="filter-chip ">Latency (p50/p95)</a>
+            <a href="?metric=tokens" class="filter-chip ">Tokens</a>
+            <a href="?metric=cost" class="filter-chip ">Cost ($ USD)</a>
+          </div>
+        </div>
         <div style="overflow-x:auto">
           <table class="ci">
             <thead>
               <tr>
                 <th>eval</th>
                 <th>phase</th>
+                
                 <th>rate</th>
                 <th colspan="2">95% CI (0-1 axis)</th>
+                
+                
+                <th>latency (p50/p95)</th>
+                
+                
+                <th>tokens</th>
+                
+                
+                
+                <th>cost</th>
+                
                 <th>n</th>
+                
                 <th>method</th>
+                
                 <th>log path</th>
               </tr>
             </thead>
@@ -293,6 +326,7 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
               <tr>
                 <td class="mono" style="font-weight:600">triage/runbook_lookup</td>
                 <td><span class="chip good"><span class="dot"></span>Completed</span></td>
+                
                 <td class="num">0.84</td>
                 <td class="num" style="font-size:13px">[0.71, 0.92]</td>
                 <td>
@@ -307,8 +341,21 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
                   </div>
                   
                 </td>
+                
+                
+                <td class="num mono"></td>
+                
+                
+                <td class="num mono"></td>
+                
+                
+                
+                <td class="num mono"></td>
+                
                 <td class="num">40/48</td>
+                
                 <td class="mono" style="font-size:13px">wilson</td>
+                
                 <td>
                   
                   

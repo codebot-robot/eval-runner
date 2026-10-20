@@ -210,6 +210,13 @@ a.log-path { color: var(--indigo); text-decoration: none; }
 a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .msg-alert { margin-top: 14px; padding: 10px 14px; background: var(--bad-soft); color: var(--bad); border-radius: 6px; font-size: 14px; }
 
+ 
+.metric-filter-bar { display: flex; align-items: center; gap: 8px; margin: 18px 0 16px; flex-wrap: wrap; }
+.filter-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
+.filter-chip { font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--neutral-soft); padding: 5px 12px; border-radius: 6px; text-decoration: none; border: 1px solid transparent; transition: all 0.15s ease; }
+.filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
+.filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
+
 .breadcrumb { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
 .breadcrumb a { color: var(--indigo); text-decoration: none; }
 .breadcrumb a:hover { text-decoration: underline; }

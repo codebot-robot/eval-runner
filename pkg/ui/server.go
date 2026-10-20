@@ -159,15 +159,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /{$}", s.handleRoot)
 	s.mux.HandleFunc("GET /runs", s.handleRunsList)
+	s.mux.HandleFunc("GET /runs/{$}", s.handleRunsList)
 	s.mux.HandleFunc("GET /runs/{namespace}/{name}", s.handleRunDetail)
 	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks/{task}/samples", s.handleTaskSamplesList)
 	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks/{task}/samples/{sample}", s.handleSampleTranscript)
 	s.mux.HandleFunc("GET /comparisons", s.handleComparisonsList)
+	s.mux.HandleFunc("GET /comparisons/{$}", s.handleComparisonsList)
 	s.mux.HandleFunc("GET /comparisons/{namespace}/{name}", s.handleComparisonDetail)
 	s.mux.HandleFunc("GET /pulls", s.handlePullsList)
+	s.mux.HandleFunc("GET /pulls/{$}", s.handlePullsList)
 	s.mux.HandleFunc("GET /pulls/{repohash}/{number}", s.handlePullDetail)
 	s.mux.HandleFunc("GET /series", s.handleSeriesList)
 	s.mux.HandleFunc("GET /series/{repohash}/{branch...}", s.handleSeriesDetail)
+}
+
+func parseMetricFilter(r *http.Request) MetricFilter {
+	switch m := MetricFilter(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("metric")))); m {
+	case MetricFilterRate, MetricFilterLatency, MetricFilterTokens, MetricFilterCost:
+		return m
+	}
+	return MetricFilterAll
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -369,8 +380,18 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse metric filter query param
+	metricFilter := parseMetricFilter(r)
+
 	// Prepare task rows
 	taskRows := make([]RunTaskRow, 0, len(run.Status.Tasks))
+	var totalCostUSD float64
+	var hasCost bool
+	var totalTokens int
+	var totalReasoningTokens int
+	var hasTokens bool
+	var sumP50, sumP95 float64
+	var countLatency int
 	for _, task := range run.Status.Tasks {
 		leftPx, widthPx, dotPx, hasCI := CalculateRunBarGeometry(task.SuccessRate, task.MeanScore, task.SuccessRateCI, 240.0)
 
@@ -431,6 +452,41 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		var latStr string = "—"
+		if task.Latency != nil && (task.Latency.P50 > 0 || task.Latency.P95 > 0) {
+			latStr = fmt.Sprintf("%.2fs / %.2fs", task.Latency.P50, task.Latency.P95)
+			sumP50 += task.Latency.P50
+			sumP95 += task.Latency.P95
+			countLatency++
+		}
+
+		var tokensStr string = "—"
+		var inTokensStr string = "—"
+		var outTokensStr string = "—"
+		var reasoningStr string = "—"
+		var cacheReadStr string = "—"
+		if task.Tokens != nil {
+			hasTokens = true
+			totalTokens += task.Tokens.Total
+			tokensStr = fmt.Sprintf("%d", task.Tokens.Total)
+			inTokensStr = fmt.Sprintf("%d", task.Tokens.Input)
+			outTokensStr = fmt.Sprintf("%d", task.Tokens.Output)
+			if task.Tokens.Reasoning > 0 {
+				totalReasoningTokens += task.Tokens.Reasoning
+				reasoningStr = fmt.Sprintf("%d", task.Tokens.Reasoning)
+			}
+			if task.Tokens.CacheRead > 0 {
+				cacheReadStr = fmt.Sprintf("%d", task.Tokens.CacheRead)
+			}
+		}
+
+		var costStr string = "—"
+		if task.CostUSD != nil {
+			hasCost = true
+			totalCostUSD += *task.CostUSD
+			costStr = fmt.Sprintf("$%.4f", *task.CostUSD)
+		}
+
 		taskRows = append(taskRows, RunTaskRow{
 			ID:             task.ID,
 			Phase:          task.Phase,
@@ -452,6 +508,13 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			SamplesPlanned: samplesPlanned,
 			ProgressPct:    progressPct,
 			ProgressText:   progressText,
+			LatencyStr:     latStr,
+			TokensStr:      tokensStr,
+			InputTokens:    inTokensStr,
+			OutputTokens:   outTokensStr,
+			ReasoningStr:   reasoningStr,
+			CacheReadStr:   cacheReadStr,
+			CostStr:        costStr,
 		})
 	}
 
@@ -523,6 +586,27 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var totalCostFormatted string
+	if hasCost {
+		totalCostFormatted = fmt.Sprintf("$%.4f", totalCostUSD)
+	}
+
+	var totalTokensFormatted string
+	if hasTokens {
+		if totalReasoningTokens > 0 {
+			totalTokensFormatted = fmt.Sprintf("%d (+%d R)", totalTokens, totalReasoningTokens)
+		} else {
+			totalTokensFormatted = fmt.Sprintf("%d", totalTokens)
+		}
+	}
+
+	var latencySummaryFormatted string
+	if countLatency > 0 {
+		avgP50 := sumP50 / float64(countLatency)
+		avgP95 := sumP95 / float64(countLatency)
+		latencySummaryFormatted = fmt.Sprintf("%.2fs / %.2fs", avgP50, avgP95)
+	}
+
 	view := RunDetailView{
 		ActiveTab:        NavTabRuns,
 		Name:             run.Name,
@@ -536,6 +620,10 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		Age:              FormatAge(run.CreationTimestamp),
 		ArtifactsPrefix:  run.Status.Artifacts,
 		Message:          run.Status.Message,
+		Metric:           metricFilter,
+		TotalCost:        totalCostFormatted,
+		TokensSummary:    totalTokensFormatted,
+		LatencySummary:   latencySummaryFormatted,
 		TasksSummary:     tasksSummary,
 		TasksCompleted:   tasksCompleted,
 		TasksFailed:      tasksFailed,
@@ -713,6 +801,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	}
 
 	view := NewComparisonDetailView(&comp, baseRunPtr, candRunPtr)
+	view.Metric = parseMetricFilter(r)
 	s.populateComparisonHistories(ctx, &comp, &view)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -249,6 +249,14 @@ func TestServerRunsList(t *testing.T) {
 	if !strings.Contains(body, "/runs/eval-runner/docs-eval-base-05ce4d8") {
 		t.Errorf("expected link to run detail")
 	}
+
+	// Trailing slash support
+	reqSlash := httptest.NewRequest(http.MethodGet, "/runs/", nil)
+	wSlash := httptest.NewRecorder()
+	server.ServeHTTP(wSlash, reqSlash)
+	if wSlash.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /runs/, got %d", wSlash.Code)
+	}
 }
 
 func TestServerRunDetail(t *testing.T) {
@@ -506,6 +514,14 @@ func TestServerComparisonsList(t *testing.T) {
 	}
 	if !strings.Contains(body, "/comparisons/eval-runner/docs-eval-same-commit") {
 		t.Errorf("expected link to comparison detail")
+	}
+
+	// Trailing slash support
+	reqSlash := httptest.NewRequest(http.MethodGet, "/comparisons/", nil)
+	wSlash := httptest.NewRecorder()
+	server.ServeHTTP(wSlash, reqSlash)
+	if wSlash.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /comparisons/, got %d", wSlash.Code)
 	}
 }
 
@@ -839,6 +855,14 @@ func TestServerPullsList(t *testing.T) {
 	}
 	if !strings.Contains(body, ">2<") {
 		t.Errorf("expected batches 2")
+	}
+
+	// Trailing slash support
+	reqSlash := httptest.NewRequest(http.MethodGet, "/pulls/", nil)
+	wSlash := httptest.NewRecorder()
+	server.ServeHTTP(wSlash, reqSlash)
+	if wSlash.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /pulls/, got %d", wSlash.Code)
 	}
 }
 
@@ -3286,6 +3310,298 @@ func TestServerSeries_HostileEscaping(t *testing.T) {
 		}
 		if !strings.Contains(body, html.EscapeString(hostilePayload)) {
 			t.Errorf("expected escaped hostile payload in detail response")
+		}
+	})
+}
+
+func TestServerRunDetail_MetricFilter(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+	candRun.Status.Tasks[0].Latency = &v1alpha1.TaskLatency{P50: 6.01, P95: 9.78}
+	candRun.Status.Tasks[0].Tokens = &v1alpha1.TaskTokens{
+		Input:     2868,
+		Output:    1531,
+		Total:     4399,
+		Reasoning: 133,
+		CacheRead: 512,
+	}
+	cost := 0.001349
+	candRun.Status.Tasks[0].CostUSD = &cost
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	tests := []struct {
+		name         string
+		url          string
+		wantChips    []string
+		wantHeaders  []string
+		wantContains []string
+	}{
+		{
+			name:         "all_metrics",
+			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=all",
+			wantChips:    []string{`href="?metric=all" class="filter-chip active"`},
+			wantHeaders:  []string{"<th>latency (p50/p95)</th>", "<th>tokens</th>", "<th>cost</th>"},
+			wantContains: []string{"6.01s / 9.78s", "4399", "$0.0013"},
+		},
+		{
+			name:         "bogus_metric_fallback_all",
+			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=bogus",
+			wantChips:    []string{`href="?metric=all" class="filter-chip active"`},
+			wantHeaders:  []string{"<th>latency (p50/p95)</th>", "<th>tokens</th>", "<th>cost</th>"},
+			wantContains: []string{"6.01s / 9.78s", "4399", "$0.0013"},
+		},
+		{
+			name:         "latency_filter",
+			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=latency",
+			wantChips:    []string{`href="?metric=latency" class="filter-chip active"`},
+			wantHeaders:  []string{"<th>latency (p50/p95)</th>"},
+			wantContains: []string{"6.01s / 9.78s"},
+		},
+		{
+			name:         "tokens_filter",
+			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=tokens",
+			wantChips:    []string{`href="?metric=tokens" class="filter-chip active"`},
+			wantHeaders:  []string{"<th>tokens</th>", "<th>input</th>", "<th>output</th>", "<th>reasoning</th>"},
+			wantContains: []string{"4399", "2868", "1531", "133"},
+		},
+		{
+			name:         "cost_filter",
+			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=cost",
+			wantChips:    []string{`href="?metric=cost" class="filter-chip active"`},
+			wantHeaders:  []string{"<th>cost</th>"},
+			wantContains: []string{"$0.0013"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", w.Code)
+			}
+			body := w.Body.String()
+			for _, chip := range tc.wantChips {
+				if !strings.Contains(body, chip) {
+					t.Errorf("expected chip %q in body", chip)
+				}
+			}
+			for _, hdr := range tc.wantHeaders {
+				if !strings.Contains(body, hdr) {
+					t.Errorf("expected header %q in body", hdr)
+				}
+			}
+			for _, s := range tc.wantContains {
+				if !strings.Contains(body, s) {
+					t.Errorf("expected %q in body", s)
+				}
+			}
+		})
+	}
+}
+
+func TestServerComparisonDetail_MetricFilter(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+
+	// Configure base run metrics
+	baseRun.Status.Tasks[0].Latency = &v1alpha1.TaskLatency{P50: 8.5, P95: 12.0}
+	baseRun.Status.Tasks[0].Tokens = &v1alpha1.TaskTokens{Total: 2000}
+	baseCost := 0.0015
+	baseRun.Status.Tasks[0].CostUSD = &baseCost
+
+	// Configure candidate run metrics
+	candRun.Status.Tasks[0].Latency = &v1alpha1.TaskLatency{P50: 6.01, P95: 9.78}
+	candRun.Status.Tasks[0].Tokens = &v1alpha1.TaskTokens{
+		Total:     3500,
+		Reasoning: 120,
+	}
+	candCost := 0.0025
+	candRun.Status.Tasks[0].CostUSD = &candCost
+
+	// Configure comparison resource
+	comp.Status.Tasks[0].Latency = &v1alpha1.TaskLatency{P50: 6.01, P95: 9.78}
+	comp.Status.Tasks[0].Tokens = &v1alpha1.TaskTokens{
+		Total:     3500,
+		Reasoning: 120,
+	}
+	comp.Status.Tasks[0].CostUSD = &candCost
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	t.Run("latency_filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=latency", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `href="?metric=latency" class="filter-chip active"`) {
+			t.Errorf("expected active latency filter chip")
+		}
+		if !strings.Contains(body, "<th>base latency (p50/p95)</th>") {
+			t.Errorf("expected base latency header in table")
+		}
+		if !strings.Contains(body, "<th>latency (p50/p95)</th>") {
+			t.Errorf("expected latency header in table")
+		}
+		if !strings.Contains(body, "<th>Δ latency (p50)</th>") {
+			t.Errorf("expected delta latency header in table")
+		}
+		if !strings.Contains(body, "8.50s / 12.00s") {
+			t.Errorf("expected base latency 8.50s / 12.00s in table")
+		}
+		if !strings.Contains(body, "6.01s / 9.78s") {
+			t.Errorf("expected candidate latency 6.01s / 9.78s in table")
+		}
+		if !strings.Contains(body, "-2.49s") {
+			t.Errorf("expected delta latency -2.49s in table")
+		}
+		if strings.Contains(body, `class="cibar"`) {
+			t.Errorf("expected CI bar to be excluded from latency view")
+		}
+	})
+
+	t.Run("tokens_filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=tokens", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `href="?metric=tokens" class="filter-chip active"`) {
+			t.Errorf("expected active tokens filter chip")
+		}
+		if !strings.Contains(body, "<th>base tokens</th>") {
+			t.Errorf("expected base tokens header in table")
+		}
+		if !strings.Contains(body, "<th>tokens</th>") {
+			t.Errorf("expected tokens header in table")
+		}
+		if !strings.Contains(body, "<th>Δ tokens</th>") {
+			t.Errorf("expected delta tokens header in table")
+		}
+		if !strings.Contains(body, "<th>reasoning (+R)</th>") {
+			t.Errorf("expected reasoning header in table")
+		}
+		if !strings.Contains(body, "2000") {
+			t.Errorf("expected base tokens 2000 in table")
+		}
+		if !strings.Contains(body, "3500") {
+			t.Errorf("expected candidate tokens 3500 in table")
+		}
+		if !strings.Contains(body, "&#43;1500") {
+			t.Errorf("expected delta tokens &#43;1500 in table")
+		}
+		if !strings.Contains(body, "+R 120") {
+			t.Errorf("expected reasoning tokens +R 120 in table")
+		}
+		if strings.Contains(body, `class="cibar"`) {
+			t.Errorf("expected CI bar to be excluded from tokens view")
+		}
+	})
+
+	t.Run("cost_filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=cost", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `href="?metric=cost" class="filter-chip active"`) {
+			t.Errorf("expected active cost filter chip")
+		}
+		if !strings.Contains(body, "<th>base cost ($ USD)</th>") {
+			t.Errorf("expected base cost header in table")
+		}
+		if !strings.Contains(body, "<th>cost</th>") {
+			t.Errorf("expected cost header in table")
+		}
+		if !strings.Contains(body, "<th>Δ cost ($ USD)</th>") {
+			t.Errorf("expected delta cost header in table")
+		}
+		if !strings.Contains(body, "$0.0015") {
+			t.Errorf("expected base cost $0.0015 in table")
+		}
+		if !strings.Contains(body, "$0.0025") {
+			t.Errorf("expected candidate cost $0.0025 in table")
+		}
+		if !strings.Contains(body, "&#43;$0.0010") {
+			t.Errorf("expected delta cost &#43;$0.0010 in table")
+		}
+		if strings.Contains(body, `class="cibar"`) {
+			t.Errorf("expected CI bar to be excluded from cost view")
+		}
+	})
+
+	t.Run("rate_filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=rate", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `href="?metric=rate" class="filter-chip active"`) {
+			t.Errorf("expected active rate filter chip")
+		}
+		if !strings.Contains(body, "<th>base</th>") {
+			t.Errorf("expected base header in table")
+		}
+		if !strings.Contains(body, "<th>this PR</th>") {
+			t.Errorf("expected this PR header in table")
+		}
+		if !strings.Contains(body, `<th colspan="2">Δ (95% CI)</th>`) {
+			t.Errorf("expected delta CI header in table")
+		}
+		if !strings.Contains(body, `class="cibar"`) {
+			t.Errorf("expected CI bar in rate view")
+		}
+		if strings.Contains(body, "<th>latency (p50/p95)</th>") {
+			t.Errorf("expected latency header to be excluded from rate view")
+		}
+		if strings.Contains(body, "<th>cost</th>") {
+			t.Errorf("expected cost header to be excluded from rate view")
+		}
+	})
+
+	t.Run("all_metrics", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=all", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `href="?metric=all" class="filter-chip active"`) {
+			t.Errorf("expected active all metrics filter chip")
+		}
+		if !strings.Contains(body, "<th>base</th>") {
+			t.Errorf("expected base header in all view")
+		}
+		if !strings.Contains(body, "<th>this PR</th>") {
+			t.Errorf("expected this PR header in all view")
+		}
+		if !strings.Contains(body, "<th>tokens</th>") {
+			t.Errorf("expected tokens header in all view")
+		}
+		if !strings.Contains(body, "<th>latency (p50/p95)</th>") {
+			t.Errorf("expected latency header in all view")
+		}
+		if !strings.Contains(body, "<th>cost</th>") {
+			t.Errorf("expected cost header in all view")
 		}
 	})
 }

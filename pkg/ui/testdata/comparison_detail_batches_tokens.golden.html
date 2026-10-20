@@ -209,6 +209,13 @@ table.ci tbody tr:last-child td { border-bottom: none; }
 a.log-path { color: var(--indigo); text-decoration: none; }
 a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
 .msg-alert { margin-top: 14px; padding: 10px 14px; background: var(--bad-soft); color: var(--bad); border-radius: 6px; font-size: 14px; }
+
+ 
+.metric-filter-bar { display: flex; align-items: center; gap: 8px; margin: 18px 0 16px; flex-wrap: wrap; }
+.filter-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
+.filter-chip { font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--neutral-soft); padding: 5px 12px; border-radius: 6px; text-decoration: none; border: 1px solid transparent; transition: all 0.15s ease; }
+.filter-chip:hover { text-decoration: none; background: var(--line); color: var(--ink); }
+.filter-chip.active { background: var(--indigo-soft); color: var(--indigo); font-weight: 600; border-color: rgba(79,70,229,0.2); }
 </style>
 </head>
 <body>
@@ -243,9 +250,39 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
         
 
         
+        <div class="meta-grid" style="margin-top:16px">
+          <div class="meta-tile">
+            <div class="label">Total Spent</div>
+            <div class="value num">—</div>
+          </div>
+          <div class="meta-tile">
+            <div class="label">Candidate Tokens</div>
+            <div class="value num">800 (&#43;100 R)</div>
+          </div>
+          <div class="meta-tile">
+            <div class="label">Samples Paired</div>
+            <div class="value num">32</div>
+          </div>
+        </div>
+        
+
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:16px 0 8px;gap:12px">
+          <h2 style="font-size:17px;font-weight:600;margin:0">Task Comparisons</h2>
+          <div class="metric-filter-bar" style="margin:0">
+            <span class="filter-label">View:</span>
+            <a href="?metric=all" class="filter-chip active">All Metrics</a>
+            <a href="?metric=rate" class="filter-chip ">Accuracy / Rate</a>
+            <a href="?metric=latency" class="filter-chip ">Latency (p50/p95)</a>
+            <a href="?metric=tokens" class="filter-chip ">Tokens</a>
+            <a href="?metric=cost" class="filter-chip ">Cost ($ USD)</a>
+          </div>
+        </div>
+
+        
 <div style="overflow-x:auto;margin-top:16px">
   <table class="ci">
     <thead>
+      
       <tr>
         <th>eval</th>
         <th>base</th>
@@ -253,13 +290,19 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
         <th colspan="2">Δ (95% CI)</th>
         <th>label</th>
         <th>samples</th>
+        
         <th>tokens</th>
+        
+        
+        
       </tr>
+      
     </thead>
     <tbody>
       
       <tr>
         <td class="mono" style="font-weight:600">docs/readme_comprehension</td>
+        
         <td class="num">0.60</td>
         <td class="num">0.90</td>
         <td class="num">&#43;0.30 <span style="font-size:13px;color:var(--muted)">[&#43;0.10, &#43;0.50]</span></td>
@@ -278,11 +321,17 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
           16
           
         </td>
+        
         <td class="num">800 (+R 100)</td>
+        
+        
+        
+        
       </tr>
       
       <tr>
         <td class="mono" style="font-weight:600">docs/readme_comprehension_blind</td>
+        
         <td class="num">0.20</td>
         <td class="num">0.15</td>
         <td class="num">-0.05 <span style="font-size:13px;color:var(--muted)">[-0.15, &#43;0.00]</span></td>
@@ -301,11 +350,17 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
           16
           
         </td>
+        
         <td class="num">—</td>
+        
+        
+        
+        
       </tr>
       
       <tr>
         <td class="mono" style="font-weight:600">docs/readme_summary</td>
+        
         <td class="num">—</td>
         <td class="num">—</td>
         <td class="num">—</td>
@@ -319,7 +374,12 @@ a.log-path:hover { text-decoration: underline; background: var(--indigo-soft); }
           —
           
         </td>
+        
         <td class="num">—</td>
+        
+        
+        
+        
       </tr>
       
     </tbody>
