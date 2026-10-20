@@ -2410,6 +2410,236 @@ func TestTruncateMessageBytes_UTF8(t *testing.T) {
 	}
 }
 
+func TestTruncateFieldBytes(t *testing.T) {
+	t.Run("UnderOrEqualLimit", func(t *testing.T) {
+		if got := TruncateFieldBytes("hello", 10); got != "hello" {
+			t.Errorf("expected 'hello', got %q", got)
+		}
+		if got := TruncateFieldBytes("hello", 5); got != "hello" {
+			t.Errorf("expected 'hello', got %q", got)
+		}
+		if got := TruncateFieldBytes("", 5); got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("OverLimit_ASCII", func(t *testing.T) {
+		s := "hello world"
+		got := TruncateFieldBytes(s, 5)
+		want := "hello\n... [truncated, 11 bytes total]"
+		if got != want {
+			t.Errorf("expected %q, got %q", want, got)
+		}
+	})
+
+	t.Run("OverLimit_UTF8RuneBoundary", func(t *testing.T) {
+		// "こんにちは世界": each rune is 3 bytes (21 bytes total).
+		// Slicing at 5 bytes falls inside 'ん' (bytes 3..5).
+		// It should walk back to 3 bytes ('こ').
+		s := "こんにちは世界"
+		got := TruncateFieldBytes(s, 5)
+		want := "こ\n... [truncated, 21 bytes total]"
+		if got != want {
+			t.Errorf("expected %q, got %q", want, got)
+		}
+	})
+
+	t.Run("OverLimit_HTMLEntities", func(t *testing.T) {
+		// Named entity cut in half: "hello &amp; world" (17 bytes).
+		// Slicing at 9 bytes gives "hello &am".
+		// It should walk back before '&' (byte 6: "hello ").
+		s := "hello &amp; world"
+		got := TruncateFieldBytes(s, 9)
+		want := "hello \n... [truncated, 17 bytes total]"
+		if got != want {
+			t.Errorf("expected %q, got %q", want, got)
+		}
+
+		// Numeric entity cut in half: "hello &#1234; world" (19 bytes).
+		// Slicing at 10 bytes gives "hello &#12".
+		gotNum := TruncateFieldBytes("hello &#1234; world", 10)
+		wantNum := "hello \n... [truncated, 19 bytes total]"
+		if gotNum != wantNum {
+			t.Errorf("expected %q, got %q", wantNum, gotNum)
+		}
+
+		// Hex entity cut in half: "hello &#x1f600; world" (21 bytes).
+		// Slicing at 11 bytes gives "hello &#x1f".
+		gotHex := TruncateFieldBytes("hello &#x1f600; world", 11)
+		wantHex := "hello \n... [truncated, 21 bytes total]"
+		if gotHex != wantHex {
+			t.Errorf("expected %q, got %q", wantHex, gotHex)
+		}
+
+		// Completed entity: slicing at 11 bytes gives "hello &amp;".
+		// The entity is complete, so it must not be walked back.
+		gotComplete := TruncateFieldBytes(s, 11)
+		wantComplete := "hello &amp;\n... [truncated, 17 bytes total]"
+		if gotComplete != wantComplete {
+			t.Errorf("expected %q, got %q", wantComplete, gotComplete)
+		}
+
+		// Dangling ampersand at the cut: "hello &"
+		gotDangling := TruncateFieldBytes("hello & world", 7)
+		wantDangling := "hello \n... [truncated, 13 bytes total]"
+		if gotDangling != wantDangling {
+			t.Errorf("expected %q, got %q", wantDangling, gotDangling)
+		}
+
+		// Ampersand in regular text not followed by an entity: "Tom & Jerry" (11 bytes).
+		// Slicing at 7 bytes gives "Tom & J". Space follows '&', so it's not an entity.
+		gotText := TruncateFieldBytes("Tom & Jerry", 7)
+		wantText := "Tom & J\n... [truncated, 11 bytes total]"
+		if gotText != wantText {
+			t.Errorf("expected %q, got %q", wantText, gotText)
+		}
+	})
+
+	t.Run("ZeroOrNegativeLimit", func(t *testing.T) {
+		s := "hello"
+		if got := TruncateFieldBytes(s, 0); got != "... [truncated, 5 bytes total]" {
+			t.Errorf("expected '... [truncated, 5 bytes total]', got %q", got)
+		}
+		if got := TruncateFieldBytes(s, -5); got != "... [truncated, 5 bytes total]" {
+			t.Errorf("expected '... [truncated, 5 bytes total]', got %q", got)
+		}
+	})
+}
+
+func TestServerSampleTranscript_Truncation(t *testing.T) {
+	scheme := newTestScheme(t)
+	sink := artifacts.NewInMemorySink()
+
+	commit := "abcdef1234567890"
+	taskID := "triage/runbook_lookup"
+	meanScore := 1.0
+	now := time.Now()
+	meta := artifacts.RunMetadata{
+		TaskID:     taskID,
+		Commit:     commit,
+		Model:      "gemini-2.5-pro",
+		Samples:    2,
+		Successes:  2,
+		MeanScore:  &meanScore,
+		StartedAt:  &now,
+		FinishedAt: &now,
+	}
+
+	// 100 KiB explanation (102,400 bytes)
+	explanation100k := strings.Repeat("a", 100*1024)
+	// 100 KiB target (102,400 bytes)
+	target100k := strings.Repeat("b", 100*1024)
+
+	rawJSON := fmt.Sprintf(`{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "triage/runbook_lookup", "scorers": [{"name": "accuracy"}]},
+		"samples": [
+			{
+				"id": "sample-oversized-explanation",
+				"target": "Expected pass rule",
+				"scores": {
+					"accuracy": {
+						"value": 1.0,
+						"explanation": %q
+					}
+				}
+			},
+			{
+				"id": "sample-oversized-target",
+				"target": %q,
+				"scores": {
+					"accuracy": {
+						"value": 1.0,
+						"explanation": "Short explanation"
+					}
+				}
+			}
+		]
+	}`, explanation100k, target100k)
+
+	logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(rawJSON))
+	if err != nil {
+		t.Fatalf("failed to store artifact in InMemorySink: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "oversized-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: commit,
+			},
+			Model: "gemini-2.5-pro",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: logURI,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		Build()
+
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+		ArtifactSink:     sink,
+	})
+
+	t.Run("OversizedExplanation_100KiB_Truncated", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-explanation", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		expectedNote := fmt.Sprintf("truncated, %d bytes total", len(explanation100k))
+		if !strings.Contains(body, expectedNote) {
+			t.Errorf("expected body to contain truncation note %q, but did not find it in:\n%s", expectedNote, body)
+		}
+
+		// Body must be well under 100 KiB (target/explanation capped at 16 KiB + HTML template skeleton)
+		if len(body) >= 50*1024 {
+			t.Errorf("expected body to be well under 100 KiB, got %d bytes", len(body))
+		}
+	})
+
+	t.Run("OversizedTarget_100KiB_Truncated", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-target", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		expectedNote := fmt.Sprintf("truncated, %d bytes total", len(target100k))
+		if !strings.Contains(body, expectedNote) {
+			t.Errorf("expected body to contain truncation note %q, but did not find it in:\n%s", expectedNote, body)
+		}
+
+		if len(body) >= 50*1024 {
+			t.Errorf("expected body to be well under 100 KiB, got %d bytes", len(body))
+		}
+	})
+}
+
 func TestComparisonCIHistory(t *testing.T) {
 	scheme := newTestScheme(t)
 	baseDir := t.TempDir()

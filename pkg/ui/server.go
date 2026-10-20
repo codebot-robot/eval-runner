@@ -1846,6 +1846,13 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Transcript size guards.
+const (
+	maxEvents               = 500
+	maxMessageBytes         = 16 * 1024
+	maxTranscriptFieldBytes = 16 * 1024
+)
+
 func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("namespace")
 	name := r.PathValue("name")
@@ -1952,14 +1959,13 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 	view.StatusClass = statusClass
 	view.LatencyStr = FormatLatency(matchedSample.Latency)
 	view.TokensStr = FormatTokens(matchedSample.TotalTokens)
-	view.Target = matchedSample.Target
-	view.Explanation = matchedSample.Explanation
+	view.Target = TruncateFieldBytes(matchedSample.Target, maxTranscriptFieldBytes)
+	view.Explanation = TruncateFieldBytes(matchedSample.Explanation, maxTranscriptFieldBytes)
 
 	totalEvents := len(matchedSample.Transcript)
 	view.TotalEvents = totalEvents
 
 	rows := matchedSample.Transcript
-	const maxEvents = 500
 	if len(rows) > maxEvents {
 		rows = rows[:maxEvents]
 		view.IsEventsTruncated = true
@@ -1973,7 +1979,6 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	const maxMessageBytes = 16 * 1024
 	var rowViews []TranscriptRowView
 	for i, r := range rows {
 		class := ""
