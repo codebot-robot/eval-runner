@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gke-labs/eval-runner/pkg/ui"
 )
 
 // runUISmoke verifies that the eval-runner-ui service is up and serving both
@@ -68,7 +70,7 @@ func runUISmoke(t *testing.T, harness *Harness, runName string) {
 		t.Fatalf("unexpected /healthz response: status=%d body=%q", resp.StatusCode, string(body))
 	}
 
-	// 2. Curl Run page
+	// 2. Curl Run page via legacy URL (redirects are followed)
 	runURL := fmt.Sprintf("%s/runs/eval-runner/%s", baseURL, runName)
 	respRun, err := http.Get(runURL)
 	if err != nil {
@@ -83,7 +85,27 @@ func runUISmoke(t *testing.T, harness *Harness, runName string) {
 		t.Errorf("expected run name %q in run detail HTML", runName)
 	}
 
-	// 3. Curl /pulls page
+	// 3. Curl Run page via repository-scoped URL derived from spec.repo.url
+	repoURLOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.spec.repo.url}")
+	repoRef, ok := ui.ParseRepoURL(strings.TrimSpace(repoURLOut))
+	if !ok {
+		t.Fatalf("failed to parse repo URL %q for run %s", repoURLOut, runName)
+	}
+	scopedRunURL := fmt.Sprintf("%s%s/runs/%s", baseURL, repoRef.Path(), runName)
+	respScoped, err := http.Get(scopedRunURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", scopedRunURL, err)
+	}
+	bodyScoped, _ := io.ReadAll(respScoped.Body)
+	respScoped.Body.Close()
+	if respScoped.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected scoped run page status: %d body=%s", respScoped.StatusCode, string(bodyScoped))
+	}
+	if !strings.Contains(string(bodyScoped), runName) {
+		t.Errorf("expected run name %q in scoped run detail HTML", runName)
+	}
+
+	// 4. Curl /pulls page
 	pullsURL := baseURL + "/pulls"
 	respPulls, err := http.Get(pullsURL)
 	if err != nil {
