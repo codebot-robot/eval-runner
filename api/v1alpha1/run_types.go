@@ -295,6 +295,11 @@ type ManifestTask struct {
 	// Images specifies which images built from the manifest this task requires.
 	// +optional
 	Images []string `json:"images,omitempty"`
+
+	// Paths specifies repository-relative path globs this task is sensitive to.
+	// When evaluating pull requests, changed files are matched against these globs.
+	// +optional
+	Paths []string `json:"paths,omitempty"`
 }
 
 // Manifest is the parsed output of .evals/list.

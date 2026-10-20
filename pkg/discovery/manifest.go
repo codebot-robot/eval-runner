@@ -99,6 +99,18 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 				return fmt.Errorf("task %q has invalid workdir %q: must be relative and not contain '..'", id, task.Workdir)
 			}
 		}
+
+		if len(task.Paths) > MaxTaskPaths {
+			return fmt.Errorf("task %q has %d paths, exceeding maximum allowed (%d)", id, len(task.Paths), MaxTaskPaths)
+		}
+		for _, p := range task.Paths {
+			if len(p) == 0 {
+				return fmt.Errorf("task %q has empty path pattern", id)
+			}
+			if len(p) > MaxPathLength {
+				return fmt.Errorf("task %q path pattern exceeds maximum length (%d)", id, MaxPathLength)
+			}
+		}
 	}
 
 	return nil

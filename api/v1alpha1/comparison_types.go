@@ -258,7 +258,22 @@ type ComparisonTaskStatus struct {
 	// PossibleSamples is the total dataset size (possible samples) for this task when known from the Inspect log.
 	// +optional
 	PossibleSamples int `json:"possibleSamples,omitempty"`
+
+	// Affinity is the changed-file affinity for this task: always, matched, or unmatched.
+	// +optional
+	Affinity string `json:"affinity,omitempty"`
 }
+
+const (
+	// ComparisonTaskAffinityAlways indicates the task runs regardless of changed files (e.g. no paths declared).
+	ComparisonTaskAffinityAlways = "always"
+
+	// ComparisonTaskAffinityMatched indicates the task's path globs matched at least one changed file.
+	ComparisonTaskAffinityMatched = "matched"
+
+	// ComparisonTaskAffinityUnmatched indicates the task declares path globs but none matched changed files.
+	ComparisonTaskAffinityUnmatched = "unmatched"
+)
 
 // ComparisonBatchStatus records the execution state of one paired batch of Runs.
 type ComparisonBatchStatus struct {
@@ -281,6 +296,21 @@ type ComparisonBatchStatus struct {
 	Phase ComparisonPhase `json:"phase,omitempty"`
 }
 
+// ComparisonAffinityStatus records the metadata of changed-file PR affinity resolution.
+type ComparisonAffinityStatus struct {
+	// FilesHash is the SHA-256 checksum of the sorted changed files list.
+	// +optional
+	FilesHash string `json:"filesHash,omitempty"`
+
+	// FilesCount is the count of changed files retrieved from GitHub.
+	// +optional
+	FilesCount int `json:"filesCount,omitempty"`
+
+	// Truncated is true if the changed file count reached the maximum cap (300).
+	// +optional
+	Truncated bool `json:"truncated,omitempty"`
+}
+
 // ComparisonSummary provides aggregate statistics across tasks in a Comparison.
 type ComparisonSummary struct {
 	// Tasks is a compact string representing completed vs total tasks (e.g. "2/2").
@@ -290,6 +320,10 @@ type ComparisonSummary struct {
 	// Skipped is the count of tasks discovered in the manifest but not planned by either Run.
 	// +optional
 	Skipped int `json:"skipped,omitempty"`
+
+	// AffinityMatched is the count of tasks with affinity "matched".
+	// +optional
+	AffinityMatched int `json:"affinityMatched,omitempty"`
 }
 
 // ComparisonReportingStatus records GitHub comment and check run reporting state.
@@ -405,6 +439,10 @@ type ComparisonStatus struct {
 	// Summary provides aggregate statistics across tasks in the Comparison.
 	// +optional
 	Summary *ComparisonSummary `json:"summary,omitempty"`
+
+	// Affinity records changed-file affinity metadata for pull requests.
+	// +optional
+	Affinity *ComparisonAffinityStatus `json:"affinity,omitempty"`
 
 	// SummaryPath is the storage path or URI where comparisons/<name>.json was written to the artifact sink.
 	// +optional
