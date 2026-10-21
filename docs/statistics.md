@@ -189,7 +189,7 @@ improved    regressed             (stop)                   (stop)
 
 ### 3.1 Comparison-Wide Dollar Budget (`spec.budgetUSD`)
 
-In addition to sample caps (`sampling.maxSamplesPerTask`), a Comparison can declare a comparison-wide dollar cap `spec.budgetUSD` (defaulted by the webhook via ConfigMap key `defaultBudgetUSD`). The budget stopping rule operationalizes "bound the CI, not the budget":
+In addition to sample caps (`sampling.maxSamplesPerTask`), a Comparison can declare a comparison-wide dollar cap `spec.budgetUSD` (defaulted by the webhook via ConfigMap key `defaultBudgetUSD`; `0` = unset / unlimited). The budget stopping rule operationalizes "bound the CI, not the budget":
 
 1. **Enforcement and Price Prerequisite**:
    - Total evaluation cost (`spentSoFar`) is accumulated across candidate and baseline batches using known model token prices (`InputPer1M`, `OutputPer1M`).
