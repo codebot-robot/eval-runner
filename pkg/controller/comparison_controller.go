@@ -2154,6 +2154,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			allBaseScores = append(allBaseScores, baseScores...)
 		}
 
+		if taskPossibleSamples > 0 && (len(allCandScores) >= taskPossibleSamples || len(allBaseScores) >= taskPossibleSamples) {
+			taskExhausted = true
+		}
+
 		var totalCandTokens *v1alpha1.TaskTokens
 		if hasCandTokens {
 			totalCandTokens = &v1alpha1.TaskTokens{
@@ -2471,6 +2475,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	// Check extraSamples if all tasks have stopped
 	extraRequested := comp.Spec.ExtraSamples > comp.Status.ExtraSamplesApplied
+	noEligibleExtraTasks := false
+	var noEligibleDetailMsg string
 	if extraRequested {
 		var undecidedTasks []string
 		var decidedTasks []string
@@ -2632,6 +2638,34 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				status.Message = extraMsg
 			})
 		}
+
+		var exhaustedTasks []string
+		var failedTasks []string
+		for _, te := range taskEvals {
+			if te.failed {
+				failedTasks = append(failedTasks, te.taskID)
+			} else if te.exhausted {
+				exhaustedTasks = append(exhaustedTasks, te.taskID)
+			}
+		}
+		var reasonClauses []string
+		if len(exhaustedTasks) > 0 {
+			sort.Strings(exhaustedTasks)
+			reasonClauses = append(reasonClauses, fmt.Sprintf("dataset exhausted: %s", github.FormatIDList(exhaustedTasks, github.MaxIDList)))
+		}
+		if len(failedTasks) > 0 {
+			sort.Strings(failedTasks)
+			reasonClauses = append(reasonClauses, fmt.Sprintf("task failed: %s", github.FormatIDList(failedTasks, github.MaxIDList)))
+		}
+		noEligibleDetailMsg = strings.Join(reasonClauses, "; ")
+
+		// When extra samples were requested but no task is eligible (exhausted or failed)
+		// on a terminal Comparison, record unserviceable extra samples, settle
+		// extraSamplesApplied to spec.extraSamples, and post a PR note.
+		if isTerminalComparisonPhase(comp.Status.Phase) {
+			return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "no eligible tasks", "NoEligibleTasks", noEligibleDetailMsg)
+		}
+		noEligibleExtraTasks = true
 	}
 
 	// All tasks are decided or stopped; finalize comparison
@@ -2944,7 +2978,22 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		if totalPossibleSamples > 0 {
 			status.PossibleSamples = totalPossibleSamples
 		}
-		status.ExtraSamplesApplied = comp.Status.ExtraSamplesApplied
+		if noEligibleExtraTasks {
+			status.ExtraSamplesApplied = comp.Spec.ExtraSamples
+			condMsg := fmt.Sprintf("extra samples cannot be run: no eligible tasks (%s)", noEligibleDetailMsg)
+			if noEligibleDetailMsg == "" {
+				condMsg = "extra samples cannot be run: no eligible tasks"
+			}
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionTypeExtraSamples,
+				Status:             metav1.ConditionFalse,
+				Reason:             "NoEligibleTasks",
+				Message:            condMsg,
+				ObservedGeneration: comp.Generation,
+			})
+		} else {
+			status.ExtraSamplesApplied = comp.Status.ExtraSamplesApplied
+		}
 		status.Summary = &v1alpha1.ComparisonSummary{
 			Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(taskStatuses)-len(prunedTasks)),
 			Skipped: len(skippedNotPlanned) + len(prunedTasks),
@@ -2958,6 +3007,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	})
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if noEligibleExtraTasks {
+		comp.Status.ExtraSamplesApplied = comp.Spec.ExtraSamples
 	}
 
 	if r.ComparisonTTL > 0 && phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
@@ -2996,6 +3049,9 @@ func (r *ComparisonReconciler) recordUnserviceableExtraSamples(
 	hasPRCommentSource := false
 	for i := range comp.Status.HandledCommands {
 		h := &comp.Status.HandledCommands[i]
+		// Commands handled while the comparison was already terminal (handledAt >= completionTime)
+		// are unserviced. A command handled earlier while still Running gets the condition upon
+		// subsequent completion without eligible tasks, but no PR note.
 		if isUnservicedHandledCommand(h, comp.Status.CompletionTime) {
 			if h.CommentID != 0 {
 				hasPRCommentSource = true
@@ -3006,6 +3062,9 @@ func (r *ComparisonReconciler) recordUnserviceableExtraSamples(
 	conditionMissing := meta.FindStatusCondition(comp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples) == nil
 	if delta > 0 || conditionMissing {
 		condMsg := fmt.Sprintf("extra samples cannot be run: %s (%s)", noteReason, detailMsg)
+		if detailMsg == "" {
+			condMsg = fmt.Sprintf("extra samples cannot be run: %s", noteReason)
+		}
 		if _, statusErr := r.updateComparisonStatus(ctx, comp, baselineRun, candidateRun, func(status *v1alpha1.ComparisonStatus) {
 			if status.ExtraSamplesApplied < comp.Spec.ExtraSamples {
 				status.ExtraSamplesApplied = comp.Spec.ExtraSamples
