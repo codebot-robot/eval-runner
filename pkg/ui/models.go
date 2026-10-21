@@ -1114,6 +1114,8 @@ type ComparisonDetailView struct {
 	HistoryNote string
 
 	TotalCostStr   string
+	BudgetStr      string
+	BudgetNote     string
 	TotalTokensStr string
 	LatencySummary string
 }
@@ -1731,6 +1733,17 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 		totalCostFormatted = fmt.Sprintf("$%.4f", totalCostUSD)
 	}
 
+	var budgetFormatted string
+	var budgetNote string
+	if comp.Status.Budget != nil && comp.Status.Budget.LimitUSD != nil {
+		budgetFormatted = fmt.Sprintf("$%.2f", *comp.Status.Budget.LimitUSD)
+	} else if comp.Spec.BudgetUSD != nil {
+		budgetFormatted = fmt.Sprintf("$%.2f", *comp.Spec.BudgetUSD)
+	}
+	if comp.Status.Budget != nil {
+		budgetNote = comp.Status.Budget.Note
+	}
+
 	var totalTokensFormatted string
 	if hasTokens {
 		if totalReasoning > 0 {
@@ -1763,6 +1776,8 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 		HasAffinity:      hasAffinity,
 		AffinityMatched:  affinityMatched,
 		TotalCostStr:     totalCostFormatted,
+		BudgetStr:        budgetFormatted,
+		BudgetNote:       budgetNote,
 		TotalTokensStr:   totalTokensFormatted,
 		Batches:          ComparisonBatches(comp),
 		Actions:          ComparisonActions(comp),

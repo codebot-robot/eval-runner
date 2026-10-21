@@ -982,12 +982,16 @@ const comparisonDetailTemplate = `
         </div>
         {{- end }}
 
-        {{ if or .TotalCostStr .TotalTokensStr }}
+        {{ if or .TotalCostStr .TotalTokensStr .BudgetStr }}
         <div class="meta-grid" style="margin-top:16px">
           <div class="meta-tile">
             <div class="label">Total Spent</div>
             <div class="value num">{{ if .TotalCostStr }}{{ .TotalCostStr }}{{ else }}—{{ end }}</div>
-          </div>
+          </div>{{ if .BudgetStr }}
+          <div class="meta-tile">
+            <div class="label">Budget</div>
+            <div class="value num"{{ if .BudgetNote }} title="{{ .BudgetNote }}"{{ end }}>{{ .BudgetStr }}</div>
+          </div>{{ end }}
           <div class="meta-tile">
             <div class="label">Candidate Tokens</div>
             <div class="value num">{{ if .TotalTokensStr }}{{ .TotalTokensStr }}{{ else }}—{{ end }}</div>
