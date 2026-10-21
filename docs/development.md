@@ -59,6 +59,8 @@ go work init . ../agent-sandbox
 ```
 `go.work` and `go.work.sum` are git-ignored so local workspace configurations do not affect CI.
 
+Because container image builds use the repository root as their build context, a sibling module referenced via `go.work` (e.g. `../agent-sandbox`) is not included in the image build context. Multi-module `go.work` setups pointing to sibling directories are therefore local-only workflows (or the sibling module must be vendored into the tree). For container image builds, the pinned `replace` directive in `go.mod` is used instead.
+
 #### CI Builds via `replace`
 In `go.mod`, a pinned `replace` directive resolves `sigs.k8s.io/agent-sandbox` to the fork commit on GitHub so CI builds succeed without requiring a multi-module workspace:
 ```
@@ -125,6 +127,24 @@ Run:
 ```
 
 This task is also invoked automatically whenever `ap generate` is executed.
+
+## Building Container Images (`ap build`)
+
+`eval-runner` builds three primary Go container images:
+- `images/eval-runner/Dockerfile` (the controller)
+- `images/eval-runner-ui/Dockerfile` (the web UI)
+- `images/eval-runner-webhook/Dockerfile` (the GitHub webhook server)
+
+### Full Git Source Tree Builds and VCS Stamping
+
+Each Go image builds from the full git tree using `COPY . .` rather than a hand-maintained list of subdirectories. Builds use Go package paths (`go build -o <bin> ./cmd/<name>`) rather than file arguments:
+- **Automatic VCS Stamping**: Go embeds version control metadata (`vcs.revision`, `vcs.time`, and `vcs.modified`) into the binary via `runtime/debug.ReadBuildInfo()` without needing `-ldflags` or manual build arguments.
+- **Reporting and Visibility**:
+  - The controller logs the stamped VCS revision at startup (`{"version": "<sha>[-dirty]"}`).
+  - The UI displays `eval-runner <sha>[-dirty]` in page card footers.
+  - All three binaries support `--version` (or `-version`) to print the stamped git revision and exit cleanly (e.g. `docker run --rm <image> --version`).
+- **Caching**: Docker dependency caching is preserved by running `COPY go.mod go.sum ./` and `RUN go mod download` with cache mounts (`--mount=type=cache,target=/go/pkg/mod` and `/root/.cache/go-build`) before `COPY . .`.
+- **`.dockerignore`**: A top-level `.dockerignore` excludes ephemeral build outputs (`.build/`, `bin/`), credentials, editor configs, and temporary caches, while explicitly keeping `.git` in the context so VCS stamping works.
 
 ## Deploying to a Cluster (`ap deploy`)
 
@@ -288,7 +308,7 @@ Once #241 merges, equivalent routes will be registered under `http://localhost:8
 #### Diagnosing Missing Artifact Storage
 
 The UI requires access to evaluation logs via an `ArtifactSink` (`artifactBucket` or `artifactDir` in `eval-runner-config`). When artifact storage is missing or not configured:
-- **Page Footer**: Run detail, sample list, and transcript pages display an `artifacts: ...` footer line (`artifacts: gs://<bucket>`, `artifacts: dir <path>`, or `artifacts: none`). This allows operators to quickly verify whether the UI is connected to an artifact sink without running `kubectl`.
+- **Page Footer**: Run detail, sample list, and transcript pages display an `artifacts: ...` footer line (`artifacts: gs://<bucket>`, `artifacts: dir <path>`, or `artifacts: none`) alongside the application version (`eval-runner <version>`). This allows operators to quickly verify whether the UI is connected to an artifact sink and check the running version without running `kubectl`.
 - **Nil-Sink Guidance Message**: Navigating to a task sample list or sample transcript when no sink is configured renders an actionable guidance message rather than a 404:
   > `artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config`
 

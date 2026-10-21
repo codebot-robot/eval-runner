@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -210,6 +211,16 @@ stringData:
 	h.KubectlApplyContent(modifiedDeploy)
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")
+
+	// Assert controller logs report a 40-hex VCS revision rather than 'devel'
+	controllerLogs := h.runCmd("kubectl", "logs", "--namespace", "eval-runner", "deployment/eval-runner-controller")
+	reHex := regexp.MustCompile(`[0-9a-f]{40}`)
+	if !reHex.MatchString(controllerLogs) {
+		h.t.Fatalf("expected controller logs to contain a 40-hex VCS revision, got:\n%s", controllerLogs)
+	}
+	if strings.Contains(controllerLogs, `"version": "devel"`) || strings.Contains(controllerLogs, `"version":"devel"`) {
+		h.t.Fatalf("controller logged version 'devel' instead of VCS revision:\n%s", controllerLogs)
+	}
 
 	// Verify controller-owned sandbox egress NetworkPolicy reconciliation
 	out := h.runCmd("kubectl", "get", "networkpolicy", "eval-runner-sandbox-egress", "-n", "eval-runner-sandbox", "-o", "json")
