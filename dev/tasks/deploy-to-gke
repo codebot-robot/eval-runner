@@ -23,8 +23,8 @@ This wraps the one-time cloud setup that ./dev/tasks/deploy does not do:
      through Workload Identity Federation principals (no Google service
      accounts, no KSA annotations).
   4. Write the eval-runner-config ConfigMap (artifactBucket plus any --set keys).
-  5. Run ./dev/tasks/deploy with IMAGE_PREFIX pointing at the project's registry
-     and wait for the rollouts.
+  5. Run ./dev/tasks/deploy with IMAGE_PREFIX pointing at the project's registry,
+     wait for the rollouts, and confirm configuration took effect.
   6. Check for the model credentials Secret and print what is still missing.
 
 Every step is idempotent, so re-running after fixing a permission problem is
@@ -45,6 +45,8 @@ import re
 import shlex
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -54,6 +56,7 @@ CONFIGMAP = "eval-runner-config"
 CONTROLLER_KSA = "eval-runner-controller"
 UI_KSA = "eval-runner-ui"
 DEPLOYMENTS = ["eval-runner-controller", "eval-runner-ui", "eval-runner-webhook"]
+CONTROLLER_DEPLOYMENT = "eval-runner-controller"
 MODEL_SECRET = "model-credentials"
 
 CLUSTER_PATH_RE = re.compile(
@@ -155,6 +158,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--skip-deploy", action="store_true", help="provision only; do not run ./dev/tasks/deploy")
     p.add_argument("--skip-bucket", action="store_true", help="do not create the bucket or grant access to it")
+    p.add_argument(
+        "--restart",
+        action="store_true",
+        help="restart deployments after deploying (for clusters running a controller older than #277)",
+    )
     p.add_argument("--dry-run", action="store_true", help="print the commands that would run")
     args = p.parse_args()
 
@@ -328,11 +336,50 @@ def ensure_configmap(r: Runner, args: argparse.Namespace, desired: Dict[str, str
 def deploy(r: Runner, args: argparse.Namespace, root: Path, restart: bool) -> None:
     r.run([str(root / "dev" / "tasks" / "deploy")], env_overrides={"IMAGE_PREFIX": args.image_prefix})
     if restart:
-        # The controller and UI read the ConfigMap at start-up only.
+        # For clusters running a controller older than #277 that does not reload at runtime.
         for d in DEPLOYMENTS:
             r.run(["kubectl", "-n", NAMESPACE, "rollout", "restart", f"deployment/{d}"])
     for d in DEPLOYMENTS:
         r.run(["kubectl", "-n", NAMESPACE, "rollout", "status", f"deployment/{d}", "--timeout=300s"])
+
+
+def wait_for_effective_settings(
+    r: Runner,
+    bucket: Optional[str],
+    *,
+    since_time: Optional[str] = None,
+    timeout: float = 60.0,
+) -> None:
+    """Wait for the controller to log effective cluster settings reflecting the bucket."""
+    cmd = ["kubectl", "-n", NAMESPACE, "logs", f"deployment/{CONTROLLER_DEPLOYMENT}"] + (
+        [f"--since-time={since_time}"] if since_time else []
+    )
+    if r.dry_run:
+        r.show(cmd)
+        return
+
+    print(f"    waiting up to {int(timeout)}s for controller to log effective cluster settings...")
+    deadline = time.time() + timeout
+    last_err: Optional[str] = None
+    while time.time() < deadline:
+        res = r.run(cmd, check=False, capture=True, mutating=False, quiet=True)
+        if res.returncode == 0 and res.stdout:
+            for line in reversed(res.stdout.splitlines()):
+                if "effective cluster settings" in line and (not bucket or bucket in line):
+                    print(f"    {line.strip()}")
+                    return
+        elif res.returncode != 0:
+            last_err = res.stderr.strip()
+        time.sleep(2)
+
+    if last_err:
+        print(f"    kubectl logs returned an error:\n      {last_err.splitlines()[-1]}")
+    desc = f" reflecting artifactBucket={bucket}" if bucket else ""
+    print(
+        f"    WARNING: did not see 'effective cluster settings'{desc} within {int(timeout)}s;\n"
+        f"    the deploy succeeded. Check with: kubectl -n {NAMESPACE} logs deployment/{CONTROLLER_DEPLOYMENT} | grep 'effective cluster settings'"
+    )
+    return
 
 
 def check_model_secret(r: Runner) -> None:
@@ -380,6 +427,7 @@ def main() -> None:
         desired[k.strip()] = v
 
     Step(f"ConfigMap {NAMESPACE}/{CONFIGMAP}")
+    started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     changed = ensure_configmap(r, args, desired)
 
     if args.skip_deploy:
@@ -387,7 +435,8 @@ def main() -> None:
         print(f"    run later: KUBECONFIG={args.kubeconfig} IMAGE_PREFIX={args.image_prefix} ./dev/tasks/deploy")
     else:
         Step(f"Deploy images {args.image_prefix}/*:<git sha> and manifests")
-        deploy(r, args, root, restart=changed)
+        deploy(r, args, root, restart=args.restart)
+        wait_for_effective_settings(r, desired.get("artifactBucket"), since_time=started if changed else None)
 
     Step("Model credentials")
     check_model_secret(r)
