@@ -1997,6 +1997,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		possibleSamples int
 		exhausted       bool
 		failed          bool
+		budgetStopped   bool
 		est             stats.PairedEstimate
 		dec             stats.Decision
 		suggestedNext   int
@@ -2438,6 +2439,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 		te.dec = dec
 		te.suggestedNext = suggestedNext
+		if dec.Stop && budgetVal > 0 && spentVal >= budgetVal {
+			te.budgetStopped = true
+		}
 	}
 
 	// Check if any tasks need to continue sampling
@@ -2488,6 +2492,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						// Stop! Zero batchSize so the guard below fires and doesn't spawn an unfiltered batch
 						batchSize = 0
 						stopReason = fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", budgetLimit, spentSoFar)
+						for i := range taskEvals {
+							if taskEvals[i].dec.Label == stats.TaskLabelContinue {
+								taskEvals[i].budgetStopped = true
+							}
+						}
 						continueTasks = nil
 					}
 				}
@@ -3128,7 +3137,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			budgetReached = true
 		}
 		for _, te := range taskEvals {
-			if strings.Contains(te.dec.Reason, "budget") {
+			if te.budgetStopped {
 				budgetReached = true
 				break
 			}
