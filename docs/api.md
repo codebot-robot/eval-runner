@@ -159,6 +159,7 @@ status:
 | `tokens` | `*TaskTokens` | Token usage breakdown consumed for this task when present in Inspect logs. |
 | `latency` | `*TaskLatency` | Sample latency percentiles (`p50`, `p95` in seconds) aggregated across evaluated samples. |
 | `costUSD` | `*float64` | Estimated task evaluation cost in USD from model prices when known (omitted otherwise). |
+| `costSource` | `string` | Provenance of model prices used to compute `costUSD` (`configmap` or `default`). |
 | `possibleSamples` | `int` | Total dataset size (possible samples) when known from the Inspect log (`eval.dataset.samples`). |
 | `samplesDone` | `int` | Number of samples completed so far while the task is running. |
 | `samplesPlanned` | `int` | Expected total number of samples to be evaluated for this task. |
@@ -256,7 +257,7 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Max parallel tasks | `--max-parallel-tasks` / ConfigMap `maxParallelTasks` | `4` | Caps concurrent task sandboxes executing at one time. |
 | Poll progress interval | `--poll-progress-interval` / ConfigMap `pollProgressInterval` | `10s` | Interval between task progress polling attempts and per-task write floor (minimum `1s`). |
 | Model credentials | `--model-secret` / ConfigMap `modelSecret` | `"model-credentials"` | Names a Secret in `eval-runner-sandbox` whose keys are injected into sample sandboxes (optional by presence; pass `""` or `"none"` to disable). |
-| Model pricing | ConfigMap `modelPrices` | `"{}"` | JSON map model -> `{inputPer1M, outputPer1M}` in USD for computing task and comparison evaluation costs (exact, case-sensitive string match on `Run.spec.model`; unknown JSON fields rejected). |
+| Model pricing | ConfigMap `modelPrices` | Built-in defaults | JSON map model -> `{inputPer1M, outputPer1M}` in USD for computing task and comparison evaluation costs. Built-in defaults ship for `google/gemini-3.5-flash-lite`, `google/gemini-2.5-flash`, `google/gemini-2.5-pro`, and `mockllm/model` (0). ConfigMap entries override or extend defaults (merge, not replace); sentinel `"none"` disables defaults entirely. An existing `modelPrices: "{}"` (the previously documented default) now yields the built-in defaults rather than omitting cost; pass `"none"` to disable model pricing entirely. Supports exact string match on `Run.spec.model` or `"prefix:<model-prefix>"` for family-wide pricing. ConfigMap entries (exact first, then longest `prefix:`) take precedence over built-in defaults; within a source, exact beats prefix. Unknown JSON fields and negative prices rejected. |
 | Default batch size | `--default-batch-size` / ConfigMap `defaultBatchSize` | `8` | Default batch size for paired adaptive sampling in webhook-created Comparisons and seed Run sampleRange. |
 | Default max samples | `--default-max-samples-per-task` / ConfigMap `defaultMaxSamplesPerTask` | `64` | Maximum total samples per task across batches in webhook-created Comparisons; bounds `/eval more <n>`. |
 | Command users | `--command-users` / ConfigMap `commandUsers` | `""` | Comma-separated list of GitHub logins allowed to execute `/eval more <n>` PR comment commands without checking GitHub permissions. |
@@ -338,6 +339,7 @@ spec:
 | `tasks[].tokens` | `*TaskTokens` | Token counts (`input`, `output`, `total`) consumed across evaluated task runs when present in Inspect logs. |
 | `tasks[].latency` | `*TaskLatency` | Sample latency percentiles (`p50`, `p95` in seconds) aggregated across evaluated samples. |
 | `tasks[].costUSD` | `*float64` | Estimated task evaluation cost in USD from model prices across candidate and baseline runs when known. |
+| `tasks[].costSource` | `string` | Provenance of model prices used to compute `costUSD` (`configmap` or `default`). |
 | `tasks[].possibleSamples` | `int` | Total dataset size (possible samples) for this task when known from the Inspect log. |
 | `tasks[].affinity` | `string` | Changed-file task affinity: `always` (no paths declared), `matched` (path globs matched changed files), or `unmatched` (globs declared but none matched). |
 | `costUSD` | `*float64` | Total estimated evaluation cost in USD across all tasks in this Comparison when prices are known. |
