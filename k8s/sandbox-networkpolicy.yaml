@@ -36,3 +36,52 @@ spec:
       port: 8080
     - protocol: TCP
       port: 9090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eval-runner-sandbox-egress
+  namespace: eval-runner-sandbox
+spec:
+  podSelector:
+    matchLabels:
+      evalrunner.gke-labs.dev/sandbox: "true"
+  policyTypes:
+  - Egress
+  egress:
+  # Cluster DNS: allow UDP and TCP port 53 to CoreDNS/kube-dns in kube-system
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Git protocol, HTTP and HTTPS egress (git clones, in-cluster git-server fixture on 9418, model APIs on 443).
+  # Egress is blocked to the eval-runner namespace and to the cluster API server / internal cluster network.
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          - eval-runner
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 9418
