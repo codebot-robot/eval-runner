@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -2333,52 +2334,6 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			samplesRun = len(allCandScores)
 		}
 
-		// Stopping rule evaluation:
-		var dec stats.Decision
-		if est.NumPairs == 0 {
-			dec = stats.Decision{
-				Label:  stats.TaskLabelInconclusive,
-				Stop:   true,
-				Reason: "no matching sample IDs between candidate and baseline",
-			}
-			est.PImprovement = 0.5
-		} else if comp.Spec.Sampling == nil {
-			// Single comparison (today's behavior): sampleCap = samplesRun
-			dec = stats.Decide(est, margin, samplesRun, samplesRun, 0, 0)
-		} else if taskExhausted {
-			dec = stats.Decide(est, margin, samplesRun, maxSamples, 0, 0)
-			if dec.Label == stats.TaskLabelContinue {
-				dec.Label = stats.TaskLabelInconclusive
-				dec.Stop = true
-				dec.Reason = "dataset exhausted"
-				dec.EstimatedSamples = 0
-				dec.NextBatchSize = 0
-			}
-		} else {
-			dec = stats.Decide(est, margin, samplesRun, maxSamples, 0, 0)
-			if dec.Label == stats.TaskLabelContinue {
-				rem := maxSamples - samplesRun
-				if rem <= 0 {
-					dec.Label = stats.TaskLabelInconclusive
-					dec.Stop = true
-					dec.Reason = fmt.Sprintf("sample cap (%d) reached without resolving", maxSamples)
-				} else if taskFailed {
-					dec.Label = stats.TaskLabelInconclusive
-					dec.Stop = true
-					dec.Reason = "task failed"
-				}
-			}
-		}
-
-		suggestedNext := 0
-		if !taskExhausted && !taskFailed {
-			if dec.EstimatedSamples > 0 {
-				suggestedNext = dec.EstimatedSamples
-			} else if dec.NextBatchSize > 0 {
-				suggestedNext = dec.NextBatchSize
-			}
-		}
-
 		taskEvals = append(taskEvals, taskEval{
 			taskID:          taskID,
 			candScores:      allCandScores,
@@ -2397,10 +2352,89 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			exhausted:       taskExhausted,
 			failed:          taskFailed,
 			est:             est,
-			dec:             dec,
-			suggestedNext:   suggestedNext,
 			samplesRun:      samplesRun,
 		})
+	}
+
+	spentSoFar := 0.0
+	for _, te := range taskEvals {
+		if te.costUSD != nil {
+			spentSoFar += *te.costUSD
+		}
+	}
+
+	budgetEnforced := true
+	budgetNote := ""
+	if comp.Spec.BudgetUSD != nil {
+		candPrice, _, candPriceKnown := r.lookupModelPrice(candidateRun.Spec.Model)
+		basePrice, _, basePriceKnown := r.lookupModelPrice(baselineRun.Spec.Model)
+		_ = candPrice
+		_ = basePrice
+		if candidateRun.Spec.Model != "" && !candPriceKnown {
+			budgetEnforced = false
+			budgetNote = fmt.Sprintf("cost unknown for %s; budget not enforced", candidateRun.Spec.Model)
+		} else if baselineRun.Spec.Model != "" && !basePriceKnown {
+			budgetEnforced = false
+			budgetNote = fmt.Sprintf("cost unknown for %s; budget not enforced", baselineRun.Spec.Model)
+		}
+	}
+
+	budgetVal := 0.0
+	spentVal := 0.0
+	if budgetEnforced && comp.Spec.BudgetUSD != nil {
+		budgetVal = *comp.Spec.BudgetUSD
+		spentVal = spentSoFar
+	}
+
+	// Stopping rule evaluation for all tasks:
+	for i := range taskEvals {
+		te := &taskEvals[i]
+		var dec stats.Decision
+		if te.est.NumPairs == 0 {
+			dec = stats.Decision{
+				Label:  stats.TaskLabelInconclusive,
+				Stop:   true,
+				Reason: "no matching sample IDs between candidate and baseline",
+			}
+			te.est.PImprovement = 0.5
+		} else if comp.Spec.Sampling == nil {
+			// Single comparison (today's behavior): sampleCap = samplesRun
+			dec = stats.Decide(te.est, margin, te.samplesRun, te.samplesRun, spentVal, budgetVal)
+		} else if te.exhausted {
+			dec = stats.Decide(te.est, margin, te.samplesRun, maxSamples, spentVal, budgetVal)
+			if dec.Label == stats.TaskLabelContinue {
+				dec.Label = stats.TaskLabelInconclusive
+				dec.Stop = true
+				dec.Reason = "dataset exhausted"
+				dec.EstimatedSamples = 0
+				dec.NextBatchSize = 0
+			}
+		} else {
+			dec = stats.Decide(te.est, margin, te.samplesRun, maxSamples, spentVal, budgetVal)
+			if dec.Label == stats.TaskLabelContinue {
+				rem := maxSamples - te.samplesRun
+				if rem <= 0 {
+					dec.Label = stats.TaskLabelInconclusive
+					dec.Stop = true
+					dec.Reason = fmt.Sprintf("sample cap (%d) reached without resolving", maxSamples)
+				} else if te.failed {
+					dec.Label = stats.TaskLabelInconclusive
+					dec.Stop = true
+					dec.Reason = "task failed"
+				}
+			}
+		}
+
+		suggestedNext := 0
+		if !te.exhausted && !te.failed {
+			if dec.EstimatedSamples > 0 {
+				suggestedNext = dec.EstimatedSamples
+			} else if dec.NextBatchSize > 0 {
+				suggestedNext = dec.NextBatchSize
+			}
+		}
+		te.dec = dec
+		te.suggestedNext = suggestedNext
 	}
 
 	// Check if any tasks need to continue sampling
@@ -2425,6 +2459,41 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		batchSize := comp.Spec.Sampling.EffectiveBatchSize()
 		if batchSize > maxRemaining {
 			batchSize = maxRemaining
+		}
+
+		if budgetEnforced && comp.Spec.BudgetUSD != nil {
+			budget := *comp.Spec.BudgetUSD
+			totalSamplesRun := 0
+			for _, te := range taskEvals {
+				totalSamplesRun += len(te.candScores) + len(te.baseScores)
+			}
+			if totalSamplesRun > 0 && spentSoFar > 0 {
+				avgCostPerSample := spentSoFar / float64(totalSamplesRun)
+				costPerPair := avgCostPerSample * 2.0
+				projected := spentSoFar + float64(batchSize)*costPerPair
+				if projected > budget {
+					remaining := budget - spentSoFar
+					fit := 0
+					if costPerPair > 0 && remaining > 0 {
+						fit = int(math.Floor(remaining/costPerPair + 1e-9))
+					}
+					if fit >= 1 {
+						if fit < batchSize {
+							batchSize = fit
+						}
+					} else {
+						// Stop!
+						for i := range taskEvals {
+							if taskEvals[i].dec.Label == stats.TaskLabelContinue {
+								taskEvals[i].dec.Label = stats.TaskLabelInconclusive
+								taskEvals[i].dec.Stop = true
+								taskEvals[i].dec.Reason = fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", budget, spentSoFar)
+							}
+						}
+						continueTasks = nil
+					}
+				}
+			}
 		}
 
 		nextBatchIndex := len(batches) + 1
@@ -2571,6 +2640,18 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					status.Summary.AffinityMatched = aff.matchedCount
 				}
 				status.Message = batchMsg
+				if comp.Spec.BudgetUSD != nil {
+					var spentUSD *float64
+					if budgetEnforced {
+						spentUSD = &spentSoFar
+					}
+					status.Budget = &v1alpha1.ComparisonBudgetStatus{
+						LimitUSD: comp.Spec.BudgetUSD,
+						SpentUSD: spentUSD,
+						Enforced: budgetEnforced,
+						Note:     budgetNote,
+					}
+				}
 			})
 		}
 	}
@@ -2745,6 +2826,18 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					status.Summary.AffinityMatched = aff.matchedCount
 				}
 				status.Message = extraMsg
+				if comp.Spec.BudgetUSD != nil {
+					var spentUSD *float64
+					if budgetEnforced {
+						spentUSD = &spentSoFar
+					}
+					status.Budget = &v1alpha1.ComparisonBudgetStatus{
+						LimitUSD: comp.Spec.BudgetUSD,
+						SpentUSD: spentUSD,
+						Enforced: budgetEnforced,
+						Note:     budgetNote,
+					}
+				}
 				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 					Type:               v1alpha1.ConditionTypeExtraSamples,
 					Status:             metav1.ConditionTrue,
@@ -3031,6 +3124,46 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 	}
 
+	budgetReached := false
+	if budgetEnforced && comp.Spec.BudgetUSD != nil {
+		if spentSoFar >= *comp.Spec.BudgetUSD {
+			budgetReached = true
+		}
+		for _, te := range taskEvals {
+			if strings.Contains(te.dec.Reason, "budget") {
+				budgetReached = true
+				break
+			}
+		}
+	}
+
+	if budgetReached && comp.Spec.BudgetUSD != nil {
+		budgetReason := fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", *comp.Spec.BudgetUSD, spentSoFar)
+		if strings.Contains(message, "more samples recommended") {
+			message = strings.Replace(message, "more samples recommended", budgetReason, 1)
+		} else if runVerdict.Verdict == stats.VerdictInconclusive {
+			if message == "" || message == "INCONCLUSIVE" {
+				message = fmt.Sprintf("INCONCLUSIVE: %s", budgetReason)
+			} else if !strings.Contains(message, "budget") {
+				message = fmt.Sprintf("%s; %s", message, budgetReason)
+			}
+		}
+	}
+
+	var compBudget *v1alpha1.ComparisonBudgetStatus
+	if comp.Spec.BudgetUSD != nil {
+		var spentUSD *float64
+		if budgetEnforced {
+			spentUSD = &spentSoFar
+		}
+		compBudget = &v1alpha1.ComparisonBudgetStatus{
+			LimitUSD: comp.Spec.BudgetUSD,
+			SpentUSD: spentUSD,
+			Enforced: budgetEnforced,
+			Note:     budgetNote,
+		}
+	}
+
 	// Store paired table as comparisons/<name>.json in the artifact sink
 	artifact := ComparisonArtifact{
 		Comparison:            comp.Name,
@@ -3053,6 +3186,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		CandidateFailed:       candFailed,
 		Affinity:              aff.status,
 		AffinityMatched:       aff.matchedCount,
+		Budget:                compBudget,
 	}
 
 	var summaryPath string
@@ -3128,6 +3262,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 		status.SummaryPath = summaryPath
 		status.Message = message
+		if compBudget != nil {
+			status.Budget = compBudget
+		}
 	})
 	if err != nil {
 		return ctrl.Result{}, err

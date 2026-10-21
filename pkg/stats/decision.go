@@ -84,7 +84,7 @@ func Decide(est PairedEstimate, margin float64, samplesRun, sampleCap int, spent
 		} else if capReached {
 			reason = fmt.Sprintf("sample cap (%d) reached without resolving", sampleCap)
 		} else {
-			reason = fmt.Sprintf("budget ($%.2f) reached without resolving (spent $%.2f)", budget, spent)
+			reason = fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", budget, spent)
 		}
 
 		return Decision{
