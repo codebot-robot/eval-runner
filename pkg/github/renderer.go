@@ -174,7 +174,8 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	// 3. Table
 	hasTokens := false
 	hasAffinity := false
-	rows := ui.ComparisonRows(comp)
+	hasPImprovement := false
+	rows := ui.ComparisonRowsWithRuns(comp, baseRun, candRun)
 	for _, row := range rows {
 		if row.Tokens != nil {
 			hasTokens = true
@@ -182,91 +183,137 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		if row.Affinity != "" {
 			hasAffinity = true
 		}
+		if row.PImprovement != nil {
+			hasPImprovement = true
+		}
 	}
 
-	var tableHeader string
-	if hasAffinity && hasTokens {
-		tableHeader = "| eval | affinity | base | this PR | Δ (95% CI) | label | samples | tokens |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-	} else if hasAffinity {
-		tableHeader = "| eval | affinity | base | this PR | Δ (95% CI) | label | samples |\n| --- | --- | --- | --- | --- | --- | --- |\n"
-	} else if hasTokens {
-		tableHeader = "| eval | base | this PR | Δ (95% CI) | label | samples | tokens |\n| --- | --- | --- | --- | --- | --- | --- |\n"
-	} else {
-		tableHeader = "| eval | base | this PR | Δ (95% CI) | label | samples |\n| --- | --- | --- | --- | --- | --- |\n"
+	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+
+	type tableColumn struct {
+		header string
+		cell   func(row ui.ComparisonTaskRow) string
 	}
+
+	var cols []tableColumn
+	cols = append(cols, tableColumn{
+		header: "eval",
+		cell: func(row ui.ComparisonTaskRow) string {
+			escapedID := EscapeCell(row.ID)
+			if trimmedUIBaseURL != "" && row.CandSamplesLink != "" {
+				return fmt.Sprintf("[%s](%s%s)", escapedID, trimmedUIBaseURL, row.CandSamplesLink)
+			}
+			return escapedID
+		},
+	})
+
+	if hasAffinity {
+		cols = append(cols, tableColumn{
+			header: "affinity",
+			cell: func(row ui.ComparisonTaskRow) string {
+				if row.Affinity == "" {
+					return "—"
+				}
+				return row.Affinity
+			},
+		})
+	}
+
+	cols = append(cols,
+		tableColumn{
+			header: "base",
+			cell: func(row ui.ComparisonTaskRow) string {
+				return row.BaseRate
+			},
+		},
+		tableColumn{
+			header: "this PR",
+			cell: func(row ui.ComparisonTaskRow) string {
+				return row.CandRate
+			},
+		},
+		tableColumn{
+			header: "Δ (95% CI)",
+			cell: func(row ui.ComparisonTaskRow) string {
+				if row.Delta != "—" && row.CILabel != "—" {
+					return fmt.Sprintf("%s %s", row.Delta, row.CILabel)
+				} else if row.Delta != "—" {
+					return row.Delta
+				}
+				return "—"
+			},
+		},
+		tableColumn{
+			header: "label",
+			cell: func(row ui.ComparisonTaskRow) string {
+				return row.Label
+			},
+		},
+		tableColumn{
+			header: "samples",
+			cell: func(row ui.ComparisonTaskRow) string {
+				if row.SamplesRun > 0 {
+					return fmt.Sprintf("%d", row.SamplesRun)
+				} else if row.Pairs > 0 {
+					return fmt.Sprintf("%d", row.Pairs)
+				}
+				return "—"
+			},
+		},
+	)
+
+	if hasTokens {
+		cols = append(cols, tableColumn{
+			header: "tokens",
+			cell: func(row ui.ComparisonTaskRow) string {
+				if row.Tokens != nil {
+					if row.Tokens.Reasoning > 0 {
+						return fmt.Sprintf("%d (+R %d)", row.Tokens.Total, row.Tokens.Reasoning)
+					}
+					return fmt.Sprintf("%d", row.Tokens.Total)
+				}
+				return "—"
+			},
+		})
+	}
+
+	if hasPImprovement {
+		cols = append(cols, tableColumn{
+			header: "P(imp)",
+			cell: func(row ui.ComparisonTaskRow) string {
+				if row.PImprovement != nil {
+					return fmt.Sprintf("%.2f", *row.PImprovement)
+				}
+				return "—"
+			},
+		})
+	}
+
+	cols = append(cols, tableColumn{
+		header: "W/L/T",
+		cell: func(row ui.ComparisonTaskRow) string {
+			if row.Pairs > 0 {
+				return fmt.Sprintf("%d/%d/%d", row.Wins, row.Losses, row.Ties)
+			}
+			return "—"
+		},
+	})
+
+	headers := make([]string, len(cols))
+	seps := make([]string, len(cols))
+	for j, col := range cols {
+		headers[j] = col.header
+		seps[j] = "---"
+	}
+	tableHeader := fmt.Sprintf("| %s |\n| %s |\n", strings.Join(headers, " | "), strings.Join(seps, " | "))
 
 	rowStrings := make([]string, len(rows))
 	for i, row := range rows {
-		escapedID := EscapeCell(row.ID)
-		deltaStr := "—"
-		if row.Delta != "—" && row.CILabel != "—" {
-			deltaStr = fmt.Sprintf("%s %s", row.Delta, row.CILabel)
-		} else if row.Delta != "—" {
-			deltaStr = row.Delta
+		cells := make([]string, len(cols))
+		for j, col := range cols {
+			cells[j] = col.cell(row)
 		}
-
-		samplesStr := "—"
-		if row.SamplesRun > 0 {
-			samplesStr = fmt.Sprintf("%d", row.SamplesRun)
-		} else if row.Pairs > 0 {
-			samplesStr = fmt.Sprintf("%d", row.Pairs)
-		}
-
-		tokensStr := "—"
-		if hasTokens && row.Tokens != nil {
-			if row.Tokens.Reasoning > 0 {
-				tokensStr = fmt.Sprintf("%d (+R %d)", row.Tokens.Total, row.Tokens.Reasoning)
-			} else {
-				tokensStr = fmt.Sprintf("%d", row.Tokens.Total)
-			}
-		}
-
-		affinityStr := row.Affinity
-		if affinityStr == "" {
-			affinityStr = "—"
-		}
-
-		if hasAffinity && hasTokens {
-			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s | %s |\n",
-				escapedID,
-				affinityStr,
-				row.BaseRate,
-				row.CandRate,
-				deltaStr,
-				row.Label,
-				samplesStr,
-				tokensStr,
-			)
-		} else if hasAffinity {
-			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
-				escapedID,
-				affinityStr,
-				row.BaseRate,
-				row.CandRate,
-				deltaStr,
-				row.Label,
-				samplesStr,
-			)
-		} else if hasTokens {
-			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
-				escapedID,
-				row.BaseRate,
-				row.CandRate,
-				deltaStr,
-				row.Label,
-				samplesStr,
-				tokensStr,
-			)
-		} else {
-			rowStrings[i] = fmt.Sprintf("| %s | %s | %s | %s | %s | %s |\n",
-				escapedID,
-				row.BaseRate,
-				row.CandRate,
-				deltaStr,
-				row.Label,
-				samplesStr,
-			)
-		}
+		rowStrings[i] = fmt.Sprintf("| %s |\n", strings.Join(cells, " | "))
 	}
 
 	// 4. Footer & Actions
@@ -288,14 +335,16 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 
 	webPath := fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name)
 	linkStr := fmt.Sprintf("`%s`", webPath)
-	if strings.TrimSpace(uiBaseURL) != "" {
-		baseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
-		linkStr = fmt.Sprintf("[web view](%s%s)", baseURL, webPath)
+	if trimmedUIBaseURL != "" {
+		linkStr = fmt.Sprintf("[web view](%s%s)", trimmedUIBaseURL, webPath)
 	}
 
 	footerParts := []string{samplesStr, pairedAgainstStr}
 	if hasAffinity && comp.Status.Summary != nil {
 		footerParts = append(footerParts, fmt.Sprintf("%d matched", comp.Status.Summary.AffinityMatched))
+	}
+	if trimmedUIBaseURL != "" && summary.CandRun != "" {
+		footerParts = append(footerParts, fmt.Sprintf("[trajectories](%s/runs/%s/%s/tasks)", trimmedUIBaseURL, comp.Namespace, summary.CandRun))
 	}
 	footerParts = append(footerParts, linkStr)
 	if comp.Status.SummaryPath != "" {
@@ -304,6 +353,10 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 
 	footerBuilder.WriteString(strings.Join(footerParts, " · "))
 	footerBuilder.WriteString("\n")
+	if summary.FooterMetricsDelta != "" {
+		footerBuilder.WriteString(summary.FooterMetricsDelta)
+		footerBuilder.WriteString("\n")
+	}
 
 	// 5. Actions (e.g. comment `/eval more <n>` to run N more samples for inconclusive tasks)
 	lines := ActionHintLines(comp)

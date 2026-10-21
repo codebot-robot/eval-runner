@@ -373,6 +373,10 @@ type ComparisonTaskRow struct {
 	StatusClass   string // good, bad, warn, neutral, pending
 	Label         string // improved, regressed, unchanged, inconclusive, running
 	Pairs         int
+	Wins          int
+	Losses        int
+	Ties          int
+	PImprovement  *float64
 	DroppedCand   int
 	DroppedBase   int
 	SamplesRun    int
@@ -431,20 +435,32 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 
 		baseRate := "—"
 		var baseLink string
-		if task.BaseRate != nil {
-			baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
-			if comp.Spec.Baseline.Run != "" {
-				baseLink = BuildTaskSamplesListLink(comp.Namespace, comp.Spec.Baseline.Run, task.ID)
+		baseRunName := comp.Spec.Baseline.Run
+		if baseRunName == "" && baseRun != nil {
+			baseRunName = baseRun.Name
+		}
+		if baseRunName != "" && (task.BaseRate != nil || task.SamplesRun > 0 || task.Pairs > 0) {
+			if task.BaseRate != nil {
+				baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
 			}
+			baseLink = BuildTaskSamplesListLink(comp.Namespace, baseRunName, task.ID)
+		} else if task.BaseRate != nil {
+			baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
 		}
 
 		candRate := "—"
 		var candLink string
-		if task.CandidateRate != nil {
-			candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
-			if comp.Spec.Candidate.Run != "" {
-				candLink = BuildTaskSamplesListLink(comp.Namespace, comp.Spec.Candidate.Run, task.ID)
+		candRunName := comp.Spec.Candidate.Run
+		if candRunName == "" && candRun != nil {
+			candRunName = candRun.Name
+		}
+		if candRunName != "" && (task.CandidateRate != nil || task.SamplesRun > 0 || task.Pairs > 0) {
+			if task.CandidateRate != nil {
+				candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
 			}
+			candLink = BuildTaskSamplesListLink(comp.Namespace, candRunName, task.ID)
+		} else if task.CandidateRate != nil {
+			candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
 		}
 
 		deltaStr := "—"
@@ -555,6 +571,10 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 			StatusClass:     labelStatusClass(task.Label),
 			Label:           string(task.Label),
 			Pairs:           task.Pairs,
+			Wins:            task.Wins,
+			Losses:          task.Losses,
+			Ties:            task.Ties,
+			PImprovement:    task.PImprovement,
 			DroppedCand:     task.Dropped.Candidate,
 			DroppedBase:     task.Dropped.Baseline,
 			SamplesRun:      task.SamplesRun,
@@ -601,6 +621,11 @@ type ComparisonSummaryData struct {
 	CandSummary      string // e.g. "commit 05ce4d8 (docs-eval-cand-05ce4d8)"
 	AffinityMatched  int
 	HasAffinity      bool
+
+	// Delta metrics between candidate and baseline
+	CostPerSampleDelta string // e.g. "cost per sample −61%"
+	P50LatencyDelta    string // e.g. "p50 latency −38%"
+	FooterMetricsDelta string // e.g. "cost per sample −61% · p50 latency −38%"
 }
 
 // ComparisonSummary computes aggregate headline and footer strings for a Comparison.
@@ -762,26 +787,163 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 		hasAffinity = true
 	}
 
+	// Cost per sample delta
+	hasCandCost := false
+	candCost := 0.0
+	if candRun != nil && candRun.Status.CostUSD != nil {
+		candCost = *candRun.Status.CostUSD
+		hasCandCost = true
+	} else if candRun != nil {
+		for _, t := range candRun.Status.Tasks {
+			if t.CostUSD != nil {
+				candCost += *t.CostUSD
+				hasCandCost = true
+			}
+		}
+	}
+
+	hasBaseCost := false
+	baseCost := 0.0
+	if baseRun != nil && baseRun.Status.CostUSD != nil {
+		baseCost = *baseRun.Status.CostUSD
+		hasBaseCost = true
+	} else if baseRun != nil {
+		for _, t := range baseRun.Status.Tasks {
+			if t.CostUSD != nil {
+				baseCost += *t.CostUSD
+				hasBaseCost = true
+			}
+		}
+	}
+
+	candSamples := 0
+	if candRun != nil && candRun.Status.Summary != nil && candRun.Status.Summary.TotalSamples > 0 {
+		candSamples = candRun.Status.Summary.TotalSamples
+	} else if candRun != nil {
+		for _, t := range candRun.Status.Tasks {
+			if t.Samples > 0 {
+				candSamples += t.Samples
+			} else {
+				candSamples += t.SamplesDone
+			}
+		}
+	}
+	if candSamples == 0 {
+		candSamples = candTotalSamples
+	}
+	if candSamples == 0 {
+		candSamples = totalPairs + totalDroppedCand
+	}
+
+	baseSamples := 0
+	if baseRun != nil && baseRun.Status.Summary != nil && baseRun.Status.Summary.TotalSamples > 0 {
+		baseSamples = baseRun.Status.Summary.TotalSamples
+	} else if baseRun != nil {
+		for _, t := range baseRun.Status.Tasks {
+			if t.Samples > 0 {
+				baseSamples += t.Samples
+			} else {
+				baseSamples += t.SamplesDone
+			}
+		}
+	}
+	if baseSamples == 0 {
+		baseSamples = baseTotalSamples
+	}
+	if baseSamples == 0 {
+		baseSamples = totalPairs + totalDroppedBase
+	}
+
+	var costDeltaStr string
+	if hasCandCost && hasBaseCost && candSamples > 0 && baseSamples > 0 {
+		candPerSample := candCost / float64(candSamples)
+		basePerSample := baseCost / float64(baseSamples)
+		if basePerSample > 0 {
+			diffPct := (candPerSample - basePerSample) / basePerSample * 100
+			pctStr, _ := signedFixed(diffPct, 0)
+			costDeltaStr = fmt.Sprintf("cost per sample %s%%", pctStr)
+		}
+	}
+
+	// P50 latency delta
+	var candP50s []float64
+	if candRun != nil {
+		for _, t := range candRun.Status.Tasks {
+			if t.Latency != nil && t.Latency.P50 > 0 {
+				candP50s = append(candP50s, t.Latency.P50)
+			}
+		}
+	}
+	if len(candP50s) == 0 {
+		for _, t := range comp.Status.Tasks {
+			if t.Latency != nil && t.Latency.P50 > 0 {
+				candP50s = append(candP50s, t.Latency.P50)
+			}
+		}
+	}
+
+	var baseP50s []float64
+	if baseRun != nil {
+		for _, t := range baseRun.Status.Tasks {
+			if t.Latency != nil && t.Latency.P50 > 0 {
+				baseP50s = append(baseP50s, t.Latency.P50)
+			}
+		}
+	}
+
+	var latDeltaStr string
+	if len(candP50s) > 0 && len(baseP50s) > 0 {
+		var sumCand float64
+		for _, p := range candP50s {
+			sumCand += p
+		}
+		candMeanP50 := sumCand / float64(len(candP50s))
+
+		var sumBase float64
+		for _, p := range baseP50s {
+			sumBase += p
+		}
+		baseMeanP50 := sumBase / float64(len(baseP50s))
+
+		if baseMeanP50 > 0 {
+			diffPct := (candMeanP50 - baseMeanP50) / baseMeanP50 * 100
+			pctStr, _ := signedFixed(diffPct, 0)
+			latDeltaStr = fmt.Sprintf("p50 latency %s%%", pctStr)
+		}
+	}
+
+	var footerMetricsDelta string
+	if costDeltaStr != "" && latDeltaStr != "" {
+		footerMetricsDelta = costDeltaStr + " · " + latDeltaStr
+	} else if costDeltaStr != "" {
+		footerMetricsDelta = costDeltaStr
+	} else if latDeltaStr != "" {
+		footerMetricsDelta = latDeltaStr
+	}
+
 	return ComparisonSummaryData{
-		Headline:         headline,
-		PImprovement:     pImpStr,
-		BaseRun:          baseRunName,
-		BaseCommit:       baseCommit,
-		BaseCommitShort:  baseCommitShort,
-		CandRun:          candRunName,
-		CandCommit:       candCommit,
-		CandCommitShort:  candCommitShort,
-		TotalSamples:     totalSamples,
-		TotalPairs:       totalPairs,
-		TotalDroppedCand: totalDroppedCand,
-		TotalDroppedBase: totalDroppedBase,
-		CostUSD:          costUSD,
-		PossibleSamples:  possibleSamples,
-		SamplesSummary:   samplesSummary,
-		BaseSummary:      baseSummary,
-		CandSummary:      candSummary,
-		AffinityMatched:  affinityMatched,
-		HasAffinity:      hasAffinity,
+		Headline:           headline,
+		PImprovement:       pImpStr,
+		BaseRun:            baseRunName,
+		BaseCommit:         baseCommit,
+		BaseCommitShort:    baseCommitShort,
+		CandRun:            candRunName,
+		CandCommit:         candCommit,
+		CandCommitShort:    candCommitShort,
+		TotalSamples:       totalSamples,
+		TotalPairs:         totalPairs,
+		TotalDroppedCand:   totalDroppedCand,
+		TotalDroppedBase:   totalDroppedBase,
+		CostUSD:            costUSD,
+		PossibleSamples:    possibleSamples,
+		SamplesSummary:     samplesSummary,
+		BaseSummary:        baseSummary,
+		CandSummary:        candSummary,
+		AffinityMatched:    affinityMatched,
+		HasAffinity:        hasAffinity,
+		CostPerSampleDelta: costDeltaStr,
+		P50LatencyDelta:    latDeltaStr,
+		FooterMetricsDelta: footerMetricsDelta,
 	}
 }
 

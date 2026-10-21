@@ -554,6 +554,203 @@ func TestRenderComparisonMarkdown_Golden_BatchesAndTokens(t *testing.T) {
 	}
 }
 
+func statisticsComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
+	rateLookupBase := 0.61
+	rateLookupCand := 0.84
+	deltaLookup := 0.23
+	pImpLookup := 0.99
+
+	ratePolicyBase := 0.88
+	ratePolicyCand := 0.90
+	deltaPolicy := 0.02
+	pImpPolicy := 0.55
+
+	rateQualityBase := 0.72
+	rateQualityCand := 0.75
+	deltaQuality := 0.03
+	pImpQuality := 0.60
+
+	overallPImp := 0.98
+
+	costBase := 2.976
+	costCand := 1.152
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-418-eval",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "run-main-a81d0c4",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "run-pr-418-3f9c2e1",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			Verdict:      v1alpha1.ComparisonVerdictImproved,
+			PImprovement: &overallPImp,
+			SummaryPath:  "gs://eval-bucket/comparisons/pr-418-eval.json",
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "triage/runbook_lookup",
+					BaseRate:      &rateLookupBase,
+					CandidateRate: &rateLookupCand,
+					Delta:         &deltaLookup,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: 0.11,
+						Upper: 0.35,
+					},
+					Label:        v1alpha1.ComparisonTaskLabelImproved,
+					Pairs:        48,
+					Wins:         15,
+					Losses:       4,
+					Ties:         29,
+					PImprovement: &pImpLookup,
+				},
+				{
+					ID:            "triage/escalation_policy",
+					BaseRate:      &ratePolicyBase,
+					CandidateRate: &ratePolicyCand,
+					Delta:         &deltaPolicy,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: -0.05,
+						Upper: 0.09,
+					},
+					Label:        v1alpha1.ComparisonTaskLabelUnchanged,
+					Pairs:        32,
+					Wins:         2,
+					Losses:       1,
+					Ties:         29,
+					PImprovement: &pImpPolicy,
+				},
+				{
+					ID:            "triage/summary_quality",
+					BaseRate:      &rateQualityBase,
+					CandidateRate: &rateQualityCand,
+					Delta:         &deltaQuality,
+					DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+						Lower: -0.08,
+						Upper: 0.14,
+					},
+					Label:        v1alpha1.ComparisonTaskLabelInconclusive,
+					Pairs:        16,
+					Wins:         2,
+					Losses:       1,
+					Ties:         13,
+					PImprovement: &pImpQuality,
+				},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-main-a81d0c4",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: "a81d0c4111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Summary: &v1alpha1.RunSummary{
+				TotalSamples: 96,
+			},
+			CostUSD: &costBase,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID: "triage/runbook_lookup",
+					Latency: &v1alpha1.TaskLatency{
+						P50: 10.0,
+						P95: 15.0,
+					},
+				},
+			},
+		},
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-pr-418-3f9c2e1",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: "3f9c2e1222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Summary: &v1alpha1.RunSummary{
+				TotalSamples: 96,
+			},
+			CostUSD: &costCand,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID: "triage/runbook_lookup",
+					Latency: &v1alpha1.TaskLatency{
+						P50: 6.2,
+						P95: 9.0,
+					},
+				},
+			},
+		},
+	}
+
+	return comp, baseRun, candRun
+}
+
+func TestRenderComparisonMarkdown_Golden_StatisticsParity(t *testing.T) {
+	comp, baseRun, candRun := statisticsComparisonFixture()
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "https://eval.example.com")
+
+	goldenPath := "testdata/statistics_parity_comparison.golden.md"
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden file: %v", err)
+	}
+	want := string(wantBytes)
+
+	if got != want {
+		t.Errorf("RenderComparisonMarkdown mismatch (-got +want):\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
+func TestRenderComparisonMarkdown_TrajectoriesAndTaskLinksOnlyWithUIBaseURL(t *testing.T) {
+	comp, baseRun, candRun := statisticsComparisonFixture()
+
+	// 1. With uiBaseURL
+	gotWith := RenderComparisonMarkdown(comp, baseRun, candRun, "https://eval.example.com")
+	if !strings.Contains(gotWith, "[trajectories](https://eval.example.com/runs/eval-runner/run-pr-418-3f9c2e1/tasks)") {
+		t.Errorf("expected trajectories link with uiBaseURL, got:\n%s", gotWith)
+	}
+	if !strings.Contains(gotWith, "[triage/runbook\\_lookup](https://eval.example.com/runs/eval-runner/run-pr-418-3f9c2e1/tasks/triage%2Frunbook_lookup/samples)") {
+		t.Errorf("expected task link with uiBaseURL, got:\n%s", gotWith)
+	}
+	if !strings.Contains(gotWith, "cost per sample −61% · p50 latency −38%") {
+		t.Errorf("expected cost and latency footer, got:\n%s", gotWith)
+	}
+
+	// 2. Without uiBaseURL
+	gotWithout := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if strings.Contains(gotWithout, "trajectories") {
+		t.Errorf("expected no trajectories link without uiBaseURL, got:\n%s", gotWithout)
+	}
+	if strings.Contains(gotWithout, "[triage/runbook\\_lookup]") {
+		t.Errorf("expected task ID to be plain text without uiBaseURL, got:\n%s", gotWithout)
+	}
+	if !strings.Contains(gotWithout, "| triage/runbook\\_lookup | 0.61 | 0.84 | +0.23 [+0.11, +0.35] | improved | 48 | 0.99 | 15/4/29 |") {
+		t.Errorf("expected plain task ID row without uiBaseURL, got:\n%s", gotWithout)
+	}
+	// Cost and latency footer is still present when cost/latency data exists
+	if !strings.Contains(gotWithout, "cost per sample −61% · p50 latency −38%") {
+		t.Errorf("expected cost and latency footer even without uiBaseURL, got:\n%s", gotWithout)
+	}
+}
+
 func TestComparisonNotes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2102,6 +2299,85 @@ func TestRenderComparisonMarkdown_500InconclusiveTasks_Bounded(t *testing.T) {
 	}
 }
 
+func TestRenderComparisonMarkdown_WiderTableTruncation(t *testing.T) {
+	const totalTasks = 500
+	tasks := make([]v1alpha1.ComparisonTaskStatus, totalTasks)
+	rate := 0.85
+	delta := 0.20
+	pImpTask := 0.95
+	for i := 0; i < totalTasks; i++ {
+		tasks[i] = v1alpha1.ComparisonTaskStatus{
+			ID:            fmt.Sprintf("evals/task_%04d/long_scenario_%s", i, strings.Repeat("y", 70)),
+			BaseRate:      &rate,
+			CandidateRate: &rate,
+			Delta:         &delta,
+			DeltaCI: &v1alpha1.DeltaConfidenceInterval{
+				Lower: 0.10,
+				Upper: 0.30,
+			},
+			Label:        v1alpha1.ComparisonTaskLabelImproved,
+			Pairs:        20,
+			Wins:         12,
+			Losses:       3,
+			Ties:         5,
+			PImprovement: &pImpTask,
+			Tokens: &v1alpha1.TaskTokens{
+				Input:     500,
+				Output:    200,
+				Total:     700,
+				Reasoning: 50,
+			},
+		}
+	}
+
+	overallPImp := 0.99
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "docs-eval-wider-table",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:        v1alpha1.ComparisonPhaseCompleted,
+			Verdict:      v1alpha1.ComparisonVerdictImproved,
+			PImprovement: &overallPImp,
+			Summary: &v1alpha1.ComparisonSummary{
+				Tasks: fmt.Sprintf("%d/%d", totalTasks, totalTasks),
+			},
+			Tasks: tasks,
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "0123456789abcdef"}},
+	}
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "fedcba9876543210"}},
+	}
+
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "https://eval.example.com")
+
+	if len(got) > MaxCommentBytes {
+		t.Fatalf("rendered markdown exceeds limit %d: got %d bytes", MaxCommentBytes, len(got))
+	}
+
+	// Verify wider table headers are present
+	if !strings.Contains(got, "| eval | base | this PR | Δ (95% CI) | label | samples | tokens | P(imp) | W/L/T |") {
+		t.Errorf("expected wider table header with P(imp) and W/L/T, got:\n%s", got)
+	}
+
+	// Verify truncation marker
+	expectedMarkerSuffix := "more tasks (see the Comparison view)"
+	if !strings.Contains(got, expectedMarkerSuffix) {
+		t.Fatalf("expected rendered markdown to contain marker %q, got:\n%s", expectedMarkerSuffix, got)
+	}
+}
+
 func TestRenderComparisonMarkdown_InconclusiveActions_SingularVsPlural(t *testing.T) {
 	// Exactly 21 inconclusive tasks -> 20 rendered + 1 more inconclusive task
 	const totalTasks = 21
@@ -2309,13 +2585,13 @@ func TestRenderComparisonMarkdown_WithAffinity(t *testing.T) {
 
 	markdown := RenderComparisonMarkdown(comp, nil, nil, "https://eval-ui.example.com")
 
-	if !strings.Contains(markdown, "| eval | affinity | base | this PR | Δ (95% CI) | label | samples |") {
+	if !strings.Contains(markdown, "| eval | affinity | base | this PR | Δ (95% CI) | label | samples | W/L/T |") {
 		t.Errorf("expected affinity column in markdown table header, got:\n%s", markdown)
 	}
-	if !strings.Contains(markdown, "| docs/readme | matched |") {
+	if !strings.Contains(markdown, "[docs/readme](https://eval-ui.example.com/runs/eval-runner/cand-run/tasks/docs%2Freadme/samples) | matched |") {
 		t.Errorf("expected row with matched affinity, got:\n%s", markdown)
 	}
-	if !strings.Contains(markdown, "| src/logic | unmatched |") {
+	if !strings.Contains(markdown, "[src/logic](https://eval-ui.example.com/runs/eval-runner/cand-run/tasks/src%2Flogic/samples) | unmatched |") {
 		t.Errorf("expected row with unmatched affinity, got:\n%s", markdown)
 	}
 	if !strings.Contains(markdown, "1 matched") {
