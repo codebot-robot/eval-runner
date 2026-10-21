@@ -182,6 +182,11 @@ type ComparisonSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	ExtraSamples int `json:"extraSamples,omitempty"`
+
+	// BudgetUSD is the optional maximum total evaluation cost in USD for this Comparison across all tasks and batches.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	BudgetUSD *float64 `json:"budgetUSD,omitempty"`
 }
 
 // DeltaConfidenceInterval represents a confidence interval on a difference/delta in [-1, 1].
@@ -459,6 +464,25 @@ type ComparisonHandledCommand struct {
 	Outcome string `json:"outcome,omitempty"`
 }
 
+// ComparisonBudgetStatus records spend and enforcement against spec.budgetUSD.
+type ComparisonBudgetStatus struct {
+	// LimitUSD is the budget limit in USD from spec.budgetUSD.
+	// +optional
+	LimitUSD *float64 `json:"limitUSD,omitempty"`
+
+	// SpentUSD is the total USD spent so far across all batches and tasks.
+	// +optional
+	SpentUSD *float64 `json:"spentUSD,omitempty"`
+
+	// Enforced indicates whether the budget was enforced.
+	// +optional
+	Enforced bool `json:"enforced,omitempty"`
+
+	// Note provides explanation if the budget could not be enforced (e.g. unknown model price).
+	// +optional
+	Note string `json:"note,omitempty"`
+}
+
 // ComparisonStatus defines the observed state of Comparison.
 type ComparisonStatus struct {
 	// Phase is the lifecycle phase of the comparison (Running, Completed, Failed).
@@ -499,6 +523,10 @@ type ComparisonStatus struct {
 	// Affinity records changed-file affinity metadata for pull requests.
 	// +optional
 	Affinity *ComparisonAffinityStatus `json:"affinity,omitempty"`
+
+	// Budget records spend and enforcement against spec.budgetUSD.
+	// +optional
+	Budget *ComparisonBudgetStatus `json:"budget,omitempty"`
 
 	// SummaryPath is the storage path or URI where comparisons/<name>.json was written to the artifact sink.
 	// +optional

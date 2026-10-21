@@ -153,6 +153,7 @@ type ComparisonArtifact struct {
 	CandidateFailed       []string                           `json:"candidateFailed,omitempty"`
 	Affinity              *v1alpha1.ComparisonAffinityStatus `json:"affinity,omitempty"`
 	AffinityMatched       int                                `json:"affinityMatched,omitempty"`
+	Budget                *v1alpha1.ComparisonBudgetStatus   `json:"budget,omitempty"`
 }
 
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.
