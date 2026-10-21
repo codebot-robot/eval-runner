@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/internal/fakes"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 )
@@ -51,13 +53,17 @@ func TestLocalDirSink(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+	samples := make([]artifacts.TaskSampleSummary, 11)
+	for i := range samples {
+		samples[i] = artifacts.TaskSampleSummary{ID: fmt.Sprintf("sample-%d", i+1)}
+	}
 	meta := artifacts.RunMetadata{
 		RunName:      "run-123",
 		RunNamespace: "test-ns",
 		TaskID:       "docs/readme_comprehension",
 		Model:        "mockllm/model",
 		Commit:       "abc1234",
-		Samples:      11,
+		Samples:      samples,
 		SampleRange:  &artifacts.SampleRange{Start: 5, End: 15},
 	}
 
@@ -401,5 +407,257 @@ func TestSinkClose(t *testing.T) {
 				t.Errorf("%s Close returned unexpected error: %v", tc.name, err)
 			}
 		})
+	}
+}
+
+func TestLocalDirSink_SummaryJSON_RoundTripAndTruncation(t *testing.T) {
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+
+	rate := 0.85
+	ci := &v1alpha1.ConfidenceInterval{
+		Lower:      0.65,
+		Upper:      0.95,
+		Confidence: 0.95,
+		Method:     "wilson",
+	}
+	latencySec := 1.25
+	score1 := 1.0
+	score2 := 0.0
+
+	samples := []artifacts.TaskSampleSummary{
+		{
+			ID:             "sample-1",
+			Epoch:          1,
+			Score:          &score1,
+			Status:         "pass",
+			LatencySeconds: &latencySec,
+			Tokens: &artifacts.TaskSampleTokens{
+				Input:  100,
+				Output: 20,
+			},
+		},
+		{
+			ID:             "sample-2",
+			Epoch:          1,
+			Score:          &score2,
+			Status:         "fail",
+			LatencySeconds: &latencySec,
+			Tokens: &artifacts.TaskSampleTokens{
+				Input:  80,
+				Output: 15,
+			},
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "my-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            "docs/readme_comprehension",
+		Model:             "mockllm/model",
+		Commit:            "abc1234",
+		ControllerVersion: "v1.2.3",
+		Scorer:            "choice",
+		SuccessRate:       &rate,
+		SuccessRateCI:     ci,
+		Samples:           samples,
+		Successes:         1,
+	}
+
+	savedPath, err := sink.StoreArtifact(t.Context(), meta, "result.json", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	// Verify using ReadTaskSummary
+	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, savedPath)
+	if err != nil {
+		t.Fatalf("ReadTaskSummary failed: %v", err)
+	}
+
+	if summary.SchemaVersion != 1 {
+		t.Errorf("Expected SchemaVersion=1, got %d", summary.SchemaVersion)
+	}
+	if summary.RunName != "my-run" {
+		t.Errorf("Expected RunName=my-run, got %q", summary.RunName)
+	}
+	if summary.RunNamespace != "eval-runner" {
+		t.Errorf("Expected RunNamespace=eval-runner, got %q", summary.RunNamespace)
+	}
+	if summary.ControllerVersion != "v1.2.3" {
+		t.Errorf("Expected ControllerVersion=v1.2.3, got %q", summary.ControllerVersion)
+	}
+	if summary.Scorer != "choice" {
+		t.Errorf("Expected Scorer=choice, got %q", summary.Scorer)
+	}
+	if summary.SuccessRate == nil || *summary.SuccessRate != 0.85 {
+		t.Errorf("Expected SuccessRate=0.85, got %v", summary.SuccessRate)
+	}
+	if summary.SuccessRateCI == nil || summary.SuccessRateCI.Method != "wilson" {
+		t.Errorf("Expected SuccessRateCI.Method=wilson, got %+v", summary.SuccessRateCI)
+	}
+	if len(summary.Samples) != 2 {
+		t.Fatalf("Expected 2 samples, got %d", len(summary.Samples))
+	}
+	if summary.Samples[0].ID != "sample-1" || summary.Samples[0].Status != "pass" {
+		t.Errorf("Sample[0] mismatch: %+v", summary.Samples[0])
+	}
+	if summary.Samples[1].ID != "sample-2" || summary.Samples[1].Status != "fail" {
+		t.Errorf("Sample[1] mismatch: %+v", summary.Samples[1])
+	}
+	if summary.SamplesTruncated {
+		t.Errorf("Expected SamplesTruncated=false for 2 samples, got true")
+	}
+	if summary.SampleCount != 2 {
+		t.Errorf("Expected SampleCount=2, got %d", summary.SampleCount)
+	}
+
+	// Verify truncation at MaxSummarySamples (10,000)
+	largeSamples := make([]artifacts.TaskSampleSummary, 10005)
+	for i := range largeSamples {
+		largeSamples[i] = artifacts.TaskSampleSummary{ID: fmt.Sprintf("sample-%d", i+1)}
+	}
+	meta.Samples = largeSamples
+	meta.SampleCount = len(largeSamples)
+	savedLargePath, err := sink.StoreArtifact(t.Context(), meta, "result-large.json", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+	largeSummary, err := artifacts.ReadTaskSummary(t.Context(), sink, savedLargePath)
+	if err != nil {
+		t.Fatalf("ReadTaskSummary failed: %v", err)
+	}
+	if !largeSummary.SamplesTruncated {
+		t.Errorf("Expected SamplesTruncated=true for 10005 samples, got false")
+	}
+	if largeSummary.SampleCount != 10005 {
+		t.Errorf("Expected SampleCount=10005, got %d", largeSummary.SampleCount)
+	}
+	if len(largeSummary.Samples) != artifacts.MaxSummarySamples {
+		t.Errorf("Expected %d samples, got %d", artifacts.MaxSummarySamples, len(largeSummary.Samples))
+	}
+}
+
+func TestInMemorySink_SummaryJSON_RoundTripAndTruncation(t *testing.T) {
+	sink := artifacts.NewInMemorySink()
+
+	rate := 0.75
+	ci := &v1alpha1.ConfidenceInterval{
+		Lower:      0.50,
+		Upper:      0.90,
+		Confidence: 0.95,
+		Method:     "t",
+	}
+
+	samples := []artifacts.TaskSampleSummary{
+		{
+			ID:     "s1",
+			Status: "pass",
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "mem-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            "docs/readme",
+		Commit:            "111122223333",
+		ControllerVersion: "v1.0.0",
+		Scorer:            "exact",
+		SuccessRate:       &rate,
+		SuccessRateCI:     ci,
+		Samples:           samples,
+	}
+
+	uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, uri)
+	if err != nil {
+		t.Fatalf("ReadTaskSummary failed: %v", err)
+	}
+
+	if summary.SchemaVersion != 1 {
+		t.Errorf("Expected SchemaVersion=1, got %d", summary.SchemaVersion)
+	}
+	if summary.ControllerVersion != "v1.0.0" {
+		t.Errorf("Expected ControllerVersion=v1.0.0, got %s", summary.ControllerVersion)
+	}
+	if summary.Scorer != "exact" {
+		t.Errorf("Expected Scorer=exact, got %s", summary.Scorer)
+	}
+	if summary.SuccessRateCI == nil || summary.SuccessRateCI.Method != "t" {
+		t.Errorf("Expected SuccessRateCI.Method=t, got %+v", summary.SuccessRateCI)
+	}
+	if summary.SampleCount != 1 {
+		t.Errorf("Expected SampleCount=1, got %d", summary.SampleCount)
+	}
+	if len(summary.Samples) != 1 {
+		t.Fatalf("Expected 1 sample, got %d", len(summary.Samples))
+	}
+}
+
+func TestReadTaskSummary_ValidationAndLegacyShape(t *testing.T) {
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+
+	// 1. Unsupported schemaVersion (e.g. 2) rejected by ReadTaskSummary
+	badSchemaJSON := []byte(`{
+		"schemaVersion": 2,
+		"taskId": "docs/readme_comprehension"
+	}`)
+	badPath := filepath.Join(tempDir, "runs", "commit1", "docs%2Freadme_comprehension", "summary.json")
+	if err := os.MkdirAll(filepath.Dir(badPath), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(badPath, badSchemaJSON, 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	_, err := artifacts.ReadTaskSummary(t.Context(), sink, badPath)
+	if err == nil {
+		t.Fatalf("Expected error reading schemaVersion 2, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported schemaVersion") {
+		t.Errorf("Expected unsupported schemaVersion error, got: %v", err)
+	}
+
+	// 2. Legacy unversioned shape: "samples" is integer 10, no schemaVersion
+	legacyJSON := []byte(`{
+		"taskId": "docs/readme_comprehension",
+		"model": "google/gemini-3.5-flash-lite",
+		"commit": "abcdef123456",
+		"samples": 10,
+		"successes": 8,
+		"meanScore": 0.8,
+		"capped": false
+	}`)
+	legacyPath := filepath.Join(tempDir, "runs", "commit2", "docs%2Freadme_comprehension", "summary.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, legacyJSON, 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	legacySummary, err := artifacts.ReadTaskSummary(t.Context(), sink, legacyPath)
+	if err != nil {
+		t.Fatalf("Expected legacy summary to load successfully, got: %v", err)
+	}
+	if legacySummary.SchemaVersion != 0 {
+		t.Errorf("Expected SchemaVersion=0 for legacy summary, got %d", legacySummary.SchemaVersion)
+	}
+	if legacySummary.SampleCount != 10 {
+		t.Errorf("Expected SampleCount=10 mapped from legacy samples int, got %d", legacySummary.SampleCount)
+	}
+	if legacySummary.Successes != 8 {
+		t.Errorf("Expected Successes=8, got %d", legacySummary.Successes)
+	}
+	if legacySummary.MeanScore == nil || *legacySummary.MeanScore != 0.8 {
+		t.Errorf("Expected MeanScore=0.8, got %v", legacySummary.MeanScore)
+	}
+	if len(legacySummary.Samples) != 0 {
+		t.Errorf("Expected empty Samples slice for legacy summary, got %d items", len(legacySummary.Samples))
 	}
 }
