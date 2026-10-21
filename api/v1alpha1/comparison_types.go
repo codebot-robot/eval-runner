@@ -284,6 +284,10 @@ type ComparisonTaskStatus struct {
 	// +optional
 	CostUSD *float64 `json:"costUSD,omitempty"`
 
+	// CostSource is the provenance of model prices used to compute costUSD (configmap or default).
+	// +optional
+	CostSource CostSource `json:"costSource,omitempty"`
+
 	// PossibleSamples is the total dataset size (possible samples) for this task when known from the Inspect log.
 	// +optional
 	PossibleSamples int `json:"possibleSamples,omitempty"`
