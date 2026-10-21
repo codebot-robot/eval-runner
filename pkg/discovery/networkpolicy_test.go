@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package discovery hosts this NetworkPolicy test because LabelSandbox
+// (evalrunner.gke-labs.dev/sandbox) is defined in this package.
 package discovery
 
 import (
@@ -148,22 +150,68 @@ func TestSandboxNetworkPolicies(t *testing.T) {
 		if len(egressPolicy.Spec.PolicyTypes) != 1 || egressPolicy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
 			t.Fatalf("expected policyTypes [Egress], got %v", egressPolicy.Spec.PolicyTypes)
 		}
-		if len(egressPolicy.Spec.Egress) != 2 {
-			t.Fatalf("expected 2 egress rules (DNS and Git/HTTPS), got %d", len(egressPolicy.Spec.Egress))
+		if len(egressPolicy.Spec.Egress) != 3 {
+			t.Fatalf("expected 3 egress rules (DNS, Internet HTTP/Git, In-cluster Git fixture), got %d", len(egressPolicy.Spec.Egress))
+		}
+
+		// Verify that no egress rule contains a namespaceSelector with NotIn or an empty podSelector: {}
+		for i, rule := range egressPolicy.Spec.Egress {
+			for j, to := range rule.To {
+				if to.NamespaceSelector != nil {
+					for _, req := range to.NamespaceSelector.MatchExpressions {
+						if req.Operator == metav1.LabelSelectorOpNotIn {
+							t.Errorf("rule %d peer %d: namespaceSelector must not use NotIn operator", i, j)
+						}
+					}
+				}
+				if to.PodSelector != nil && len(to.PodSelector.MatchLabels) == 0 && len(to.PodSelector.MatchExpressions) == 0 {
+					t.Errorf("rule %d peer %d: podSelector must not be empty {}", i, j)
+				}
+			}
 		}
 
 		// Rule 1: DNS
 		dnsRule := egressPolicy.Spec.Egress[0]
-		if len(dnsRule.To) != 1 {
-			t.Fatalf("expected 1 to peer for DNS rule, got %d", len(dnsRule.To))
+		hasKubeSystemDNSPods := false
+		hasNodeLocalIP := false
+		hasCloudDNSIP := false
+
+		for _, to := range dnsRule.To {
+			if to.NamespaceSelector != nil && to.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "kube-system" {
+				if to.PodSelector != nil {
+					for _, expr := range to.PodSelector.MatchExpressions {
+						if expr.Key == "k8s-app" && expr.Operator == metav1.LabelSelectorOpIn {
+							vals := map[string]bool{}
+							for _, v := range expr.Values {
+								vals[v] = true
+							}
+							if vals["kube-dns"] && vals["node-local-dns"] {
+								hasKubeSystemDNSPods = true
+							}
+						}
+					}
+				}
+			}
+			if to.IPBlock != nil {
+				if to.IPBlock.CIDR == "169.254.20.10/32" {
+					hasNodeLocalIP = true
+				}
+				if to.IPBlock.CIDR == "169.254.169.254/32" {
+					hasCloudDNSIP = true
+				}
+			}
 		}
-		dnsTo := dnsRule.To[0]
-		if dnsTo.NamespaceSelector == nil || dnsTo.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" {
-			t.Errorf("expected DNS to namespace kube-system, got %v", dnsTo.NamespaceSelector)
+
+		if !hasKubeSystemDNSPods {
+			t.Errorf("expected DNS to kube-system pods with k8s-app In [kube-dns, node-local-dns]")
 		}
-		if dnsTo.PodSelector == nil || dnsTo.PodSelector.MatchLabels["k8s-app"] != "kube-dns" {
-			t.Errorf("expected DNS to pod k8s-app=kube-dns, got %v", dnsTo.PodSelector)
+		if !hasNodeLocalIP {
+			t.Errorf("expected DNS to ipBlock 169.254.20.10/32 (NodeLocal DNSCache)")
 		}
+		if !hasCloudDNSIP {
+			t.Errorf("expected DNS to ipBlock 169.254.169.254/32 (Cloud DNS metadata data plane)")
+		}
+
 		hasUDP53 := false
 		hasTCP53 := false
 		for _, port := range dnsRule.Ports {
@@ -183,67 +231,75 @@ func TestSandboxNetworkPolicies(t *testing.T) {
 			t.Errorf("expected TCP port 53 in DNS egress rule")
 		}
 
-		// Rule 2: Git / HTTP / HTTPS
-		gitRule := egressPolicy.Spec.Egress[1]
-		hasIPBlock := false
-		hasExcludedEvalRunner := false
-		hasIntraNamespace := false
+		// Rule 2: Internet Git / HTTP / HTTPS
+		internetRule := egressPolicy.Spec.Egress[1]
+		if len(internetRule.To) != 1 {
+			t.Fatalf("expected exactly 1 peer in internet rule, got %d", len(internetRule.To))
+		}
+		toPeer := internetRule.To[0]
+		if toPeer.IPBlock == nil || toPeer.IPBlock.CIDR != "0.0.0.0/0" {
+			t.Fatalf("expected ipBlock 0.0.0.0/0 in internet rule, got %v", toPeer.IPBlock)
+		}
+		if toPeer.NamespaceSelector != nil || toPeer.PodSelector != nil {
+			t.Errorf("internet rule peer must only be an ipBlock; got namespaceSelector=%v, podSelector=%v",
+				toPeer.NamespaceSelector, toPeer.PodSelector)
+		}
 
-		for _, to := range gitRule.To {
-			if to.IPBlock != nil {
-				if to.IPBlock.CIDR == "0.0.0.0/0" {
-					hasIPBlock = true
-					// Check for RFC1918 exceptions
-					exceptMap := make(map[string]bool)
-					for _, exc := range to.IPBlock.Except {
-						exceptMap[exc] = true
-					}
-					for _, expectedCIDR := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
-						if !exceptMap[expectedCIDR] {
-							t.Errorf("expected ipBlock.except to contain %s, got %v", expectedCIDR, to.IPBlock.Except)
-						}
-					}
-				}
-			}
-			if to.NamespaceSelector != nil {
-				for _, req := range to.NamespaceSelector.MatchExpressions {
-					if req.Key == "kubernetes.io/metadata.name" && req.Operator == metav1.LabelSelectorOpNotIn {
-						for _, val := range req.Values {
-							if val == "eval-runner" {
-								hasExcludedEvalRunner = true
-							}
-						}
-					}
-				}
-			}
-			if to.PodSelector != nil && to.NamespaceSelector == nil && to.IPBlock == nil {
-				hasIntraNamespace = true
+		exceptMap := make(map[string]bool)
+		for _, exc := range toPeer.IPBlock.Except {
+			exceptMap[exc] = true
+		}
+		expectedExceptions := []string{
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+			"100.64.0.0/10",
+			"169.254.0.0/16",
+		}
+		for _, expectedCIDR := range expectedExceptions {
+			if !exceptMap[expectedCIDR] {
+				t.Errorf("expected internet rule ipBlock.except to contain %s, got %v", expectedCIDR, toPeer.IPBlock.Except)
 			}
 		}
 
-		if !hasIPBlock {
-			t.Errorf("expected ipBlock 0.0.0.0/0 with RFC1918 exceptions in Git/HTTPS rule")
-		}
-		if !hasExcludedEvalRunner {
-			t.Errorf("expected namespaceSelector with NotIn [eval-runner] in Git/HTTPS rule")
-		}
-		if !hasIntraNamespace {
-			t.Errorf("expected intra-namespace podSelector in Git/HTTPS rule")
-		}
-
-		expectedGitPorts := map[int32]bool{80: false, 443: false, 9418: false}
-		for _, port := range gitRule.Ports {
+		expectedInternetPorts := map[int32]bool{80: false, 443: false, 9418: false}
+		for _, port := range internetRule.Ports {
 			if port.Protocol == nil || *port.Protocol != corev1.ProtocolTCP {
 				t.Errorf("expected TCP protocol, got %v", port.Protocol)
 			}
 			if port.Port != nil {
-				expectedGitPorts[port.Port.IntVal] = true
+				expectedInternetPorts[port.Port.IntVal] = true
 			}
 		}
-		for portNum, found := range expectedGitPorts {
+		for portNum, found := range expectedInternetPorts {
 			if !found {
-				t.Errorf("missing expected egress port %d", portNum)
+				t.Errorf("missing expected internet egress port %d", portNum)
 			}
+		}
+
+		// Rule 3: In-cluster Git Fixture
+		gitFixtureRule := egressPolicy.Spec.Egress[2]
+		if len(gitFixtureRule.To) != 1 {
+			t.Fatalf("expected exactly 1 peer in git fixture rule, got %d", len(gitFixtureRule.To))
+		}
+		gitPeer := gitFixtureRule.To[0]
+		if gitPeer.PodSelector == nil || gitPeer.PodSelector.MatchLabels["app"] != "git-server" {
+			t.Errorf("expected podSelector app=git-server in git fixture rule, got %v", gitPeer.PodSelector)
+		}
+		if gitPeer.NamespaceSelector != nil || gitPeer.IPBlock != nil {
+			t.Errorf("git fixture rule must only use podSelector; got namespaceSelector=%v, ipBlock=%v",
+				gitPeer.NamespaceSelector, gitPeer.IPBlock)
+		}
+
+		if len(gitFixtureRule.Ports) != 1 {
+			t.Fatalf("expected 1 port in git fixture rule, got %d", len(gitFixtureRule.Ports))
+		}
+		gitPort := gitFixtureRule.Ports[0]
+		if gitPort.Protocol == nil || *gitPort.Protocol != corev1.ProtocolTCP {
+			t.Errorf("expected TCP protocol for git fixture, got %v", gitPort.Protocol)
+		}
+		if gitPort.Port == nil || gitPort.Port.IntVal != 9418 {
+			t.Errorf("expected port 9418 for git fixture, got %v", gitPort.Port)
 		}
 	})
 }

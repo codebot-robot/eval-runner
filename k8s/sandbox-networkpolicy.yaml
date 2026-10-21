@@ -49,21 +49,31 @@ spec:
   policyTypes:
   - Egress
   egress:
-  # Cluster DNS: allow UDP and TCP port 53 to CoreDNS/kube-dns in kube-system
+  # Cluster DNS: allow UDP and TCP port 53 to CoreDNS/kube-dns/node-local-dns pods in kube-system
+  # and link-local DNS endpoints (NodeLocal DNSCache and Cloud DNS data plane).
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values:
+          - kube-dns
+          - node-local-dns
+    - ipBlock:
+        cidr: 169.254.20.10/32
+    - ipBlock:
+        cidr: 169.254.169.254/32
     ports:
     - protocol: UDP
       port: 53
     - protocol: TCP
       port: 53
-  # Git protocol, HTTP and HTTPS egress (git clones, in-cluster git-server fixture on 9418, model APIs on 443).
-  # Egress is blocked to the eval-runner namespace and to the cluster API server / internal cluster network.
+  # Git protocol, HTTP and HTTPS internet egress (external git clones and model APIs on 443).
+  # Excludes internal RFC1918 ranges, link-local (GCE metadata server on :80),
+  # and CGNAT (100.64.0.0/10).
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0
@@ -71,17 +81,20 @@ spec:
         - 10.0.0.0/8
         - 172.16.0.0/12
         - 192.168.0.0/16
-    - namespaceSelector:
-        matchExpressions:
-        - key: kubernetes.io/metadata.name
-          operator: NotIn
-          values:
-          - eval-runner
-    - podSelector: {}
+        - 100.64.0.0/10
+        - 169.254.0.0/16
     ports:
     - protocol: TCP
       port: 80
     - protocol: TCP
       port: 443
+    - protocol: TCP
+      port: 9418
+  # In-cluster git fixture (tests/e2e/harness.go labels it app: git-server).
+  - to:
+    - podSelector:
+        matchLabels:
+          app: git-server
+    ports:
     - protocol: TCP
       port: 9418
