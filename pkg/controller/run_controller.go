@@ -19,9 +19,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1214,85 +1216,167 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// -------------------------------------------------------------------------
-	// Step 3: ./.evals/list (writes /workspace/out/manifest.json)
+	// Step 3: Discovery (.evals/list or fallback Inspect @task scan)
 	// -------------------------------------------------------------------------
-	logger.Info("Step 2 succeeded; starting step 3: discover evals to file", "command", discovery.DiscoveryCommand)
-	listRes, listErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
-		Command: []string{"sh", "-c", discovery.DiscoveryCommand},
+	manifestSource := v1alpha1.ManifestSourceList
+	var manifestBytes []byte
+	var manifest *v1alpha1.Manifest
+	var scanResult *discovery.ScanResult
+
+	// Check if .evals/list is present in the repository
+	checkRes, checkErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		Command: []string{"test", "-f", ".evals/list"},
 		Cwd:     "repo",
 	})
+	evalsListPresent := checkErr == nil && checkRes != nil && checkRes.ExitCode == 0
 
-	if listErr != nil {
-		var limitErr *discovery.LimitError
-		if errors.As(listErr, &limitErr) {
-			var tail string
-			if listRes != nil {
-				tail = extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+	if evalsListPresent {
+		logger.Info("Step 2 succeeded; starting step 3: discover evals to file", "command", discovery.DiscoveryCommand)
+		listRes, listErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+			Command: []string{"sh", "-c", discovery.DiscoveryCommand},
+			Cwd:     "repo",
+		})
+
+		if listErr != nil {
+			var limitErr *discovery.LimitError
+			if errors.As(listErr, &limitErr) {
+				var tail string
+				if listRes != nil {
+					tail = extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+				}
+				msg := fmt.Sprintf("step ./.evals/list failed: %v", limitErr)
+				if tail != "" {
+					msg += "\n" + tail
+				}
+				return r.failRun(ctx, &run, &sandbox, msg)
 			}
-			msg := fmt.Sprintf("step ./.evals/list failed: %v", limitErr)
-			if tail != "" {
-				msg += "\n" + tail
+
+			if status.Code(listErr) == codes.Unauthenticated {
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: unauthenticated: %v", listErr))
 			}
-			return r.failRun(ctx, &run, &sandbox, msg)
+			if isNotFoundError(listErr) {
+				evalsListPresent = false
+			} else if isPermissionError(listErr) {
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: .evals/list is not executable: %v", listErr))
+			} else {
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", listErr))
+			}
 		}
 
-		if status.Code(listErr) == codes.Unauthenticated {
-			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: unauthenticated: %v", listErr))
+		if evalsListPresent {
+			if listRes == nil {
+				return r.failRun(ctx, &run, &sandbox, "step ./.evals/list failed: nil response")
+			}
+
+			if listRes.ExitCode != 0 {
+				tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+				var msg string
+				if tail != "" {
+					msg = fmt.Sprintf("step ./.evals/list failed with exit code %d: %s", listRes.ExitCode, tail)
+				} else {
+					msg = fmt.Sprintf("step ./.evals/list failed with exit code %d", listRes.ExitCode)
+				}
+				return r.failRun(ctx, &run, &sandbox, msg)
+			}
+
+			// Step 4: Pull manifest via bounded sandboxd ReadFile (resolves under /workspace)
+			var readErr error
+			manifestBytes, readErr = sbClient.ReadFile(execCtx, discovery.DiscoveryManifestReadPath)
+			if readErr != nil {
+				var limitErr *discovery.LimitError
+				if errors.As(readErr, &limitErr) {
+					return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", limitErr))
+				}
+				if status.Code(readErr) == codes.Unauthenticated {
+					return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: unauthenticated: %v", readErr))
+				}
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", readErr))
+			}
+
+			// Controller-side 1 MiB check before parse
+			if int64(len(manifestBytes)) > discovery.MaxManifestBytes {
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: manifest size %d exceeds 1 MiB limit", len(manifestBytes)))
+			}
+
+			var parseErr error
+			manifest, parseErr = discovery.ParseManifest(manifestBytes)
+			if parseErr != nil {
+				tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+				msg := fmt.Sprintf("step ./.evals/list failed: invalid JSON: %v", parseErr)
+				if tail != "" {
+					msg += "\n" + tail
+				}
+				return r.failRun(ctx, &run, &sandbox, msg)
+			}
+
+			if err := discovery.ValidateManifest(manifest); err != nil {
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Manifest validation failed: %v", err))
+			}
 		}
-		if isNotFoundError(listErr) {
-			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: missing .evals/list: %v", listErr))
-		}
-		if isPermissionError(listErr) {
-			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: .evals/list is not executable: %v", listErr))
-		}
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", listErr))
 	}
 
-	if listRes == nil {
-		return r.failRun(ctx, &run, &sandbox, "step ./.evals/list failed: nil response")
-	}
+	if !evalsListPresent {
+		logger.Info(".evals/list absent; falling back to scanning checkout for Inspect @task definitions")
+		manifestSource = v1alpha1.ManifestSourceInspectScan
 
-	if listRes.ExitCode != 0 {
-		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		var msg string
-		if tail != "" {
-			msg = fmt.Sprintf("step ./.evals/list failed with exit code %d: %s", listRes.ExitCode, tail)
-		} else {
-			msg = fmt.Sprintf("step ./.evals/list failed with exit code %d", listRes.ExitCode)
+		tarRes, tarErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+			Command: []string{"sh", "-c", discovery.ScanArchiveCommand},
+			Cwd:     "repo",
+		})
+		if tarErr != nil {
+			var limitErr *discovery.LimitError
+			if errors.As(tarErr, &limitErr) {
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: scan archive error: %v", limitErr))
+			}
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: scan archive error: %v", tarErr))
 		}
-		return r.failRun(ctx, &run, &sandbox, msg)
-	}
-
-	// Step 4: Pull manifest via bounded sandboxd ReadFile (resolves under /workspace)
-	manifestBytes, readErr := sbClient.ReadFile(execCtx, discovery.DiscoveryManifestReadPath)
-	if readErr != nil {
-		var limitErr *discovery.LimitError
-		if errors.As(readErr, &limitErr) {
-			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", limitErr))
+		if tarRes != nil && tarRes.ExitCode != 0 {
+			tail := extractStderrTail(tarRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: scan archive failed with exit code %d: %s", tarRes.ExitCode, tail))
 		}
-		if status.Code(readErr) == codes.Unauthenticated {
-			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: unauthenticated: %v", readErr))
+
+		tarBytes, readErr := sbClient.ReadFile(execCtx, discovery.DiscoveryScanArchiveReadPath)
+		if readErr != nil {
+			var limitErr *discovery.LimitError
+			if errors.As(readErr, &limitErr) {
+				return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: scan archive read error: %v", limitErr))
+			}
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: scan archive read error: %v", readErr))
 		}
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", readErr))
-	}
 
-	// Controller-side 1 MiB check before parse
-	if int64(len(manifestBytes)) > discovery.MaxManifestBytes {
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: manifest size %d exceeds 1 MiB limit", len(manifestBytes)))
-	}
-
-	manifest, err := discovery.ParseManifest(manifestBytes)
-	if err != nil {
-		tail := extractStderrTail(listRes.Stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		msg := fmt.Sprintf("step ./.evals/list failed: invalid JSON: %v", err)
-		if tail != "" {
-			msg += "\n" + tail
+		tmpDir, err := os.MkdirTemp("", "eval-runner-scan-*")
+		if err != nil {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: failed to create temp dir: %v", err))
 		}
-		return r.failRun(ctx, &run, &sandbox, msg)
-	}
+		defer func() {
+			if removeErr := os.RemoveAll(tmpDir); removeErr != nil {
+				_ = removeErr
+			}
+		}()
 
-	if err := discovery.ValidateManifest(manifest); err != nil {
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Manifest validation failed: %v", err))
+		if err := discovery.ExtractTar(tarBytes, tmpDir); err != nil {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: failed to extract scan archive: %v", err))
+		}
+
+		scanResult, err = discovery.ScanInspectTasks(tmpDir)
+		if err != nil {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", err))
+		}
+
+		if len(scanResult.Manifest.Tasks) == 0 {
+			return r.failRun(ctx, &run, &sandbox, "step ./.evals/list failed: missing .evals/list and no Inspect tasks found")
+		}
+
+		manifest = scanResult.Manifest
+		if err := discovery.ValidateManifest(manifest); err != nil {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("Manifest validation failed: %v", err))
+		}
+
+		var marshalErr error
+		manifestBytes, marshalErr = json.Marshal(manifest)
+		if marshalErr != nil {
+			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("failed to marshal synthesized manifest: %v", marshalErr))
+		}
 	}
 
 	// Store manifest in artifact store
@@ -1342,7 +1426,15 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Step 5: Success -> update Run to Discovered (or Running if spec.model is set), then cleanup sandbox
 	successMsg := ""
 	condMsg := fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks))
-	if cloneAttempts > 1 {
+	if scanResult != nil && scanResult.CapMessage() != "" {
+		if cloneAttempts > 1 {
+			successMsg = fmt.Sprintf("%s after %s", scanResult.CapMessage(), formatAttemptCount(cloneAttempts))
+			condMsg = fmt.Sprintf("Discovered %d tasks (%s) after %s", len(manifest.Tasks), scanResult.CapMessage(), formatAttemptCount(cloneAttempts))
+		} else {
+			successMsg = scanResult.CapMessage()
+			condMsg = fmt.Sprintf("Discovered %d tasks (%s)", len(manifest.Tasks), scanResult.CapMessage())
+		}
+	} else if cloneAttempts > 1 {
 		successMsg = fmt.Sprintf("Discovered after %s", formatAttemptCount(cloneAttempts))
 		condMsg = fmt.Sprintf("Discovered %d tasks after %s", len(manifest.Tasks), formatAttemptCount(cloneAttempts))
 	}
@@ -1351,11 +1443,13 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		"tasks", len(manifest.Tasks),
 		"cloneAttempts", cloneAttempts,
 		"manifestURI", manifestURI,
+		"manifestSource", manifestSource,
 	)
 
 	if run.Spec.Model == "" {
 		err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseDiscovered
+			status.ManifestSource = manifestSource
 			status.Message = successMsg
 			status.Discovery = discoveryStatus
 			if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
@@ -1385,6 +1479,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	dl := metav1.NewTime(r.now().Add(r.executionDeadline()))
 	err = r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 		status.Phase = v1alpha1.RunPhaseRunning
+		status.ManifestSource = manifestSource
 		status.Message = successMsg
 		status.Discovery = discoveryStatus
 		status.Tasks = initialTasks

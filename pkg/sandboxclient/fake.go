@@ -17,10 +17,14 @@ package sandboxclient
 import (
 	"context"
 	"crypto/tls"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // FakeClient is a test fake implementing Client and Factory.
@@ -36,6 +40,9 @@ type FakeClient struct {
 	ListStdout string
 	ListStderr string
 	ListErr    error
+
+	RepoDir string
+	RepoTar []byte
 
 	CloneErr    error
 	CloneExit   int
@@ -123,6 +130,19 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 			return data, nil
 		}
 	}
+	if strings.HasSuffix(path, "scan.tar") {
+		f.mu.Lock()
+		repoTar := f.RepoTar
+		repoDir := f.RepoDir
+		f.mu.Unlock()
+		if repoTar != nil {
+			return repoTar, nil
+		}
+		if repoDir != "" {
+			return discovery.CreateTarFromDir(repoDir)
+		}
+		return nil, nil
+	}
 	if inspectLog != nil {
 		if readFileLimit > 0 && int64(len(inspectLog)) > readFileLimit {
 			return nil, &discovery.LimitError{
@@ -178,6 +198,30 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 
 	cmd0 := cfg.Command[0]
 	if cmd0 == "rm" {
+		return &ExecuteResult{ExitCode: 0}, nil
+	}
+
+	if cmd0 == "test" && len(cfg.Command) >= 3 && cfg.Command[2] == ".evals/list" {
+		f.mu.Lock()
+		listErr := f.ListErr
+		repoDir := f.RepoDir
+		listStdout := f.ListStdout
+		manifestBytes := f.ManifestBytes
+		f.mu.Unlock()
+
+		if listErr != nil {
+			if status.Code(listErr) == codes.NotFound || strings.Contains(strings.ToLower(listErr.Error()), "not found") {
+				return &ExecuteResult{ExitCode: 1}, nil
+			}
+		}
+		if repoDir != "" {
+			if _, err := os.Stat(filepath.Join(repoDir, ".evals/list")); os.IsNotExist(err) {
+				return &ExecuteResult{ExitCode: 1}, nil
+			}
+		}
+		if repoDir == "" && listErr == nil && listStdout == "" && manifestBytes == nil {
+			return &ExecuteResult{ExitCode: 1}, nil
+		}
 		return &ExecuteResult{ExitCode: 0}, nil
 	}
 

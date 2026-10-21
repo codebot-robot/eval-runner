@@ -2791,6 +2791,205 @@ func TestReconcileDiscoveryToRunningWhenModelSet(t *testing.T) {
 	}
 }
 
+func TestReconcileInspectFallbackWhenEvalsListAbsent(t *testing.T) {
+	scheme := setupScheme(t)
+
+	repoDir := t.TempDir()
+	evalsDir := filepath.Join(repoDir, "evals")
+	if err := os.MkdirAll(evalsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	pyContent := `
+from inspect_ai import task
+
+@task
+def triage_eval():
+    pass
+
+@task
+def summary_eval():
+    pass
+`
+	if err := os.WriteFile(filepath.Join(evalsDir, "docs_eval.py"), []byte(pyContent), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	executor := &sandboxclient.FakeClient{
+		RepoDir: repoDir,
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-run-fallback",
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(run.Name)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: run.Name}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue: true to transition to Running")
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseRunning {
+		t.Errorf("Expected phase %s, got %s (message: %s)", v1alpha1.RunPhaseRunning, updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+	if updatedRun.Status.ManifestSource != v1alpha1.ManifestSourceInspectScan {
+		t.Errorf("Expected ManifestSource %s, got %s", v1alpha1.ManifestSourceInspectScan, updatedRun.Status.ManifestSource)
+	}
+	if len(updatedRun.Status.Tasks) != 2 {
+		t.Fatalf("Expected 2 synthesized tasks, got %d", len(updatedRun.Status.Tasks))
+	}
+	if updatedRun.Status.Tasks[0].ID != "evals/summary_eval" {
+		t.Errorf("Expected task 0 ID 'evals/summary_eval', got %s", updatedRun.Status.Tasks[0].ID)
+	}
+	if updatedRun.Status.Tasks[1].ID != "evals/triage_eval" {
+		t.Errorf("Expected task 1 ID 'evals/triage_eval', got %s", updatedRun.Status.Tasks[1].ID)
+	}
+
+	// Verify cached and stored manifest has source "inspect-scan"
+	cached := reconciler.getCachedManifest(run.Namespace + "/" + run.Name)
+	if cached == nil {
+		t.Fatalf("Expected cached manifest to be present")
+	}
+	if cached.Source != "inspect-scan" {
+		t.Errorf("Expected cached manifest source 'inspect-scan', got %q", cached.Source)
+	}
+
+	t.Run("ModelEmptyReachesDiscoveredWithInspectScan", func(t *testing.T) {
+		runNoModel := run.DeepCopy()
+		runNoModel.Name = "test-run-no-model"
+		runNoModel.Spec.Model = ""
+
+		sbNoModel := discovery.BuildSandbox(runNoModel, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+		podNoModel := pod.DeepCopy()
+		podNoModel.Name = discovery.SandboxNameForRun(runNoModel.Name)
+
+		clNoModel := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(runNoModel, sbNoModel, podNoModel).
+			WithStatusSubresource(runNoModel).
+			Build()
+
+		recNoModel := &RunReconciler{
+			Client:           clNoModel,
+			Scheme:           scheme,
+			SandboxClient:    executor,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+
+		reqNoModel := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runNoModel.Name}}
+		resNoModel, err := recNoModel.Reconcile(t.Context(), reqNoModel)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+		if resNoModel.Requeue {
+			t.Errorf("Expected no requeue for discovered run")
+		}
+
+		var updatedNoModel v1alpha1.Run
+		if err := clNoModel.Get(t.Context(), reqNoModel.NamespacedName, &updatedNoModel); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+		if updatedNoModel.Status.Phase != v1alpha1.RunPhaseDiscovered {
+			t.Errorf("Expected phase Discovered, got %s", updatedNoModel.Status.Phase)
+		}
+		if updatedNoModel.Status.ManifestSource != v1alpha1.ManifestSourceInspectScan {
+			t.Errorf("Expected ManifestSource %s, got %s", v1alpha1.ManifestSourceInspectScan, updatedNoModel.Status.ManifestSource)
+		}
+	})
+
+	t.Run("EvalsListPresentHasSourceList", func(t *testing.T) {
+		listClient := &sandboxclient.FakeClient{
+			ListStdout: `{"tasks": [{"id": "task1", "spec": "eval.py@task1", "workdir": "evals"}]}`,
+		}
+		runWithList := run.DeepCopy()
+		runWithList.Name = "test-run-with-list"
+
+		sbWithList := discovery.BuildSandbox(runWithList, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+		podWithList := pod.DeepCopy()
+		podWithList.Name = discovery.SandboxNameForRun(runWithList.Name)
+
+		clWithList := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(runWithList, sbWithList, podWithList).
+			WithStatusSubresource(runWithList).
+			Build()
+
+		recWithList := &RunReconciler{
+			Client:           clWithList,
+			Scheme:           scheme,
+			SandboxClient:    listClient,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+
+		reqWithList := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runWithList.Name}}
+		_, err := recWithList.Reconcile(t.Context(), reqWithList)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedWithList v1alpha1.Run
+		if err := clWithList.Get(t.Context(), reqWithList.NamespacedName, &updatedWithList); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+		if updatedWithList.Status.ManifestSource != v1alpha1.ManifestSourceList {
+			t.Errorf("Expected ManifestSource %s, got %s", v1alpha1.ManifestSourceList, updatedWithList.Status.ManifestSource)
+		}
+	})
+}
+
 func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
 	scheme := setupScheme(t)
 
