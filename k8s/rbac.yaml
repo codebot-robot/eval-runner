@@ -124,6 +124,20 @@ rules:
   verbs:
   - create
   - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - watch
   - update
   - patch
   - delete

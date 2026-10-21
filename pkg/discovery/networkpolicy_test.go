@@ -77,38 +77,21 @@ func loadNetworkPolicies(t *testing.T) []networkingv1.NetworkPolicy {
 
 func TestSandboxNetworkPolicies(t *testing.T) {
 	policies := loadNetworkPolicies(t)
-	if len(policies) != 2 {
-		t.Fatalf("expected 2 NetworkPolicies in k8s/sandbox-networkpolicy.yaml, got %d", len(policies))
+	if len(policies) != 1 {
+		t.Fatalf("expected 1 NetworkPolicy in k8s/sandbox-networkpolicy.yaml, got %d", len(policies))
 	}
 
-	var ingressPolicy, egressPolicy *networkingv1.NetworkPolicy
-	for i := range policies {
-		p := &policies[i]
-		switch p.Name {
-		case "eval-runner-sandbox-ingress":
-			ingressPolicy = p
-		case "eval-runner-sandbox-egress":
-			egressPolicy = p
-		default:
-			t.Errorf("unexpected NetworkPolicy name: %s", p.Name)
-		}
+	ingressPolicy := &policies[0]
+	if ingressPolicy.Name != "eval-runner-sandbox-ingress" {
+		t.Fatalf("expected eval-runner-sandbox-ingress policy, got %s", ingressPolicy.Name)
 	}
 
-	if ingressPolicy == nil {
-		t.Fatal("missing eval-runner-sandbox-ingress policy")
+	// Verify namespace and podSelector
+	if ingressPolicy.Namespace != "eval-runner-sandbox" {
+		t.Errorf("expected namespace eval-runner-sandbox, got %q", ingressPolicy.Namespace)
 	}
-	if egressPolicy == nil {
-		t.Fatal("missing eval-runner-sandbox-egress policy")
-	}
-
-	// Verify namespace and podSelector for both
-	for _, p := range []*networkingv1.NetworkPolicy{ingressPolicy, egressPolicy} {
-		if p.Namespace != "eval-runner-sandbox" {
-			t.Errorf("%s: expected namespace eval-runner-sandbox, got %q", p.Name, p.Namespace)
-		}
-		if p.Spec.PodSelector.MatchLabels[LabelSandbox] != "true" {
-			t.Errorf("%s: expected podSelector %s=true, got %v", p.Name, LabelSandbox, p.Spec.PodSelector.MatchLabels)
-		}
+	if ingressPolicy.Spec.PodSelector.MatchLabels[LabelSandbox] != "true" {
+		t.Errorf("expected podSelector %s=true, got %v", LabelSandbox, ingressPolicy.Spec.PodSelector.MatchLabels)
 	}
 
 	// Assert Ingress policy
@@ -145,164 +128,299 @@ func TestSandboxNetworkPolicies(t *testing.T) {
 			}
 		}
 	})
+}
 
-	// Assert Egress policy
-	t.Run("EgressPolicy", func(t *testing.T) {
-		if len(egressPolicy.Spec.PolicyTypes) != 1 || egressPolicy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
-			t.Fatalf("expected policyTypes [Egress], got %v", egressPolicy.Spec.PolicyTypes)
-		}
-		if len(egressPolicy.Spec.Egress) != 3 {
-			t.Fatalf("expected 3 egress rules (DNS, Internet HTTP/Git, In-cluster Git fixture), got %d", len(egressPolicy.Spec.Egress))
-		}
+func TestRenderSandboxEgressNetworkPolicy_FQDNAbsent(t *testing.T) {
+	egressPolicy := RenderSandboxEgressNetworkPolicy(DefaultSandboxEgressNetworkPolicyName, DefaultSandboxNamespace, false)
+	if egressPolicy == nil {
+		t.Fatal("expected non-nil egress policy")
+	}
 
-		// Verify that no egress rule contains a namespaceSelector with NotIn or an empty podSelector: {}
-		for i, rule := range egressPolicy.Spec.Egress {
-			for j, to := range rule.To {
-				if to.NamespaceSelector != nil {
-					for _, req := range to.NamespaceSelector.MatchExpressions {
-						if req.Operator == metav1.LabelSelectorOpNotIn {
-							t.Errorf("rule %d peer %d: namespaceSelector must not use NotIn operator", i, j)
-						}
-					}
-				}
-				if to.PodSelector != nil && len(to.PodSelector.MatchLabels) == 0 && len(to.PodSelector.MatchExpressions) == 0 {
-					t.Errorf("rule %d peer %d: podSelector must not be empty {}", i, j)
-				}
-			}
-		}
+	if egressPolicy.Name != DefaultSandboxEgressNetworkPolicyName {
+		t.Errorf("expected name %s, got %s", DefaultSandboxEgressNetworkPolicyName, egressPolicy.Name)
+	}
+	if egressPolicy.Namespace != DefaultSandboxNamespace {
+		t.Errorf("expected namespace %s, got %s", DefaultSandboxNamespace, egressPolicy.Namespace)
+	}
+	if egressPolicy.Spec.PodSelector.MatchLabels[LabelSandbox] != "true" {
+		t.Errorf("expected podSelector %s=true, got %v", LabelSandbox, egressPolicy.Spec.PodSelector.MatchLabels)
+	}
 
-		// Rule 1: DNS
-		dnsRule := egressPolicy.Spec.Egress[0]
-		hasKubeSystemDNSPods := false
-		hasNodeLocalIP := false
-		hasCloudDNSIP := false
+	if len(egressPolicy.Spec.PolicyTypes) != 1 || egressPolicy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Fatalf("expected policyTypes [Egress], got %v", egressPolicy.Spec.PolicyTypes)
+	}
+	if len(egressPolicy.Spec.Egress) != 3 {
+		t.Fatalf("expected 3 egress rules (DNS, Internet HTTP/Git, In-cluster Git fixture), got %d", len(egressPolicy.Spec.Egress))
+	}
 
-		for _, to := range dnsRule.To {
-			if to.NamespaceSelector != nil && to.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "kube-system" {
-				if to.PodSelector != nil {
-					for _, expr := range to.PodSelector.MatchExpressions {
-						if expr.Key == "k8s-app" && expr.Operator == metav1.LabelSelectorOpIn {
-							vals := map[string]bool{}
-							for _, v := range expr.Values {
-								vals[v] = true
-							}
-							if vals["kube-dns"] && vals["node-local-dns"] {
-								hasKubeSystemDNSPods = true
-							}
-						}
+	// Verify that no egress rule contains a namespaceSelector with NotIn or an empty podSelector: {}
+	for i, rule := range egressPolicy.Spec.Egress {
+		for j, to := range rule.To {
+			if to.NamespaceSelector != nil {
+				for _, req := range to.NamespaceSelector.MatchExpressions {
+					if req.Operator == metav1.LabelSelectorOpNotIn {
+						t.Errorf("rule %d peer %d: namespaceSelector must not use NotIn operator", i, j)
 					}
 				}
 			}
+			if to.PodSelector != nil && len(to.PodSelector.MatchLabels) == 0 && len(to.PodSelector.MatchExpressions) == 0 {
+				t.Errorf("rule %d peer %d: podSelector must not be empty {}", i, j)
+			}
+		}
+	}
+
+	// Rule 1: DNS
+	dnsRule := egressPolicy.Spec.Egress[0]
+	hasKubeSystemDNSPods := false
+	hasNodeLocalIP := false
+	hasCloudDNSIP := false
+
+	for _, to := range dnsRule.To {
+		if to.NamespaceSelector != nil && to.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "kube-system" {
+			if to.PodSelector != nil {
+				for _, expr := range to.PodSelector.MatchExpressions {
+					if expr.Key == "k8s-app" && expr.Operator == metav1.LabelSelectorOpIn {
+						vals := map[string]bool{}
+						for _, v := range expr.Values {
+							vals[v] = true
+						}
+						if vals["kube-dns"] && vals["node-local-dns"] {
+							hasKubeSystemDNSPods = true
+						}
+					}
+				}
+			}
+		}
+		if to.IPBlock != nil {
+			if to.IPBlock.CIDR == "169.254.20.10/32" {
+				hasNodeLocalIP = true
+			}
+			if to.IPBlock.CIDR == "169.254.169.254/32" {
+				hasCloudDNSIP = true
+			}
+		}
+	}
+
+	if !hasKubeSystemDNSPods {
+		t.Errorf("expected DNS to kube-system pods with k8s-app In [kube-dns, node-local-dns]")
+	}
+	if !hasNodeLocalIP {
+		t.Errorf("expected DNS to ipBlock 169.254.20.10/32 (NodeLocal DNSCache)")
+	}
+	if !hasCloudDNSIP {
+		t.Errorf("expected DNS to ipBlock 169.254.169.254/32 (Cloud DNS metadata data plane)")
+	}
+
+	hasUDP53 := false
+	hasTCP53 := false
+	for _, port := range dnsRule.Ports {
+		if port.Port != nil && port.Port.IntVal == 53 {
+			if port.Protocol != nil && *port.Protocol == corev1.ProtocolUDP {
+				hasUDP53 = true
+			}
+			if port.Protocol != nil && *port.Protocol == corev1.ProtocolTCP {
+				hasTCP53 = true
+			}
+		}
+	}
+	if !hasUDP53 {
+		t.Errorf("expected UDP port 53 in DNS egress rule")
+	}
+	if !hasTCP53 {
+		t.Errorf("expected TCP port 53 in DNS egress rule")
+	}
+
+	// Rule 2: Internet Git / HTTP / HTTPS
+	internetRule := egressPolicy.Spec.Egress[1]
+	if len(internetRule.To) != 1 {
+		t.Fatalf("expected exactly 1 peer in internet rule, got %d", len(internetRule.To))
+	}
+	toPeer := internetRule.To[0]
+	if toPeer.IPBlock == nil || toPeer.IPBlock.CIDR != "0.0.0.0/0" {
+		t.Fatalf("expected ipBlock 0.0.0.0/0 in internet rule, got %v", toPeer.IPBlock)
+	}
+	if toPeer.NamespaceSelector != nil || toPeer.PodSelector != nil {
+		t.Errorf("internet rule peer must only be an ipBlock; got namespaceSelector=%v, podSelector=%v",
+			toPeer.NamespaceSelector, toPeer.PodSelector)
+	}
+
+	exceptMap := make(map[string]bool)
+	for _, exc := range toPeer.IPBlock.Except {
+		exceptMap[exc] = true
+	}
+	expectedExceptions := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+		"169.254.0.0/16",
+	}
+	for _, expectedCIDR := range expectedExceptions {
+		if !exceptMap[expectedCIDR] {
+			t.Errorf("expected internet rule ipBlock.except to contain %s, got %v", expectedCIDR, toPeer.IPBlock.Except)
+		}
+	}
+
+	expectedInternetPorts := map[int32]bool{80: false, 443: false, 9418: false}
+	for _, port := range internetRule.Ports {
+		if port.Protocol == nil || *port.Protocol != corev1.ProtocolTCP {
+			t.Errorf("expected TCP protocol, got %v", port.Protocol)
+		}
+		if port.Port != nil {
+			expectedInternetPorts[port.Port.IntVal] = true
+		}
+	}
+	for portNum, found := range expectedInternetPorts {
+		if !found {
+			t.Errorf("missing expected internet egress port %d", portNum)
+		}
+	}
+
+	// Rule 3: In-cluster Git Fixture
+	gitFixtureRule := egressPolicy.Spec.Egress[2]
+	if len(gitFixtureRule.To) != 1 {
+		t.Fatalf("expected exactly 1 peer in git fixture rule, got %d", len(gitFixtureRule.To))
+	}
+	gitPeer := gitFixtureRule.To[0]
+	if gitPeer.PodSelector == nil || gitPeer.PodSelector.MatchLabels["app"] != "git-server" {
+		t.Errorf("expected podSelector app=git-server in git fixture rule, got %v", gitPeer.PodSelector)
+	}
+	if gitPeer.NamespaceSelector != nil || gitPeer.IPBlock != nil {
+		t.Errorf("git fixture rule must only use podSelector; got namespaceSelector=%v, ipBlock=%v",
+			gitPeer.NamespaceSelector, gitPeer.IPBlock)
+	}
+
+	if len(gitFixtureRule.Ports) != 1 {
+		t.Fatalf("expected 1 port in git fixture rule, got %d", len(gitFixtureRule.Ports))
+	}
+	gitPort := gitFixtureRule.Ports[0]
+	if gitPort.Protocol == nil || *gitPort.Protocol != corev1.ProtocolTCP {
+		t.Errorf("expected TCP protocol for git fixture, got %v", gitPort.Protocol)
+	}
+	if gitPort.Port == nil || gitPort.Port.IntVal != 9418 {
+		t.Errorf("expected port 9418 for git fixture, got %v", gitPort.Port)
+	}
+}
+
+func TestRenderSandboxEgressNetworkPolicy_FQDNActive(t *testing.T) {
+	egressPolicy := RenderSandboxEgressNetworkPolicy(DefaultSandboxEgressNetworkPolicyName, DefaultSandboxNamespace, true)
+	if egressPolicy == nil {
+		t.Fatal("expected non-nil egress policy")
+	}
+
+	if egressPolicy.Name != DefaultSandboxEgressNetworkPolicyName {
+		t.Errorf("expected name %s, got %s", DefaultSandboxEgressNetworkPolicyName, egressPolicy.Name)
+	}
+	if egressPolicy.Namespace != DefaultSandboxNamespace {
+		t.Errorf("expected namespace %s, got %s", DefaultSandboxNamespace, egressPolicy.Namespace)
+	}
+	if egressPolicy.Spec.PodSelector.MatchLabels[LabelSandbox] != "true" {
+		t.Errorf("expected podSelector %s=true, got %v", LabelSandbox, egressPolicy.Spec.PodSelector.MatchLabels)
+	}
+
+	if len(egressPolicy.Spec.PolicyTypes) != 1 || egressPolicy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Fatalf("expected policyTypes [Egress], got %v", egressPolicy.Spec.PolicyTypes)
+	}
+
+	// When FQDN is active, exactly 2 rules: DNS and in-cluster git fixture
+	if len(egressPolicy.Spec.Egress) != 2 {
+		t.Fatalf("expected exactly 2 egress rules (DNS and in-cluster Git fixture) when FQDN is active, got %d", len(egressPolicy.Spec.Egress))
+	}
+
+	// Explicitly assert that no rule allows 0.0.0.0/0 (or 0.0.0.0/0:443, 0.0.0.0/0:80)
+	for i, rule := range egressPolicy.Spec.Egress {
+		for j, to := range rule.To {
 			if to.IPBlock != nil {
-				if to.IPBlock.CIDR == "169.254.20.10/32" {
-					hasNodeLocalIP = true
-				}
-				if to.IPBlock.CIDR == "169.254.169.254/32" {
-					hasCloudDNSIP = true
+				if to.IPBlock.CIDR == "0.0.0.0/0" {
+					t.Fatalf("rule %d peer %d: 0.0.0.0/0 internet egress rule must NOT exist when FQDN is active", i, j)
 				}
 			}
 		}
+		for _, port := range rule.Ports {
+			if port.Port != nil && (port.Port.IntVal == 443 || port.Port.IntVal == 80) {
+				t.Fatalf("rule %d: port %d must NOT be allowed in baseline egress policy when FQDN is active", i, port.Port.IntVal)
+			}
+		}
+	}
 
-		if !hasKubeSystemDNSPods {
-			t.Errorf("expected DNS to kube-system pods with k8s-app In [kube-dns, node-local-dns]")
-		}
-		if !hasNodeLocalIP {
-			t.Errorf("expected DNS to ipBlock 169.254.20.10/32 (NodeLocal DNSCache)")
-		}
-		if !hasCloudDNSIP {
-			t.Errorf("expected DNS to ipBlock 169.254.169.254/32 (Cloud DNS metadata data plane)")
-		}
+	// Rule 1: DNS
+	dnsRule := egressPolicy.Spec.Egress[0]
+	hasKubeSystemDNSPods := false
+	hasNodeLocalIP := false
+	hasCloudDNSIP := false
 
-		hasUDP53 := false
-		hasTCP53 := false
-		for _, port := range dnsRule.Ports {
-			if port.Port != nil && port.Port.IntVal == 53 {
-				if port.Protocol != nil && *port.Protocol == corev1.ProtocolUDP {
-					hasUDP53 = true
+	for _, to := range dnsRule.To {
+		if to.NamespaceSelector != nil && to.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "kube-system" {
+			if to.PodSelector != nil {
+				for _, expr := range to.PodSelector.MatchExpressions {
+					if expr.Key == "k8s-app" && expr.Operator == metav1.LabelSelectorOpIn {
+						vals := map[string]bool{}
+						for _, v := range expr.Values {
+							vals[v] = true
+						}
+						if vals["kube-dns"] && vals["node-local-dns"] {
+							hasKubeSystemDNSPods = true
+						}
+					}
 				}
-				if port.Protocol != nil && *port.Protocol == corev1.ProtocolTCP {
-					hasTCP53 = true
-				}
 			}
 		}
-		if !hasUDP53 {
-			t.Errorf("expected UDP port 53 in DNS egress rule")
-		}
-		if !hasTCP53 {
-			t.Errorf("expected TCP port 53 in DNS egress rule")
-		}
-
-		// Rule 2: Internet Git / HTTP / HTTPS
-		internetRule := egressPolicy.Spec.Egress[1]
-		if len(internetRule.To) != 1 {
-			t.Fatalf("expected exactly 1 peer in internet rule, got %d", len(internetRule.To))
-		}
-		toPeer := internetRule.To[0]
-		if toPeer.IPBlock == nil || toPeer.IPBlock.CIDR != "0.0.0.0/0" {
-			t.Fatalf("expected ipBlock 0.0.0.0/0 in internet rule, got %v", toPeer.IPBlock)
-		}
-		if toPeer.NamespaceSelector != nil || toPeer.PodSelector != nil {
-			t.Errorf("internet rule peer must only be an ipBlock; got namespaceSelector=%v, podSelector=%v",
-				toPeer.NamespaceSelector, toPeer.PodSelector)
-		}
-
-		exceptMap := make(map[string]bool)
-		for _, exc := range toPeer.IPBlock.Except {
-			exceptMap[exc] = true
-		}
-		expectedExceptions := []string{
-			"10.0.0.0/8",
-			"172.16.0.0/12",
-			"192.168.0.0/16",
-			"100.64.0.0/10",
-			"169.254.0.0/16",
-		}
-		for _, expectedCIDR := range expectedExceptions {
-			if !exceptMap[expectedCIDR] {
-				t.Errorf("expected internet rule ipBlock.except to contain %s, got %v", expectedCIDR, toPeer.IPBlock.Except)
+		if to.IPBlock != nil {
+			if to.IPBlock.CIDR == "169.254.20.10/32" {
+				hasNodeLocalIP = true
+			}
+			if to.IPBlock.CIDR == "169.254.169.254/32" {
+				hasCloudDNSIP = true
 			}
 		}
+	}
 
-		expectedInternetPorts := map[int32]bool{80: false, 443: false, 9418: false}
-		for _, port := range internetRule.Ports {
-			if port.Protocol == nil || *port.Protocol != corev1.ProtocolTCP {
-				t.Errorf("expected TCP protocol, got %v", port.Protocol)
-			}
-			if port.Port != nil {
-				expectedInternetPorts[port.Port.IntVal] = true
-			}
-		}
-		for portNum, found := range expectedInternetPorts {
-			if !found {
-				t.Errorf("missing expected internet egress port %d", portNum)
-			}
-		}
+	if !hasKubeSystemDNSPods {
+		t.Errorf("expected DNS to kube-system pods with k8s-app In [kube-dns, node-local-dns]")
+	}
+	if !hasNodeLocalIP {
+		t.Errorf("expected DNS to ipBlock 169.254.20.10/32 (NodeLocal DNSCache)")
+	}
+	if !hasCloudDNSIP {
+		t.Errorf("expected DNS to ipBlock 169.254.169.254/32 (Cloud DNS metadata data plane)")
+	}
 
-		// Rule 3: In-cluster Git Fixture
-		gitFixtureRule := egressPolicy.Spec.Egress[2]
-		if len(gitFixtureRule.To) != 1 {
-			t.Fatalf("expected exactly 1 peer in git fixture rule, got %d", len(gitFixtureRule.To))
-		}
-		gitPeer := gitFixtureRule.To[0]
-		if gitPeer.PodSelector == nil || gitPeer.PodSelector.MatchLabels["app"] != "git-server" {
-			t.Errorf("expected podSelector app=git-server in git fixture rule, got %v", gitPeer.PodSelector)
-		}
-		if gitPeer.NamespaceSelector != nil || gitPeer.IPBlock != nil {
-			t.Errorf("git fixture rule must only use podSelector; got namespaceSelector=%v, ipBlock=%v",
-				gitPeer.NamespaceSelector, gitPeer.IPBlock)
-		}
+	// Rule 2: In-cluster Git Fixture
+	gitFixtureRule := egressPolicy.Spec.Egress[1]
+	if len(gitFixtureRule.To) != 1 {
+		t.Fatalf("expected exactly 1 peer in git fixture rule, got %d", len(gitFixtureRule.To))
+	}
+	gitPeer := gitFixtureRule.To[0]
+	if gitPeer.PodSelector == nil || gitPeer.PodSelector.MatchLabels["app"] != "git-server" {
+		t.Errorf("expected podSelector app=git-server in git fixture rule, got %v", gitPeer.PodSelector)
+	}
+	if len(gitFixtureRule.Ports) != 1 || gitFixtureRule.Ports[0].Port == nil || gitFixtureRule.Ports[0].Port.IntVal != 9418 {
+		t.Errorf("expected TCP port 9418 for git fixture, got %v", gitFixtureRule.Ports)
+	}
+}
 
-		if len(gitFixtureRule.Ports) != 1 {
-			t.Fatalf("expected 1 port in git fixture rule, got %d", len(gitFixtureRule.Ports))
-		}
-		gitPort := gitFixtureRule.Ports[0]
-		if gitPort.Protocol == nil || *gitPort.Protocol != corev1.ProtocolTCP {
-			t.Errorf("expected TCP protocol for git fixture, got %v", gitPort.Protocol)
-		}
-		if gitPort.Port == nil || gitPort.Port.IntVal != 9418 {
-			t.Errorf("expected port 9418 for git fixture, got %v", gitPort.Port)
-		}
-	})
+func TestRenderSandboxEgressNetworkPolicyYAML_RoundTrip(t *testing.T) {
+	yamlAbsent, err := RenderSandboxEgressNetworkPolicyYAML(DefaultSandboxEgressNetworkPolicyName, DefaultSandboxNamespace, false)
+	if err != nil {
+		t.Fatalf("failed to render YAML for FQDN absent: %v", err)
+	}
+	if !strings.Contains(yamlAbsent, "0.0.0.0/0") || !strings.Contains(yamlAbsent, "port: 443") {
+		t.Errorf("expected 0.0.0.0/0 and port 443 in YAML when FQDN absent, got:\n%s", yamlAbsent)
+	}
+
+	yamlActive, err := RenderSandboxEgressNetworkPolicyYAML(DefaultSandboxEgressNetworkPolicyName, DefaultSandboxNamespace, true)
+	if err != nil {
+		t.Fatalf("failed to render YAML for FQDN active: %v", err)
+	}
+	if strings.Contains(yamlActive, "0.0.0.0/0") {
+		t.Errorf("expected no 0.0.0.0/0 in YAML when FQDN active, got:\n%s", yamlActive)
+	}
+	if strings.Contains(yamlActive, "port: 443") {
+		t.Errorf("expected no port 443 in YAML when FQDN active, got:\n%s", yamlActive)
+	}
+	if !strings.Contains(yamlActive, "port: 9418") {
+		t.Errorf("expected port 9418 to fixture in YAML when FQDN active, got:\n%s", yamlActive)
+	}
 }
 
 func TestRenderFQDNNetworkPolicy_DefaultHosts(t *testing.T) {

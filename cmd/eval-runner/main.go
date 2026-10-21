@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	discoveryk8s "k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -162,6 +163,12 @@ func main() {
 	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create kubernetes client")
+		os.Exit(1)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create dynamic client")
 		os.Exit(1)
 	}
 
@@ -367,23 +374,37 @@ func main() {
 	if err != nil {
 		setupLog.Info("unable to detect FQDNNetworkPolicy support; skipping FQDN egress narrowing", "error", err)
 	}
-	var fqdnSyncFunc func(ctx context.Context, hosts []string) error
+	activeFQDNVersion := ""
 	if fqdnSupported {
+		activeFQDNVersion = fqdnVersion
 		setupLog.Info("FQDNNetworkPolicy supported; configuring sandbox HTTPS egress narrowing",
 			"apiVersion", fqdnVersion,
 			"namespace", sandboxNamespace,
 			"hosts", clusterConfig.SandboxEgressHosts,
 		)
-		fqdnCtx, fqdnCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer fqdnCancel()
-		if err := controller.ReconcileFQDNNetworkPolicy(fqdnCtx, mgr.GetClient(), fqdnVersion, sandboxNamespace, clusterConfig.SandboxEgressHosts, setupLog); err != nil {
-			setupLog.Error(err, "failed initial reconcile of FQDNNetworkPolicy; continuing")
-		}
-		fqdnSyncFunc = func(ctx context.Context, hosts []string) error {
-			return controller.ReconcileFQDNNetworkPolicy(ctx, mgr.GetClient(), fqdnVersion, sandboxNamespace, hosts, setupLog)
-		}
 	} else {
 		setupLog.Info("FQDNNetworkPolicy CRD not found in cluster; sandbox FQDN egress narrowing disabled until restart (requires GKE Dataplane V2 with --enable-fqdn-network-policy)")
+	}
+
+	egressWatcher := controller.NewSandboxEgressWatcher(controller.SandboxEgressWatcherOptions{
+		Client:        mgr.GetClient(),
+		KubeClient:    kubeClient,
+		DynamicClient: dynamicClient,
+		Namespace:     sandboxNamespace,
+		FQDNVersion:   activeFQDNVersion,
+		Logger:        setupLog.WithName("egress-watcher"),
+		InitialHosts:  clusterConfig.SandboxEgressHosts,
+	})
+
+	// Startup initial reconcile of sandbox egress policies
+	egressCtx, egressCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer egressCancel()
+	if err := egressWatcher.Reconcile(egressCtx); err != nil {
+		setupLog.Error(err, "failed initial reconcile of sandbox egress policies; continuing")
+	}
+
+	egressSyncFunc := func(ctx context.Context, hosts []string) error {
+		return egressWatcher.Sync(ctx, hosts)
 	}
 
 	reloader := controller.NewConfigReloader(controller.ConfigReloaderOptions{
@@ -393,8 +414,13 @@ func main() {
 		RunReconciler:  reconciler,
 		CompReconciler: comparisonReconciler,
 		InitialConfig:  &clusterConfig,
-		FQDNSyncFunc:   fqdnSyncFunc,
+		FQDNSyncFunc:   egressSyncFunc,
 	})
+
+	if err := mgr.Add(egressWatcher); err != nil {
+		setupLog.Error(err, "unable to add egress watcher runnable")
+		os.Exit(1)
+	}
 
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		err := sinkconfig.WatchConfigMap(ctx, kubeClient, evalRunnerNamespace, controller.DefaultConfigMapName, func(cm *corev1.ConfigMap) {
