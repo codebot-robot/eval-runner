@@ -690,57 +690,70 @@ func sampleRepoOverviewView() RepoOverviewView {
 	}
 	spark := BuildSparklineSVG(sparkItems)
 
-	leftPx, widthPx, dotPx, hasCI := CalculateRunBarGeometry(&rate2, nil, sparkItems[1].CI, 240.0)
-
-	tasks := []RepoOverviewTaskRow{
+	evalRows := []RepoOverviewEvalRow{
 		{
-			ID:            "triage/runbook_lookup",
-			SamplesLink:   "/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples",
-			RunLink:       "/github.com/gke-labs/eval-runner/runs/base-2222222",
-			SeriesLink:    "/github.com/gke-labs/eval-runner/series/main?task=triage%2Frunbook_lookup",
-			RateStr:       "0.85",
-			CILabel:       "[0.70, 0.94]",
-			CILeftPx:      leftPx,
-			CIWidthPx:     widthPx,
-			CIDotPx:       dotPx,
-			HasCI:         hasCI,
-			DeltaStr:      "+0.15",
-			DeltaClass:    "good",
-			HasDelta:      true,
-			Sparkline:     spark,
-			Samples:       "48",
-			TokensStr:     "12,400",
-			CostStr:       "$0.05",
-			CommitShort:   "2222222",
-			CommitTimeStr: "10m",
+			ID:          "triage/runbook_lookup",
+			SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples",
+			RunLink:     "/github.com/gke-labs/eval-runner/runs/base-2222222",
+			ScoreStr:    "0.85",
+			CILabel:     "[0.70, 0.94]",
+			DeltaStr:    "Δ +0.15 [+0.02, +0.28]",
+			DeltaClass:  "good",
+			HasDelta:    true,
+			Sparkline:   spark,
+		},
+	}
+
+	suites := []RepoOverviewSuiteRow{
+		{
+			Name:       "triage",
+			ScoreStr:   "0.85",
+			CILabel:    "[0.70, 0.94]",
+			EvalsCount: 1,
+			DeltaStr:   "Δ +0.15 [+0.02, +0.28]",
+			DeltaClass: "good",
+			HasDelta:   true,
+			Sparkline:  spark,
+			Evals:      evalRows,
 		},
 	}
 
 	return RepoOverviewView{
-		ActiveTab:       NavTabOverview,
-		Repo:            RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
-		Namespace:       "eval-runner",
-		Branch:          "main",
-		TasksTracked:    1,
-		MeanSuccessRate: "0.85",
-		LastCommitSHA:   "2222222222222222222222222222222222222222",
-		LastCommitShort: "2222222",
-		LastCommitLink:  "/github.com/gke-labs/eval-runner/runs/base-2222222",
-		RunsOnBranch:    2,
-		PullsLink:       "/github.com/gke-labs/eval-runner/pulls",
-		Tasks:           tasks,
-		IsEmpty:         false,
+		ActiveTab:             NavTabOverview,
+		Repo:                  RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
+		Namespace:             "eval-runner",
+		Branch:                "main",
+		OverallScore:          "0.85",
+		OverallCILabel:        "[0.70, 0.94]",
+		OverallCommitSHA:      "2222222222222222222222222222222222222222",
+		OverallCommitShort:    "2222222",
+		OverallCommitLink:     "/github.com/gke-labs/eval-runner/runs/base-2222222",
+		OverallTimeStr:        "10m",
+		OverallTimeUTC:        "2026-10-20T02:00:00Z",
+		Suites:                suites,
+		TotalRunsCount:        2,
+		RunsLink:              "/github.com/gke-labs/eval-runner/runs",
+		TotalComparisonsCount: 1,
+		ComparisonsLink:       "/github.com/gke-labs/eval-runner/comparisons",
+		TotalPullsCount:       1,
+		PullsLink:             "/github.com/gke-labs/eval-runner/pulls",
+		IsEmpty:               false,
 	}
 }
 
 func sampleRepoOverviewEmptyView() RepoOverviewView {
 	return RepoOverviewView{
-		ActiveTab: NavTabOverview,
-		Repo:      RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
-		Namespace: "eval-runner",
-		Branch:    "main",
-		PullsLink: "/github.com/gke-labs/eval-runner/pulls",
-		IsEmpty:   true,
+		ActiveTab:             NavTabOverview,
+		Repo:                  RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
+		Namespace:             "eval-runner",
+		Branch:                "main",
+		TotalRunsCount:        0,
+		RunsLink:              "/github.com/gke-labs/eval-runner/runs",
+		TotalComparisonsCount: 0,
+		ComparisonsLink:       "/github.com/gke-labs/eval-runner/comparisons",
+		TotalPullsCount:       0,
+		PullsLink:             "/github.com/gke-labs/eval-runner/pulls",
+		IsEmpty:               true,
 	}
 }
 

@@ -239,6 +239,49 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 .reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
 .reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
 .reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
+
+.overview-headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 24px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.overview-headline .headline-score {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.overview-headline .headline-ci {
+  font-size: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+.overview-headline .headline-meta {
+  font-size: 14px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.suite-row {
+  background: var(--neutral-soft);
+  font-weight: 600;
+}
+.suite-row td {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.eval-row td.eval-name {
+  padding-left: 32px;
+}
+.sparkline-svg {
+  display: block;
+}
 </style>
 </head>
 <body>
@@ -257,10 +300,10 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
       <nav class="nav-links">
         <a href="/github.com/gke-labs/eval-runner" class="nav-link active">Overview</a>
         <a href="/github.com/gke-labs/eval-runner/runs" class="nav-link ">Runs</a>
+        <a href="/github.com/gke-labs/eval-runner/pulls" class="nav-link ">Pull requests</a>
         <a href="/github.com/gke-labs/eval-runner/comparisons" class="nav-link ">Comparisons</a>
       </nav>
     </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
   </header>
 
   <main class="container">
@@ -270,32 +313,8 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
         <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">main</span></span>
       </div>
       <div class="card-body">
-
-        <div class="meta-grid">
-          <div class="meta-tile">
-            <div class="label">Tasks Tracked</div>
-            <div class="value num">0</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Mean Success Rate</div>
-            <div class="value">—</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Last Commit Evaluated</div>
-            <div class="value mono">—</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Runs on Branch</div>
-            <div class="value num">0</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Pull Requests</div>
-            <div class="value"><a href="/github.com/gke-labs/eval-runner/pulls">Pull requests →</a></div>
-          </div>
-        </div>
         <div class="empty-state">
-          <p>No evaluations recorded for this repository.</p>
-          <p style="font-size:13px;color:var(--muted);margin-top:8px">Track eval metrics by applying a Run: <code class="mono">kubectl apply -f &lt;run.yaml&gt;</code></p>
+          <p>No observations recorded on <code class="mono">main</code>. Produce an observation by applying a baseline Run: <code class="mono">kubectl apply -f &lt;run.yaml&gt;</code></p>
         </div>
       </div>
     </div>

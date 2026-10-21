@@ -92,47 +92,72 @@ type RepoIndexView struct {
 	TotalCount    int
 }
 
-// RepoOverviewTaskRow represents a single task in the RepoOverview table.
-type RepoOverviewTaskRow struct {
-	ID            string
-	SamplesLink   string
-	RunLink       string
-	SeriesLink    string
-	RateStr       string // e.g. "0.84" or "—"
-	CILabel       string // e.g. "[0.70, 0.94]" or "—"
-	CILeftPx      float64
-	CIWidthPx     float64
-	CIDotPx       float64
-	HasCI         bool
-	DeltaStr      string // e.g. "+0.10", "-0.05", "+0.00", or "—"
-	DeltaClass    string // "good", "bad", "neutral", or ""
-	HasDelta      bool
-	Sparkline     SparklineSVG
-	Samples       string // e.g. "48" or "—"
-	TokensStr     string // e.g. "12k" or "—"
-	CostStr       string // e.g. "$0.02" or "—"
-	CommitShort   string // e.g. "05ce4d8" or "—"
-	CommitTimeStr string // e.g. "10m" or RFC3339
+// SuiteOf returns the eval suite for a given task ID.
+// An eval suite is the first path segment of the task ID (e.g. "docs" for "docs/readme_comprehension").
+// A task ID without a "/" is a suite of one.
+func SuiteOf(taskID string) string {
+	if idx := strings.Index(taskID, "/"); idx != -1 {
+		return taskID[:idx]
+	}
+	return taskID
+}
+
+// RepoOverviewEvalRow represents a single eval in the RepoOverview table.
+type RepoOverviewEvalRow struct {
+	ID          string
+	SamplesLink string
+	RunLink     string
+	ScoreStr    string // e.g. "0.84" or "—"
+	CILabel     string // e.g. "[0.70, 0.94]" or "—"
+	DeltaStr    string // e.g. "Δ +0.10 [+0.02, +0.18]" or "—"
+	DeltaClass  string // "good", "bad", "neutral", or ""
+	HasDelta    bool
+	Sparkline   SparklineSVG
+}
+
+// RepoOverviewSuiteRow represents an eval suite in the RepoOverview table.
+type RepoOverviewSuiteRow struct {
+	Name       string // e.g. "docs"
+	SuiteLink  string // link if route exists, else empty
+	ScoreStr   string // mean of its evals' scores, e.g. "0.70"
+	CILabel    string // interval from pooled samples, e.g. "[0.58, 0.82]"
+	EvalsCount int    // number of evals, e.g. 2
+	DeltaStr   string // delta vs previous commit with interval
+	DeltaClass string // "good", "bad", "neutral", or ""
+	HasDelta   bool
+	Sparkline  SparklineSVG
+	Evals      []RepoOverviewEvalRow
 }
 
 // RepoOverviewView is the view model for the repository overview page (GET /{host}/{owner}/{repo}).
 type RepoOverviewView struct {
-	ActiveTab       NavTab
-	Repo            RepoRef
-	Namespace       string
-	LinkNamespace   string
-	Branch          string
-	Cohort          string
-	TasksTracked    int
-	MeanSuccessRate string // e.g. "0.84" or "—"
-	LastCommitSHA   string
-	LastCommitShort string
-	LastCommitLink  string
-	RunsOnBranch    int
-	PullsLink       string
-	Note            string // e.g. "no main-branch baselines yet; showing latest Runs"
-	Tasks           []RepoOverviewTaskRow
-	IsEmpty         bool
+	ActiveTab     NavTab
+	Repo          RepoRef
+	Namespace     string
+	LinkNamespace string
+	Branch        string
+	Cohort        string
+	IsEmpty       bool
+
+	// Headline
+	OverallScore       string
+	OverallCILabel     string
+	OverallCommitSHA   string
+	OverallCommitShort string
+	OverallCommitLink  string
+	OverallTimeStr     string
+	OverallTimeUTC     string
+
+	// Suites and Evals
+	Suites []RepoOverviewSuiteRow
+
+	// Tiles below the suite table
+	TotalRunsCount        int
+	RunsLink              string
+	TotalComparisonsCount int
+	ComparisonsLink       string
+	TotalPullsCount       int
+	PullsLink             string
 }
 
 // RunTaskRow represents a single eval task in the /runs/<ns>/<name> detail view.
@@ -1471,6 +1496,8 @@ type SeriesItem struct {
 	DeltaPrevStr    string
 	DeltaPrevChip   string
 	DeltaPrevMethod string
+
+	ObsCount int // Number of observations represented at this commit
 }
 
 // Estimate converts the SeriesItem point and CI into a stats.Estimate.
@@ -1569,12 +1596,22 @@ type SeriesSVG struct {
 	YAxisTicks   []SVGTick       // ticks for success rate along Y-axis
 }
 
+// SVGObservationTick represents an observation tick mark on a sparkline.
+type SVGObservationTick struct {
+	X1     float64
+	Y1     float64
+	X2     float64
+	Y2     float64
+	Stroke string
+}
+
 // SparklineSVG holds viewbox and element coordinates for a compact sparkline.
 type SparklineSVG struct {
 	ViewBox   string
 	Polylines []SVGPolyline
 	Polygons  []string
 	Circles   []SVGCircle
+	Ticks     []SVGObservationTick
 	HasPoints bool
 }
 
@@ -1612,11 +1649,11 @@ func seriesXTicks(commitSHAs []string) []SVGTick {
 	return xTicks
 }
 
-// computeSeriesGeometry generates polylines, shaded CI polygons, and circles for series items
+// computeSeriesGeometry generates polylines, shaded CI polygons, circles, and observation ticks for series items
 // mapped into [x0, x1] horizontally and [y0, y1] vertically (rate 1.0 at y0, 0.0 at y1).
-func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) (polylines []SVGPolyline, polygons []string, circles []SVGCircle, hasPoints bool) {
+func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) (polylines []SVGPolyline, polygons []string, circles []SVGCircle, ticks []SVGObservationTick, hasPoints bool) {
 	if len(items) == 0 {
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	N := len(items)
 
@@ -1711,6 +1748,40 @@ func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) 
 		pt := pt2D{x: cx, y: cy}
 		circles = append(circles, SVGCircle{CX: cx, CY: cy, R: circleR})
 
+		obsCount := it.ObsCount
+		if obsCount <= 0 {
+			obsCount = 1
+		}
+		yTop := math.Round(math.Max(y0, cy-3.5)*10.0) / 10.0
+		yBottom := math.Round(math.Min(y1, cy+3.5)*10.0) / 10.0
+		if obsCount == 1 {
+			ticks = append(ticks, SVGObservationTick{
+				X1:     cx,
+				Y1:     yTop,
+				X2:     cx,
+				Y2:     yBottom,
+				Stroke: "var(--indigo)",
+			})
+		} else {
+			step := 2.5
+			startX := cx - float64(obsCount-1)*step/2.0
+			for k := 0; k < obsCount; k++ {
+				tx := math.Round((startX+float64(k)*step)*10.0) / 10.0
+				if tx < x0 {
+					tx = x0
+				} else if tx > x1 {
+					tx = x1
+				}
+				ticks = append(ticks, SVGObservationTick{
+					X1:     tx,
+					Y1:     yTop,
+					X2:     tx,
+					Y2:     yBottom,
+					Stroke: "var(--indigo)",
+				})
+			}
+		}
+
 		if len(curLine) == 0 {
 			curLine = append(curLine, pt)
 		} else {
@@ -1762,7 +1833,7 @@ func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) 
 	flushLine()
 	flushCI()
 
-	return polylines, polygons, circles, hasPoints
+	return polylines, polygons, circles, ticks, hasPoints
 }
 
 // BuildSeriesSVG generates server-side numeric SVG coordinates for success rate vs commit series.
@@ -1798,7 +1869,7 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 	}
 	xTicks := seriesXTicks(commitSHAs)
 
-	polylines, polygons, circles, _ := computeSeriesGeometry(items, x0, x1, y0, y1, 4.0)
+	polylines, polygons, circles, _, _ := computeSeriesGeometry(items, x0, x1, y0, y1, 4.0)
 
 	return SeriesSVG{
 		ViewBox:    viewBox,
@@ -1835,12 +1906,13 @@ func BuildSparklineSVG(items []SeriesItem) SparklineSVG {
 		}
 	}
 
-	polylines, polygons, circles, hasPoints := computeSeriesGeometry(items, x0, x1, y0, y1, circleR)
+	polylines, polygons, circles, ticks, hasPoints := computeSeriesGeometry(items, x0, x1, y0, y1, circleR)
 	return SparklineSVG{
 		ViewBox:   viewBox,
 		Polylines: polylines,
 		Polygons:  polygons,
 		Circles:   circles,
+		Ticks:     ticks,
 		HasPoints: hasPoints,
 	}
 }

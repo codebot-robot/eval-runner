@@ -239,6 +239,49 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 .reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
 .reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
 .reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
+
+.overview-headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 24px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.overview-headline .headline-score {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.overview-headline .headline-ci {
+  font-size: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+.overview-headline .headline-meta {
+  font-size: 14px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.suite-row {
+  background: var(--neutral-soft);
+  font-weight: 600;
+}
+.suite-row td {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.eval-row td.eval-name {
+  padding-left: 32px;
+}
+.sparkline-svg {
+  display: block;
+}
 </style>
 </head>
 <body>
@@ -257,113 +300,109 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
       <nav class="nav-links">
         <a href="/github.com/gke-labs/eval-runner" class="nav-link active">Overview</a>
         <a href="/github.com/gke-labs/eval-runner/runs" class="nav-link ">Runs</a>
+        <a href="/github.com/gke-labs/eval-runner/pulls" class="nav-link ">Pull requests</a>
         <a href="/github.com/gke-labs/eval-runner/comparisons" class="nav-link ">Comparisons</a>
       </nav>
     </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
   </header>
 
   <main class="container">
+    
+    <div class="overview-headline">
+      <div>
+        <span class="headline-score">0.85</span>
+        <span class="headline-ci">[0.70, 0.94]</span>
+      </div>
+      <div class="headline-meta">
+        at commit <a href="/github.com/gke-labs/eval-runner/runs/base-2222222" class="mono">2222222</a> · <span title="2026-10-20T02:00:00Z">10m</span>
+      </div>
+    </div>
+
+    
     <div class="card">
       <div class="card-header">
-        <h1 class="card-title">Overview</h1>
+        <h1 class="card-title">Eval Suites</h1>
         <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">main</span></span>
       </div>
-      <div class="card-body">
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Suite / Eval</th>
+              <th>Score (95% CI)</th>
+              <th>Evals</th>
+              <th>Δ vs prev</th>
+              <th>Trend</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="suite-row">
+              <td>
+                <span class="mono" style="font-weight:600">triage</span>
+              </td>
+              <td>
+                <span class="mono" style="font-weight:600">0.85</span>
+                <span style="font-size:12px;color:var(--muted);margin-left:4px">[0.70, 0.94]</span>
+              </td>
+              <td class="num">1</td>
+              <td>
+                <span class="chip good">Δ &#43;0.15 [&#43;0.02, &#43;0.28]</span>
+              </td>
+              <td>
+                <svg viewBox="0 0 120 28" width="120" height="28" class="sparkline-svg">
+                  <polygon points="114.0,5.2 118.0,5.2 118.0,10.0 114.0,10.0" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+                  <polyline points="4.0,10.0 116.0,7.0" fill="none" stroke="var(--indigo)" stroke-width="1.5"/>
+                  <circle cx="4" cy="10" r="2" fill="var(--indigo)"/>
+                  <circle cx="116" cy="7" r="2" fill="var(--indigo)"/>
+                  <line x1="4" y1="6.5" x2="4" y2="13.5" stroke="var(--indigo)" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                  <line x1="116" y1="4" x2="116" y2="10.5" stroke="var(--indigo)" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                </svg>
+              </td>
+            </tr>
+            <tr class="eval-row">
+              <td class="eval-name mono">
+                <a href="/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples">triage/runbook_lookup</a>
+              </td>
+              <td>
+                <a href="/github.com/gke-labs/eval-runner/runs/base-2222222" class="mono">0.85</a>
+                <span style="font-size:12px;color:var(--muted);margin-left:4px">[0.70, 0.94]</span>
+              </td>
+              <td class="num" style="color:var(--muted)">—</td>
+              <td>
+                <span class="chip good">Δ &#43;0.15 [&#43;0.02, &#43;0.28]</span>
+              </td>
+              <td>
+                <svg viewBox="0 0 120 28" width="120" height="28" class="sparkline-svg">
+                  <polygon points="114.0,5.2 118.0,5.2 118.0,10.0 114.0,10.0" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+                  <polyline points="4.0,10.0 116.0,7.0" fill="none" stroke="var(--indigo)" stroke-width="1.5"/>
+                  <circle cx="4" cy="10" r="2" fill="var(--indigo)"/>
+                  <circle cx="116" cy="7" r="2" fill="var(--indigo)"/>
+                  <line x1="4" y1="6.5" x2="4" y2="13.5" stroke="var(--indigo)" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                  <line x1="116" y1="4" x2="116" y2="10.5" stroke="var(--indigo)" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                </svg>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="padding:14px 24px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);line-height:1.5">
+        Score at main for an eval is the pooled success rate (Wilson score interval) over the newest completed baseline observations on <code class="mono">main</code>. Suite scores are the mean of their evals' scores with the confidence interval from pooled samples. Overall score is the mean over suites.
+      </div>
+    </div>
 
-        <div class="meta-grid">
-          <div class="meta-tile">
-            <div class="label">Tasks Tracked</div>
-            <div class="value num">1</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Mean Success Rate</div>
-            <div class="value">0.85</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Last Commit Evaluated</div>
-            <div class="value mono"><a href="/github.com/gke-labs/eval-runner/runs/base-2222222">2222222</a></div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Runs on Branch</div>
-            <div class="value num">2</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Pull Requests</div>
-            <div class="value"><a href="/github.com/gke-labs/eval-runner/pulls">Pull requests →</a></div>
-          </div>
-        </div>
-        <div style="overflow-x:auto;margin-top:20px">
-          <table class="ci">
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Rate</th>
-                <th>CI (95%)</th>
-                <th>Δ vs prev</th>
-                <th>Trend</th>
-                <th>Samples</th>
-                <th>Tokens</th>
-                <th>Cost</th>
-                <th>Commit</th>
-                <th>Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td class="mono" style="font-weight:600">
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples">triage/runbook_lookup</a>
-                </td>
-                <td class="num">
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222">0.85</a>
-                </td>
-                <td>
-                  <div style="display:flex;align-items:center;gap:8px">
-                    <a href="/github.com/gke-labs/eval-runner/runs/base-2222222" style="display:inline-block;text-decoration:none">
-                      <div class="cibar-01" title="Rate: 0.85 [0.70, 0.94]">
-                        <div class="axis"></div>
-                        <div class="tick-0"></div>
-                        <div class="tick-50"></div>
-                        <div class="tick-100"></div>
-                        <div class="range" style="left:168.0px; width:57.6px"></div>
-                        <div class="pt" style="left:197.0px"></div>
-                      </div>
-                    </a>
-                    <span style="font-size:12px;color:var(--muted);white-space:nowrap">[0.70, 0.94]</span>
-                  </div>
-                </td>
-                <td>
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222" style="text-decoration:none"><span class="chip good">&#43;0.15</span></a>
-                </td>
-                <td>
-                  <a href="/github.com/gke-labs/eval-runner/series/main?task=triage%2Frunbook_lookup" title="View series for triage/runbook_lookup" style="display:inline-block;text-decoration:none">
-                    <svg viewBox="0 0 120 28" width="120" height="28" style="display:block">
-                      <polygon points="114.0,5.2 118.0,5.2 118.0,10.0 114.0,10.0" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
-                      <polyline points="4.0,10.0 116.0,7.0" fill="none" stroke="var(--indigo)" stroke-width="1.5"/>
-                      <circle cx="4" cy="10" r="2" fill="var(--indigo)"/>
-                      <circle cx="116" cy="7" r="2" fill="var(--indigo)"/>
-                    </svg>
-                  </a>
-                </td>
-                <td class="num">
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples">48</a>
-                </td>
-                <td class="num mono">
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222">12,400</a>
-                </td>
-                <td class="num mono" style="font-size:13px">
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222">$0.05</a>
-                </td>
-                <td class="mono">
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222">2222222</a>
-                </td>
-                <td style="font-size:13px;color:var(--muted)">
-                  <a href="/github.com/gke-labs/eval-runner/runs/base-2222222" style="color:inherit;text-decoration:none">10m</a>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+    
+    <div class="meta-grid" style="margin-top:24px">
+      <div class="meta-tile">
+        <div class="label">Runs</div>
+        <div class="value num"><a href="/github.com/gke-labs/eval-runner/runs">2</a></div>
+      </div>
+      <div class="meta-tile">
+        <div class="label">Comparisons</div>
+        <div class="value num"><a href="/github.com/gke-labs/eval-runner/comparisons">1</a></div>
+      </div>
+      <div class="meta-tile">
+        <div class="label">Pull Requests</div>
+        <div class="value num"><a href="/github.com/gke-labs/eval-runner/pulls">1</a></div>
       </div>
     </div>
   </main>

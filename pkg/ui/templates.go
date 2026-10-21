@@ -353,180 +353,211 @@ const repoOverviewTemplate = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ if .Repo.Name }}{{ .Repo.Name }} · {{ end }}Overview · eval-runner</title>
-  <style>` + baseCSS + `</style>
+  <style>` + baseCSS + `
+.overview-headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 24px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.overview-headline .headline-score {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.overview-headline .headline-ci {
+  font-size: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+.overview-headline .headline-meta {
+  font-size: 14px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.suite-row {
+  background: var(--neutral-soft);
+  font-weight: 600;
+}
+.suite-row td {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.eval-row td.eval-name {
+  padding-left: 32px;
+}
+.sparkline-svg {
+  display: block;
+}
+</style>
 </head>
 <body>
   {{ template "repo_header" . }}
 
   <main class="container">
+    {{- if .IsEmpty }}
     <div class="card">
       <div class="card-header">
         <h1 class="card-title">Overview</h1>
         <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">{{ .Branch }}</span></span>
       </div>
       <div class="card-body">
-        {{- if .Note }}
-        <div style="margin-bottom:16px;padding:10px 14px;background:var(--neutral-soft);border:1px solid var(--line);border-left:3px solid var(--neutral);border-radius:6px;font-size:14px;color:var(--ink-2)">
-          {{ .Note }}
-        </div>
-        {{- end }}
-
-        <div class="meta-grid">
-          <div class="meta-tile">
-            <div class="label">Tasks Tracked</div>
-            <div class="value num">{{ .TasksTracked }}</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Mean Success Rate</div>
-            <div class="value">{{ if .MeanSuccessRate }}{{ .MeanSuccessRate }}{{ else }}—{{ end }}</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Last Commit Evaluated</div>
-            <div class="value mono">{{ if .LastCommitLink }}<a href="{{ .LastCommitLink }}">{{ .LastCommitShort }}</a>{{ else if .LastCommitShort }}{{ .LastCommitShort }}{{ else }}—{{ end }}</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Runs on Branch</div>
-            <div class="value num">{{ .RunsOnBranch }}</div>
-          </div>
-          <div class="meta-tile">
-            <div class="label">Pull Requests</div>
-            <div class="value"><a href="{{ .PullsLink }}">Pull requests →</a></div>
-          </div>
-        </div>
-
-        {{- if .IsEmpty }}
         <div class="empty-state">
-          {{- if and .Branch (ne .Branch "main") }}
-          <p>No Completed Runs on branch <code class="mono">{{ .Branch }}</code>.</p>
-          {{- else }}
-          <p>No evaluations recorded for this repository.</p>
-          <p style="font-size:13px;color:var(--muted);margin-top:8px">Track eval metrics by applying a Run: <code class="mono">kubectl apply -f &lt;run.yaml&gt;</code></p>
-          {{- end }}
+          <p>No observations recorded on <code class="mono">{{ .Branch }}</code>. Produce an observation by applying a baseline Run: <code class="mono">kubectl apply -f &lt;run.yaml&gt;</code></p>
         </div>
-        {{- else }}
-        <div style="overflow-x:auto;margin-top:20px">
-          <table class="ci">
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Rate</th>
-                <th>CI (95%)</th>
-                <th>Δ vs prev</th>
-                <th>Trend</th>
-                <th>Samples</th>
-                <th>Tokens</th>
-                <th>Cost</th>
-                <th>Commit</th>
-                <th>Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              {{- range .Tasks }}
-              <tr>
-                <td class="mono" style="font-weight:600">
-                  {{- if .SamplesLink }}
-                  <a href="{{ .SamplesLink }}">{{ .ID }}</a>
-                  {{- else }}
-                  {{ .ID }}
-                  {{- end }}
-                </td>
-                <td class="num">
-                  {{- if .RunLink }}
-                  <a href="{{ .RunLink }}">{{ .RateStr }}</a>
-                  {{- else }}
-                  {{ .RateStr }}
-                  {{- end }}
-                </td>
-                <td>
-                  {{- if .HasCI }}
-                  <div style="display:flex;align-items:center;gap:8px">
-                    <a href="{{ .RunLink }}" style="display:inline-block;text-decoration:none">
-                      <div class="cibar-01" title="Rate: {{ .RateStr }} {{ .CILabel }}">
-                        <div class="axis"></div>
-                        <div class="tick-0"></div>
-                        <div class="tick-50"></div>
-                        <div class="tick-100"></div>
-                        <div class="range" style="left:{{ printf "%.1f" .CILeftPx }}px; width:{{ printf "%.1f" .CIWidthPx }}px"></div>
-                        <div class="pt" style="left:{{ printf "%.1f" .CIDotPx }}px"></div>
-                      </div>
-                    </a>
-                    <span style="font-size:12px;color:var(--muted);white-space:nowrap">{{ .CILabel }}</span>
-                  </div>
-                  {{- else }}
-                  <span style="color:var(--muted)">—</span>
-                  {{- end }}
-                </td>
-                <td>
-                  {{- if .HasDelta }}
-                  <a href="{{ .RunLink }}" style="text-decoration:none"><span class="chip {{ .DeltaClass }}">{{ .DeltaStr }}</span></a>
-                  {{- else }}
-                  <span style="color:var(--muted)">—</span>
-                  {{- end }}
-                </td>
-                <td>
-                  {{- if .Sparkline.HasPoints }}
-                  <a href="{{ .SeriesLink }}" title="View series for {{ .ID }}" style="display:inline-block;text-decoration:none">
-                    <svg viewBox="{{ .Sparkline.ViewBox }}" width="120" height="28" style="display:block">
-                      {{- range .Sparkline.Polygons }}
-                      <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
-                      {{- end }}
-                      {{- range .Sparkline.Polylines }}
-                      <polyline points="{{ .Points }}" fill="none" stroke="{{ .Stroke }}" stroke-width="1.5"/>
-                      {{- end }}
-                      {{- range .Sparkline.Circles }}
-                      <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)"/>
-                      {{- end }}
-                    </svg>
-                  </a>
-                  {{- else }}
-                  <span style="color:var(--muted)">—</span>
-                  {{- end }}
-                </td>
-                <td class="num">
-                  {{- if .SamplesLink }}
-                  <a href="{{ .SamplesLink }}">{{ .Samples }}</a>
-                  {{- else if .RunLink }}
-                  <a href="{{ .RunLink }}">{{ .Samples }}</a>
-                  {{- else }}
-                  {{ .Samples }}
-                  {{- end }}
-                </td>
-                <td class="num mono">
-                  {{- if .RunLink }}
-                  <a href="{{ .RunLink }}">{{ .TokensStr }}</a>
-                  {{- else }}
-                  {{ .TokensStr }}
-                  {{- end }}
-                </td>
-                <td class="num mono" style="font-size:13px">
-                  {{- if .RunLink }}
-                  <a href="{{ .RunLink }}">{{ .CostStr }}</a>
-                  {{- else }}
-                  {{ .CostStr }}
-                  {{- end }}
-                </td>
-                <td class="mono">
-                  {{- if .RunLink }}
-                  <a href="{{ .RunLink }}">{{ .CommitShort }}</a>
-                  {{- else }}
-                  {{ .CommitShort }}
-                  {{- end }}
-                </td>
-                <td style="font-size:13px;color:var(--muted)">
-                  {{- if .RunLink }}
-                  <a href="{{ .RunLink }}" style="color:inherit;text-decoration:none">{{ .CommitTimeStr }}</a>
-                  {{- else }}
-                  {{ .CommitTimeStr }}
-                  {{- end }}
-                </td>
-              </tr>
-              {{- end }}
-            </tbody>
-          </table>
-        </div>
-        {{- end }}
       </div>
     </div>
+    {{- else }}
+    <!-- 1. Headline -->
+    <div class="overview-headline">
+      <div>
+        <span class="headline-score">{{ .OverallScore }}</span>
+        <span class="headline-ci">{{ .OverallCILabel }}</span>
+      </div>
+      <div class="headline-meta">
+        at commit {{ if .OverallCommitLink }}<a href="{{ .OverallCommitLink }}" class="mono">{{ .OverallCommitShort }}</a>{{ else }}<span class="mono">{{ .OverallCommitShort }}</span>{{ end }} · <span title="{{ .OverallTimeUTC }}">{{ .OverallTimeStr }}</span>
+      </div>
+    </div>
+
+    <!-- 2 & 3. Eval Suites & Evals Table -->
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Eval Suites</h1>
+        <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">{{ .Branch }}</span></span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Suite / Eval</th>
+              <th>Score (95% CI)</th>
+              <th>Evals</th>
+              <th>Δ vs prev</th>
+              <th>Trend</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{- range .Suites }}
+            <tr class="suite-row">
+              <td>
+                {{- if .SuiteLink }}
+                <a href="{{ .SuiteLink }}" class="mono" style="font-weight:600">{{ .Name }}</a>
+                {{- else }}
+                <span class="mono" style="font-weight:600">{{ .Name }}</span>
+                {{- end }}
+              </td>
+              <td>
+                <span class="mono" style="font-weight:600">{{ .ScoreStr }}</span>
+                <span style="font-size:12px;color:var(--muted);margin-left:4px">{{ .CILabel }}</span>
+              </td>
+              <td class="num">{{ .EvalsCount }}</td>
+              <td>
+                {{- if .HasDelta }}
+                <span class="chip {{ .DeltaClass }}">{{ .DeltaStr }}</span>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+              <td>
+                {{- if .Sparkline.HasPoints }}
+                <svg viewBox="{{ .Sparkline.ViewBox }}" width="120" height="28" class="sparkline-svg">
+                  {{- range .Sparkline.Polygons }}
+                  <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+                  {{- end }}
+                  {{- range .Sparkline.Polylines }}
+                  <polyline points="{{ .Points }}" fill="none" stroke="{{ .Stroke }}" stroke-width="1.5"/>
+                  {{- end }}
+                  {{- range .Sparkline.Circles }}
+                  <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)"/>
+                  {{- end }}
+                  {{- range .Sparkline.Ticks }}
+                  <line x1="{{ .X1 }}" y1="{{ .Y1 }}" x2="{{ .X2 }}" y2="{{ .Y2 }}" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--indigo){{ end }}" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                  {{- end }}
+                </svg>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+            </tr>
+            {{- range .Evals }}
+            <tr class="eval-row">
+              <td class="eval-name mono">
+                {{- if .SamplesLink }}
+                <a href="{{ .SamplesLink }}">{{ .ID }}</a>
+                {{- else }}
+                {{ .ID }}
+                {{- end }}
+              </td>
+              <td>
+                {{- if .RunLink }}
+                <a href="{{ .RunLink }}" class="mono">{{ .ScoreStr }}</a>
+                {{- else }}
+                <span class="mono">{{ .ScoreStr }}</span>
+                {{- end }}
+                <span style="font-size:12px;color:var(--muted);margin-left:4px">{{ .CILabel }}</span>
+              </td>
+              <td class="num" style="color:var(--muted)">—</td>
+              <td>
+                {{- if .HasDelta }}
+                <span class="chip {{ .DeltaClass }}">{{ .DeltaStr }}</span>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+              <td>
+                {{- if .Sparkline.HasPoints }}
+                <svg viewBox="{{ .Sparkline.ViewBox }}" width="120" height="28" class="sparkline-svg">
+                  {{- range .Sparkline.Polygons }}
+                  <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+                  {{- end }}
+                  {{- range .Sparkline.Polylines }}
+                  <polyline points="{{ .Points }}" fill="none" stroke="{{ .Stroke }}" stroke-width="1.5"/>
+                  {{- end }}
+                  {{- range .Sparkline.Circles }}
+                  <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)"/>
+                  {{- end }}
+                  {{- range .Sparkline.Ticks }}
+                  <line x1="{{ .X1 }}" y1="{{ .Y1 }}" x2="{{ .X2 }}" y2="{{ .Y2 }}" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--indigo){{ end }}" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                  {{- end }}
+                </svg>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+            </tr>
+            {{- end }}
+            {{- end }}
+          </tbody>
+        </table>
+      </div>
+      <div style="padding:14px 24px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);line-height:1.5">
+        Score at main for an eval is the pooled success rate (Wilson score interval) over the newest completed baseline observations on <code class="mono">{{ .Branch }}</code>. Suite scores are the mean of their evals' scores with the confidence interval from pooled samples. Overall score is the mean over suites.
+      </div>
+    </div>
+
+    <!-- 4. Tiles below the table -->
+    <div class="meta-grid" style="margin-top:24px">
+      <div class="meta-tile">
+        <div class="label">Runs</div>
+        <div class="value num"><a href="{{ .RunsLink }}">{{ .TotalRunsCount }}</a></div>
+      </div>
+      <div class="meta-tile">
+        <div class="label">Comparisons</div>
+        <div class="value num"><a href="{{ .ComparisonsLink }}">{{ .TotalComparisonsCount }}</a></div>
+      </div>
+      <div class="meta-tile">
+        <div class="label">Pull Requests</div>
+        <div class="value num"><a href="{{ .PullsLink }}">{{ .TotalPullsCount }}</a></div>
+      </div>
+    </div>
+    {{- end }}
   </main>
 </body>
 </html>
