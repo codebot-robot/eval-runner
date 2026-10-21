@@ -30,6 +30,9 @@ const (
 	ComparisonPhaseCompleted ComparisonPhase = "Completed"
 )
 
+// ConditionTypeExtraSamples reports whether extra samples requested for the Comparison can be serviced.
+const ConditionTypeExtraSamples = "ExtraSamples"
+
 // ComparisonTaskLabel represents the statistical decision label for a single task.
 // +kubebuilder:validation:Enum=improved;regressed;unchanged;inconclusive;running;continue;skipped
 type ComparisonTaskLabel string
@@ -477,6 +480,12 @@ type ComparisonStatus struct {
 	// HandledCommands records review comment commands that have been processed by the controller.
 	// +optional
 	HandledCommands []ComparisonHandledCommand `json:"handledCommands,omitempty"`
+
+	// Conditions records lifecycle conditions on the Comparison.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
