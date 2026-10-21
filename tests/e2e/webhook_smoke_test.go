@@ -214,6 +214,54 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 		t.Errorf("expected comparison ExtraSamples=8, got %d", updatedComp.Spec.ExtraSamples)
 	}
 
+	// 7.5 Port forward to UI service and verify Comparison appears at .../pulls/{n}
+	lUI, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on local port for UI: %v", err)
+	}
+	uiPort := lUI.Addr().(*net.TCPAddr).Port
+	_ = lUI.Close()
+
+	cmdUI := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-ui", fmt.Sprintf("%d:80", uiPort))
+	if err := cmdUI.Start(); err != nil {
+		t.Fatalf("failed to start UI port-forward: %v", err)
+	}
+	defer func() {
+		_ = cmdUI.Process.Kill()
+	}()
+
+	uiBaseURL := fmt.Sprintf("http://127.0.0.1:%d", uiPort)
+	uiReady := false
+	for i := 0; i < 30; i++ {
+		resp, err := http.Get(uiBaseURL + "/healthz")
+		if err == nil && resp.StatusCode == http.StatusOK {
+			uiReady = true
+			resp.Body.Close()
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !uiReady {
+		t.Fatalf("eval-runner-ui port-forward failed to become ready")
+	}
+
+	pullURL := fmt.Sprintf("%s/github.com/gke-labs/eval-runner/pulls/305", uiBaseURL)
+	pullResp, err := http.Get(pullURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", pullURL, err)
+	}
+	pullBody, err := io.ReadAll(pullResp.Body)
+	pullResp.Body.Close()
+	if pullResp.StatusCode != http.StatusOK {
+		t.Fatalf("pull detail page returned status %d: %s", pullResp.StatusCode, string(pullBody))
+	}
+	if !strings.Contains(string(pullBody), compName) {
+		t.Errorf("expected comparison %s in pull detail page, got:\n%s", compName, string(pullBody))
+	}
+
 	// 8. Post signed pull_request closed event and assert Comparison and Candidate Run are deleted while Baseline Run is preserved
 	closedPayload := []byte(`{
 		"action": "closed",
@@ -356,40 +404,6 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 	patchStatus := `{"status":{"phase":"Completed","tasks":[{"id":"smoke/task1","phase":"Completed","samples":10,"successes":8,"successRate":0.8,"successRateCI":{"lower":0.6,"upper":0.9,"confidence":0.95,"method":"wilson"}}]}}`
 	harness.runCmd("kubectl", "patch", "run", push1RunName, "-n", "eval-runner", "--subresource=status", "--type=merge", "-p", patchStatus)
 	harness.runCmd("kubectl", "patch", "run", push2RunName, "-n", "eval-runner", "--subresource=status", "--type=merge", "-p", patchStatus)
-
-	// Port forward to UI service
-	lUI, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on local port for UI: %v", err)
-	}
-	uiPort := lUI.Addr().(*net.TCPAddr).Port
-	_ = lUI.Close()
-
-	cmdUI := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-ui", fmt.Sprintf("%d:80", uiPort))
-	if err := cmdUI.Start(); err != nil {
-		t.Fatalf("failed to start UI port-forward: %v", err)
-	}
-	defer func() {
-		_ = cmdUI.Process.Kill()
-	}()
-
-	uiBaseURL := fmt.Sprintf("http://127.0.0.1:%d", uiPort)
-	uiReady := false
-	for i := 0; i < 30; i++ {
-		resp, err := http.Get(uiBaseURL + "/healthz")
-		if err == nil && resp.StatusCode == http.StatusOK {
-			uiReady = true
-			resp.Body.Close()
-			break
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !uiReady {
-		t.Fatalf("eval-runner-ui port-forward failed to become ready")
-	}
 
 	repoHash := webhook.RepoHash("gke-labs/eval-runner")
 	seriesURL := fmt.Sprintf("%s/series/%s/main?task=smoke/task1", uiBaseURL, repoHash)

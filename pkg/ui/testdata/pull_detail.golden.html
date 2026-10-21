@@ -242,13 +242,23 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 </style>
 </head>
 <body>
+  
   <header class="header-bar">
     <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <div style="display:flex;align-items:center;gap:8px;font-size:16px">
+        <a href="/" class="header-logo">eval-runner</a>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">github.com</span>
+        <span style="color:var(--muted)">/</span>
+        <span class="mono" style="color:var(--muted)">gke-labs</span>
+        <span style="color:var(--muted)">/</span>
+        <a href="/github.com/gke-labs/eval-runner" class="mono" style="font-weight:600;color:var(--ink)">eval-runner</a>
+      </div>
       <nav class="nav-links">
-        <a href="/pulls" class="nav-link active">Pull Requests</a>
-        <a href="/runs" class="nav-link ">Runs</a>
-        <a href="/comparisons" class="nav-link ">Comparisons</a>
+        <a href="/github.com/gke-labs/eval-runner" class="nav-link ">Overview</a>
+        <a href="/github.com/gke-labs/eval-runner/runs" class="nav-link ">Runs</a>
+        <a href="/github.com/gke-labs/eval-runner/pulls" class="nav-link active">Pull requests</a>
+        <a href="/github.com/gke-labs/eval-runner/comparisons" class="nav-link ">Comparisons</a>
       </nav>
     </div>
     <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">eval-runner</span></div>
@@ -260,7 +270,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
         <div style="display:flex;align-items:center;gap:12px">
           <h1 class="card-title">gke-labs/eval-runner <a href="https://github.com/gke-labs/eval-runner/pull/42" target="_blank" rel="noopener">#42</a></h1>
         </div>
-        <div style="font-size:13px;color:var(--muted)"><a href="/pulls">← Back to Pull Requests</a></div>
+        <div style="font-size:13px;color:var(--muted)"><a href="/github.com/gke-labs/eval-runner/pulls">← Back to Pull Requests</a></div>
       </div>
       <div class="card-body">
         <div style="overflow-x:auto">
@@ -270,6 +280,8 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
                 <th>Comparison</th>
                 <th>Head</th>
                 <th>Base</th>
+                <th>Candidate Run</th>
+                <th>Baseline Run</th>
                 <th>Verdict</th>
                 <th>P(imp)</th>
                 <th>Samples</th>
@@ -281,9 +293,11 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
             <tbody>
               
               <tr>
-                <td><a href="/comparisons/eval-runner/pr-42-head2" class="mono" style="font-weight:600">pr-42-head2</a></td>
+                <td><a href="/github.com/gke-labs/eval-runner/comparisons/pr-42-head2" class="mono" style="font-weight:600">pr-42-head2</a></td>
                 <td><span class="mono" style="font-size:13px">05ce4d8</span></td>
                 <td><span class="mono" style="font-size:13px">a81d0c4</span></td>
+                <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8" class="mono" style="font-size:13px">docs-eval-cand-05ce4d8</a></td>
+                <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-base-a81d0c4" class="mono" style="font-size:13px">docs-eval-base-a81d0c4</a></td>
                 <td><span class="chip good"><span class="dot"></span>IMPROVED</span></td>
                 <td class="num">0.98</td>
                 <td class="num">96</td>
@@ -293,9 +307,11 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
               </tr>
               
               <tr>
-                <td><a href="/comparisons/eval-runner/pr-42-head1" class="mono" style="font-weight:600">pr-42-head1</a></td>
+                <td><a href="/github.com/gke-labs/eval-runner/comparisons/pr-42-head1" class="mono" style="font-weight:600">pr-42-head1</a></td>
                 <td><span class="mono" style="font-size:13px">1111111</span></td>
                 <td><span class="mono" style="font-size:13px">a81d0c4</span></td>
+                <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-cand-1111111" class="mono" style="font-size:13px">docs-eval-cand-1111111</a></td>
+                <td><a href="/github.com/gke-labs/eval-runner/runs/docs-eval-base-a81d0c4" class="mono" style="font-size:13px">docs-eval-base-a81d0c4</a></td>
                 <td><span class="chip neutral"><span class="dot"></span>INCONCLUSIVE</span></td>
                 <td class="num">0.50</td>
                 <td class="num">48</td>

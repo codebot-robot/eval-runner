@@ -464,6 +464,7 @@ func sampleComparisonsListGroupedView() ComparisonsListView {
 func samplePullRequestsListView() PullRequestsListView {
 	return PullRequestsListView{
 		ActiveTab: NavTabPulls,
+		Repo:      RepoRef{},
 		Namespace: "eval-runner",
 		Pulls: []PullRequestListItem{
 			{
@@ -473,15 +474,19 @@ func samplePullRequestsListView() PullRequestsListView {
 				GitHubURL:      "https://github.com/gke-labs/eval-runner/pull/42",
 				HeadSHA:        "05ce4d8222222222222222222222222222222222",
 				HeadSHAShort:   "05ce4d8",
+				BaseSHA:        "a81d0c4111111111111111111111111111111111",
+				BaseSHAShort:   "a81d0c4",
 				Verdict:        v1alpha1.ComparisonVerdictImproved,
 				VerdictChip:    "good",
 				PImprovement:   "0.98",
 				SamplesRun:     96,
 				Batches:        2,
 				CompletionTime: "5m",
+				Age:            "10m",
 				ComparisonName: "pr-42",
-				ComparisonLink: "/comparisons/eval-runner/pr-42",
-				HistoryLink:    "/pulls/" + RepoHash("gke-labs/eval-runner") + "/42",
+				ComparisonLink: "/github.com/gke-labs/eval-runner/comparisons/pr-42",
+				HistoryLink:    "/github.com/gke-labs/eval-runner/pulls/42",
+				RepoLink:       "/github.com/gke-labs/eval-runner/pulls",
 				Namespace:      "eval-runner",
 			},
 		},
@@ -494,15 +499,22 @@ func samplePullRequestsListView() PullRequestsListView {
 	}
 }
 
+func sampleRepoPullRequestsListView() PullRequestsListView {
+	v := samplePullRequestsListView()
+	v.Repo = RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	return v
+}
+
 func samplePullRequestDetailView() PullRequestDetailView {
 	return PullRequestDetailView{
 		ActiveTab:  NavTabPulls,
+		Repo:       RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
 		Namespace:  "eval-runner",
 		Repository: "gke-labs/eval-runner",
 		RepoHash:   RepoHash("gke-labs/eval-runner"),
 		Number:     42,
 		GitHubURL:  "https://github.com/gke-labs/eval-runner/pull/42",
-		BackLink:   "/pulls",
+		BackLink:   "/github.com/gke-labs/eval-runner/pulls",
 		TotalCount: 2,
 		Comparisons: []PullRequestHistoryItem{
 			{
@@ -512,6 +524,10 @@ func samplePullRequestDetailView() PullRequestDetailView {
 				HeadSHAShort:   "05ce4d8",
 				BaseSHA:        "a81d0c4111111111111111111111111111111111",
 				BaseSHAShort:   "a81d0c4",
+				CandidateRun:   "docs-eval-cand-05ce4d8",
+				BaselineRun:    "docs-eval-base-a81d0c4",
+				CandidateLink:  "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8",
+				BaselineLink:   "/github.com/gke-labs/eval-runner/runs/docs-eval-base-a81d0c4",
 				Verdict:        v1alpha1.ComparisonVerdictImproved,
 				VerdictChip:    "good",
 				PImprovement:   "0.98",
@@ -519,7 +535,7 @@ func samplePullRequestDetailView() PullRequestDetailView {
 				Batches:        2,
 				CompletionTime: "5m",
 				Age:            "10m",
-				Link:           "/comparisons/eval-runner/pr-42-head2",
+				Link:           "/github.com/gke-labs/eval-runner/comparisons/pr-42-head2",
 			},
 			{
 				Name:           "pr-42-head1",
@@ -528,6 +544,10 @@ func samplePullRequestDetailView() PullRequestDetailView {
 				HeadSHAShort:   "1111111",
 				BaseSHA:        "a81d0c4111111111111111111111111111111111",
 				BaseSHAShort:   "a81d0c4",
+				CandidateRun:   "docs-eval-cand-1111111",
+				BaselineRun:    "docs-eval-base-a81d0c4",
+				CandidateLink:  "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-1111111",
+				BaselineLink:   "/github.com/gke-labs/eval-runner/runs/docs-eval-base-a81d0c4",
 				Verdict:        v1alpha1.ComparisonVerdictInconclusive,
 				VerdictChip:    "neutral",
 				PImprovement:   "0.50",
@@ -535,7 +555,7 @@ func samplePullRequestDetailView() PullRequestDetailView {
 				Batches:        1,
 				CompletionTime: "15m",
 				Age:            "20m",
-				Link:           "/comparisons/eval-runner/pr-42-head1",
+				Link:           "/github.com/gke-labs/eval-runner/comparisons/pr-42-head1",
 			},
 		},
 	}
@@ -1056,6 +1076,17 @@ func TestTemplateRenderingPullsListGolden(t *testing.T) {
 	assertGolden(t, "pulls_list.golden.html", buf.String())
 }
 
+func TestTemplateRenderingRepoPullsGolden(t *testing.T) {
+	view := sampleRepoPullRequestsListView()
+
+	var buf bytes.Buffer
+	if err := tmplPullsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo pulls list template: %v", err)
+	}
+
+	assertGolden(t, "repo_pulls.golden.html", buf.String())
+}
+
 func TestTemplateRenderingPullDetailGolden(t *testing.T) {
 	view := samplePullRequestDetailView()
 
@@ -1559,15 +1590,19 @@ func TestEscapingHostileFixtures(t *testing.T) {
 					GitHubURL:      "https://github.com/evil/repo" + hostileImg,
 					HeadSHA:        "head" + hostileScript,
 					HeadSHAShort:   "h" + hostileScript,
+					BaseSHA:        "base" + hostileScript,
+					BaseSHAShort:   "b" + hostileScript,
 					Verdict:        v1alpha1.ComparisonVerdictImproved,
 					VerdictChip:    "good",
 					PImprovement:   "0.99" + hostileIframe,
 					SamplesRun:     10,
 					Batches:        1,
 					CompletionTime: "1m" + hostileScript,
+					Age:            "5m" + hostileImg,
 					ComparisonName: "comp" + hostileScript,
 					ComparisonLink: "/comparisons/eval-runner/" + hostileImg,
 					HistoryLink:    "/pulls/badhash/12" + hostileScript,
+					RepoLink:       "/pulls" + hostileScript,
 					Namespace:      "eval-runner",
 				},
 			},
@@ -1607,6 +1642,10 @@ func TestEscapingHostileFixtures(t *testing.T) {
 					HeadSHAShort:   "h" + hostileScript,
 					BaseSHA:        "base" + hostileScript,
 					BaseSHAShort:   "b" + hostileScript,
+					CandidateRun:   "cand" + hostileScript,
+					BaselineRun:    "base" + hostileScript,
+					CandidateLink:  "/runs/cand" + hostileScript,
+					BaselineLink:   "/runs/base" + hostileScript,
 					Verdict:        v1alpha1.ComparisonVerdictImproved,
 					VerdictChip:    "good",
 					PImprovement:   "0.99" + hostileIframe,

@@ -252,6 +252,15 @@ func runRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
 	return RepoRef{}, false
 }
 
+// pullRequestRepoRef parses a repository string from a PullRequestSpec.
+// It tries RepoRefFromOwnerName first (for "owner/repo" format), falling back to ParseRepoURL.
+func pullRequestRepoRef(repo string) (RepoRef, bool) {
+	if ref, ok := RepoRefFromOwnerName(repo); ok {
+		return ref, true
+	}
+	return ParseRepoURL(repo)
+}
+
 // comparisonRepoRef resolves the RepoRef of a Comparison via spec.pullRequest.repository,
 // falling back to the baseline Run's URL (fork candidates must not re-home a PR).
 func comparisonRepoRef(ctx context.Context, comp *v1alpha1.Comparison, r client.Reader) (RepoRef, bool) {
@@ -259,10 +268,7 @@ func comparisonRepoRef(ctx context.Context, comp *v1alpha1.Comparison, r client.
 		return RepoRef{}, false
 	}
 	if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Repository != "" {
-		if ref, ok := ParseRepoURL(comp.Spec.PullRequest.Repository); ok {
-			return ref, true
-		}
-		if ref, ok := RepoRefFromOwnerName(comp.Spec.PullRequest.Repository); ok {
+		if ref, ok := pullRequestRepoRef(comp.Spec.PullRequest.Repository); ok {
 			return ref, true
 		}
 	}

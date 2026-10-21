@@ -276,31 +276,37 @@ type PullRequestListItem struct {
 	GitHubURL      string
 	HeadSHA        string
 	HeadSHAShort   string
+	BaseSHA        string
+	BaseSHAShort   string
 	Verdict        v1alpha1.ComparisonVerdict
 	VerdictChip    string
 	PImprovement   string
 	SamplesRun     int
 	Batches        int
 	CompletionTime string
+	Age            string
 	ComparisonName string
 	ComparisonLink string
 	HistoryLink    string
+	RepoLink       string
 	Namespace      string
 }
 
 // PullRequestsListView is the view model for the /pulls list page.
 type PullRequestsListView struct {
-	ActiveTab    NavTab
-	Namespace    string
-	Pulls        []PullRequestListItem
-	TotalCount   int
-	Offset       int
-	Limit        int
-	HasMore      bool
-	NextLink     string
-	HasPrev      bool
-	PrevLink     string
-	ShowingRange string
+	ActiveTab     NavTab
+	Repo          RepoRef
+	Namespace     string
+	LinkNamespace string
+	Pulls         []PullRequestListItem
+	TotalCount    int
+	Offset        int
+	Limit         int
+	HasMore       bool
+	NextLink      string
+	HasPrev       bool
+	PrevLink      string
+	ShowingRange  string
 }
 
 // PullRequestHistoryItem represents one Comparison in a pull request's history.
@@ -311,6 +317,10 @@ type PullRequestHistoryItem struct {
 	HeadSHAShort   string
 	BaseSHA        string
 	BaseSHAShort   string
+	CandidateRun   string
+	BaselineRun    string
+	CandidateLink  string
+	BaselineLink   string
 	Verdict        v1alpha1.ComparisonVerdict
 	VerdictChip    string
 	PImprovement   string
@@ -323,16 +333,18 @@ type PullRequestHistoryItem struct {
 
 // PullRequestDetailView is the view model for the /pulls/{repohash}/{number} history page.
 type PullRequestDetailView struct {
-	ActiveTab   NavTab
-	Namespace   string
-	Repository  string
-	RepoHash    string
-	Number      int
-	GitHubURL   string
-	BackLink    string
-	Comparisons []PullRequestHistoryItem
-	TotalCount  int
-	Version     string
+	ActiveTab     NavTab
+	Repo          RepoRef
+	Namespace     string
+	LinkNamespace string
+	Repository    string
+	RepoHash      string
+	Number        int
+	GitHubURL     string
+	BackLink      string
+	Comparisons   []PullRequestHistoryItem
+	TotalCount    int
+	Version       string
 }
 
 // RepoHash returns a deterministic 7-character lowercase hexadecimal SHA-256 hash

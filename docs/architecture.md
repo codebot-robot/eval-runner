@@ -144,8 +144,10 @@ The `eval-runner-webhook` service (image `eval-runner-webhook`) receives GitHub 
 ### Web Dashboard UI (`cmd/eval-runner-ui`)
 
 The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboard:
-- `GET /pulls`: Overview table of pull requests derived from webhook-created Comparisons, grouped by repository and PR number with latest verdict, samples run, batches, and completion time.
-- `GET /pulls/{repohash}/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression.
+- `GET /pulls`: Overview table of pull requests derived from webhook-created Comparisons, grouped by repository and PR number with latest verdict, base → head commit SHAs, samples run, batches, completion time, and age.
+- `GET /pulls/{repohash}/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression and links to the Comparison, candidate Run, and baseline Run.
+- `GET /{host}/{owner}/{repo}/pulls`: Overview table of pull requests for the repository with latest verdict, base → head commit SHAs, samples run, batches, completion time, and age.
+- `GET /{host}/{owner}/{repo}/pulls/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression and links to the Comparison, candidate Run, and baseline Run under the repo prefix.
 - `GET /runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
 - `GET /runs/{namespace}/{name}`: Detailed per-task breakdown for a single Run.
 - `GET /runs/{namespace}/{name}/tasks` and `GET /runs/{namespace}/{name}/tasks/{rest...}`: Per-task sample list (`.../tasks/{task}/samples`) and sample transcript viewer (`.../tasks/{task}/samples/{sample}`).

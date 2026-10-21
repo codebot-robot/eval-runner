@@ -272,6 +272,7 @@ const repoHeaderPartial = `{{- define "repo_header" }}
       <nav class="nav-links">
         <a href="{{ repoLink .Repo "" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "overview" }}active{{ end }}">Overview</a>
         <a href="{{ repoLink .Repo "/runs" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
+        <a href="{{ repoLink .Repo "/pulls" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull requests</a>
         <a href="{{ repoLink .Repo "/comparisons" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
       </nav>
       {{- else }}
@@ -1479,17 +1480,7 @@ const pullsListTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -1503,29 +1494,31 @@ const pullsListTemplate = `
             <tr>
               <th>Repository</th>
               <th>PR</th>
-              <th>Head</th>
+              <th>Base → Head</th>
               <th>Verdict</th>
               <th>Samples</th>
               <th>Batches</th>
               <th>Completed</th>
+              <th>Age</th>
               <th>Comparison</th>
             </tr>
           </thead>
           <tbody>
             {{ range .Pulls }}
             <tr>
-              <td><a href="{{ .HistoryLink }}" style="font-weight:600">{{ .Repository }}</a></td>
-              <td><a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></td>
-              <td><span class="mono" style="font-size:13px">{{ .HeadSHAShort }}</span></td>
+              <td><a href="{{ .RepoLink }}" style="font-weight:600">{{ .Repository }}</a></td>
+              <td><a href="{{ .HistoryLink }}" style="font-weight:600">#{{ .Number }}</a> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener" style="font-size:12px;color:var(--muted);margin-left:4px">GitHub ↗</a></td>
+              <td><span class="mono" style="font-size:13px">{{ if .BaseSHAShort }}{{ .BaseSHAShort }} → {{ end }}{{ .HeadSHAShort }}</span></td>
               <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span>{{ if ne .PImprovement "—" }} <span class="mono" style="font-size:12px;color:var(--muted)">(P={{ .PImprovement }})</span>{{ end }}</td>
               <td class="num">{{ .SamplesRun }}</td>
               <td class="num">{{ .Batches }}</td>
               <td style="color:var(--muted);font-size:13px">{{ .CompletionTime }}</td>
+              <td style="color:var(--muted);font-size:13px">{{ .Age }}</td>
               <td><a href="{{ .ComparisonLink }}" class="mono" style="font-size:13px">{{ .ComparisonName }}</a></td>
             </tr>
             {{ else }}
             <tr>
-              <td colspan="8" class="empty-state">No pull requests found in namespace {{ .Namespace }}.</td>
+              <td colspan="9" class="empty-state">No pull requests found in namespace {{ .Namespace }}.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -1558,17 +1551,7 @@ const pullDetailTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
-  <header class="header-bar">
-    <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
-      <nav class="nav-links">
-        <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
-        <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
-        <a href="/comparisons" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
-      </nav>
-    </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
-  </header>
+  {{ template "repo_header" . }}
 
   <main class="container">
     <div class="card">
@@ -1586,6 +1569,8 @@ const pullDetailTemplate = `
                 <th>Comparison</th>
                 <th>Head</th>
                 <th>Base</th>
+                <th>Candidate Run</th>
+                <th>Baseline Run</th>
                 <th>Verdict</th>
                 <th>P(imp)</th>
                 <th>Samples</th>
@@ -1600,6 +1585,8 @@ const pullDetailTemplate = `
                 <td><a href="{{ .Link }}" class="mono" style="font-weight:600">{{ .Name }}</a></td>
                 <td><span class="mono" style="font-size:13px">{{ .HeadSHAShort }}</span></td>
                 <td><span class="mono" style="font-size:13px">{{ .BaseSHAShort }}</span></td>
+                <td>{{ if .CandidateRun }}<a href="{{ .CandidateLink }}" class="mono" style="font-size:13px">{{ .CandidateRun }}</a>{{ else }}<span style="color:var(--muted)">—</span>{{ end }}</td>
+                <td>{{ if .BaselineRun }}<a href="{{ .BaselineLink }}" class="mono" style="font-size:13px">{{ .BaselineRun }}</a>{{ else }}<span style="color:var(--muted)">—</span>{{ end }}</td>
                 <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span></td>
                 <td class="num">{{ .PImprovement }}</td>
                 <td class="num">{{ .SamplesRun }}</td>
@@ -1609,7 +1596,7 @@ const pullDetailTemplate = `
               </tr>
               {{ else }}
               <tr>
-                <td colspan="9" class="empty-state">No comparisons recorded for this pull request.</td>
+                <td colspan="11" class="empty-state">No comparisons recorded for this pull request.</td>
               </tr>
               {{ end }}
             </tbody>
