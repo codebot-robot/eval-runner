@@ -6591,28 +6591,6 @@ func TestServerRepoNamespacePropagation(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
 	server := NewServer(Config{Client: fakeClient})
 
-	// Non-default namespace request
-	reqCustom := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs?namespace=staging", nil)
-	wCustom := httptest.NewRecorder()
-	server.ServeHTTP(wCustom, reqCustom)
-	if wCustom.Code != http.StatusOK {
-		t.Fatalf("GET /runs with custom ns failed: %d", wCustom.Code)
-	}
-	bodyCustom := wCustom.Body.String()
-	if !strings.Contains(bodyCustom, "?namespace=staging") {
-		t.Errorf("expected links in custom ns to contain '?namespace=staging', got: %s", bodyCustom)
-	}
-	if n := strings.Count(bodyCustom, "namespace: staging"); n != 1 {
-		t.Errorf("expected badge with 'namespace: staging' exactly once, got %d", n)
-	}
-	if n := strings.Count(bodyCustom, "namespace:"); n != 1 {
-		t.Errorf("expected 'namespace:' to appear exactly once (in badge), got %d", n)
-	}
-	if strings.Contains(bodyCustom, "Namespace</th>") {
-		t.Errorf("expected custom ns page to contain no 'Namespace</th>', got: %s", bodyCustom)
-	}
-
-	// Default namespace request
 	runDefault := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "default-run",
@@ -6625,21 +6603,58 @@ func TestServerRepoNamespacePropagation(t *testing.T) {
 		},
 	}
 	serverDefault := NewServer(Config{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(runDefault).Build()})
-	reqDefault := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs", nil)
-	wDefault := httptest.NewRecorder()
-	serverDefault.ServeHTTP(wDefault, reqDefault)
-	if wDefault.Code != http.StatusOK {
-		t.Fatalf("GET /runs with default ns failed: %d", wDefault.Code)
+
+	pages := []string{
+		"/",
+		"/runs",
+		"/comparisons",
+		"/pulls",
+		"/series",
+		"/github.com/gke-labs/eval-runner/runs",
+		"/github.com/gke-labs/eval-runner/comparisons",
+		"/github.com/gke-labs/eval-runner/pulls",
 	}
-	bodyDefault := wDefault.Body.String()
-	if strings.Contains(bodyDefault, "?namespace=") {
-		t.Errorf("expected links in default ns to NOT contain '?namespace=', got: %s", bodyDefault)
-	}
-	if strings.Contains(bodyDefault, "namespace:") {
-		t.Errorf("expected default ns page to contain no 'namespace:' text, got: %s", bodyDefault)
-	}
-	if strings.Contains(bodyDefault, "Namespace</th>") {
-		t.Errorf("expected default ns page to contain no 'Namespace</th>', got: %s", bodyDefault)
+
+	for _, page := range pages {
+		reqCustom := httptest.NewRequest(http.MethodGet, page+"?namespace=staging", nil)
+		wCustom := httptest.NewRecorder()
+		server.ServeHTTP(wCustom, reqCustom)
+		if wCustom.Code != http.StatusOK {
+			t.Fatalf("%s: GET with custom ns failed: %d", page, wCustom.Code)
+		}
+		bodyCustom := wCustom.Body.String()
+		if n := strings.Count(bodyCustom, "namespace: staging"); n != 1 {
+			t.Errorf("%s: expected badge with 'namespace: staging' exactly once, got %d", page, n)
+		}
+		if n := strings.Count(bodyCustom, "namespace:"); n != 1 {
+			t.Errorf("%s: expected 'namespace:' to appear exactly once (in badge), got %d", page, n)
+		}
+		if strings.Contains(bodyCustom, "Namespace</th>") {
+			t.Errorf("%s: expected custom ns page to contain no 'Namespace</th>', got: %s", page, bodyCustom)
+		}
+
+		reqDefault := httptest.NewRequest(http.MethodGet, page, nil)
+		wDefault := httptest.NewRecorder()
+		serverDefault.ServeHTTP(wDefault, reqDefault)
+		if wDefault.Code != http.StatusOK {
+			t.Fatalf("%s: GET with default ns failed: %d", page, wDefault.Code)
+		}
+		bodyDefault := wDefault.Body.String()
+		if strings.Contains(bodyDefault, "namespace:") {
+			t.Errorf("%s: expected default ns page to contain no 'namespace:' text, got: %s", page, bodyDefault)
+		}
+		if strings.Contains(bodyDefault, "Namespace</th>") {
+			t.Errorf("%s: expected default ns page to contain no 'Namespace</th>', got: %s", page, bodyDefault)
+		}
+
+		if page == "/github.com/gke-labs/eval-runner/runs" {
+			if !strings.Contains(bodyCustom, "?namespace=staging") {
+				t.Errorf("%s: expected links in custom ns to contain '?namespace=staging', got: %s", page, bodyCustom)
+			}
+			if strings.Contains(bodyDefault, "?namespace=") {
+				t.Errorf("%s: expected links in default ns to NOT contain '?namespace=', got: %s", page, bodyDefault)
+			}
+		}
 	}
 
 	// Non-default Config.DefaultNamespace test:
