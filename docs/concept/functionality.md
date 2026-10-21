@@ -10,7 +10,7 @@ This document is derived from `docs/concept/project.yaml`, the eight episode scr
 functionality for the real implementation. Where the concept material is silent, the gap is marked
 **[open]** so the implementer can make a call rather than guess that the concept decided it.
 
-> **Status:** This document describes the target product functionality and concept. For the architecture and implementation as it exists on `main` today, see [docs/architecture.md](../architecture.md). Decisions made during implementation are recorded in [docs/decisions.md](../decisions.md).
+> **Status:** This document describes the target product functionality and concept. For the architecture and implementation as it exists on `main` today, see [docs/architecture.md](../architecture.md). Decisions made during implementation are recorded in [docs/decisions.md](../decisions.md). For the concept proposal establishing observations (not runs) as the central product and navigation unit, see [observations.md](observations.md) (ADR-032).
 
 Running example used throughout the concept: repo `acme/support-agent`, PR `#418`, three evals
 `triage/runbook_lookup`, `triage/escalation_policy`, `triage/summary_quality`.

@@ -362,6 +362,20 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   The hybrid model strictly respects isolation and bounded communication boundaries, avoids executing arbitrary repository scripts during discovery when no manifest is provided, and provides deterministic zero-config evaluation for Inspect projects.
 
+---
+
+### ADR-032: Observations as the Product Unit of Measurement (#322)
+- **Status**: Proposed
+- **Context**:
+  On 2026-10-21, Justin observed: *"I am uneasy about 'runs' being a central unit of observation, because I think the whole point is that we don't do runs, we just run as few individual evals as we can to try to understand how we are doing."* Today the `Run` CRD serves double-duty as both the execution batch primitive and the primary conceptual and navigation unit. This creates friction with the statistical core of eval-runner (sequential sampling, stop when confident, independent per-task convergence, baseline reuse, and changed-file affinity).
+- **Decision (Proposed)**:
+  1. **The Observation Model**: Define an Observation as an immutable measurement record for 7 coordinates: `(repository, commit, eval, model, harness, sampleRange, time)` with its score, confidence interval (Wilson/Student-t), cost/token accounting, and artifact pointers. Formally map `Run.status.tasks[]` entries as scheduled batches of observations, and `Comparison` as a statistical decision function over two sets of observations.
+  2. **Product Navigation Hierarchy**: Re-orient web UI and CLI navigation to follow the evaluation hierarchy: `/{host}/{owner}/{repo}` → `.../series` (or cohorts) → `.../evals/{task}` → `Observations (ticks on the trendline)` → `Samples / Trajectory`. Demote the repository-level "Runs" tab to a secondary "Activity" view, while preserving permanent compatibility for `/runs/{ns}/{name}` and `/{host}/{owner}/{repo}/runs/...` deep links, PR comment links, and `kubectl` / `evalstats` workflows.
+  3. **Scheduling and Dimension Proposals**: Specific API architectures (two-tier intent vs. per-eval CRDs), harness declaration, and indexing strategies are proposed with open questions and recommendations in [docs/concept/observations.md](concept/observations.md) §3, §4, and §5.
+- **Rationale**:
+  Aligns the product information architecture with statistical reality. Decoupling the measurement unit (Observation) from the scheduling container (Run) eliminates lockstep execution waste, clarifies that baselines are reusable across PRs, enables multi-dimensional slicing across models and harnesses, and presents users with questions they actually care about: agent capability trends and PR merge decisions.
+
+
 
 
 
