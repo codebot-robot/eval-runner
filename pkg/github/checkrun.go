@@ -202,6 +202,34 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 		state.Summary = EscapeCell(comp.Status.Message)
 	}
 
+	var budgetLine string
+	if comp.Status.Budget != nil && comp.Status.Budget.LimitUSD != nil && *comp.Status.Budget.LimitUSD > 0 {
+		spent := 0.0
+		if comp.Status.Budget.SpentUSD != nil {
+			spent = *comp.Status.Budget.SpentUSD
+		} else if comp.Status.CostUSD != nil {
+			spent = *comp.Status.CostUSD
+		}
+		budgetLine = fmt.Sprintf("budget $%.2f / $%.2f", spent, *comp.Status.Budget.LimitUSD)
+		if !comp.Status.Budget.Enforced {
+			budgetLine += " (not enforced)"
+		}
+	} else if comp.Spec.BudgetUSD != nil && *comp.Spec.BudgetUSD > 0 {
+		spent := 0.0
+		if comp.Status.CostUSD != nil {
+			spent = *comp.Status.CostUSD
+		}
+		budgetLine = fmt.Sprintf("budget $%.2f / $%.2f", spent, *comp.Spec.BudgetUSD)
+	}
+
+	if budgetLine != "" {
+		if state.Summary != "" {
+			state.Summary = state.Summary + "\n\n" + budgetLine
+		} else {
+			state.Summary = budgetLine
+		}
+	}
+
 	lines := ActionHintLines(comp)
 	if len(lines) > 0 {
 		if state.Summary != "" {

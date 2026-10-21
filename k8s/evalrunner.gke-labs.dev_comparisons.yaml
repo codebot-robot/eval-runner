@@ -87,6 +87,11 @@ spec:
                 required:
                 - run
                 type: object
+              budgetUSD:
+                description: BudgetUSD is the optional maximum total evaluation cost
+                  in USD for this Comparison across all tasks and batches.
+                minimum: 0
+                type: number
               candidate:
                 description: Candidate specifies the candidate (e.g. PR) Run.
                 properties:
@@ -240,6 +245,24 @@ spec:
                   - index
                   type: object
                 type: array
+              budget:
+                description: Budget records spend and enforcement against spec.budgetUSD.
+                properties:
+                  enforced:
+                    description: Enforced indicates whether the budget was enforced.
+                    type: boolean
+                  limitUSD:
+                    description: LimitUSD is the budget limit in USD from spec.budgetUSD.
+                    type: number
+                  note:
+                    description: Note provides explanation if the budget could not
+                      be enforced (e.g. unknown model price).
+                    type: string
+                  spentUSD:
+                    description: SpentUSD is the total USD spent so far across all
+                      batches and tasks.
+                    type: number
+                type: object
               completionTime:
                 description: |-
                   CompletionTime is the timestamp when the comparison reached the Completed phase.

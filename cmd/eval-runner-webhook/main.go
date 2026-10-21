@@ -56,6 +56,7 @@ func main() {
 	var defaultLimit int
 	var defaultBatchSize int
 	var defaultMaxSamplesPerTask int
+	var defaultBudgetUSD float64
 	var webhookRepositories string
 	var workers int
 	var queueSize int
@@ -69,6 +70,7 @@ func main() {
 	flag.IntVar(&defaultLimit, "default-limit", 0, "Default sample limit for created Runs (0 = unlimited)")
 	flag.IntVar(&defaultBatchSize, "default-batch-size", webhook.DefaultBatchSize, "Default batch size for paired adaptive sampling")
 	flag.IntVar(&defaultMaxSamplesPerTask, "default-max-samples-per-task", webhook.DefaultMaxSamplesPerTask, "Default maximum samples per task across batches")
+	flag.Float64Var(&defaultBudgetUSD, "default-budget-usd", 0.0, "Default comparison budget in USD across all tasks and batches (0 = unlimited)")
 	flag.StringVar(&webhookRepositories, "webhook-repositories", "", "Comma-separated allow-list of repositories (owner/repo)")
 	flag.IntVar(&workers, "workers", webhook.DefaultWorkers, "Number of concurrent worker goroutines")
 	flag.IntVar(&queueSize, "queue-size", webhook.DefaultQueueSize, "Queue buffer size for incoming webhook events")
@@ -91,6 +93,10 @@ func main() {
 	if explicit["default-max-samples-per-task"] && defaultMaxSamplesPerTask > 0 {
 		maxSamplesPtr = &defaultMaxSamplesPerTask
 	}
+	var budgetPtr *float64
+	if explicit["default-budget-usd"] && defaultBudgetUSD >= 0 {
+		budgetPtr = &defaultBudgetUSD
+	}
 
 	rawFlags := webhook.RawWebhookFlags{
 		Namespace:                namespace,
@@ -102,6 +108,7 @@ func main() {
 		DefaultLimit:             limitPtr,
 		DefaultBatchSize:         batchSizePtr,
 		DefaultMaxSamplesPerTask: maxSamplesPtr,
+		DefaultBudgetUSD:         budgetPtr,
 		WebhookRepositories:      webhookRepositories,
 		Workers:                  workers,
 		QueueSize:                queueSize,

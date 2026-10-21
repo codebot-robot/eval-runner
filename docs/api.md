@@ -312,6 +312,7 @@ spec:
 | `sampling` | `*ComparisonSamplingSpec` | Optional. Configures adaptive paired batch sampling driven by the stopping rule. When omitted, only the single pair of referenced runs is compared. |
 | `sampling.batchSize` | `int` | Number of samples to evaluate in each subsequent batch (default: `8`). |
 | `sampling.maxSamplesPerTask` | `int` | Maximum total number of samples evaluated per task across all batches (default: `64`). Clamps the stopping rule's sample range window; once reached without resolving, undecided tasks are marked `inconclusive`. Note that explicit `extraSamples` requests are not bounded by this cap. |
+| `budgetUSD` | `*float64` | Optional maximum total evaluation cost in USD for this Comparison across all tasks and batches (minimum 0; 0 = unset / unlimited). Webhook default via ConfigMap key `defaultBudgetUSD`. When spent reaches budget, undecided tasks stop sampling with decision `inconclusive` and the budget reason. Prior to spawning each batch, window shrinks to fit remaining budget (min 1) or stops early. Explicit `extraSamples` requests are exempt from this limit. |
 | `extraSamples` | `int` | Optional. Additional samples requested beyond the stopping rule per undecided task (or all tasks if decided) (default: `0`). Evaluates beyond `sampling.maxSamplesPerTask` (explicit user requests are not bounded by the sample cap); bumping triggers more. In PR workflows, review comments of the form `/eval more <n>` increment this value. |
 | `tasks` | `[]string` | Optional allow-list of task IDs to evaluate. When omitted, all tasks present in both runs are compared. |
 
@@ -354,6 +355,7 @@ spec:
 | `summary.skipped` | `int` | Count of tasks discovered in the manifest but not planned by either Run, or pruned by affinityMode=prune. |
 | `summary.affinityMatched` | `int` | Count of tasks with affinity `matched`. |
 | `affinity` | `*ComparisonAffinityStatus` | Metadata of changed-file PR affinity resolution (`filesHash`, `filesCount`, `truncated`). |
+| `budget` | `*ComparisonBudgetStatus` | Budget spend and enforcement status against `spec.budgetUSD` (`limitUSD`, `spentUSD`, `enforced`, `note`). |
 | `summaryPath` | `string` | Storage path or URI where the complete paired table was stored (`comparisons/<name>.json`). |
 | `message` | `string` | Human-readable explanation of the aggregate verdict or failure. In addition to the aggregate verdict summary, the controller emits policy notes: `missing batch run: <ids>` (or `runs`, batch Runs not found), `failed batch run: <ids>` (or `runs`, batch Runs that failed or whose task logs did not match the artifact sink's commit prefix), `candidate task failed: <ids>` (caps UNCHANGED or IMPROVED verdicts to INCONCLUSIVE with $P(\text{improvement}) \le 0.50$), `failed in both runs: <ids>` (tasks that failed in both runs), `tasks not executed: <ids>` (tasks in scope executed by neither run), `tasks not executed by both runs: <ids>` (tasks executed by only one run), `skipped (not planned): <ids>` (tasks discovered in the manifest but not planned by either run), and `skipped (unmatched): <ids>` (tasks whose declared paths did not match PR changed files when affinityMode=prune). |
 | `conditions` | `[]metav1.Condition` | Standard Kubernetes condition list. Includes conditions `ExtraSamples` (reasons: `ArtifactPrefixMismatch`, `ArtifactNotFound`, `NoEligibleTasks`, `Scheduled`) and `ArtifactsReadable` (reasons: `PrefixMismatch`, `NotFound`). |
@@ -384,6 +386,15 @@ Inspect log provider-specific totals are dropped so that `total` is strictly and
 | `filesCount` | `int` | Count of changed files retrieved from GitHub (capped at 300). |
 | `truncated` | `bool` | True if changed files exceeded the cap (300 files), causing all tasks with paths to be treated as matched. |
 | `fallbackReason` | `string` | Reason why changed-file affinity fell back to order mode with all tasks always (e.g. GitHub API error or permissions). |
+
+### ComparisonBudgetStatus (`status.budget`)
+
+| Field | Type | Description |
+|---|---|---|
+| `limitUSD` | `*float64` | Configured budget limit in USD from `spec.budgetUSD`. |
+| `spentUSD` | `*float64` | Total spend in USD across all batches and tasks so far. |
+| `enforced` | `bool` | Whether the budget was enforced. Set to `false` if any evaluated model lacks a known price. |
+| `note` | `string` | Explanation if budget could not be enforced (e.g. `"cost unknown for <model>; budget not enforced"`). |
 
 ### ComparisonSummary (`status.summary`)
 

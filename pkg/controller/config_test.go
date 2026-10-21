@@ -1032,6 +1032,7 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 			configkeys.ConfigMapKeyDefaultLimit:             "5",
 			configkeys.ConfigMapKeyDefaultBatchSize:         "8",
 			configkeys.ConfigMapKeyDefaultMaxSamplesPerTask: "64",
+			configkeys.ConfigMapKeyDefaultBudgetUSD:         "0.50",
 			configkeys.ConfigMapKeyCommandUsers:             "user1,user2",
 			ConfigMapKeySandboxEgressHosts:                  "*.googleapis.com,github.com",
 		},

@@ -343,6 +343,25 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	if hasAffinity && comp.Status.Summary != nil {
 		footerParts = append(footerParts, fmt.Sprintf("%d matched", comp.Status.Summary.AffinityMatched))
 	}
+	if comp.Status.Budget != nil && comp.Status.Budget.LimitUSD != nil && *comp.Status.Budget.LimitUSD > 0 {
+		spent := 0.0
+		if comp.Status.Budget.SpentUSD != nil {
+			spent = *comp.Status.Budget.SpentUSD
+		} else if comp.Status.CostUSD != nil {
+			spent = *comp.Status.CostUSD
+		}
+		part := fmt.Sprintf("budget $%.2f / $%.2f", spent, *comp.Status.Budget.LimitUSD)
+		if !comp.Status.Budget.Enforced {
+			part += " (not enforced)"
+		}
+		footerParts = append(footerParts, part)
+	} else if comp.Spec.BudgetUSD != nil && *comp.Spec.BudgetUSD > 0 {
+		spent := 0.0
+		if comp.Status.CostUSD != nil {
+			spent = *comp.Status.CostUSD
+		}
+		footerParts = append(footerParts, fmt.Sprintf("budget $%.2f / $%.2f", spent, *comp.Spec.BudgetUSD))
+	}
 	if trimmedUIBaseURL != "" && summary.CandRun != "" {
 		footerParts = append(footerParts, fmt.Sprintf("[trajectories](%s/runs/%s/%s/tasks)", trimmedUIBaseURL, comp.Namespace, summary.CandRun))
 	}
@@ -440,12 +459,28 @@ func ActionHintLines(comp *v1alpha1.Comparison) []string {
 	if limit > MaxIDList {
 		limit = MaxIDList
 	}
+	budgetReached := false
+	if comp.Status.Budget != nil && comp.Status.Budget.Enforced && comp.Status.Budget.LimitUSD != nil && *comp.Status.Budget.LimitUSD > 0 {
+		if comp.Status.Budget.SpentUSD != nil && *comp.Status.Budget.SpentUSD >= *comp.Status.Budget.LimitUSD {
+			budgetReached = true
+		} else if strings.Contains(comp.Status.Message, "budget") && strings.Contains(comp.Status.Message, "reached") {
+			budgetReached = true
+		}
+	}
 	for i := 0; i < limit; i++ {
 		action := actions[i]
-		if action.ShowTaskID && action.TaskID != "" {
-			lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples (%s)", action.SuggestedNext, action.SuggestedNext, EscapeCell(action.TaskID)))
+		if budgetReached {
+			if action.ShowTaskID && action.TaskID != "" {
+				lines = append(lines, fmt.Sprintf("- budget reached; comment `/eval more %d` to exceed it (%s)", action.SuggestedNext, EscapeCell(action.TaskID)))
+			} else {
+				lines = append(lines, fmt.Sprintf("- budget reached; comment `/eval more %d` to exceed it", action.SuggestedNext))
+			}
 		} else {
-			lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples", action.SuggestedNext, action.SuggestedNext))
+			if action.ShowTaskID && action.TaskID != "" {
+				lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples (%s)", action.SuggestedNext, action.SuggestedNext, EscapeCell(action.TaskID)))
+			} else {
+				lines = append(lines, fmt.Sprintf("- comment `/eval more %d` to run %d more samples", action.SuggestedNext, action.SuggestedNext))
+			}
 		}
 	}
 	if actionCount > MaxIDList {

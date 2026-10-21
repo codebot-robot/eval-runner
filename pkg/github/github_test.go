@@ -390,6 +390,67 @@ func TestRenderComparisonMarkdown_Golden_RunMoreSamples(t *testing.T) {
 	}
 }
 
+func budgetComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
+	comp, baseRun, candRun := runMoreSamplesComparisonFixture()
+	comp.Name = "docs-eval-budget-reached"
+	comp.Status.SummaryPath = "gs://eval-bucket/comparisons/docs-eval-budget-reached.json"
+	budget := 0.50
+	spent := 0.52
+	comp.Spec.BudgetUSD = &budget
+	comp.Status.Budget = &v1alpha1.ComparisonBudgetStatus{
+		LimitUSD: &budget,
+		SpentUSD: &spent,
+		Enforced: true,
+	}
+	comp.Status.Message = "INCONCLUSIVE: 1 task(s) inconclusive; budget ($0.50) reached (spent $0.52)"
+	return comp, baseRun, candRun
+}
+
+func TestRenderComparisonMarkdown_Golden_BudgetReached(t *testing.T) {
+	comp, baseRun, candRun := budgetComparisonFixture()
+	got := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+
+	goldenPath := "testdata/budget_comparison.golden.md"
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden file: %v", err)
+	}
+	want := string(wantBytes)
+
+	if got != want {
+		t.Errorf("RenderComparisonMarkdown mismatch (-got +want):\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
+func TestCheckRunStateForComparison_BudgetSummaryLine(t *testing.T) {
+	comp, baseRun, candRun := budgetComparisonFixture()
+	state := CheckRunStateForComparison(comp, baseRun, candRun, "")
+	bIdx := strings.Index(state.Summary, "budget $0.52 / $0.50")
+	hIdx := strings.Index(state.Summary, "budget reached; comment `/eval more 16` to exceed it")
+	if bIdx == -1 {
+		t.Errorf("expected state.Summary to contain 'budget $0.52 / $0.50', got %q", state.Summary)
+	}
+	if hIdx == -1 {
+		t.Errorf("expected state.Summary to contain budget reached hint, got %q", state.Summary)
+	}
+	if bIdx >= hIdx {
+		t.Errorf("expected budget line to appear before hints in check-run summary, got:\n%s", state.Summary)
+	}
+
+	// Test unenforced budget displays "(not enforced)" in check-run and PR footer
+	comp.Status.Budget.Enforced = false
+	comp.Status.Budget.Note = "cost unknown for custom-model; budget not enforced"
+	stateUnenforced := CheckRunStateForComparison(comp, baseRun, candRun, "")
+	if !strings.Contains(stateUnenforced.Summary, "budget $0.52 / $0.50 (not enforced)") {
+		t.Errorf("expected check-run summary to contain 'budget $0.52 / $0.50 (not enforced)', got %q", stateUnenforced.Summary)
+	}
+
+	mdUnenforced := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(mdUnenforced, "budget $0.52 / $0.50 (not enforced)") {
+		t.Errorf("expected markdown footer to contain 'budget $0.52 / $0.50 (not enforced)', got %q", mdUnenforced)
+	}
+}
+
 func batchesTokensComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
 	rateImprovedBase := 0.60
 	rateImprovedCand := 0.90

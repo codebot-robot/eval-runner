@@ -197,9 +197,30 @@ improved    regressed             (stop)                   (stop)
    - **CI entirely within equivalence margin** $[-\text{margin}, +\text{margin}]$ (default $\pm 0.05$):
      - $-\text{margin} \le \text{CI}_{\text{lower}} \le \text{CI}_{\text{upper}} \le +\text{margin} \implies \mathbf{unchanged}$ (stop)
 2. **Sample cap or budget reached**:
-   - $\text{samplesRun} \ge \text{sampleCap}$ or $\text{spent} \ge \text{budget} \implies \mathbf{inconclusive}$ (stop)
+   - $\text{samplesRun} \ge \text{sampleCap}$ or $\text{spent} \ge \text{budget} \implies \mathbf{inconclusive}$ (stop). When the budget is reached, undecided tasks terminate as `inconclusive` with reason `budget ($B) reached (spent $S)`.
 3. **Otherwise (or if $n < 8$)**:
    - $\mathbf{continue}$ sampling. Returns suggested `NextBatchSize` (e.g. 8, 16, 24, 32) and `EstimatedSamples` to reach resolution.
+
+### 3.1 Comparison-Wide Dollar Budget (`spec.budgetUSD`)
+
+In addition to sample caps (`sampling.maxSamplesPerTask`), a Comparison can declare a comparison-wide dollar cap `spec.budgetUSD` (defaulted by the webhook via ConfigMap key `defaultBudgetUSD`; `0` = unset / unlimited). The budget stopping rule operationalizes "bound the CI, not the budget":
+
+1. **Enforcement and Price Prerequisite**:
+   - Total evaluation cost (`spentSoFar`) is accumulated across candidate and baseline batches using known model token prices (`InputPer1M`, `OutputPer1M`).
+   - If any model in the evaluation lacks a known price, budget enforcement is disabled and recorded in `status.budget`: `{enforced: false, note: "cost unknown for <model>; budget not enforced"}`.
+2. **Pre-Batch Window Projection & Shrink-to-Fit**:
+   - Before launching the next regular batch, the controller computes the average cost per sample across past observations and estimates:
+     $$\text{projected} = \text{spent} + \text{batchSize} \times \text{avgCostPerSample} \times 2$$
+   - If $\text{projected} > \text{budget}$, the controller calculates the maximum number of sample pairs that fit within the remaining budget:
+     $$\text{fit} = \left\lfloor \frac{\text{budget} - \text{spent}}{\text{avgCostPerSample} \times 2} \right\rfloor$$
+   - If $\text{fit} \ge 1$, the batch window shrinks to fit ($\text{batchSize} = \text{fit}$); if $\text{fit} < 1$, sampling stops early as `inconclusive` with reason `budget ($B) reached (spent $S)`.
+3. **Exemption for Reviewer Extra Samples**:
+   - Explicit reviewer requests via review comments (`/eval more <n>`, incrementing `spec.extraSamples`) stay exempt from `spec.budgetUSD`, matching how `extraSamples` bypasses `maxSamplesPerTask` (ADR-026 §6).
+4. **Surfaces**:
+   - **PR Comment Footer**: Displays `· budget $S / $B`.
+   - **Action Hint**: Alerts reviewers when budget is reached: `- budget reached; comment /eval more <n> to exceed it`.
+   - **Check Run**: Displays `budget $S / $B` on the summary line.
+   - **Web UI**: Renders a dedicated `Budget` meta-tile in the Comparison detail header.
 
 ### Sample Size Estimation Formula
 The CI half-width narrows as $W \propto 1/\sqrt{n}$. To reach target resolution $W_{\text{target}} = \max(|\bar{d}|, \text{margin})$:
