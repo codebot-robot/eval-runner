@@ -161,8 +161,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs", s.handleRunsList)
 	s.mux.HandleFunc("GET /runs/{$}", s.handleRunsList)
 	s.mux.HandleFunc("GET /runs/{namespace}/{name}", s.handleRunDetail)
-	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks/{task}/samples", s.handleTaskSamplesList)
-	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks/{task}/samples/{sample}", s.handleSampleTranscript)
+	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks", s.handleRunTasks)
+	s.mux.HandleFunc("GET /runs/{namespace}/{name}/tasks/{rest...}", s.handleRunTasks)
 	s.mux.HandleFunc("GET /comparisons", s.handleComparisonsList)
 	s.mux.HandleFunc("GET /comparisons/{$}", s.handleComparisonsList)
 	s.mux.HandleFunc("GET /comparisons/{namespace}/{name}", s.handleComparisonDetail)
@@ -417,7 +417,8 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var samplesLink string
-		if task.LogPath != "" {
+		artifactsUnavailable := s.cfg.ArtifactSink == nil && task.LogPath != ""
+		if task.LogPath != "" && s.cfg.ArtifactSink != nil {
 			samplesLink = BuildTaskSamplesListLink(ns, name, task.ID)
 		}
 
@@ -488,33 +489,34 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		}
 
 		taskRows = append(taskRows, RunTaskRow{
-			ID:             task.ID,
-			Phase:          task.Phase,
-			PhaseChip:      taskPhaseChipClass(task.Phase),
-			RateStr:        rateStr,
-			HasCI:          hasCI,
-			CILeftPx:       leftPx,
-			CIWidthPx:      widthPx,
-			CIDotPx:        dotPx,
-			CILabel:        ciLabel,
-			Samples:        task.Samples,
-			Successes:      task.Successes,
-			Method:         method,
-			LogPath:        task.LogPath,
-			SamplesLink:    samplesLink,
-			Message:        task.Message,
-			SampleRange:    taskSampleRange,
-			SamplesDone:    samplesDone,
-			SamplesPlanned: samplesPlanned,
-			ProgressPct:    progressPct,
-			ProgressText:   progressText,
-			LatencyStr:     latStr,
-			TokensStr:      tokensStr,
-			InputTokens:    inTokensStr,
-			OutputTokens:   outTokensStr,
-			ReasoningStr:   reasoningStr,
-			CacheReadStr:   cacheReadStr,
-			CostStr:        costStr,
+			ID:                   task.ID,
+			Phase:                task.Phase,
+			PhaseChip:            taskPhaseChipClass(task.Phase),
+			RateStr:              rateStr,
+			HasCI:                hasCI,
+			CILeftPx:             leftPx,
+			CIWidthPx:            widthPx,
+			CIDotPx:              dotPx,
+			CILabel:              ciLabel,
+			Samples:              task.Samples,
+			Successes:            task.Successes,
+			Method:               method,
+			LogPath:              task.LogPath,
+			SamplesLink:          samplesLink,
+			Message:              task.Message,
+			SampleRange:          taskSampleRange,
+			SamplesDone:          samplesDone,
+			SamplesPlanned:       samplesPlanned,
+			ProgressPct:          progressPct,
+			ProgressText:         progressText,
+			LatencyStr:           latStr,
+			TokensStr:            tokensStr,
+			InputTokens:          inTokensStr,
+			OutputTokens:         outTokensStr,
+			ReasoningStr:         reasoningStr,
+			CacheReadStr:         cacheReadStr,
+			CostStr:              costStr,
+			ArtifactsUnavailable: artifactsUnavailable,
 		})
 	}
 
@@ -619,6 +621,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		Model:            run.Spec.Model,
 		Age:              FormatAge(run.CreationTimestamp),
 		ArtifactsPrefix:  run.Status.Artifacts,
+		ArtifactFooter:   FormatArtifactFooter(s.cfg.ArtifactSink),
 		Message:          run.Status.Message,
 		Metric:           metricFilter,
 		TotalCost:        totalCostFormatted,
@@ -1790,13 +1793,114 @@ func (s *Server) populateComparisonHistories(ctx context.Context, comp *v1alpha1
 	}
 }
 
-func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
+// FormatArtifactFooter formats the artifact sink status for the page footer.
+// Returns "artifacts: gs://<bucket>", "artifacts: dir <path>", or "artifacts: none".
+func FormatArtifactFooter(sink artifacts.ArtifactSink) string {
+	if sink == nil {
+		return "artifacts: none"
+	}
+	type bucketGetter interface {
+		Bucket() string
+	}
+	if bg, ok := sink.(bucketGetter); ok {
+		return fmt.Sprintf("artifacts: gs://%s", bg.Bucket())
+	}
+	if ld, ok := sink.(*artifacts.LocalDirSink); ok {
+		return fmt.Sprintf("artifacts: dir %s", ld.BaseDir)
+	}
+	if _, ok := sink.(*artifacts.InMemorySink); ok {
+		return "artifacts: memory"
+	}
+	prefix := sink.ArtifactPrefix("dummy")
+	if strings.HasPrefix(prefix, "gs://") {
+		trimmed := strings.TrimPrefix(prefix, "gs://")
+		parts := strings.Split(trimmed, "/")
+		if len(parts) > 0 && parts[0] != "" {
+			return fmt.Sprintf("artifacts: gs://%s", parts[0])
+		}
+	}
+	return "artifacts: none"
+}
+
+// parseRunTaskRest parses the {rest...} path segment and query parameters into taskID and sampleID.
+// It splits rest at the last "/samples" segment into (task, sample?).
+// Query parameters ?task=&sample= act as an explicit escape hatch.
+func parseRunTaskRest(rest string, q url.Values, fragment, rawFragment string) (taskID string, sampleID string, ok bool) {
+	qTask := q.Get("task")
+	qSample := q.Get("sample")
+
+	var parsedTask, parsedSample string
+	var foundSamples bool
+
+	search := "/samples"
+	for i := len(rest) - len(search); i >= 0; i-- {
+		if rest[i:i+len(search)] == search {
+			after := i + len(search)
+			if after == len(rest) || rest[after] == '/' {
+				parsedTask = rest[:i]
+				parsedSample = strings.TrimPrefix(rest[after:], "/")
+				foundSamples = true
+				break
+			}
+		}
+	}
+
+	if !foundSamples {
+		if rest == "samples" || strings.HasPrefix(rest, "samples/") {
+			foundSamples = true
+			parsedTask = ""
+			if len(rest) > len("samples") {
+				parsedSample = strings.TrimPrefix(rest[len("samples"):], "/")
+			}
+		}
+	}
+
+	if qTask != "" {
+		taskID = qTask
+	} else if foundSamples {
+		parsedTask = strings.TrimPrefix(parsedTask, "/")
+		if u, err := url.PathUnescape(parsedTask); err == nil {
+			taskID = u
+		} else {
+			taskID = parsedTask
+		}
+	}
+
+	if qSample != "" {
+		sampleID = qSample
+	} else if foundSamples && parsedSample != "" {
+		parsedSample = strings.TrimSuffix(parsedSample, "/")
+		if u, err := url.PathUnescape(parsedSample); err == nil {
+			sampleID = u
+		} else {
+			sampleID = parsedSample
+		}
+		if fragment != "" && !strings.Contains(sampleID, "#") {
+			sampleID = sampleID + "#" + fragment
+		} else if rawFragment != "" && !strings.Contains(sampleID, "#") {
+			sampleID = sampleID + "#" + rawFragment
+		}
+	}
+
+	if taskID == "" {
+		return "", "", false
+	}
+	return taskID, sampleID, true
+}
+
+func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("namespace")
 	name := r.PathValue("name")
-	taskID := r.PathValue("task")
+	rest := r.PathValue("rest")
 
-	if !isValidNamespace(ns) || !isValidResourceName(name) || taskID == "" {
+	if !isValidNamespace(ns) || !isValidResourceName(name) {
 		httpError(w, http.StatusBadRequest, "invalid route params", "", nil)
+		return
+	}
+
+	taskID, sampleID, ok := parseRunTaskRest(rest, r.URL.Query(), r.URL.Fragment, r.URL.RawFragment)
+	if !ok || taskID == "" {
+		httpError(w, http.StatusNotFound, "not found", "", nil)
 		return
 	}
 
@@ -1808,11 +1912,6 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, http.StatusInternalServerError, "error loading run", fmt.Sprintf("error loading run %s/%s", ns, name), err)
-		return
-	}
-
-	if s.cfg.ArtifactSink == nil {
-		httpError(w, http.StatusNotFound, "artifact storage not configured", "", nil)
 		return
 	}
 
@@ -1830,24 +1929,76 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	commit := run.Spec.Repo.Commit
-	expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
-	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
-		httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
+	if s.cfg.ArtifactSink != nil {
+		expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
+		if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
+			httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
+			return
+		}
+	}
+
+	if s.cfg.ArtifactSink == nil {
+		log.Printf("artifact storage not configured for UI (namespace=%s, run=%s, task=%s)", ns, name, taskID)
+		if sampleID == "" {
+			view := TaskSamplesListView{
+				ActiveTab:      NavTabRuns,
+				Namespace:      ns,
+				RunName:        name,
+				TaskID:         taskID,
+				EscapedTaskID:  url.PathEscape(taskID),
+				Commit:         ShortCommit(commit),
+				Model:          run.Spec.Model,
+				LogPath:        matchedTask.LogPath,
+				StorageMessage: "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config",
+				ArtifactFooter: FormatArtifactFooter(s.cfg.ArtifactSink),
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if err := tmplTaskSamplesList.Execute(w, view); err != nil {
+				httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+			}
+			return
+		}
+		view := SampleTranscriptView{
+			ActiveTab:       NavTabRuns,
+			Namespace:       ns,
+			RunName:         name,
+			TaskID:          taskID,
+			EscapedTaskID:   url.PathEscape(taskID),
+			SampleID:        sampleID,
+			EscapedSampleID: url.PathEscape(sampleID),
+			LogPath:         matchedTask.LogPath,
+			StorageMessage:  "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config",
+			ArtifactFooter:  FormatArtifactFooter(s.cfg.ArtifactSink),
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmplSampleTranscript.Execute(w, view); err != nil {
+			httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+		}
 		return
 	}
 
+	if sampleID == "" {
+		s.renderTaskSamplesList(w, r, ns, name, taskID, commit, run.Spec.Model, matchedTask.LogPath)
+		return
+	}
+	s.renderSampleTranscript(w, r, ns, name, taskID, sampleID, matchedTask.LogPath)
+}
+
+func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, ns, name, taskID, commit, model, logPath string) {
+	ctx := r.Context()
 	view := TaskSamplesListView{
-		ActiveTab:     NavTabRuns,
-		Namespace:     ns,
-		RunName:       name,
-		TaskID:        taskID,
-		EscapedTaskID: url.PathEscape(taskID),
-		Commit:        ShortCommit(commit),
-		Model:         run.Spec.Model,
-		LogPath:       matchedTask.LogPath,
+		ActiveTab:      NavTabRuns,
+		Namespace:      ns,
+		RunName:        name,
+		TaskID:         taskID,
+		EscapedTaskID:  url.PathEscape(taskID),
+		Commit:         ShortCommit(commit),
+		Model:          model,
+		LogPath:        logPath,
+		ArtifactFooter: FormatArtifactFooter(s.cfg.ArtifactSink),
 	}
 
-	samples, isTruncated, err := s.loadInspectSamples(ctx, matchedTask.LogPath)
+	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
 	if isTruncated {
 		view.IsTruncatedLog = true
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Sample details cannot be displayed."
@@ -1862,7 +2013,7 @@ func (s *Server) handleTaskSamplesList(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusNotFound, "task log not found on storage", "", nil)
 			return
 		}
-		httpError(w, http.StatusBadGateway, "artifact storage unavailable; see UI logs", fmt.Sprintf("storage error loading artifact %s", matchedTask.LogPath), err)
+		httpError(w, http.StatusBadGateway, "artifact storage unavailable; see UI logs", fmt.Sprintf("storage error loading artifact %s", logPath), err)
 		return
 	}
 
@@ -1955,53 +2106,8 @@ const (
 	maxTranscriptFieldBytes = 16 * 1024
 )
 
-func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) {
-	ns := r.PathValue("namespace")
-	name := r.PathValue("name")
-	taskID := r.PathValue("task")
-	sampleID := r.PathValue("sample")
-
-	if !isValidNamespace(ns) || !isValidResourceName(name) || taskID == "" || sampleID == "" {
-		httpError(w, http.StatusBadRequest, "invalid route params", "", nil)
-		return
-	}
-
+func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, ns, name, taskID, sampleID, logPath string) {
 	ctx := r.Context()
-	var run v1alpha1.Run
-	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
-		if apierrors.IsNotFound(err) {
-			httpError(w, http.StatusNotFound, "run not found", "", nil)
-			return
-		}
-		httpError(w, http.StatusInternalServerError, "error loading run", fmt.Sprintf("error loading run %s/%s", ns, name), err)
-		return
-	}
-
-	if s.cfg.ArtifactSink == nil {
-		httpError(w, http.StatusNotFound, "artifact storage not configured", "", nil)
-		return
-	}
-
-	var matchedTask *v1alpha1.TaskStatus
-	for i := range run.Status.Tasks {
-		if run.Status.Tasks[i].ID == taskID {
-			matchedTask = &run.Status.Tasks[i]
-			break
-		}
-	}
-
-	if matchedTask == nil || matchedTask.LogPath == "" {
-		httpError(w, http.StatusNotFound, "log path not found for task", "", nil)
-		return
-	}
-
-	commit := run.Spec.Repo.Commit
-	expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
-	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
-		httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
-		return
-	}
-
 	view := SampleTranscriptView{
 		ActiveTab:       NavTabRuns,
 		Namespace:       ns,
@@ -2010,10 +2116,11 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 		EscapedTaskID:   url.PathEscape(taskID),
 		SampleID:        sampleID,
 		EscapedSampleID: url.PathEscape(sampleID),
-		LogPath:         matchedTask.LogPath,
+		LogPath:         logPath,
+		ArtifactFooter:  FormatArtifactFooter(s.cfg.ArtifactSink),
 	}
 
-	samples, isTruncated, err := s.loadInspectSamples(ctx, matchedTask.LogPath)
+	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
 	if isTruncated {
 		view.IsTruncatedLog = true
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Transcript details cannot be displayed."
@@ -2028,7 +2135,7 @@ func (s *Server) handleSampleTranscript(w http.ResponseWriter, r *http.Request) 
 			httpError(w, http.StatusNotFound, "task log not found on storage", "", nil)
 			return
 		}
-		httpError(w, http.StatusBadGateway, "artifact storage unavailable; see UI logs", fmt.Sprintf("storage error loading artifact %s", matchedTask.LogPath), err)
+		httpError(w, http.StatusBadGateway, "artifact storage unavailable; see UI logs", fmt.Sprintf("storage error loading artifact %s", logPath), err)
 		return
 	}
 

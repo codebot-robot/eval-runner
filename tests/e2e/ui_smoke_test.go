@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,37 @@ func runUISmoke(t *testing.T, harness *Harness, runName string) {
 	respPulls.Body.Close()
 	if respPulls.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected pulls page status: %d body=%s", respPulls.StatusCode, string(bodyPulls))
+	}
+
+	// 4. Follow the first samples href from the run page, then the first sample href.
+	reSamples := regexp.MustCompile(`href="(/runs/[^"]+/samples)"`)
+	matchSamples := reSamples.FindStringSubmatch(string(bodyRun))
+	if len(matchSamples) > 1 {
+		samplesURL := baseURL + matchSamples[1]
+		respSamples, err := http.Get(samplesURL)
+		if err != nil {
+			t.Fatalf("failed to GET samples page %s: %v", samplesURL, err)
+		}
+		bodySamples, _ := io.ReadAll(respSamples.Body)
+		respSamples.Body.Close()
+		if respSamples.StatusCode != http.StatusOK {
+			t.Fatalf("unexpected samples page status: %d body=%s", respSamples.StatusCode, string(bodySamples))
+		}
+
+		reSample := regexp.MustCompile(`href="(` + regexp.QuoteMeta(matchSamples[1]) + `/[^"]+)"`)
+		matchSample := reSample.FindStringSubmatch(string(bodySamples))
+		if len(matchSample) > 1 {
+			sampleURL := baseURL + matchSample[1]
+			respSample, err := http.Get(sampleURL)
+			if err != nil {
+				t.Fatalf("failed to GET sample transcript page %s: %v", sampleURL, err)
+			}
+			bodySample, _ := io.ReadAll(respSample.Body)
+			respSample.Body.Close()
+			if respSample.StatusCode != http.StatusOK {
+				t.Fatalf("unexpected sample transcript page status: %d body=%s", respSample.StatusCode, string(bodySample))
+			}
+		}
 	}
 }
 

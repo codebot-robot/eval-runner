@@ -97,7 +97,7 @@ func main() {
 			}
 		}
 	} else {
-		log.Printf("no artifact storage configured; sample trajectories will return 404")
+		log.Printf("no artifact storage configured; sample trajectories will show configuration guidance")
 	}
 
 	if sink != nil {

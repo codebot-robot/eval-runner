@@ -474,7 +474,14 @@ const runDetailTemplate = `
             <tbody>
               {{ range .Tasks }}
               <tr>
-                <td class="mono" style="font-weight:600">{{ .ID }}</td>
+                <td class="mono" style="font-weight:600">
+                  {{- if .SamplesLink }}
+                  <a href="{{ .SamplesLink }}">{{ .ID }}</a>
+                  {{- else }}
+                  {{- .ID }}
+                  {{- if .ArtifactsUnavailable }} <span style="font-size:11px;font-weight:normal;color:var(--muted)">(artifacts unavailable)</span>{{ end }}
+                  {{- end }}
+                </td>
                 <td><span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span></td>
                 {{ if or (eq $.Metric "all") (eq $.Metric "") (eq $.Metric "rate") }}
                 <td class="num">{{ .RateStr }}</td>
@@ -548,6 +555,9 @@ const runDetailTemplate = `
             </tbody>
           </table>
         </div>
+      </div>
+      <div class="card-footer">
+        <span>{{ .ArtifactFooter }}</span>
       </div>
     </div>
   </main>
@@ -805,8 +815,8 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
         <td class="mono" style="font-weight:600">{{ .ID }}</td>{{ if $.HasAffinity }}
         <td class="mono">{{ .Affinity }}</td>{{ end }}
         {{ if eq $.Metric "rate" }}
-        <td class="num">{{ .BaseRate }}</td>
-        <td class="num">{{ .CandRate }}</td>
+        <td class="num">{{ if .BaseSamplesLink }}<a href="{{ .BaseSamplesLink }}">{{ .BaseRate }}</a>{{ else }}{{ .BaseRate }}{{ end }}</td>
+        <td class="num">{{ if .CandSamplesLink }}<a href="{{ .CandSamplesLink }}">{{ .CandRate }}</a>{{ else }}{{ .CandRate }}{{ end }}</td>
         <td class="num">{{ .Delta }}{{ if .HasCI }} <span style="font-size:13px;color:var(--muted)">{{ .CILabel }}</span>{{ end }}</td>
         <td>
           {{ if .HasCI }}
@@ -841,8 +851,8 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
         <td class="num mono">{{ if .CandTokensStr }}{{ .CandTokensStr }}{{ else if .Tokens }}{{ .Tokens.Total }}{{ else }}—{{ end }}</td>
         <td class="num">{{ if gt .SamplesRun 0 }}{{ .SamplesRun }}{{ else if gt .Pairs 0 }}{{ .Pairs }}{{ else }}—{{ end }}</td>
         {{ else }}
-        <td class="num">{{ .BaseRate }}</td>
-        <td class="num">{{ .CandRate }}</td>
+        <td class="num">{{ if .BaseSamplesLink }}<a href="{{ .BaseSamplesLink }}">{{ .BaseRate }}</a>{{ else }}{{ .BaseRate }}{{ end }}</td>
+        <td class="num">{{ if .CandSamplesLink }}<a href="{{ .CandSamplesLink }}">{{ .CandRate }}</a>{{ else }}{{ .CandRate }}{{ end }}</td>
         <td class="num">{{ .Delta }}{{ if .HasCI }} <span style="font-size:13px;color:var(--muted)">{{ .CILabel }}</span>{{ end }}</td>
         <td>
           {{ if .HasCI }}
@@ -1182,7 +1192,11 @@ const taskSamplesListTemplate = `
         </div>
       </div>
 
-      {{ if .IsTruncatedLog }}
+      {{ if .StorageMessage }}
+      <div class="msg-alert" style="margin-bottom:16px">
+        {{ .StorageMessage }}
+      </div>
+      {{ else if .IsTruncatedLog }}
       <div class="msg-alert" style="margin-bottom:16px">
         <strong>Log Truncated:</strong> {{ .TruncatedMessage }}
       </div>
@@ -1243,6 +1257,10 @@ const taskSamplesListTemplate = `
       </div>
       {{ end }}
       {{ end }}
+
+      <div class="card-footer">
+        <span>{{ .ArtifactFooter }}</span>
+      </div>
     </div>
   </main>
 </body>
@@ -1286,7 +1304,11 @@ const sampleTranscriptTemplate = `
         </div>
       </div>
 
-      {{ if .IsTruncatedLog }}
+      {{ if .StorageMessage }}
+      <div class="msg-alert" style="margin-bottom:16px">
+        {{ .StorageMessage }}
+      </div>
+      {{ else if .IsTruncatedLog }}
       <div class="msg-alert" style="margin-bottom:16px">
         <strong>Log Truncated:</strong> {{ .TruncatedMessage }}
       </div>
@@ -1330,6 +1352,10 @@ const sampleTranscriptTemplate = `
         open format · any agent can read it
       </div>
       {{ end }}
+
+      <div class="card-footer">
+        <span>{{ .ArtifactFooter }}</span>
+      </div>
     </div>
   </main>
 </body>
