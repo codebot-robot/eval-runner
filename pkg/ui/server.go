@@ -38,6 +38,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -640,6 +641,70 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func runCommitSHA(run *v1alpha1.Run) string {
+	if run == nil {
+		return ""
+	}
+	if run.Spec.Repo.Commit != "" {
+		return run.Spec.Repo.Commit
+	}
+	return run.Labels["evalrunner.gke-labs.dev/head-sha"]
+}
+
+type seriesRun struct {
+	run        *v1alpha1.Run
+	commitTime time.Time
+	isFallback bool
+}
+
+// collectSeries finds base-* Runs for the given repository and branch in namespace ns,
+// optionally filtered by cohort, ordered chronologically by commit time.
+func (s *Server) collectSeries(ctx context.Context, ns string, ref RepoRef, branch, cohort string) ([]seriesRun, error) {
+	var runList v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		return nil, err
+	}
+
+	var matched []seriesRun
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		if !strings.HasPrefix(run.Name, "base-") {
+			continue
+		}
+		runBranch := run.Labels["evalrunner.gke-labs.dev/branch"]
+		if runBranch == "" {
+			continue
+		}
+		if runBranch != branch && runBranch != sanitizeBranchLabel(branch) {
+			continue
+		}
+		if cohort != "" && run.Spec.Cohort != cohort {
+			continue
+		}
+
+		runRepo, ok := runRepoRef(run)
+		if !ok || !runRepo.Equal(ref) {
+			continue
+		}
+
+		cTime, fallback := runCommitTime(run)
+		matched = append(matched, seriesRun{
+			run:        run,
+			commitTime: cTime,
+			isFallback: fallback,
+		})
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].commitTime.Equal(matched[j].commitTime) {
+			return matched[i].commitTime.Before(matched[j].commitTime)
+		}
+		return matched[i].run.Name < matched[j].run.Name
+	})
+
+	return matched, nil
+}
+
 func (s *Server) handleRepoOverview(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.parseRouteRepo(r)
 	if !ok {
@@ -651,7 +716,288 @@ func (s *Server) handleRepoOverview(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
 		return
 	}
-	s.renderRepoRuns(w, r, ns, ref, NavTabOverview)
+	s.renderRepoOverview(w, r, ns, ref)
+}
+
+func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef) {
+	ctx := r.Context()
+	linkNS := s.linkNamespace(ns)
+	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	if branch == "" {
+		branch = "main"
+	}
+	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
+
+	matched, err := s.collectSeries(ctx, ns, ref, branch, cohortFilter)
+	if err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+
+	var note string
+	if len(matched) == 0 {
+		var runList v1alpha1.RunList
+		if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
+			if apierrors.IsForbidden(err) {
+				httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+				return
+			}
+			httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+			return
+		}
+
+		hasBranchRuns := false
+		var completedRuns []seriesRun
+		for i := range runList.Items {
+			run := &runList.Items[i]
+			runRepo, ok := runRepoRef(run)
+			if !ok || !runRepo.Equal(ref) {
+				continue
+			}
+			if cohortFilter != "" && run.Spec.Cohort != cohortFilter {
+				continue
+			}
+			if b := run.Labels["evalrunner.gke-labs.dev/branch"]; b != "" {
+				hasBranchRuns = true
+			}
+			if run.Status.Phase == v1alpha1.RunPhaseCompleted {
+				cTime, fallback := runCommitTime(run)
+				completedRuns = append(completedRuns, seriesRun{
+					run:        run,
+					commitTime: cTime,
+					isFallback: fallback,
+				})
+			}
+		}
+
+		if !hasBranchRuns && len(completedRuns) > 0 {
+			sort.Slice(completedRuns, func(i, j int) bool {
+				if !completedRuns[i].run.CreationTimestamp.Equal(&completedRuns[j].run.CreationTimestamp) {
+					return completedRuns[i].run.CreationTimestamp.Before(&completedRuns[j].run.CreationTimestamp)
+				}
+				return completedRuns[i].run.Name < completedRuns[j].run.Name
+			})
+			matched = completedRuns
+			note = fmt.Sprintf("no %s-branch baselines yet; showing latest Runs", branch)
+		}
+	}
+
+	if len(matched) == 0 {
+		view := RepoOverviewView{
+			ActiveTab:     NavTabOverview,
+			Repo:          ref,
+			Namespace:     ns,
+			LinkNamespace: linkNS,
+			Branch:        branch,
+			Cohort:        cohortFilter,
+			PullsLink:     repoLink(ref, "/pulls", linkNS),
+			IsEmpty:       true,
+			Note:          note,
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := RenderRepoOverview(w, view); err != nil {
+			httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+		}
+		return
+	}
+
+	latestOverallRun := matched[len(matched)-1].run
+	meanSuccessRate := "—"
+	if latestOverallRun.Status.Summary != nil && latestOverallRun.Status.Summary.MeanSuccessRate != nil {
+		meanSuccessRate = fmt.Sprintf("%.2f", *latestOverallRun.Status.Summary.MeanSuccessRate)
+	}
+
+	lastCommit := runCommitSHA(latestOverallRun)
+	lastCommitShort := ShortCommit(lastCommit)
+	lastCommitLink := repoLink(ref, "/runs/"+latestOverallRun.Name, linkNS)
+
+	taskSet := make(map[string]bool)
+	for _, sr := range matched {
+		for _, t := range sr.run.Status.Tasks {
+			if t.ID != "" {
+				taskSet[t.ID] = true
+			}
+		}
+		for _, tid := range sr.run.Spec.Tasks {
+			if tid != "" {
+				taskSet[tid] = true
+			}
+		}
+	}
+
+	var allTaskIDs []string
+	for tid := range taskSet {
+		allTaskIDs = append(allTaskIDs, tid)
+	}
+	sort.Strings(allTaskIDs)
+
+	type taskInstance struct {
+		run        *v1alpha1.Run
+		task       *v1alpha1.TaskStatus
+		commitTime time.Time
+	}
+
+	var taskRows []RepoOverviewTaskRow
+	for _, tid := range allTaskIDs {
+		var completedInstances []taskInstance
+		var sparklineItems []SeriesItem
+		var anyTaskRun *v1alpha1.Run
+
+		for _, m := range matched {
+			run := m.run
+			commit := runCommitSHA(run)
+			commitTimeStr := "—"
+			if !m.commitTime.IsZero() {
+				commitTimeStr = m.commitTime.UTC().Format(time.RFC3339)
+			}
+
+			var matchedTask *v1alpha1.TaskStatus
+			for idx := range run.Status.Tasks {
+				if run.Status.Tasks[idx].ID == tid {
+					matchedTask = &run.Status.Tasks[idx]
+					break
+				}
+			}
+
+			if matchedTask != nil {
+				anyTaskRun = run
+			}
+
+			sItem := SeriesItem{
+				CommitSHA:      commit,
+				CommitSHAShort: ShortCommit(commit),
+				CommitTime:     m.commitTime,
+				CommitTimeStr:  commitTimeStr,
+				RunName:        run.Name,
+				Namespace:      run.Namespace,
+			}
+
+			if matchedTask != nil && matchedTask.Phase == v1alpha1.TaskPhaseCompleted && matchedTask.SuccessRate != nil {
+				sItem.HasPoint = true
+				sItem.SuccessRate = matchedTask.SuccessRate
+				sItem.CI = matchedTask.SuccessRateCI
+				sItem.Phase = matchedTask.Phase
+				completedInstances = append(completedInstances, taskInstance{
+					run:        run,
+					task:       matchedTask,
+					commitTime: m.commitTime,
+				})
+			}
+			sparklineItems = append(sparklineItems, sItem)
+		}
+
+		sparkline := BuildSparklineSVG(sparklineItems)
+
+		sParams := url.Values{}
+		sParams.Set("task", tid)
+		if cohortFilter != "" {
+			sParams.Set("cohort", cohortFilter)
+		}
+		sSuffix := "/series/" + url.PathEscape(branch) + "?" + sParams.Encode()
+		sLink := repoLink(ref, sSuffix, linkNS)
+
+		row := RepoOverviewTaskRow{
+			ID:         tid,
+			SeriesLink: sLink,
+			Sparkline:  sparkline,
+			RateStr:    "—",
+			CILabel:    "—",
+			DeltaStr:   "—",
+			Samples:    "—",
+			TokensStr:  "—",
+			CostStr:    "—",
+		}
+
+		if len(completedInstances) > 0 {
+			latestInst := completedInstances[len(completedInstances)-1]
+			latestTask := latestInst.task
+			latestRun := latestInst.run
+
+			row.RunLink = repoLink(ref, "/runs/"+latestRun.Name, linkNS)
+			row.SamplesLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", latestRun.Name, url.PathEscape(tid)), linkNS)
+			row.RateStr = fmt.Sprintf("%.2f", *latestTask.SuccessRate)
+
+			leftPx, widthPx, dotPx, hasCI := CalculateRunBarGeometry(latestTask.SuccessRate, latestTask.MeanScore, latestTask.SuccessRateCI, 240.0)
+			row.CILeftPx = leftPx
+			row.CIWidthPx = widthPx
+			row.CIDotPx = dotPx
+			row.HasCI = hasCI
+			if latestTask.SuccessRateCI != nil {
+				row.CILabel = fmt.Sprintf("[%.2f, %.2f]", latestTask.SuccessRateCI.Lower, latestTask.SuccessRateCI.Upper)
+			}
+
+			row.Samples = strconv.Itoa(latestTask.Samples)
+			if latestTask.Tokens != nil && latestTask.Tokens.Total > 0 {
+				row.TokensStr = FormatTokens(latestTask.Tokens.Total)
+			}
+			if latestTask.CostUSD != nil {
+				if *latestTask.CostUSD < 0.01 && *latestTask.CostUSD > 0 {
+					row.CostStr = fmt.Sprintf("$%.4f", *latestTask.CostUSD)
+				} else {
+					row.CostStr = fmt.Sprintf("$%.2f", *latestTask.CostUSD)
+				}
+			}
+
+			row.CommitShort = ShortCommit(runCommitSHA(latestRun))
+
+			if !latestInst.commitTime.IsZero() {
+				row.CommitTimeStr = FormatAge(metav1.Time{Time: latestInst.commitTime})
+			} else {
+				row.CommitTimeStr = FormatAge(latestRun.CreationTimestamp)
+			}
+
+			if len(completedInstances) > 1 {
+				prevInst := completedInstances[len(completedInstances)-2]
+				prevTask := prevInst.task
+				diff := *latestTask.SuccessRate - *prevTask.SuccessRate
+				row.HasDelta = true
+				row.DeltaStr = fmt.Sprintf("%+.2f", diff)
+				if math.Abs(diff) < 1e-6 {
+					row.DeltaClass = "neutral"
+					row.DeltaStr = "+0.00"
+				} else if diff > 0 {
+					row.DeltaClass = "good"
+				} else {
+					row.DeltaClass = "bad"
+				}
+			}
+		} else if anyTaskRun != nil {
+			row.RunLink = repoLink(ref, "/runs/"+anyTaskRun.Name, linkNS)
+			row.SamplesLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", anyTaskRun.Name, url.PathEscape(tid)), linkNS)
+			row.CommitShort = ShortCommit(runCommitSHA(anyTaskRun))
+			row.CommitTimeStr = FormatAge(anyTaskRun.CreationTimestamp)
+		}
+
+		taskRows = append(taskRows, row)
+	}
+
+	view := RepoOverviewView{
+		ActiveTab:       NavTabOverview,
+		Repo:            ref,
+		Namespace:       ns,
+		LinkNamespace:   linkNS,
+		Branch:          branch,
+		Cohort:          cohortFilter,
+		TasksTracked:    len(allTaskIDs),
+		MeanSuccessRate: meanSuccessRate,
+		LastCommitSHA:   lastCommit,
+		LastCommitShort: lastCommitShort,
+		LastCommitLink:  lastCommitLink,
+		RunsOnBranch:    len(matched),
+		PullsLink:       repoLink(ref, "/pulls", linkNS),
+		Note:            note,
+		Tasks:           taskRows,
+		IsEmpty:         false,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := RenderRepoOverview(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
 }
 
 func (s *Server) handleRepoRunsList(w http.ResponseWriter, r *http.Request) {
