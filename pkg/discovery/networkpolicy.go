@@ -18,14 +18,21 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	discoveryk8s "k8s.io/client-go/discovery"
 	"sigs.k8s.io/yaml"
 )
 
 const (
+	// DefaultSandboxEgressNetworkPolicyName is the default name for the sandbox egress NetworkPolicy.
+	DefaultSandboxEgressNetworkPolicyName = "eval-runner-sandbox-egress"
+
 	// DefaultFQDNNetworkPolicyName is the default name for the sandbox FQDNNetworkPolicy.
 	DefaultFQDNNetworkPolicyName = "eval-runner-sandbox-fqdn-egress"
 
@@ -225,4 +232,151 @@ func DetectFQDNNetworkPolicyAPIVersion(discoveryClient discoveryk8s.DiscoveryInt
 	}
 
 	return "", false, nil
+}
+
+// RenderSandboxEgressNetworkPolicy renders the baseline sandbox egress NetworkPolicy.
+// When fqdnActive is true, the 0.0.0.0/0 internet rule (allowing TCP 80/443/9418) is omitted
+// so that HTTPS traffic is narrowed to the active FQDNNetworkPolicy.
+// When fqdnActive is false (FQDN absent or disabled), the internet rule is included to allow
+// external clones and model APIs over 80/443/9418.
+func RenderSandboxEgressNetworkPolicy(namespace string, fqdnActive bool) *networkingv1.NetworkPolicy {
+	return RenderSandboxEgressNetworkPolicyWithName(DefaultSandboxEgressNetworkPolicyName, namespace, fqdnActive)
+}
+
+// RenderSandboxEgressNetworkPolicyWithName renders the baseline sandbox egress NetworkPolicy with a specific name.
+// All v1-defaulted fields (such as port protocols) are explicitly populated.
+func RenderSandboxEgressNetworkPolicyWithName(name, namespace string, fqdnActive bool) *networkingv1.NetworkPolicy {
+	if name == "" {
+		name = DefaultSandboxEgressNetworkPolicyName
+	}
+	if namespace == "" {
+		namespace = DefaultSandboxNamespace
+	}
+
+	tcpProto := corev1.ProtocolTCP
+	udpProto := corev1.ProtocolUDP
+
+	port53 := intstr.FromInt32(53)
+	port80 := intstr.FromInt32(80)
+	port443 := intstr.FromInt32(443)
+	port9418 := intstr.FromInt32(9418)
+
+	dnsRule := networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{
+			{
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"kubernetes.io/metadata.name": "kube-system",
+					},
+				},
+				PodSelector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{
+							Key:      "k8s-app",
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{"kube-dns", "node-local-dns"},
+						},
+					},
+				},
+			},
+			{
+				IPBlock: &networkingv1.IPBlock{
+					CIDR: "169.254.20.10/32",
+				},
+			},
+			{
+				IPBlock: &networkingv1.IPBlock{
+					CIDR: "169.254.169.254/32",
+				},
+			},
+		},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{
+				Protocol: &udpProto,
+				Port:     &port53,
+			},
+			{
+				Protocol: &tcpProto,
+				Port:     &port53,
+			},
+		},
+	}
+
+	internetRule := networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{
+			{
+				IPBlock: &networkingv1.IPBlock{
+					CIDR: "0.0.0.0/0",
+					Except: []string{
+						"10.0.0.0/8",
+						"172.16.0.0/12",
+						"192.168.0.0/16",
+						"100.64.0.0/10",
+						"169.254.0.0/16",
+					},
+				},
+			},
+		},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{
+				Protocol: &tcpProto,
+				Port:     &port80,
+			},
+			{
+				Protocol: &tcpProto,
+				Port:     &port443,
+			},
+			{
+				Protocol: &tcpProto,
+				Port:     &port9418,
+			},
+		},
+	}
+
+	gitServerRule := networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{
+			{
+				PodSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "git-server",
+					},
+				},
+			},
+		},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{
+				Protocol: &tcpProto,
+				Port:     &port9418,
+			},
+		},
+	}
+
+	var egressRules []networkingv1.NetworkPolicyEgressRule
+	if fqdnActive {
+		egressRules = []networkingv1.NetworkPolicyEgressRule{dnsRule, gitServerRule}
+	} else {
+		egressRules = []networkingv1.NetworkPolicyEgressRule{dnsRule, internetRule, gitServerRule}
+	}
+
+	return &networkingv1.NetworkPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "networking.k8s.io/v1",
+			Kind:       "NetworkPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					LabelSandbox: "true",
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeEgress,
+			},
+			Egress: egressRules,
+		},
+	}
 }

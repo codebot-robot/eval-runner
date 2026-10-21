@@ -118,15 +118,27 @@ rules:
   - watch
   - delete
 - apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+  - delete
+  - watch
+- apiGroups:
   - networking.gke.io
   resources:
   - fqdnnetworkpolicies
   verbs:
-  - create
   - get
+  - create
   - update
   - patch
   - delete
+  - watch
 - apiGroups:
   - ""
   resources:

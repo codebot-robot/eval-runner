@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 const (
@@ -208,6 +210,40 @@ stringData:
 	h.KubectlApplyContent(modifiedDeploy)
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")
+
+	// Verify controller-owned sandbox egress NetworkPolicy reconciliation
+	out := h.runCmd("kubectl", "get", "networkpolicy", "eval-runner-sandbox-egress", "-n", "eval-runner-sandbox", "-o", "json")
+	var egressPolicy networkingv1.NetworkPolicy
+	if err := json.Unmarshal([]byte(out), &egressPolicy); err != nil {
+		h.t.Fatalf("failed to decode eval-runner-sandbox-egress into NetworkPolicy: %v", err)
+	}
+	if len(egressPolicy.Spec.Egress) != 3 {
+		h.t.Fatalf("expected 3 egress rules in eval-runner-sandbox-egress, got %d", len(egressPolicy.Spec.Egress))
+	}
+	var internetRule *networkingv1.NetworkPolicyEgressRule
+	for i := range egressPolicy.Spec.Egress {
+		r := &egressPolicy.Spec.Egress[i]
+		for _, to := range r.To {
+			if to.IPBlock != nil && to.IPBlock.CIDR == "0.0.0.0/0" {
+				internetRule = r
+				break
+			}
+		}
+	}
+	if internetRule == nil {
+		h.t.Fatalf("eval-runner-sandbox-egress missing 0.0.0.0/0 internet rule")
+	}
+	expectedPorts := map[int32]bool{80: false, 443: false, 9418: false}
+	for _, port := range internetRule.Ports {
+		if port.Protocol != nil && *port.Protocol == corev1.ProtocolTCP && port.Port != nil {
+			expectedPorts[port.Port.IntVal] = true
+		}
+	}
+	for p, found := range expectedPorts {
+		if !found {
+			h.t.Fatalf("0.0.0.0/0 internet rule missing expected TCP port %d", p)
+		}
+	}
 
 	// Apply UI Deployment with image rewritten for kind local image
 	uiDeployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/ui-deployment.yaml"))

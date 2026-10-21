@@ -388,3 +388,123 @@ func TestWatchConfigMap(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+func TestWatchNamedObject_BookmarkAndError(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var getCallCount int
+	var mu sync.Mutex
+	currentCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-target",
+			ResourceVersion: "100",
+		},
+	}
+
+	getFn := func(ctx context.Context) (metav1.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		getCallCount++
+		copied := currentCM.DeepCopy()
+		return copied, nil
+	}
+
+	fakeWatchers := make(chan *watch.FakeWatcher, 5)
+	lastRVChan := make(chan string, 5)
+
+	watchFn := func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+		lastRVChan <- opts.ResourceVersion
+		fw := watch.NewFake()
+		fakeWatchers <- fw
+		return fw, nil
+	}
+
+	var observedEvents []metav1.Object
+	eventCh := make(chan struct{}, 10)
+
+	onChange := func(obj metav1.Object) {
+		mu.Lock()
+		observedEvents = append(observedEvents, obj)
+		mu.Unlock()
+		eventCh <- struct{}{}
+	}
+
+	go func() {
+		_ = WatchNamedObject(ctx, "test-target", getFn, watchFn, onChange)
+	}()
+
+	// 1. Initial event from initial Get
+	select {
+	case <-eventCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial get event")
+	}
+
+	// First watch registered with initial RV "100"
+	var firstWatcher *watch.FakeWatcher
+	select {
+	case rv := <-lastRVChan:
+		if rv != "100" {
+			t.Fatalf("expected watch RV 100, got %s", rv)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first watch RV")
+	}
+	select {
+	case firstWatcher = <-fakeWatchers:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first fakeWatcher")
+	}
+
+	// 2. Send Bookmark event with RV "150"
+	bookmarkObj := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-target",
+			ResourceVersion: "150",
+		},
+	}
+	firstWatcher.Action(watch.Bookmark, bookmarkObj)
+
+	// Bookmark should update RV without calling onChange
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	if len(observedEvents) != 1 {
+		t.Fatalf("bookmark should not trigger onChange, expected 1 event, got %d", len(observedEvents))
+	}
+	mu.Unlock()
+
+	// 3. Send watch.Error event
+	// This should cause the watcher to stop, re-Get the object, and trigger onChange
+	mu.Lock()
+	currentCM.ResourceVersion = "200"
+	mu.Unlock()
+
+	firstWatcher.Action(watch.Error, nil)
+
+	// Wait for onChange from re-Get after watch.Error
+	select {
+	case <-eventCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event after watch.Error")
+	}
+
+	mu.Lock()
+	if len(observedEvents) != 2 {
+		t.Fatalf("expected 2 events after watch.Error re-Get, got %d", len(observedEvents))
+	}
+	if observedEvents[1].GetResourceVersion() != "200" {
+		t.Errorf("expected re-Get RV 200, got %s", observedEvents[1].GetResourceVersion())
+	}
+	mu.Unlock()
+
+	// Second watch should be created with RV "200"
+	select {
+	case rv := <-lastRVChan:
+		if rv != "200" {
+			t.Fatalf("expected second watch RV 200, got %s", rv)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second watch RV")
+	}
+}
