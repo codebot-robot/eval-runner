@@ -634,6 +634,118 @@ func TestTemplateRenderingRepoRunsGolden(t *testing.T) {
 	assertGolden(t, "repo_runs.golden.html", buf.String())
 }
 
+func sampleRepoOverviewView() RepoOverviewView {
+	rate1 := 0.70
+	rate2 := 0.85
+	t1 := time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
+
+	sparkItems := []SeriesItem{
+		{
+			CommitSHA:      "1111111111111111111111111111111111111111",
+			CommitSHAShort: "1111111",
+			CommitTime:     t1,
+			CommitTimeStr:  "2026-10-20T01:00:00Z",
+			RunName:        "base-1111111",
+			Namespace:      "eval-runner",
+			HasPoint:       true,
+			SuccessRate:    &rate1,
+		},
+		{
+			CommitSHA:      "2222222222222222222222222222222222222222",
+			CommitSHAShort: "2222222",
+			CommitTime:     t2,
+			CommitTimeStr:  "2026-10-20T02:00:00Z",
+			RunName:        "base-2222222",
+			Namespace:      "eval-runner",
+			HasPoint:       true,
+			SuccessRate:    &rate2,
+			CI: &v1alpha1.ConfidenceInterval{
+				Lower:      0.70,
+				Upper:      0.94,
+				Confidence: 0.95,
+				Method:     "wilson",
+			},
+		},
+	}
+	spark := BuildSparklineSVG(sparkItems)
+
+	leftPx, widthPx, dotPx, hasCI := CalculateRunBarGeometry(&rate2, nil, sparkItems[1].CI, 240.0)
+
+	tasks := []RepoOverviewTaskRow{
+		{
+			ID:            "triage/runbook_lookup",
+			SamplesLink:   "/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples",
+			RunLink:       "/github.com/gke-labs/eval-runner/runs/base-2222222",
+			SeriesLink:    "/github.com/gke-labs/eval-runner/series/main?task=triage%2Frunbook_lookup",
+			RateStr:       "0.85",
+			CILabel:       "[0.70, 0.94]",
+			CILeftPx:      leftPx,
+			CIWidthPx:     widthPx,
+			CIDotPx:       dotPx,
+			HasCI:         hasCI,
+			DeltaStr:      "+0.15",
+			DeltaClass:    "good",
+			HasDelta:      true,
+			Sparkline:     spark,
+			Samples:       "48",
+			TokensStr:     "12,400",
+			CostStr:       "$0.05",
+			CommitShort:   "2222222",
+			CommitTimeStr: "10m",
+		},
+	}
+
+	return RepoOverviewView{
+		ActiveTab:       NavTabOverview,
+		Repo:            RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
+		Namespace:       "eval-runner",
+		Branch:          "main",
+		TasksTracked:    1,
+		MeanSuccessRate: "0.85",
+		LastCommitSHA:   "2222222222222222222222222222222222222222",
+		LastCommitShort: "2222222",
+		LastCommitLink:  "/github.com/gke-labs/eval-runner/runs/base-2222222",
+		RunsOnBranch:    2,
+		PullsLink:       "/github.com/gke-labs/eval-runner/pulls",
+		Tasks:           tasks,
+		IsEmpty:         false,
+	}
+}
+
+func sampleRepoOverviewEmptyView() RepoOverviewView {
+	return RepoOverviewView{
+		ActiveTab: NavTabOverview,
+		Repo:      RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
+		Namespace: "eval-runner",
+		Branch:    "main",
+		PullsLink: "/github.com/gke-labs/eval-runner/pulls",
+		IsEmpty:   true,
+	}
+}
+
+func TestTemplateRenderingRepoOverviewGolden(t *testing.T) {
+	view := sampleRepoOverviewView()
+
+	var buf bytes.Buffer
+	if err := tmplRepoOverview.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo overview template: %v", err)
+	}
+
+	assertGolden(t, "repo_overview.golden.html", buf.String())
+}
+
+func TestTemplateRenderingRepoOverviewEmptyGolden(t *testing.T) {
+	view := sampleRepoOverviewEmptyView()
+
+	var buf bytes.Buffer
+	if err := tmplRepoOverview.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo overview empty template: %v", err)
+	}
+
+	assertGolden(t, "repo_overview_empty.golden.html", buf.String())
+}
+
 func TestTemplateRenderingRepoComparisonDetailGolden(t *testing.T) {
 	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
 	baseRun, candRun, comp := sampleFixtures()

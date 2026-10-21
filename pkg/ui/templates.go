@@ -341,6 +341,192 @@ const repoIndexTemplate = `
 </html>
 `
 
+const repoOverviewTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ if .Repo.Name }}{{ .Repo.Name }} · {{ end }}Overview · eval-runner</title>
+  <style>` + baseCSS + `</style>
+</head>
+<body>
+  {{ template "repo_header" . }}
+
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Overview</h1>
+        <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">{{ .Branch }}</span></span>
+      </div>
+      <div class="card-body">
+        {{- if .Note }}
+        <div style="margin-bottom:16px;padding:10px 14px;background:var(--neutral-soft);border:1px solid var(--line);border-left:3px solid var(--neutral);border-radius:6px;font-size:14px;color:var(--ink-2)">
+          {{ .Note }}
+        </div>
+        {{- end }}
+
+        <div class="meta-grid">
+          <div class="meta-tile">
+            <div class="label">Tasks Tracked</div>
+            <div class="value num">{{ .TasksTracked }}</div>
+          </div>
+          <div class="meta-tile">
+            <div class="label">Mean Success Rate</div>
+            <div class="value">{{ if .MeanSuccessRate }}{{ .MeanSuccessRate }}{{ else }}—{{ end }}</div>
+          </div>
+          <div class="meta-tile">
+            <div class="label">Last Commit Evaluated</div>
+            <div class="value mono">{{ if .LastCommitLink }}<a href="{{ .LastCommitLink }}">{{ .LastCommitShort }}</a>{{ else if .LastCommitShort }}{{ .LastCommitShort }}{{ else }}—{{ end }}</div>
+          </div>
+          <div class="meta-tile">
+            <div class="label">Runs on Branch</div>
+            <div class="value num">{{ .RunsOnBranch }}</div>
+          </div>
+          <div class="meta-tile">
+            <div class="label">Pull Requests</div>
+            <div class="value"><a href="{{ .PullsLink }}">Pull requests →</a></div>
+          </div>
+        </div>
+
+        {{- if .IsEmpty }}
+        <div class="empty-state">
+          {{- if and .Branch (ne .Branch "main") }}
+          <p>No Completed Runs on branch <code class="mono">{{ .Branch }}</code>.</p>
+          {{- else }}
+          <p>No evaluations recorded for this repository.</p>
+          <p style="font-size:13px;color:var(--muted);margin-top:8px">Track eval metrics by applying a Run: <code class="mono">kubectl apply -f &lt;run.yaml&gt;</code></p>
+          {{- end }}
+        </div>
+        {{- else }}
+        <div style="overflow-x:auto;margin-top:20px">
+          <table class="ci">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Rate</th>
+                <th>CI (95%)</th>
+                <th>Δ vs prev</th>
+                <th>Trend</th>
+                <th>Samples</th>
+                <th>Tokens</th>
+                <th>Cost</th>
+                <th>Commit</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{- range .Tasks }}
+              <tr>
+                <td class="mono" style="font-weight:600">
+                  {{- if .SamplesLink }}
+                  <a href="{{ .SamplesLink }}">{{ .ID }}</a>
+                  {{- else }}
+                  {{ .ID }}
+                  {{- end }}
+                </td>
+                <td class="num">
+                  {{- if .RunLink }}
+                  <a href="{{ .RunLink }}">{{ .RateStr }}</a>
+                  {{- else }}
+                  {{ .RateStr }}
+                  {{- end }}
+                </td>
+                <td>
+                  {{- if .HasCI }}
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <a href="{{ .RunLink }}" style="display:inline-block;text-decoration:none">
+                      <div class="cibar-01" title="Rate: {{ .RateStr }} {{ .CILabel }}">
+                        <div class="axis"></div>
+                        <div class="tick-0"></div>
+                        <div class="tick-50"></div>
+                        <div class="tick-100"></div>
+                        <div class="range" style="left:{{ printf "%.1f" .CILeftPx }}px; width:{{ printf "%.1f" .CIWidthPx }}px"></div>
+                        <div class="pt" style="left:{{ printf "%.1f" .CIDotPx }}px"></div>
+                      </div>
+                    </a>
+                    <span style="font-size:12px;color:var(--muted);white-space:nowrap">{{ .CILabel }}</span>
+                  </div>
+                  {{- else }}
+                  <span style="color:var(--muted)">—</span>
+                  {{- end }}
+                </td>
+                <td>
+                  {{- if .HasDelta }}
+                  <a href="{{ .RunLink }}" style="text-decoration:none"><span class="chip {{ .DeltaClass }}">{{ .DeltaStr }}</span></a>
+                  {{- else }}
+                  <span style="color:var(--muted)">—</span>
+                  {{- end }}
+                </td>
+                <td>
+                  {{- if .Sparkline.HasPoints }}
+                  <a href="{{ .SeriesLink }}" title="View series for {{ .ID }}" style="display:inline-block;text-decoration:none">
+                    <svg viewBox="{{ .Sparkline.ViewBox }}" width="120" height="28" style="display:block">
+                      {{- range .Sparkline.Polygons }}
+                      <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+                      {{- end }}
+                      {{- range .Sparkline.Polylines }}
+                      <polyline points="{{ .Points }}" fill="none" stroke="{{ .Stroke }}" stroke-width="1.5"/>
+                      {{- end }}
+                      {{- range .Sparkline.Circles }}
+                      <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)"/>
+                      {{- end }}
+                    </svg>
+                  </a>
+                  {{- else }}
+                  <span style="color:var(--muted)">—</span>
+                  {{- end }}
+                </td>
+                <td class="num">
+                  {{- if .SamplesLink }}
+                  <a href="{{ .SamplesLink }}">{{ .Samples }}</a>
+                  {{- else if .RunLink }}
+                  <a href="{{ .RunLink }}">{{ .Samples }}</a>
+                  {{- else }}
+                  {{ .Samples }}
+                  {{- end }}
+                </td>
+                <td class="num mono">
+                  {{- if .RunLink }}
+                  <a href="{{ .RunLink }}">{{ .TokensStr }}</a>
+                  {{- else }}
+                  {{ .TokensStr }}
+                  {{- end }}
+                </td>
+                <td class="num mono" style="font-size:13px">
+                  {{- if .RunLink }}
+                  <a href="{{ .RunLink }}">{{ .CostStr }}</a>
+                  {{- else }}
+                  {{ .CostStr }}
+                  {{- end }}
+                </td>
+                <td class="mono">
+                  {{- if .RunLink }}
+                  <a href="{{ .RunLink }}">{{ .CommitShort }}</a>
+                  {{- else }}
+                  {{ .CommitShort }}
+                  {{- end }}
+                </td>
+                <td style="font-size:13px;color:var(--muted)">
+                  {{- if .RunLink }}
+                  <a href="{{ .RunLink }}" style="color:inherit;text-decoration:none">{{ .CommitTimeStr }}</a>
+                  {{- else }}
+                  {{ .CommitTimeStr }}
+                  {{- end }}
+                </td>
+              </tr>
+              {{- end }}
+            </tbody>
+          </table>
+        </div>
+        {{- end }}
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+`
+
 const runsListTemplate = `
 <!doctype html>
 <html lang="en">
@@ -1464,6 +1650,7 @@ var (
 	tmplSeriesList       = parseTemplate("series_list", seriesListTemplate)
 	tmplSeriesDetail     = parseTemplate("series_detail", seriesDetailTemplate)
 	tmplRepoIndex        = parseTemplate("repo_index", repoIndexTemplate)
+	tmplRepoOverview     = parseTemplate("repo_overview", repoOverviewTemplate)
 
 	// TmplComparisonTable is the parsed template for the comparison table sub-template.
 	TmplComparisonTable = tmplComparisonTable
@@ -1962,4 +2149,9 @@ func RenderSeriesDetail(w io.Writer, view SeriesDetailView) error {
 // RenderRepoIndex renders the repository index template to the given writer.
 func RenderRepoIndex(w io.Writer, view RepoIndexView) error {
 	return tmplRepoIndex.Execute(w, view)
+}
+
+// RenderRepoOverview renders the repository overview template to the given writer.
+func RenderRepoOverview(w io.Writer, view RepoOverviewView) error {
+	return tmplRepoOverview.Execute(w, view)
 }
