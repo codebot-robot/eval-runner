@@ -897,7 +897,7 @@ func TestTemplateRenderingComparisonsList_FilteredEmptyState(t *testing.T) {
 	}
 	body := buf.String()
 
-	if !strings.Contains(body, "No Comparisons with label evalrunner.gke-labs.dev/vs-previous=true in namespace eval-runner.") {
+	if !strings.Contains(body, "No Comparisons with label evalrunner.gke-labs.dev/vs-previous=true.") {
 		t.Errorf("expected filtered empty state naming the label, got:\n%s", body)
 	}
 	if !strings.Contains(body, `<a href="/comparisons?kind=previous" class="filter-chip active">vs previous</a>`) {

@@ -1562,7 +1562,7 @@ func TestServerPullsNamespaceFilterAndEmptyState(t *testing.T) {
 			t.Fatalf("expected 200 OK, got %d", w.Code)
 		}
 		body := w.Body.String()
-		if !strings.Contains(body, "No pull requests found in namespace empty-ns.") {
+		if !strings.Contains(body, "No pull requests found.") {
 			t.Errorf("expected empty state message for empty-ns")
 		}
 	})
@@ -6602,6 +6602,15 @@ func TestServerRepoNamespacePropagation(t *testing.T) {
 	if !strings.Contains(bodyCustom, "?namespace=staging") {
 		t.Errorf("expected links in custom ns to contain '?namespace=staging', got: %s", bodyCustom)
 	}
+	if n := strings.Count(bodyCustom, "namespace: staging"); n != 1 {
+		t.Errorf("expected badge with 'namespace: staging' exactly once, got %d", n)
+	}
+	if n := strings.Count(bodyCustom, "namespace:"); n != 1 {
+		t.Errorf("expected 'namespace:' to appear exactly once (in badge), got %d", n)
+	}
+	if strings.Contains(bodyCustom, "Namespace</th>") {
+		t.Errorf("expected custom ns page to contain no 'Namespace</th>', got: %s", bodyCustom)
+	}
 
 	// Default namespace request
 	runDefault := &v1alpha1.Run{
@@ -6625,6 +6634,12 @@ func TestServerRepoNamespacePropagation(t *testing.T) {
 	bodyDefault := wDefault.Body.String()
 	if strings.Contains(bodyDefault, "?namespace=") {
 		t.Errorf("expected links in default ns to NOT contain '?namespace=', got: %s", bodyDefault)
+	}
+	if strings.Contains(bodyDefault, "namespace:") {
+		t.Errorf("expected default ns page to contain no 'namespace:' text, got: %s", bodyDefault)
+	}
+	if strings.Contains(bodyDefault, "Namespace</th>") {
+		t.Errorf("expected default ns page to contain no 'Namespace</th>', got: %s", bodyDefault)
 	}
 
 	// Non-default Config.DefaultNamespace test:

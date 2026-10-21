@@ -1384,11 +1384,12 @@ type SeriesListRow struct {
 
 // SeriesListView is the view model for GET /series.
 type SeriesListView struct {
-	ActiveTab  NavTab
-	Namespace  string
-	Cohort     string
-	Series     []SeriesListRow
-	TotalCount int
+	ActiveTab     NavTab
+	Namespace     string
+	LinkNamespace string
+	Cohort        string
+	Series        []SeriesListRow
+	TotalCount    int
 }
 
 // SeriesTaskLink represents a task link in the task selector.
@@ -1451,6 +1452,7 @@ func (it SeriesItem) Estimate() stats.Estimate {
 type SeriesDetailView struct {
 	ActiveTab             NavTab
 	Namespace             string
+	LinkNamespace         string
 	Repository            string
 	RepoHash              string
 	Branch                string

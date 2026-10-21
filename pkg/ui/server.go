@@ -2326,11 +2326,12 @@ func (s *Server) handleSeriesList(w http.ResponseWriter, r *http.Request) {
 	})
 
 	view := SeriesListView{
-		ActiveTab:  NavTabSeries,
-		Namespace:  ns,
-		Cohort:     cohortFilter,
-		Series:     seriesRows,
-		TotalCount: len(seriesRows),
+		ActiveTab:     NavTabSeries,
+		Namespace:     ns,
+		LinkNamespace: s.linkNamespace(ns),
+		Cohort:        cohortFilter,
+		Series:        seriesRows,
+		TotalCount:    len(seriesRows),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2821,6 +2822,7 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	view := SeriesDetailView{
 		ActiveTab:             NavTabSeries,
 		Namespace:             ns,
+		LinkNamespace:         s.linkNamespace(ns),
 		Repository:            repoDisplay,
 		RepoHash:              matchedRepoHash,
 		Branch:                branch,
