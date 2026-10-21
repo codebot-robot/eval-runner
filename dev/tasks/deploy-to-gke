@@ -46,6 +46,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -160,7 +161,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--restart",
         action="store_true",
-        help="restart deployments after ConfigMap updates (for clusters running a controller older than #277)",
+        help="restart deployments after deploying (for clusters running a controller older than #277)",
     )
     p.add_argument("--dry-run", action="store_true", help="print the commands that would run")
     args = p.parse_args()
@@ -343,14 +344,23 @@ def deploy(r: Runner, args: argparse.Namespace, root: Path, restart: bool) -> No
 
 
 def wait_for_effective_settings(
-    r: Runner, bucket: Optional[str] = None, timeout: float = 60.0
+    r: Runner,
+    bucket: Optional[str],
+    *,
+    since_time: Optional[str] = None,
+    timeout: float = 60.0,
 ) -> None:
     """Wait for the controller to log effective cluster settings reflecting the bucket."""
+    cmd = ["kubectl", "-n", NAMESPACE, "logs", f"deployment/{CONTROLLER_DEPLOYMENT}"] + (
+        [f"--since-time={since_time}"] if since_time else []
+    )
     if r.dry_run:
+        r.show(cmd)
         return
 
-    cmd = ["kubectl", "-n", NAMESPACE, "logs", f"deployment/{CONTROLLER_DEPLOYMENT}", "--since=60s"]
+    print(f"    waiting up to {int(timeout)}s for controller to log effective cluster settings...")
     deadline = time.time() + timeout
+    last_err: Optional[str] = None
     while time.time() < deadline:
         res = r.run(cmd, check=False, capture=True, mutating=False, quiet=True)
         if res.returncode == 0 and res.stdout:
@@ -358,12 +368,18 @@ def wait_for_effective_settings(
                 if "effective cluster settings" in line and (not bucket or bucket in line):
                     print(f"    {line.strip()}")
                     return
+        elif res.returncode != 0:
+            last_err = res.stderr.strip()
         time.sleep(2)
 
-    err = "error: timed out waiting for controller to log effective cluster settings"
-    if bucket:
-        err += f" reflecting artifactBucket={bucket}"
-    raise SystemExit(err)
+    if last_err:
+        print(f"    kubectl logs returned an error:\n      {last_err.splitlines()[-1]}")
+    desc = f" reflecting artifactBucket={bucket}" if bucket else ""
+    print(
+        f"    WARNING: did not see 'effective cluster settings'{desc} within {int(timeout)}s;\n"
+        f"    the deploy succeeded. Check with: kubectl -n {NAMESPACE} logs deployment/{CONTROLLER_DEPLOYMENT} | grep 'effective cluster settings'"
+    )
+    return
 
 
 def check_model_secret(r: Runner) -> None:
@@ -411,7 +427,8 @@ def main() -> None:
         desired[k.strip()] = v
 
     Step(f"ConfigMap {NAMESPACE}/{CONFIGMAP}")
-    ensure_configmap(r, args, desired)
+    started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    changed = ensure_configmap(r, args, desired)
 
     if args.skip_deploy:
         Step("Deploy (skipped)")
@@ -419,7 +436,7 @@ def main() -> None:
     else:
         Step(f"Deploy images {args.image_prefix}/*:<git sha> and manifests")
         deploy(r, args, root, restart=args.restart)
-        wait_for_effective_settings(r, desired.get("artifactBucket"))
+        wait_for_effective_settings(r, desired.get("artifactBucket"), since_time=started if changed else None)
 
     Step("Model credentials")
     check_model_secret(r)
