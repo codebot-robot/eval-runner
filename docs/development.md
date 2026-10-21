@@ -529,6 +529,20 @@ Supported ConfigMap keys include:
 
 Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the ConfigMap is absent, all built-in defaults are used.
 
+### Runtime Configuration Reloading
+
+Both the controller and UI watch `eval-runner-config` and dynamically apply configuration changes at runtime without requiring a deployment restart:
+- **Artifact Sink**: When `artifactBucket`, `artifactDir`, or `artifactMaxUploadBytes` is modified (e.g. setting `artifactBucket` after initial cluster deploy), the controller and UI construct the new artifact sink and safely retire the previous one. In-flight uploads and reads are permitted to complete before the old sink is closed. *(Note: Swapping away from the default in-memory sink discards previously stored in-memory artifacts, so Runs or Comparisons in flight at that moment may encounter unreadable artifacts.)*
+- **Reloadable Settings**: Changes to deadlines (`discoveryDeadline`, `executionDeadline`), concurrency limits (`maxParallelTasks`), progress polling intervals (`pollProgressInterval`), sandbox task grace periods (`taskGracePeriod`), sandbox images (`sandboxdImage`), model credentials (`modelSecret`), token pricing (`modelPrices`), command authorizers (`commandUsers`), GitHub credentials (`githubTokenSecret`, `githubAppSecret`), PR reporting (`uiBaseURL`, `inconclusivePolicy`), completed comparison retention expiry, and task affinity (`affinityMode`) take effect immediately for subsequent evaluations.
+- **Observability**: When settings reload, the controller logs a single `"effective cluster settings"` line reflecting all active values, and the UI increments its internal `config_generation` value and updates the artifact sink status in page footers (`artifacts: gs://bucket`).
+
+#### Restart-Only Settings
+
+Settings that bind to host interfaces, define process identity, or configure webhook startup cannot change at runtime and require restarting the corresponding Deployment or pod:
+- **Listen and Probe Addresses**: Controller and UI bind addresses (e.g. `--health-probe-bind-address`, `--listen-addr`).
+- **Namespaces**: Target Kubernetes namespaces (e.g. `--namespace`, `--sandbox-namespace`).
+- **Webhook Settings**: Keys consumed by `eval-runner-webhook` (`githubWebhookSecret`, `webhookRepositories`, `defaultBatchSize`, `defaultMaxSamplesPerTask`, `defaultModel`) are read once at webhook startup and remain restart-only.
+
 ### Empty-Value Semantics and Feature Disabling
 
 Empty values in the ConfigMap (empty string or whitespace-only) are unified across all keys to mean **"unset, use default"**; they do not disable features or clear defaults.
