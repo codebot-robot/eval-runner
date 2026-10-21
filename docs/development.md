@@ -273,6 +273,10 @@ kubectl -n eval-runner port-forward svc/eval-runner-ui 8080:80
 ```
 
 Then open your browser:
+- `http://localhost:8080/`: repository index listing distinct repositories and counts in the namespace.
+- `http://localhost:8080/<host>/<owner>/<repo>`: repository home page and Overview tab displaying per-task success rate, confidence intervals, delta vs previous commit, trend sparklines, and run links.
+- `http://localhost:8080/<host>/<owner>/<repo>/runs`: view all Runs for the repository.
+- `http://localhost:8080/<host>/<owner>/<repo>/comparisons`: view all Comparisons for the repository.
 - `http://localhost:8080/pulls`: view all pull requests derived from Comparisons, grouped by repository and PR number with latest verdicts, samples, batches, and completion time.
 - `http://localhost:8080/pulls/<repohash>/<number>`: view verdict history across pushes for a pull request.
 - `http://localhost:8080/runs`: view all Runs in the namespace with their phase, task completion, sample counts, and rates.

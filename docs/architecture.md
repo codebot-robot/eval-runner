@@ -144,6 +144,12 @@ The `eval-runner-webhook` service (image `eval-runner-webhook`) receives GitHub 
 ### Web Dashboard UI (`cmd/eval-runner-ui`)
 
 The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboard:
+- `GET /`: Repository index listing distinct repositories and counts in the namespace.
+- `GET /{host}/{owner}/{repo}`: Repository home page and Overview tab displaying per-task success rate, confidence intervals, delta vs previous commit, trend sparklines, and run links.
+- `GET /{host}/{owner}/{repo}/runs`: Repository-scoped Runs list.
+- `GET /{host}/{owner}/{repo}/runs/{name}`: Repository-scoped Run detail.
+- `GET /{host}/{owner}/{repo}/comparisons`: Repository-scoped Comparisons list.
+- `GET /{host}/{owner}/{repo}/comparisons/{name}`: Repository-scoped Comparison detail.
 - `GET /pulls`: Overview table of pull requests derived from webhook-created Comparisons, grouped by repository and PR number with latest verdict, samples run, batches, and completion time.
 - `GET /pulls/{repohash}/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression.
 - `GET /runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
