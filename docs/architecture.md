@@ -147,12 +147,44 @@ The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboa
 - `GET /pulls/{repohash}/{number}`: Per-PR history page showing all Comparisons for a pull request across pushes with verdict progression.
 - `GET /runs`: Overview of all Runs in the namespace with phase, task counts, sample ranges, and success rates.
 - `GET /runs/{namespace}/{name}`: Detailed per-task breakdown for a single Run.
-- `GET /runs/{namespace}/{name}/tasks/{task}/samples`: Per-task sample list with IDs, scores, preview snippets, latency, and tokens.
-- `GET /runs/{namespace}/{name}/tasks/{task}/samples/{sample}`: Sample transcript viewer rendering multi-turn message and event streams as typed text rows.
+- `GET /runs/{namespace}/{name}/tasks` and `GET /runs/{namespace}/{name}/tasks/{rest...}`: Per-task sample list (`.../tasks/{task}/samples`) and sample transcript viewer (`.../tasks/{task}/samples/{sample}`).
 - `GET /comparisons`: Overview of all Comparisons with verdicts, $P(\text{improvement})$, and batch progress.
 - `GET /comparisons/{namespace}/{name}`: Complete paired comparison table mirroring the PR comment layout, plus per-task CI-width-vs-n history chart and stopping rule decision table recomputed from the stored comparison artifact.
+- `GET /series`: Main-branch series list.
+- `GET /series/{repohash}/{branch...}`: Main-branch progression series chart with confidence interval bands and per-task rates over time.
+
+#### Task Routing and Proxy Decoding (`{rest...}`)
+
+Task IDs in `eval-runner` frequently contain slashes (for example, `docs/readme_comprehension` or `triage/runbook_lookup`). While the UI generates canonical links with URL-encoded task IDs (`url.PathEscape`, such as `/runs/{ns}/{name}/tasks/docs%2Freadme_comprehension/samples`), intermediate reverse proxies, ingress gateways, and load balancers often decode `%2F` into `/` before forwarding the HTTP request to the pod.
+
+Because Go's router matches `{task}` against only a single path segment, a decoded multi-segment task path (such as `/runs/{ns}/{name}/tasks/docs/readme_comprehension/samples`) fails to match single-segment routes and produces a 404 error. To prevent this, the UI registers wildcard routes using `{rest...}`:
+- `GET /runs/{namespace}/{name}/tasks`
+- `GET /runs/{namespace}/{name}/tasks/{rest...}`
+
+The handler parses `rest` by searching backwards for the last `/samples` delimiter:
+1. Everything before the final `/samples` segment is parsed as the task ID (supporting both `%2F`-escaped and multi-segment decoded task names).
+2. Any trailing path segment after `/samples/` is parsed as the sample ID. Sample IDs containing `#` (such as epoch suffixes `sample-017#2`) survive escaping both ways.
+3. If no sample ID follows `/samples`, the handler renders the task's sample list. If a sample ID is present, it renders the sample transcript viewer.
+
+**Query Parameter Escape Hatch**: As an explicit escape hatch that bypasses path parsing and proxy path rewriting, the handler accepts `?task=<task>` and `?sample=<sample>` query parameters:
+- `GET /runs/{namespace}/{name}/tasks?task=<task>`: renders the task sample list.
+- `GET /runs/{namespace}/{name}/tasks?task=<task>&sample=<sample>`: renders the sample transcript viewer.
+
+Query parameters take precedence over path-extracted values when provided.
+
+**Repository-Scoped Equivalents**: Once #241 merges, equivalent task routes will be registered under `/{host}/{owner}/{repo}/runs/{name}/tasks/{rest...}` (and `/tasks`), accepting the same canonical paths (`/{host}/{owner}/{repo}/runs/{name}/tasks/{task}/samples[/{sample}]`), proxy-decoded paths, and query escape hatches.
+
+#### Artifact Storage Diagnosis and Guidance
 
 The UI loads `artifactBucket` and `artifactDir` configuration from `eval-runner-config` at startup, connecting to the configured `ArtifactSink` (GCS using Application Default Credentials, or a local filesystem directory). An in-process LRU cache (bounded by byte size and TTL) caches immutable Inspect evaluation logs across page requests.
+
+When artifact storage is missing or unconfigured:
+- **Page Footer**: Every Run detail, task sample list, and sample transcript page displays an `artifacts: ...` footer line (`artifacts: gs://<bucket>`, `artifacts: dir <path>`, or `artifacts: none`). This allows operators to immediately check artifact sink status directly from the browser without `kubectl`.
+- **Nil-Sink Guidance Message**: If a user navigates to a sample list or transcript URL when artifact storage is unconfigured (`s.cfg.ArtifactSink == nil`), the server renders the page with a clear configuration message rather than a generic 404:
+  > `artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config`
+
+  The missing sink is also logged on the UI pod (`artifact storage not configured for UI`).
+- **Run Detail Links**: When `s.cfg.ArtifactSink` is nil, task IDs that have a log path are rendered on the Run detail page (`/runs/{namespace}/{name}`) without hyperlinks alongside an `(artifacts unavailable)` note, preventing navigation to dead ends.
 
 ### Two Namespaces
 

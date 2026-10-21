@@ -257,8 +257,43 @@ Then open your browser:
 - `http://localhost:8080/pulls/<repohash>/<number>`: view verdict history across pushes for a pull request.
 - `http://localhost:8080/runs`: view all Runs in the namespace with their phase, task completion, sample counts, and rates.
 - `http://localhost:8080/runs/<namespace>/<name>`: view detailed Run statistics with per-task rates, 95% CI bars against a 0–1 axis, sample counts, estimation method, and artifact pointers.
+- `http://localhost:8080/runs/<namespace>/<name>/tasks/<task>/samples`: per-task sample list with scores, preview snippets, latency, and sample counts.
+- `http://localhost:8080/runs/<namespace>/<name>/tasks/<task>/samples/<sample>`: sample transcript viewer rendering multi-turn message and event streams as typed text rows.
 - `http://localhost:8080/comparisons/<namespace>/<name>`: view paired comparison results in the PR-comment table shape with Δ CI bars drawn against a zero line, verdict chip, P(improvement), and base/candidate commits. The top of the page shows the Quality, Tokens and Cost changes between the two Runs, `status.message` in a Reason panel, and a Regressed tasks table (base → candidate rate, Δ, and 95% CI) when any task is labeled `regressed`. A message with line breaks renders as a headline (its first line) followed by blocks: blank lines separate blocks, consecutive `- ` lines form a list, a line ending in `:` directly above a list is its heading, other lines keep their line breaks, and `http(s)` URLs become links. A message without line breaks renders as one block.
 - `http://localhost:8080/comparisons`: view all Comparisons in the namespace. Each row shows the completion time in UTC, a reason line under the verdict (the first line of `status.message`, or for a `REGRESSED` Comparison without a message, the regressed tasks with the most negative Δ), and the Quality, Tokens and Cost changes between its two Runs. Comparisons labeled `evalrunner.gke-labs.dev/vs-baseline: "true"` or `evalrunner.gke-labs.dev/vs-previous: "true"` are grouped into one row per candidate Run with side-by-side "vs baseline" and "vs previous" cells, ordered by candidate Run creation time; `?kind=baseline` or `?kind=previous` shows one kind only.
+- `http://localhost:8080/series`: view all main-branch series across repositories.
+- `http://localhost:8080/series/<repohash>/<branch>`: view main-branch progression series chart with confidence interval bands and per-task rates over time.
+
+#### Task Routes, Path Decoding, and Escape Hatches
+
+The UI serves task sample lists and individual sample transcripts under `http://localhost:8080/runs/<namespace>/<name>/tasks/<task>/samples[/<sample>]`. Internally, these routes are registered as `GET /runs/{namespace}/{name}/tasks` and `GET /runs/{namespace}/{name}/tasks/{rest...}`.
+
+**Why `{rest...}` is used**:
+Task IDs frequently contain slashes (such as `docs/readme_comprehension`). The UI generates canonical links using URL-encoded task IDs (`url.PathEscape`, e.g. `docs%2Freadme_comprehension`). However, ingress controllers, reverse proxies, and cloud load balancers often decode `%2F` into `/` before proxying requests to the container. If the route were registered with single-segment `{task}` (such as `.../tasks/{task}/samples`), Go's router would treat each slash as a path separator, causing decoded multi-segment paths to return 404.
+
+The `{rest...}` wildcard captures the full trailing path. The server extracts the task ID and optional sample ID by splitting backwards at the last `/samples` delimiter:
+- Canonical `%2F`-encoded paths (`.../tasks/docs%2Freadme_comprehension/samples`) and proxy-decoded paths (`.../tasks/docs/readme_comprehension/samples`) resolve to the same task sample list.
+- Sample transcripts (`.../samples/<sample>`) preserve `#`-suffixed sample IDs (such as epoch identifiers `sample-017#2`).
+
+**Escape-Hatch Query Form**:
+If intermediate proxies or gateways rewrite paths in unsupported ways, query parameters provide an explicit escape hatch that bypasses path parsing entirely:
+- `http://localhost:8080/runs/<namespace>/<name>/tasks?task=<task>`: opens the sample list for `<task>`.
+- `http://localhost:8080/runs/<namespace>/<name>/tasks?task=<task>&sample=<sample>`: opens the transcript for `<sample>`.
+
+Query parameters take precedence over path-extracted values when provided.
+
+**Repository-Scoped Routes**:
+Once #241 merges, equivalent routes will be registered under `http://localhost:8080/<host>/<owner>/<repo>/runs/<name>/tasks/<task>/samples[/<sample>]` (as `/{host}/{owner}/{repo}/runs/{name}/tasks/{rest...}`), supporting the same decoded multi-segment paths and `?task=&sample=` query escape hatch.
+
+#### Diagnosing Missing Artifact Storage
+
+The UI requires access to evaluation logs via an `ArtifactSink` (`artifactBucket` or `artifactDir` in `eval-runner-config`). When artifact storage is missing or not configured:
+- **Page Footer**: Run detail, sample list, and transcript pages display an `artifacts: ...` footer line (`artifacts: gs://<bucket>`, `artifacts: dir <path>`, or `artifacts: none`). This allows operators to quickly verify whether the UI is connected to an artifact sink without running `kubectl`.
+- **Nil-Sink Guidance Message**: Navigating to a task sample list or sample transcript when no sink is configured renders an actionable guidance message rather than a 404:
+  > `artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config`
+
+  The missing sink is also logged in the UI container output (`artifact storage not configured for UI`).
+- **Run Detail Page**: On `http://localhost:8080/runs/<namespace>/<name>`, task IDs that have a log path are displayed as plain text without links alongside an `(artifacts unavailable)` note when artifact storage is unconfigured, preventing navigation to unbacked pages.
 
 #### Running the UI Locally
 
