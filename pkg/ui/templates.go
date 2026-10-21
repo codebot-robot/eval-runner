@@ -1216,7 +1216,7 @@ const taskSamplesListTemplate = `
       </div>
       {{ else }}{{ with .WarningMessage }}
       <div class="msg-alert" style="margin-bottom:16px">
-        {{ . }}
+        {{ . }}{{ if $.WarningLogPath }}; download it from {{ if $.WarningLogURL }}<a href="{{ $.WarningLogURL }}" target="_blank" rel="noopener noreferrer">{{ $.WarningLogPath }}</a>{{ else }}{{ $.WarningLogPath }}{{ end }}{{ end }}
       </div>{{ end }}
       <table class="table" style="margin-top:16px">
         <thead>

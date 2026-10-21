@@ -19,8 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
-	"html/template"
 	"log"
 	"math"
 	"net/http"
@@ -2004,25 +2002,38 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]artifacts.ParsedInspectSample, bool, error) {
+type inspectFailureReason string
+
+const (
+	inspectFailureNone        inspectFailureReason = ""
+	inspectFailureOversized   inspectFailureReason = "oversized"
+	inspectFailureUnparsable  inspectFailureReason = "unparsable"
+	inspectFailureUnavailable inspectFailureReason = "unavailable"
+)
+
+func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]artifacts.ParsedInspectSample, inspectFailureReason, error) {
 	if s.cache != nil {
 		if samples, parseErr, ok := s.cache.get(logPath); ok {
 			if parseErr != nil {
-				return nil, true, parseErr
+				if strings.Contains(parseErr.Error(), "exceeds maximum") {
+					return nil, inspectFailureOversized, parseErr
+				}
+				return nil, inspectFailureUnparsable, parseErr
 			}
-			return samples, false, nil
+			return samples, inspectFailureNone, nil
 		}
 	}
 
 	data, err := s.reloadableSink.Load(ctx, logPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "exceeds maximum") {
+			// Cache the oversized-load error to avoid retrying large artifact reads on every request.
 			if s.cache != nil {
 				s.cache.set(logPath, 0, nil, err)
 			}
-			return nil, true, err
+			return nil, inspectFailureOversized, err
 		}
-		return nil, false, err
+		return nil, inspectFailureUnavailable, err
 	}
 
 	samples, parseErr := artifacts.ParseInspectSamples(data)
@@ -2030,13 +2041,13 @@ func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]arti
 		if s.cache != nil {
 			s.cache.set(logPath, int64(len(data)), nil, parseErr)
 		}
-		return nil, true, parseErr
+		return nil, inspectFailureUnparsable, parseErr
 	}
 
 	if s.cache != nil {
 		s.cache.set(logPath, int64(len(data)), samples, nil)
 	}
-	return samples, false, nil
+	return samples, inspectFailureNone, nil
 }
 
 func (s *Server) loadTaskSamplesFromSummary(ctx context.Context, logPath string) ([]artifacts.ParsedInspectSample, bool, error) {
@@ -2105,51 +2116,6 @@ func (s *Server) loadTaskSamplesFromSummary(ctx context.Context, logPath string)
 	}
 
 	return parsed, summary.SamplesTruncated, nil
-}
-
-func loadCapMiB(err error) int64 {
-	defaultMiB := artifacts.DefaultMaxLoadBytes / (1024 * 1024)
-	if err == nil {
-		return defaultMiB
-	}
-	msg := err.Error()
-	idx := strings.Index(msg, " of ")
-	if idx != -1 {
-		sub := msg[idx+4:]
-		if byteIdx := strings.Index(sub, " bytes"); byteIdx != -1 {
-			numStr := strings.TrimSpace(sub[:byteIdx])
-			if b, parseErr := strconv.ParseInt(numStr, 10, 64); parseErr == nil && b > 0 {
-				mib := b / (1024 * 1024)
-				if mib > 0 {
-					return mib
-				}
-			}
-		}
-	}
-	return defaultMiB
-}
-
-func isGCSSink(sink artifacts.ArtifactSink) bool {
-	if sink == nil {
-		return false
-	}
-	type currentGetter interface {
-		Current() artifacts.ArtifactSink
-	}
-	if cg, ok := sink.(currentGetter); ok {
-		sink = cg.Current()
-		if sink == nil {
-			return false
-		}
-	}
-	type bucketGetter interface {
-		Bucket() string
-	}
-	if _, ok := sink.(bucketGetter); ok {
-		return true
-	}
-	prefix := sink.ArtifactPrefix("dummy")
-	return strings.HasPrefix(prefix, "gs://")
 }
 
 func hasComparisonPrefix(path string) bool {
@@ -2597,15 +2563,13 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 		Version:        s.cfg.Version,
 	}
 
-	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
-	inspectErr := err
+	samples, failureReason, err := s.loadInspectSamples(ctx, logPath)
 	isFallback := false
-	if isTruncated || err != nil {
-		// Fallback to summary.json when the full log exceeded the load cap or could not be parsed.
+	if failureReason != inspectFailureNone {
+		// Fallback to summary.json when the full log exceeded the load cap, could not be parsed, or could not be loaded.
 		if summarySamples, samplesTruncated, summaryErr := s.loadTaskSamplesFromSummary(ctx, logPath); summaryErr == nil && len(summarySamples) > 0 {
 			samples = summarySamples
 			err = nil
-			isTruncated = false
 			isFallback = true
 
 			prefix := "Showing sample outcomes from summary.json"
@@ -2613,22 +2577,23 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 				prefix = "This task evaluated more than 10,000 samples. Showing the first 10,000 samples from summary.json"
 			}
 
-			var logArtifactHTML string
-			logURL := ""
-			if isGCSSink(s.ArtifactSink()) {
-				logURL = FormatLogURL(logPath)
-			}
-			if logURL != "" {
-				logArtifactHTML = fmt.Sprintf(`<a href="%s" target="_blank" rel="noopener noreferrer">%s</a>`, logURL, html.EscapeString(logPath))
-			} else {
-				logArtifactHTML = html.EscapeString(logPath)
+			var reasonStr string
+			switch failureReason {
+			case inspectFailureOversized:
+				loadCapMiB := artifacts.DefaultMaxLoadBytes / (1024 * 1024)
+				reasonStr = fmt.Sprintf("the evaluation log exceeds the UI load cap (%d MiB)", loadCapMiB)
+			case inspectFailureUnparsable:
+				reasonStr = "the evaluation log could not be parsed"
+			default:
+				reasonStr = "the evaluation log could not be loaded"
 			}
 
-			mib := loadCapMiB(inspectErr)
-			view.WarningMessage = template.HTML(fmt.Sprintf("%s; transcripts unavailable: the evaluation log exceeds the UI load cap (%d MiB); download it from %s", prefix, mib, logArtifactHTML))
+			view.WarningMessage = fmt.Sprintf("%s; transcripts unavailable: %s", prefix, reasonStr)
+			view.WarningLogPath = logPath
+			view.WarningLogURL = FormatLogURL(logPath)
 		}
 	}
-	if isTruncated {
+	if !isFallback && (failureReason == inspectFailureOversized || failureReason == inspectFailureUnparsable) {
 		view.IsTruncatedLog = true
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Sample details cannot be displayed."
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2754,14 +2719,23 @@ func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, 
 		Version:         s.cfg.Version,
 	}
 
-	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
-	if isTruncated || err != nil {
+	samples, failureReason, err := s.loadInspectSamples(ctx, logPath)
+	if failureReason != inspectFailureNone {
 		if summarySamples, _, summaryErr := s.loadTaskSamplesFromSummary(ctx, logPath); summaryErr == nil && len(summarySamples) > 0 {
-			httpError(w, http.StatusNotFound, "transcript unavailable: log exceeds the UI load cap", "", nil)
+			var publicMsg string
+			switch failureReason {
+			case inspectFailureOversized:
+				publicMsg = "transcript unavailable: log exceeds the UI load cap"
+			case inspectFailureUnparsable:
+				publicMsg = "transcript unavailable: log could not be parsed"
+			default:
+				publicMsg = "transcript unavailable: log could not be loaded"
+			}
+			httpError(w, http.StatusNotFound, publicMsg, "", nil)
 			return
 		}
 	}
-	if isTruncated {
+	if failureReason == inspectFailureOversized || failureReason == inspectFailureUnparsable {
 		view.IsTruncatedLog = true
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Transcript details cannot be displayed."
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

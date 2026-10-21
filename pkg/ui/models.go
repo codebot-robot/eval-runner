@@ -18,7 +18,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"html/template"
 	"math"
 	"net/url"
 	"strconv"
@@ -2341,7 +2340,9 @@ type TaskSamplesListView struct {
 	NextLink         string
 	IsTruncatedLog   bool
 	TruncatedMessage string
-	WarningMessage   template.HTML
+	WarningMessage   string
+	WarningLogPath   string
+	WarningLogURL    string
 	StorageMessage   string
 	ArtifactFooter   string
 	Version          string
