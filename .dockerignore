@@ -1,47 +1,40 @@
+# Note: Go's VCS stamping runs `git status --porcelain` inside the build context.
+# Any tracked file matching an ignore pattern would appear deleted to git inside
+# the container, causing the image binary to report `-dirty`. Do not add patterns
+# that match tracked files in git.
+
 # Build artifacts
 .build/
 bin/
 
+# Go workspace (local-only; container image builds use the go.mod replace directive)
+go.work
+go.work.sum
+**/go.work
+**/go.work.sum
+
 # Local cluster credentials and secrets
-*.kubeconfig
 **/*.kubeconfig
-*.key
 **/*.key
-*.pem
 **/*.pem
-*.secret
 **/*.secret
-.env
-.env.*
 **/.env
 **/.env.*
 
 # Editor and OS junk
-.DS_Store
 **/.DS_Store
-Thumbs.db
 **/Thumbs.db
-*.swp
 **/*.swp
-*.swo
 **/*.swo
-*~
 **/*~
-.idea/
 **/.idea/
-.vscode/
 **/.vscode/
 
 # Python virtual environments and caches
-.venv/
 **/.venv/
-__pycache__/
 **/__pycache__/
-*.py[cod]
 **/*.py[cod]
 
 # Logs
-*.log
 **/*.log
-*.eval
 **/*.eval
