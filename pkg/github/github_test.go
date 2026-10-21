@@ -2322,3 +2322,56 @@ func TestRenderComparisonMarkdown_WithAffinity(t *testing.T) {
 		t.Errorf("expected footer to mention '1 matched', got:\n%s", markdown)
 	}
 }
+
+func TestReporter_PostUnserviceableNote(t *testing.T) {
+	ctx := t.Context()
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("test-token")
+	reporter := NewReporter(client, ReporterOptions{})
+
+	// 1. Nil comparison or nil pull request is no-op
+	if err := reporter.PostUnserviceableNote(ctx, nil, "artifact prefix mismatch"); err != nil {
+		t.Errorf("expected nil error for nil comparison, got: %v", err)
+	}
+	compNoPR := &v1alpha1.Comparison{}
+	if err := reporter.PostUnserviceableNote(ctx, compNoPR, "artifact prefix mismatch"); err != nil {
+		t.Errorf("expected nil error for nil pull request, got: %v", err)
+	}
+
+	// 2. Invalid repository format returns error
+	compInvalidRepo := &v1alpha1.Comparison{
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "invalid-format",
+				Number:     42,
+			},
+		},
+	}
+	if err := reporter.PostUnserviceableNote(ctx, compInvalidRepo, "artifact prefix mismatch"); err == nil {
+		t.Errorf("expected error for invalid repository format, got nil")
+	}
+
+	// 3. Valid comparison posts note to PR
+	comp := &v1alpha1.Comparison{
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     42,
+			},
+		},
+	}
+	if err := reporter.PostUnserviceableNote(ctx, comp, "artifact prefix mismatch"); err != nil {
+		t.Fatalf("unexpected error posting note: %v", err)
+	}
+
+	comments := server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment created, got %d", len(comments))
+	}
+	expected := "Extra samples cannot be run: artifact prefix mismatch."
+	if comments[0].Body != expected {
+		t.Errorf("expected comment body %q, got %q", expected, comments[0].Body)
+	}
+}
