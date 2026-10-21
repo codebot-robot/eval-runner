@@ -352,6 +352,15 @@ type ComparisonReportingStatus struct {
 	// Message records error or status details (e.g. "disabled" or permanent error message).
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// Attempts is the number of times the controller has attempted to report to GitHub.
+	// +optional
+	Attempts int `json:"attempts,omitempty"`
+
+	// NextAttemptAt is the earliest time when the controller should next attempt reporting.
+	// If nil or in the past, reporting is eligible immediately.
+	// +optional
+	NextAttemptAt *metav1.Time `json:"nextAttemptAt,omitempty"`
 }
 
 const (
@@ -363,6 +372,9 @@ const (
 
 	// MaxCommandAttempts is the maximum number of processing attempts before transient command errors become terminal.
 	MaxCommandAttempts = 3
+
+	// MaxReportingAttempts is the maximum number of reporting attempts before transient errors become permanent.
+	MaxReportingAttempts = 4
 )
 
 // ComparisonPendingCommand represents an unhandled command received from a GitHub review comment.
