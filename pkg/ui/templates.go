@@ -1625,6 +1625,7 @@ const seriesListTemplate = `
               <th>Repository</th>
               <th>Branch</th>
               <th>Runs</th>
+              <th>Last Move</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -1634,11 +1635,12 @@ const seriesListTemplate = `
               <td><a href="{{ .Link }}" style="font-weight:600">{{ .Repository }}</a></td>
               <td><span class="mono" style="font-size:13px">{{ .Branch }}</span></td>
               <td class="num">{{ .RunCount }}</td>
+              <td class="num" style="font-size:13px">{{ if .LastMove }}<span class="chip {{ .LastMoveChip }}" title="{{ .LastMoveMethod }}">{{ .LastMoveStr }}</span>{{ else }}—{{ end }}</td>
               <td><a href="{{ .Link }}" class="mono" style="font-size:13px">view series →</a></td>
             </tr>
             {{ else }}
             <tr>
-              <td colspan="4" class="empty-state">No series found in namespace {{ .Namespace }}.</td>
+              <td colspan="5" class="empty-state">No series found in namespace {{ .Namespace }}.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -1722,7 +1724,7 @@ const seriesDetailTemplate = `
 
             <!-- Polylines -->
             {{ range .SVG.Polylines }}
-            <polyline points="{{ . }}" fill="none" stroke="var(--indigo)" stroke-width="2"/>
+            <polyline points="{{ .Points }}" fill="none" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--indigo){{ end }}" stroke-width="2"/>
             {{ end }}
 
             <!-- Data Points -->
@@ -1748,6 +1750,7 @@ const seriesDetailTemplate = `
                 <th>Samples</th>
                 <th>Rate</th>
                 <th>95% CI</th>
+                <th>Δ vs prev (95% CI)</th>
                 <th>Tokens</th>
                 <th>Cost</th>
                 <th>Run</th>
@@ -1762,13 +1765,14 @@ const seriesDetailTemplate = `
                 <td class="num">{{ .Samples }}</td>
                 <td class="num">{{ .RateStr }}</td>
                 <td class="num" style="font-size:13px">{{ .CIStr }}</td>
+                <td class="num" style="font-size:13px">{{ if .DeltaPrev }}<span class="chip {{ .DeltaPrevChip }}" title="{{ .DeltaPrevMethod }}">{{ .DeltaPrevStr }}</span>{{ else }}—{{ end }}</td>
                 <td class="num">{{ .TokensStr }}</td>
                 <td class="num">{{ .CostStr }}</td>
                 <td><a href="{{ .RunLink }}" class="mono" style="font-size:13px">{{ .RunName }}</a></td>
               </tr>
               {{ else }}
               <tr>
-                <td colspan="9" class="empty-state">No runs recorded for this series.</td>
+                <td colspan="10" class="empty-state">No runs recorded for this series.</td>
               </tr>
               {{ end }}
             </tbody>
