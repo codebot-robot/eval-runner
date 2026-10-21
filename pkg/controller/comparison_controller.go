@@ -35,6 +35,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -625,6 +626,39 @@ func (r *ComparisonReconciler) reportToGitHub(
 
 func isTerminalRunPhase(phase v1alpha1.RunPhase) bool {
 	return phase == v1alpha1.RunPhaseCompleted || phase == v1alpha1.RunPhaseFailed
+}
+
+func isTerminalComparisonPhase(phase v1alpha1.ComparisonPhase) bool {
+	return phase == v1alpha1.ComparisonPhaseCompleted
+}
+
+func (r *ComparisonReconciler) comparisonAge(comp *v1alpha1.Comparison) (time.Duration, bool) {
+	referenceTime := comp.CreationTimestamp.Time
+	if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
+		referenceTime = comp.Status.CompletionTime.Time
+	}
+	if referenceTime.IsZero() {
+		return 0, false
+	}
+	return r.now().Sub(referenceTime), true
+}
+
+func (r *ComparisonReconciler) postUnserviceableCommandNote(ctx context.Context, comp *v1alpha1.Comparison, reason string) error {
+	if comp == nil || comp.Spec.PullRequest == nil {
+		return nil
+	}
+	ghClient, err := r.getGitHubClient(ctx)
+	if err != nil {
+		return err
+	}
+	if ghClient == nil {
+		return nil
+	}
+	reporter := github.NewReporter(ghClient, github.ReporterOptions{
+		UIBaseURL:          r.UIBaseURL,
+		InconclusivePolicy: r.InconclusivePolicy,
+	})
+	return reporter.PostUnserviceableNote(ctx, comp, reason)
 }
 
 // SetupWithManager sets up the controller with the Manager and watches Runs.
@@ -1314,12 +1348,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	// Check TTL expiration for completed comparisons
 	if r.ComparisonTTL > 0 && comp.Status.Phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
-		referenceTime := comp.CreationTimestamp.Time
-		if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
-			referenceTime = comp.Status.CompletionTime.Time
-		}
-		if !referenceTime.IsZero() {
-			age := r.now().Sub(referenceTime)
+		if age, ok := r.comparisonAge(&comp); ok {
 			if age >= r.ComparisonTTL {
 				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
 				if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
@@ -1784,6 +1813,66 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					mismatchMsg = fmt.Sprintf("baseline log path %q does not match commit prefix %q", baseTask.LogPath, basePrefix)
 				}
 				logger.Error(nil, mismatchMsg, "task", taskID)
+
+				if isTerminalComparisonPhase(comp.Status.Phase) {
+					delta := comp.Spec.ExtraSamples - comp.Status.ExtraSamplesApplied
+					hasPRCommentSource := false
+					if delta > 0 {
+						accum := 0
+						for i := len(comp.Status.HandledCommands) - 1; i >= 0 && accum < delta; i-- {
+							h := &comp.Status.HandledCommands[i]
+							if h.Outcome == "applied" {
+								if h.CommentID != 0 {
+									hasPRCommentSource = true
+								}
+								accum += h.Requested
+							}
+						}
+					}
+
+					conditionMissing := meta.FindStatusCondition(comp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples) == nil
+					if delta > 0 || conditionMissing {
+						condMsg := fmt.Sprintf("extra samples cannot be run: artifact prefix mismatch (%s)", mismatchMsg)
+						if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
+							if status.ExtraSamplesApplied < comp.Spec.ExtraSamples {
+								status.ExtraSamplesApplied = comp.Spec.ExtraSamples
+							}
+							accum := 0
+							for i := len(status.HandledCommands) - 1; i >= 0 && accum < delta; i-- {
+								h := &status.HandledCommands[i]
+								if h.Outcome == "applied" {
+									h.Outcome = "unserviceable: artifact prefix mismatch"
+									accum += h.Requested
+								}
+							}
+							meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+								Type:               v1alpha1.ConditionTypeExtraSamples,
+								Status:             metav1.ConditionFalse,
+								Reason:             "ArtifactPrefixMismatch",
+								Message:            condMsg,
+								ObservedGeneration: comp.Generation,
+							})
+						}); statusErr != nil {
+							logger.Error(statusErr, "failed to update terminal comparison status for unserviceable extra samples", "comparison", comp.Name)
+							return ctrl.Result{}, statusErr
+						}
+					}
+
+					if hasPRCommentSource {
+						if postErr := r.postUnserviceableCommandNote(ctx, &comp, "artifact prefix mismatch"); postErr != nil {
+							logger.Info("warning: failed to post unserviceable command note to PR", "pr", comp.Spec.PullRequest.Number, "err", postErr)
+						}
+					}
+
+					var result ctrl.Result
+					if r.ComparisonTTL > 0 {
+						if age, ok := r.comparisonAge(&comp); ok && age < r.ComparisonTTL {
+							result.RequeueAfter = r.ComparisonTTL - age
+						}
+					}
+					return result, nil
+				}
+
 				err := fmt.Errorf("%s", mismatchMsg)
 				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 					status.Message = mismatchMsg
@@ -2702,12 +2791,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	if r.ComparisonTTL > 0 && phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
-		referenceTime := comp.CreationTimestamp.Time
-		if comp.Status.CompletionTime != nil && !comp.Status.CompletionTime.IsZero() {
-			referenceTime = comp.Status.CompletionTime.Time
-		}
-		if !referenceTime.IsZero() {
-			age := r.now().Sub(referenceTime)
+		if age, ok := r.comparisonAge(&comp); ok {
 			if age >= r.ComparisonTTL {
 				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
 				if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
