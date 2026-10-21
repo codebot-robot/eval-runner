@@ -37,6 +37,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	"github.com/gke-labs/eval-runner/pkg/version"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -205,6 +206,9 @@ type RunReconciler struct {
 	// SandboxdImage is the container image used for the sandboxd initContainer.
 	SandboxdImage string
 
+	// ControllerVersion is the version or build identifier of the controller persisted in summary.json.
+	ControllerVersion string
+
 	// ModelPrices maps model identifier to token pricing in USD per 1M tokens.
 	ModelPrices map[string]ModelPrice
 
@@ -223,6 +227,13 @@ type RunReconciler struct {
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
 
 	cfgMu sync.RWMutex
+}
+
+func (r *RunReconciler) controllerVersion() string {
+	if r.ControllerVersion != "" {
+		return r.ControllerVersion
+	}
+	return version.String()
 }
 
 func (r *RunReconciler) controllerNamespace() string {
@@ -2425,50 +2436,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	if effRange != nil {
 		artifactSampleRange = &artifacts.SampleRange{Start: effRange.Start, End: effRange.End}
 	}
-	meta := artifacts.RunMetadata{
-		RunName:         run.Name,
-		RunNamespace:    run.Namespace,
-		TaskID:          taskID,
-		Model:           run.Spec.Model,
-		Commit:          run.Spec.Repo.Commit,
-		Samples:         agg.Samples,
-		Successes:       agg.Successes,
-		MeanScore:       agg.MeanScore,
-		StartedAt:       &startTime,
-		FinishedAt:      &finishTime,
-		SampleRange:     artifactSampleRange,
-		Tokens:          tokens,
-		Latency:         latency,
-		CostUSD:         costUSD,
-		CostSource:      costSource,
-		PossibleSamples: datasetSamples,
-	}
-	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
-	if storeErr != nil {
-		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
-		return taskExecutionResult{
-			taskID:          taskID,
-			phase:           v1alpha1.TaskPhaseFailed,
-			samples:         agg.Samples,
-			successes:       agg.Successes,
-			meanScore:       agg.MeanScore,
-			message:         fmt.Sprintf("failed to store artifact: %v", storeErr),
-			sampleRange:     effRange,
-			possibleSamples: datasetSamples,
-		}
-	}
 
-	if agg.Samples == 0 {
-		msg := "no scored samples"
-		logger.Error(errors.New(msg), "Task completed without scored samples", "task", taskID)
-		return taskExecutionResult{
-			taskID:          taskID,
-			phase:           v1alpha1.TaskPhaseFailed,
-			message:         msg,
-			logPath:         logPath,
-			sampleRange:     effRange,
-			possibleSamples: datasetSamples,
-		}
+	sampleSummaries, primaryScorer, err := artifacts.ExtractTaskSampleSummaries(logBytes)
+	if err != nil {
+		logger.V(1).Info("failed to extract task sample summaries from inspect log", "task", taskID, "error", err)
 	}
 
 	var successRate *float64
@@ -2496,6 +2467,58 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			Method:     "t",
 		}
 		successRateSD = est.SD
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           run.Name,
+		RunNamespace:      run.Namespace,
+		ControllerVersion: r.controllerVersion(),
+		TaskID:            taskID,
+		Model:             run.Spec.Model,
+		Commit:            run.Spec.Repo.Commit,
+		Scorer:            primaryScorer,
+		SampleCount:       agg.Samples,
+		Samples:           sampleSummaries,
+		Successes:         agg.Successes,
+		MeanScore:         agg.MeanScore,
+		SuccessRate:       successRate,
+		SuccessRateCI:     successRateCI,
+		SuccessRateSD:     successRateSD,
+		StartedAt:         &startTime,
+		FinishedAt:        &finishTime,
+		SampleRange:       artifactSampleRange,
+		Tokens:            tokens,
+		Latency:           latency,
+		CostUSD:           costUSD,
+		CostSource:        costSource,
+		PossibleSamples:   datasetSamples,
+	}
+	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
+	if storeErr != nil {
+		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
+		return taskExecutionResult{
+			taskID:          taskID,
+			phase:           v1alpha1.TaskPhaseFailed,
+			samples:         agg.Samples,
+			successes:       agg.Successes,
+			meanScore:       agg.MeanScore,
+			message:         fmt.Sprintf("failed to store artifact: %v", storeErr),
+			sampleRange:     effRange,
+			possibleSamples: datasetSamples,
+		}
+	}
+
+	if agg.Samples == 0 {
+		msg := "no scored samples"
+		logger.Error(errors.New(msg), "Task completed without scored samples", "task", taskID)
+		return taskExecutionResult{
+			taskID:          taskID,
+			phase:           v1alpha1.TaskPhaseFailed,
+			message:         msg,
+			logPath:         logPath,
+			sampleRange:     effRange,
+			possibleSamples: datasetSamples,
+		}
 	}
 
 	var v1Tokens *v1alpha1.TaskTokens
