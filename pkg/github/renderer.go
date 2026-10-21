@@ -277,6 +277,16 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		})
 	}
 
+	cols = append(cols, tableColumn{
+		header: "W/L/T",
+		cell: func(row ui.ComparisonTaskRow) string {
+			if row.Pairs > 0 {
+				return fmt.Sprintf("%d/%d/%d", row.Wins, row.Losses, row.Ties)
+			}
+			return "—"
+		},
+	})
+
 	if hasPImprovement {
 		cols = append(cols, tableColumn{
 			header: "P(imp)",
@@ -288,16 +298,6 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 			},
 		})
 	}
-
-	cols = append(cols, tableColumn{
-		header: "W/L/T",
-		cell: func(row ui.ComparisonTaskRow) string {
-			if row.Pairs > 0 {
-				return fmt.Sprintf("%d/%d/%d", row.Wins, row.Losses, row.Ties)
-			}
-			return "—"
-		},
-	})
 
 	headers := make([]string, len(cols))
 	seps := make([]string, len(cols))

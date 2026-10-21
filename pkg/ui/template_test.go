@@ -1984,6 +1984,159 @@ func TestComparisonSummary(t *testing.T) {
 			t.Errorf("expected nil sum.CostUSD when status.CostUSD is nil, got %v", sum.CostUSD)
 		}
 	})
+
+	t.Run("CostAndLatencyDeltas", func(t *testing.T) {
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "delta-comp", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+			},
+		}
+
+		fCost := func(v float64) *float64 { return &v }
+
+		// 1. Both cost and latency present: cost per sample -61%, p50 latency -38%
+		candRunBoth := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 96},
+				CostUSD: fCost(1.152), // $0.012/sample
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1", Latency: &v1alpha1.TaskLatency{P50: 6.2}},
+				},
+			},
+		}
+		baseRunBoth := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 96},
+				CostUSD: fCost(2.976), // $0.031/sample
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1", Latency: &v1alpha1.TaskLatency{P50: 10.0}},
+				},
+			},
+		}
+		sumBoth := ComparisonSummary(comp, baseRunBoth, candRunBoth)
+		if sumBoth.CostPerSampleDelta != "cost per sample −61%" {
+			t.Errorf("expected CostPerSampleDelta 'cost per sample −61%%', got %q", sumBoth.CostPerSampleDelta)
+		}
+		if sumBoth.P50LatencyDelta != "p50 latency −38%" {
+			t.Errorf("expected P50LatencyDelta 'p50 latency −38%%', got %q", sumBoth.P50LatencyDelta)
+		}
+		if sumBoth.FooterMetricsDelta != "cost per sample −61% · p50 latency −38%" {
+			t.Errorf("expected FooterMetricsDelta 'cost per sample −61%% · p50 latency −38%%', got %q", sumBoth.FooterMetricsDelta)
+		}
+
+		// 2. Latency only: p50 latency -38% without separator
+		candRunLatOnly := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1", Latency: &v1alpha1.TaskLatency{P50: 6.2}},
+				},
+			},
+		}
+		baseRunLatOnly := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1", Latency: &v1alpha1.TaskLatency{P50: 10.0}},
+				},
+			},
+		}
+		sumLatOnly := ComparisonSummary(comp, baseRunLatOnly, candRunLatOnly)
+		if sumLatOnly.CostPerSampleDelta != "" {
+			t.Errorf("expected empty CostPerSampleDelta for latency-only, got %q", sumLatOnly.CostPerSampleDelta)
+		}
+		if sumLatOnly.P50LatencyDelta != "p50 latency −38%" {
+			t.Errorf("expected P50LatencyDelta 'p50 latency −38%%', got %q", sumLatOnly.P50LatencyDelta)
+		}
+		if sumLatOnly.FooterMetricsDelta != "p50 latency −38%" {
+			t.Errorf("expected FooterMetricsDelta 'p50 latency −38%%' without separator, got %q", sumLatOnly.FooterMetricsDelta)
+		}
+
+		// 3. Cost on one side only: no cost segment
+		candRunCostOneSide := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 10},
+				CostUSD: fCost(1.0),
+			},
+		}
+		baseRunNoCost := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 10},
+			},
+		}
+		sumCostOneSide := ComparisonSummary(comp, baseRunNoCost, candRunCostOneSide)
+		if sumCostOneSide.CostPerSampleDelta != "" {
+			t.Errorf("expected empty CostPerSampleDelta when cost only on candidate, got %q", sumCostOneSide.CostPerSampleDelta)
+		}
+
+		// 4. Latency on one side only: no latency segment
+		candRunLatOneSide := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1", Latency: &v1alpha1.TaskLatency{P50: 5.0}},
+				},
+			},
+		}
+		baseRunNoLat := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1"},
+				},
+			},
+		}
+		sumLatOneSide := ComparisonSummary(comp, baseRunNoLat, candRunLatOneSide)
+		if sumLatOneSide.P50LatencyDelta != "" {
+			t.Errorf("expected empty P50LatencyDelta when latency only on candidate, got %q", sumLatOneSide.P50LatencyDelta)
+		}
+
+		// 5. baseCost == 0: no cost segment
+		candRunBaseCostZero := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 10},
+				CostUSD: fCost(1.0),
+			},
+		}
+		baseRunCostZero := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 10},
+				CostUSD: fCost(0.0),
+			},
+		}
+		sumBaseCostZero := ComparisonSummary(comp, baseRunCostZero, candRunBaseCostZero)
+		if sumBaseCostZero.CostPerSampleDelta != "" {
+			t.Errorf("expected empty CostPerSampleDelta when baseCost is 0, got %q", sumBaseCostZero.CostPerSampleDelta)
+		}
+
+		// 6. Zero samples: no cost segment
+		candRunZeroSamples := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 0},
+				CostUSD: fCost(1.0),
+			},
+		}
+		baseRunZeroSamples := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+			Status: v1alpha1.RunStatus{
+				Summary: &v1alpha1.RunSummary{TotalSamples: 0},
+				CostUSD: fCost(2.0),
+			},
+		}
+		sumZeroSamples := ComparisonSummary(comp, baseRunZeroSamples, candRunZeroSamples)
+		if sumZeroSamples.CostPerSampleDelta != "" {
+			t.Errorf("expected empty CostPerSampleDelta when samples is 0, got %q", sumZeroSamples.CostPerSampleDelta)
+		}
+	})
 }
 
 func TestTemplateRendering_SampleRange(t *testing.T) {

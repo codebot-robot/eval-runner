@@ -865,50 +865,34 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 		}
 	}
 
-	// P50 latency delta
-	var candP50s []float64
-	if candRun != nil {
+	// P50 latency delta: mean of per-task p50 latencies over shared tasks reporting latency on both sides
+	var latDeltaStr string
+	if candRun != nil && baseRun != nil {
+		candTaskLat := make(map[string]float64)
 		for _, t := range candRun.Status.Tasks {
 			if t.Latency != nil && t.Latency.P50 > 0 {
-				candP50s = append(candP50s, t.Latency.P50)
+				candTaskLat[t.ID] = t.Latency.P50
 			}
 		}
-	}
-	if len(candP50s) == 0 {
-		for _, t := range comp.Status.Tasks {
-			if t.Latency != nil && t.Latency.P50 > 0 {
-				candP50s = append(candP50s, t.Latency.P50)
-			}
-		}
-	}
-
-	var baseP50s []float64
-	if baseRun != nil {
+		var sumCand, sumBase float64
+		count := 0
 		for _, t := range baseRun.Status.Tasks {
 			if t.Latency != nil && t.Latency.P50 > 0 {
-				baseP50s = append(baseP50s, t.Latency.P50)
+				if cLat, ok := candTaskLat[t.ID]; ok {
+					sumCand += cLat
+					sumBase += t.Latency.P50
+					count++
+				}
 			}
 		}
-	}
-
-	var latDeltaStr string
-	if len(candP50s) > 0 && len(baseP50s) > 0 {
-		var sumCand float64
-		for _, p := range candP50s {
-			sumCand += p
-		}
-		candMeanP50 := sumCand / float64(len(candP50s))
-
-		var sumBase float64
-		for _, p := range baseP50s {
-			sumBase += p
-		}
-		baseMeanP50 := sumBase / float64(len(baseP50s))
-
-		if baseMeanP50 > 0 {
-			diffPct := (candMeanP50 - baseMeanP50) / baseMeanP50 * 100
-			pctStr, _ := signedFixed(diffPct, 0)
-			latDeltaStr = fmt.Sprintf("p50 latency %s%%", pctStr)
+		if count > 0 {
+			candMeanP50 := sumCand / float64(count)
+			baseMeanP50 := sumBase / float64(count)
+			if baseMeanP50 > 0 {
+				diffPct := (candMeanP50 - baseMeanP50) / baseMeanP50 * 100
+				pctStr, _ := signedFixed(diffPct, 0)
+				latDeltaStr = fmt.Sprintf("p50 latency %s%%", pctStr)
+			}
 		}
 	}
 

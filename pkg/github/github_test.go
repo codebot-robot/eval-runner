@@ -742,12 +742,58 @@ func TestRenderComparisonMarkdown_TrajectoriesAndTaskLinksOnlyWithUIBaseURL(t *t
 	if strings.Contains(gotWithout, "[triage/runbook\\_lookup]") {
 		t.Errorf("expected task ID to be plain text without uiBaseURL, got:\n%s", gotWithout)
 	}
-	if !strings.Contains(gotWithout, "| triage/runbook\\_lookup | 0.61 | 0.84 | +0.23 [+0.11, +0.35] | improved | 48 | 0.99 | 15/4/29 |") {
+	if !strings.Contains(gotWithout, "| triage/runbook\\_lookup | 0.61 | 0.84 | +0.23 [+0.11, +0.35] | improved | 48 | 15/4/29 | 0.99 |") {
 		t.Errorf("expected plain task ID row without uiBaseURL, got:\n%s", gotWithout)
 	}
 	// Cost and latency footer is still present when cost/latency data exists
 	if !strings.Contains(gotWithout, "cost per sample −61% · p50 latency −38%") {
 		t.Errorf("expected cost and latency footer even without uiBaseURL, got:\n%s", gotWithout)
+	}
+}
+
+func TestRenderComparisonMarkdown_ZeroPairsRowShowsDashes(t *testing.T) {
+	rate := 0.80
+	delta := 0.20
+	pImp := 0.95
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "zero-pairs-comp", Namespace: "eval-runner"},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:            "evals/normal_task",
+					BaseRate:      &rate,
+					CandidateRate: &rate,
+					Delta:         &delta,
+					Label:         v1alpha1.ComparisonTaskLabelImproved,
+					Pairs:         10,
+					Wins:          7,
+					Losses:        1,
+					Ties:          2,
+					PImprovement:  &pImp,
+				},
+				{
+					ID:           "evals/zero_pairs_task",
+					Label:        v1alpha1.ComparisonTaskLabelInconclusive,
+					Pairs:        0,
+					PImprovement: nil,
+				},
+			},
+		},
+	}
+
+	got := RenderComparisonMarkdown(comp, nil, nil, "")
+	// Table should have both W/L/T and P(imp) because normal_task has PImprovement
+	if !strings.Contains(got, "| eval | base | this PR | Δ (95% CI) | label | samples | W/L/T | P(imp) |") {
+		t.Errorf("expected header with W/L/T and P(imp), got:\n%s", got)
+	}
+	// Normal task has formatted W/L/T and P(imp)
+	if !strings.Contains(got, "| evals/normal\\_task | 0.80 | 0.80 | +0.20 | improved | 10 | 7/1/2 | 0.95 |") {
+		t.Errorf("expected normal task row with W/L/T and P(imp), got:\n%s", got)
+	}
+	// Zero-pairs task has dashes for both W/L/T and P(imp)
+	if !strings.Contains(got, "| evals/zero\\_pairs\\_task | — | — | — | inconclusive | — | — | — |") {
+		t.Errorf("expected zero pairs task row with '—' for W/L/T and P(imp), got:\n%s", got)
 	}
 }
 
@@ -2367,8 +2413,8 @@ func TestRenderComparisonMarkdown_WiderTableTruncation(t *testing.T) {
 	}
 
 	// Verify wider table headers are present
-	if !strings.Contains(got, "| eval | base | this PR | Δ (95% CI) | label | samples | tokens | P(imp) | W/L/T |") {
-		t.Errorf("expected wider table header with P(imp) and W/L/T, got:\n%s", got)
+	if !strings.Contains(got, "| eval | base | this PR | Δ (95% CI) | label | samples | tokens | W/L/T | P(imp) |") {
+		t.Errorf("expected wider table header with W/L/T and P(imp), got:\n%s", got)
 	}
 
 	// Verify truncation marker
