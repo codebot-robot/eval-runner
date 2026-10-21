@@ -35,12 +35,16 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -344,6 +348,266 @@ func TestServerRunDetail(t *testing.T) {
 	}
 	if strings.Contains(wNotFound.Body.String(), "non-existent-run") {
 		t.Errorf("expected no reflected input in body, got %q", wNotFound.Body.String())
+	}
+}
+
+type mockFooterSink struct {
+	artifacts.ArtifactSink
+	bucket string
+}
+
+func (m *mockFooterSink) Bucket() string {
+	return m.bucket
+}
+
+func (m *mockFooterSink) ArtifactPrefix(commit string) string {
+	return "gs://" + m.bucket + "/" + commit
+}
+
+func (m *mockFooterSink) Close() error {
+	return nil
+}
+
+func TestServer_ReloadConfigMap_FooterReflectsNewValueWithoutRestart(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+
+	// 1. Initial server without sink
+	server := NewServer(Config{Client: fakeClient, DefaultNamespace: "eval-runner"})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/docs-eval-cand-05ce4d8", nil)
+	w1 := httptest.NewRecorder()
+	server.ServeHTTP(w1, req)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w1.Code)
+	}
+	body1 := w1.Body.String()
+	if !strings.Contains(body1, "artifacts: none") {
+		t.Errorf("expected 'artifacts: none' in initial footer, got: %s", body1)
+	}
+	if server.ConfigGeneration() != 1 {
+		t.Errorf("expected initial config generation 1, got %d", server.ConfigGeneration())
+	}
+
+	// 2. Reload with GCS bucket without restarting server
+	cmBucket := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      sinkconfig.DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "gs://reloaded-eval-bucket",
+		},
+	}
+	mockSinkFactory := func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+		if bucket != "" {
+			return &mockFooterSink{bucket: strings.TrimPrefix(bucket, "gs://")}, nil
+		}
+		if dir != "" {
+			return &artifacts.LocalDirSink{BaseDir: dir}, nil
+		}
+		return nil, nil
+	}
+
+	if err := server.ReloadConfigMap(t.Context(), cmBucket, "", "", mockSinkFactory); err != nil {
+		t.Fatalf("ReloadConfigMap failed: %v", err)
+	}
+
+	if server.ConfigGeneration() != 2 {
+		t.Errorf("expected config generation 2 after bucket reload, got %d", server.ConfigGeneration())
+	}
+
+	// 3. Make HTTP request again without restarting server - footer reflects new value
+	w2 := httptest.NewRecorder()
+	server.ServeHTTP(w2, req)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w2.Code)
+	}
+	body2 := w2.Body.String()
+	if !strings.Contains(body2, "artifacts: gs://reloaded-eval-bucket") {
+		t.Errorf("expected 'artifacts: gs://reloaded-eval-bucket' in footer without restart, got: %s", body2)
+	}
+	if strings.Contains(body2, "artifacts: none") {
+		t.Errorf("expected footer to no longer contain 'artifacts: none', got: %s", body2)
+	}
+
+	// 4. Reload with local directory
+	cmDir := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      sinkconfig.DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactDir: "/var/log/artifacts",
+		},
+	}
+	if err := server.ReloadConfigMap(t.Context(), cmDir, "", "", mockSinkFactory); err != nil {
+		t.Fatalf("ReloadConfigMap failed: %v", err)
+	}
+	if server.ConfigGeneration() != 3 {
+		t.Errorf("expected config generation 3 after dir reload, got %d", server.ConfigGeneration())
+	}
+
+	w3 := httptest.NewRecorder()
+	server.ServeHTTP(w3, req)
+	body3 := w3.Body.String()
+	if !strings.Contains(body3, "artifacts: dir /var/log/artifacts") {
+		t.Errorf("expected 'artifacts: dir /var/log/artifacts' in footer without restart, got: %s", body3)
+	}
+
+	// 5. WatchConfigMap integration with fake clientset
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	cmWatch := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       "eval-runner",
+			Name:            sinkconfig.DefaultConfigMapName,
+			ResourceVersion: "100",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "gs://watch-eval-bucket",
+		},
+	}
+	clientset := k8sfake.NewSimpleClientset(cmWatch)
+	serverWatch := NewServer(Config{Client: fakeClient, DefaultNamespace: "eval-runner"})
+
+	watchDone := make(chan struct{}, 10)
+	go func() {
+		_ = sinkconfig.WatchConfigMap(ctx, clientset, "eval-runner", sinkconfig.DefaultConfigMapName, func(cm *corev1.ConfigMap) {
+			_ = serverWatch.ReloadConfigMap(ctx, cm, "", "", mockSinkFactory)
+			watchDone <- struct{}{}
+		})
+	}()
+
+	select {
+	case <-watchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial watch callback")
+	}
+
+	wWatch1 := httptest.NewRecorder()
+	serverWatch.ServeHTTP(wWatch1, req)
+	if !strings.Contains(wWatch1.Body.String(), "artifacts: gs://watch-eval-bucket") {
+		t.Errorf("expected footer to reflect gs://watch-eval-bucket, got: %s", wWatch1.Body.String())
+	}
+
+	// Update ConfigMap via fake clientset
+	cmWatchUpdated := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       "eval-runner",
+			Name:            sinkconfig.DefaultConfigMapName,
+			ResourceVersion: "101",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "gs://hot-reloaded-bucket",
+		},
+	}
+	_, err := clientset.CoreV1().ConfigMaps("eval-runner").Update(ctx, cmWatchUpdated, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("failed to update configmap: %v", err)
+	}
+
+	select {
+	case <-watchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update watch callback")
+	}
+
+	wWatch2 := httptest.NewRecorder()
+	serverWatch.ServeHTTP(wWatch2, req)
+	if !strings.Contains(wWatch2.Body.String(), "artifacts: gs://hot-reloaded-bucket") {
+		t.Errorf("expected footer to reflect gs://hot-reloaded-bucket without restart, got: %s", wWatch2.Body.String())
+	}
+}
+
+func TestServer_InitialBucketDir_DoesNotDuplicateOnStartup(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+
+	var factoryCalls int
+	mockSinkFactory := func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+		factoryCalls++
+		return &mockFooterSink{bucket: bucket}, nil
+	}
+
+	initialSink, _ := mockSinkFactory(t.Context(), "initial-bucket", "", 0)
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+		ArtifactSink:     initialSink,
+		InitialBucket:    "initial-bucket",
+	})
+
+	if server.ConfigGeneration() != 1 {
+		t.Fatalf("expected initial config generation 1, got %d", server.ConfigGeneration())
+	}
+
+	cmInitial := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      sinkconfig.DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "initial-bucket",
+		},
+	}
+
+	// First watch callback with matching ConfigMap should be a no-op
+	if err := server.ReloadConfigMap(t.Context(), cmInitial, "", "", mockSinkFactory); err != nil {
+		t.Fatalf("ReloadConfigMap failed: %v", err)
+	}
+
+	if server.ConfigGeneration() != 1 {
+		t.Errorf("expected config generation to remain 1 on matching initial watch event, got %d", server.ConfigGeneration())
+	}
+	if factoryCalls != 1 {
+		t.Errorf("expected factory calls to remain 1 (no duplicate creation), got %d", factoryCalls)
+	}
+}
+
+func TestServer_ReloadConfigMap_FactoryErrorDoesNotAdvanceState(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+
+	server := NewServer(Config{Client: fakeClient, DefaultNamespace: "eval-runner"})
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      sinkconfig.DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "transient-bucket",
+		},
+	}
+
+	failNext := true
+	mockSinkFactory := func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+		if failNext {
+			return nil, errors.New("simulated transient network failure")
+		}
+		return &mockFooterSink{bucket: bucket}, nil
+	}
+
+	// First attempt fails
+	err := server.ReloadConfigMap(t.Context(), cm, "", "", mockSinkFactory)
+	if err == nil {
+		t.Fatal("expected error on first attempt, got nil")
+	}
+
+	// State should not have advanced, so re-running with the same ConfigMap retries construction
+	failNext = false
+	err = server.ReloadConfigMap(t.Context(), cm, "", "", mockSinkFactory)
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if server.ConfigGeneration() != 2 {
+		t.Errorf("expected config generation 2 after successful retry, got %d", server.ConfigGeneration())
 	}
 }
 
