@@ -329,17 +329,17 @@ Once discovery completes (or fails), the sandbox is automatically deleted.
 
 ### NetworkPolicy Enforcement and Debugging
 
-Network isolation for sandboxes is defined in `k8s/sandbox-networkpolicy.yaml` (`eval-runner-sandbox-ingress` and `eval-runner-sandbox-egress`), applying to all pods labeled `evalrunner.gke-labs.dev/sandbox: "true"`.
+Network isolation for sandboxes is defined via `eval-runner-sandbox-ingress` (static manifest in `k8s/sandbox-networkpolicy.yaml`) and `eval-runner-sandbox-egress` (dynamically owned and reconciled by the controller), applying to all pods labeled `evalrunner.gke-labs.dev/sandbox: "true"`.
 
 #### FQDN Narrowing on GKE Dataplane V2 (`FQDNNetworkPolicy`)
 
-Standard Kubernetes `NetworkPolicy` operates at L3/L4 (IP blocks and CIDRs) and cannot express domain names, meaning baseline egress policies must allow port 443 to `0.0.0.0/0` (external IPs) so sandboxes can reach git hosts and model APIs.
+Standard Kubernetes `NetworkPolicy` operates at L3/L4 (IP blocks and CIDRs) and cannot express domain names, meaning baseline egress policies without domain controls must allow port 443 to `0.0.0.0/0` (external IPs) so sandboxes can reach git hosts and model APIs.
 
 On GKE Dataplane V2 clusters, the controller dynamically renders and reconciles an `FQDNNetworkPolicy` (`networking.gke.io/v1alpha1`, ADR-029) named `eval-runner-sandbox-fqdn-egress` in `eval-runner-sandbox` that selects `evalrunner.gke-labs.dev/sandbox: "true"` and specifies the allowed hostnames for HTTPS egress on port 443.
 
-**Allow-Union Semantics**: On GKE Dataplane V2, an `FQDNNetworkPolicy` combines with standard `NetworkPolicy` resources selecting the same Pod as an **allow-union** (traffic is allowed if either policy matches). Because the baseline `NetworkPolicy` (`k8s/sandbox-networkpolicy.yaml`) currently allows TCP 443 (and 80) to all external IPs (`0.0.0.0/0`), the `FQDNNetworkPolicy` is **inert** and adds no egress narrowing until the baseline rule is removed in a follow-up enhancement that gives the controller ownership of sandbox egress policies. The plumbing, ConfigMap key, hot-reloading, and object management are established now so operators can configure domain allow-lists in preparation for that baseline change.
+**Allow-Union Semantics and Controller Ownership**: On GKE Dataplane V2, an `FQDNNetworkPolicy` combines with standard `NetworkPolicy` resources selecting the same Pod as an **allow-union** (traffic is allowed if either policy matches). To achieve true egress narrowing, the controller owns both the baseline `eval-runner-sandbox-egress` NetworkPolicy and the `eval-runner-sandbox-fqdn-egress` FQDN policy. Whenever FQDN narrowing is active, the controller drops the `0.0.0.0/0` internet rule (allowing TCP 80/443/9418) from `eval-runner-sandbox-egress`, leaving only DNS (UDP/TCP 53) and the internal git fixture (TCP 9418). All HTTPS traffic on port 443 is governed exclusively by the `FQDNNetworkPolicy`. Consequently, probes to unlisted domains (e.g. `curl -sSf https://example.com`) from a sandbox will time out on clusters with `--enable-fqdn-network-policy`. When FQDN narrowing is absent or disabled (`sandboxEgressHosts: "none"`), the controller restores the 3-rule baseline including `0.0.0.0/0:80/443/9418`.
 
-- **GKE-only feature**: FQDN policies require GKE Dataplane V2 with FQDN network policy enabled. Clusters without Dataplane V2 (e.g. local `kind` clusters running `kindnet`) retain the baseline plain `NetworkPolicy` from `k8s/sandbox-networkpolicy.yaml` without breaking or degrading.
+- **GKE-only feature**: FQDN policies require GKE Dataplane V2 with FQDN network policy enabled. Clusters without Dataplane V2 (e.g. local `kind` clusters running `kindnet`) retain the controller-rendered 3-rule baseline `NetworkPolicy` without breaking or degrading.
 - **Enabling FQDN Network Policy on GKE**: The cluster must be running GKE Dataplane V2 (GKE >= 1.26.4-gke.500 / 1.27.1-gke.400) with FQDN network policy enabled. The CRD is installed by this feature flag, not by Dataplane V2 alone:
   ```bash
   gcloud container clusters update CLUSTER --enable-fqdn-network-policy

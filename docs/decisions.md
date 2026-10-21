@@ -289,21 +289,21 @@ Future pull requests that introduce an architectural decision should append an e
 
 ### ADR-028: Default-Deny Egress NetworkPolicy for eval-runner-sandbox (#33)
 - **Date**: 2026-10-21
-- **Status**: Accepted
+- **Status**: Accepted (egress ownership migrated to controller in #298)
 - **Decision**:
-  1. **Dual NetworkPolicy in `k8s/sandbox-networkpolicy.yaml`**: Add a default-deny egress `NetworkPolicy` (`eval-runner-sandbox-egress`) selecting all sandboxes with `evalrunner.gke-labs.dev/sandbox: "true"`, coexisting alongside the existing ingress policy (`eval-runner-sandbox-ingress`).
+  1. **Dual NetworkPolicy Architecture**: Enforce ingress and egress controls for sandboxes labeled `evalrunner.gke-labs.dev/sandbox: "true"`. The ingress policy (`eval-runner-sandbox-ingress`) remains a static manifest in `k8s/sandbox-networkpolicy.yaml`, while ownership of the egress policy (`eval-runner-sandbox-egress`) is transferred to the controller to enable dynamic hostname narrowing without allow-union bypasses.
   2. **Default-Deny Egress PolicyType**: Configure `policyTypes: [Egress]`, blocking all outbound traffic from sandboxes unless explicitly allowed by egress rules.
   3. **Cluster DNS Allowance**: Allow UDP and TCP port 53 to CoreDNS/kube-dns/node-local-dns pods in `kube-system` (`k8s-app In [kube-dns, node-local-dns]`) and link-local DNS endpoints (`169.254.20.10/32` NodeLocal DNSCache on Autopilot/Cloud DNS, and `169.254.169.254/32` Cloud DNS data plane on the metadata server).
-  4. **Git Protocol and HTTP/HTTPS Internet Allowance**: Allow TCP ports 80, 443, and 9418 to external IPs via `ipBlock: 0.0.0.0/0` with RFC1918, CGNAT, and link-local CIDR exceptions `[10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]`, permitting git clones from GitHub and external model provider APIs (e.g. `generativelanguage.googleapis.com` over 443).
-  5. **Internal Isolation and Metadata Server Block**: In-cluster pod traffic is restricted to `app: git-server` on port 9418 only; egress to all other namespaces (including controller endpoints in `eval-runner`) is blocked by default deny. Node IPs, private control-plane endpoints, and the GCE metadata server (`169.254.169.254:80`, preventing ADC token acquisition) are blocked by the CIDR exceptions. A public control-plane endpoint on port 443 is not blocked by this static policy since Dataplane V2 applies policy post-DNAT; sandboxes rely on `automountServiceAccountToken: false` and the absence of a kubeconfig. A follow-up for FQDN-based egress (GKE `FQDNNetworkPolicy`) will restrict 443 strictly to `github.com` and `*.googleapis.com`.
+  4. **Git Protocol and HTTP/HTTPS Internet Allowance**: Allow TCP ports 80, 443, and 9418 to external IPs via `ipBlock: 0.0.0.0/0` with RFC1918, CGNAT, and link-local CIDR exceptions `[10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]` when FQDN narrowing is absent or disabled. When FQDN narrowing is active, this rule is dropped by the controller.
+  5. **Internal Isolation and Metadata Server Block**: In-cluster pod traffic is restricted to `app: git-server` on port 9418 only; egress to all other namespaces (including controller endpoints in `eval-runner`) is blocked by default deny. Node IPs, private control-plane endpoints, and the GCE metadata server (`169.254.169.254:80`, preventing ADC token acquisition) are blocked by the CIDR exceptions.
   6. **Intra-Namespace Fixture Allowance**: Allow intra-namespace egress on port 9418 via a dedicated rule selecting `podSelector: matchLabels: {app: git-server}` so sandboxes can clone from the `git-server` fixture in `eval-runner-sandbox`.
   7. **Enforcement Requirements**: Document that NetworkPolicy enforcement requires a cluster CNI with policy enforcement enabled, such as GKE Dataplane V2 (e.g. `gke-labs-corp-dev`) or Calico. On clusters without policy enforcement (like default kindnet in kind), manifests apply cleanly and rules are validated by unit tests in `pkg/discovery`.
 - **Rationale**:
   Hardens the untrusted sandbox environment at the network perimeter. In addition to running without Kubernetes ServiceAccount tokens (`automountServiceAccountToken: false`) and dropping all Linux capabilities, sandboxes are prevented from accessing controller endpoints (:8081 health probe, UI, webhook), internal cluster services, GCE metadata credentials, and arbitrary outbound ports.
 
-### ADR-029: GKE Dataplane V2 FQDNNetworkPolicy for Narrowed Sandbox HTTPS Egress (#283)
+### ADR-029: GKE Dataplane V2 FQDNNetworkPolicy for Narrowed Sandbox HTTPS Egress (#283, #298)
 - **Date**: 2026-10-21
-- **Status**: Accepted, pending the baseline change
+- **Status**: Accepted
 - **Decision**:
   1. **Dynamic GKE FQDNNetworkPolicy**: On clusters running GKE Dataplane V2 (`networking.gke.io/v1alpha1`), the controller dynamically renders and manages an `FQDNNetworkPolicy` (`eval-runner-sandbox-fqdn-egress`) selecting `evalrunner.gke-labs.dev/sandbox: "true"` in `eval-runner-sandbox`, specifying the allowed FQDN hostnames for HTTPS traffic on port 443.
   2. **Configurable Host List with Sane Defaults**: Allowed egress hosts are driven by ConfigMap key `sandboxEgressHosts` in `eval-runner-config` (or CLI flag `--sandbox-egress-hosts`). When unset, it defaults to:
@@ -312,11 +312,10 @@ Future pull requests that introduce an architectural decision should append an e
      - Package indexes: `pypi.org`, `*.pypi.org`, `files.pythonhosted.org`, `*.pythonhosted.org`
      Operators can supply a comma-separated list to extend allowed hostnames without code changes, or use the sentinel `none` to disable the FQDN policy.
   3. **Runtime ConfigMap Hot-Reloading**: When `sandboxEgressHosts` is updated in `eval-runner-config`, `ConfigReloader` reconciles the policy without requiring a controller restart.
-  4. **Baseline Plain NetworkPolicy Kept for Portability**: The static plain `NetworkPolicy` from ADR-028 in `k8s/sandbox-networkpolicy.yaml` remains the baseline, ensuring clusters without Dataplane V2 (e.g. local `kind` clusters in CI/e2e) are no worse off and continue functioning.
-  5. **Graceful Degradation on Non-GKE Clusters**: If the `FQDNNetworkPolicy` CRD is not present on the cluster (detected via discovery and NoMatch handling), the controller logs an informational message and skips policy management without failing startup or reconciliation.
-  6. **Allow-Union Semantics**: On GKE Dataplane V2, when both a standard `NetworkPolicy` and an `FQDNNetworkPolicy` select the same Pod, egress traffic is permitted if it matches either policy (allow-union). Because the baseline `NetworkPolicy` currently allows TCP 443 (and 80) to all external IPs (`0.0.0.0/0`), the FQDN policy is inert and adds no egress narrowing until the baseline rule is removed in a follow-up issue that transfers ownership of sandbox egress policies to the controller.
+  4. **Controller Ownership Eliminates Allow-Union Loophole**: Because GKE Dataplane V2 evaluates multiple policies selecting the same Pod as an allow-union, the controller owns both `eval-runner-sandbox-egress` and `eval-runner-sandbox-fqdn-egress`. Whenever the FQDN policy is active, the controller automatically drops the `0.0.0.0/0` rule (allowing TCP 80/443/9418) from `eval-runner-sandbox-egress`, leaving only DNS and git-server. HTTPS traffic on port 443 is permitted solely by the `FQDNNetworkPolicy` for the designated hostnames. Requests to unlisted hostnames (like `https://example.com`) time out and fail.
+  5. **Graceful Degradation on Non-GKE Clusters**: If the `FQDNNetworkPolicy` CRD is not present on the cluster (detected via discovery and NoMatch handling), the controller renders the full 3-rule baseline egress policy and skips FQDN policy management without failing startup or reconciliation.
 - **Rationale**:
-  Lays the groundwork for eliminating arbitrary HTTPS exfiltration and blocking reachability to public control-plane endpoints. Establishing the FQDN policy rendering, ConfigMap key, hot-reloading mechanism, and discovery checks allows operators to configure their domain lists before the baseline rule is dropped in the subsequent controller-managed egress follow-up.
+  Eliminates arbitrary HTTPS exfiltration and blocks reachability to unlisted endpoints by removing the allow-union loophole while preserving full portability on clusters without Dataplane V2.
 
 
 
