@@ -17,10 +17,12 @@ package gcs
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/internal/fakes"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 )
@@ -42,13 +44,19 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	finishTime := time.Date(2026, 10, 17, 12, 5, 0, 0, time.UTC)
 
+	sampleList := make([]artifacts.TaskSampleSummary, 10)
+	for i := range sampleList {
+		sampleList[i] = artifacts.TaskSampleSummary{ID: fmt.Sprintf("sample-%d", i+1)}
+	}
+
 	meta := artifacts.RunMetadata{
 		RunName:      "test-run",
 		RunNamespace: "eval-runner",
 		TaskID:       "docs/readme_comprehension",
 		Model:        "google/gemini-3.5-flash-lite",
 		Commit:       "abcdef123456",
-		Samples:      10,
+		SampleCount:  len(sampleList),
+		Samples:      sampleList,
 		Successes:    8,
 		MeanScore:    &score,
 		StartedAt:    &startTime,
@@ -109,8 +117,11 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 	if summary.Commit != "abcdef123456" {
 		t.Errorf("Expected Commit %q, got %q", "abcdef123456", summary.Commit)
 	}
-	if summary.Samples != 10 {
-		t.Errorf("Expected Samples 10, got %d", summary.Samples)
+	if len(summary.Samples) != 10 {
+		t.Errorf("Expected Samples 10, got %d", len(summary.Samples))
+	}
+	if summary.SampleCount != 10 {
+		t.Errorf("Expected SampleCount 10, got %d", summary.SampleCount)
 	}
 	if summary.Successes != 8 {
 		t.Errorf("Expected Successes 8, got %d", summary.Successes)
@@ -147,11 +158,11 @@ func TestGCSSink_CapBehavior(t *testing.T) {
 	}
 
 	meta := artifacts.RunMetadata{
-		TaskID:    "docs/readme_comprehension",
-		Model:     "test-model",
-		Commit:    "1234567890ab",
-		Samples:   5,
-		Successes: 5,
+		TaskID:      "docs/readme_comprehension",
+		Model:       "test-model",
+		Commit:      "1234567890ab",
+		SampleCount: 5,
+		Successes:   5,
 	}
 
 	largeLog := []byte(strings.Repeat("A", 100)) // 100 bytes > 30 byte cap
@@ -569,5 +580,132 @@ func TestGCSSink_Close(t *testing.T) {
 	// Idempotent Close
 	if err := sink.Close(); err != nil {
 		t.Errorf("Expected nil on second Close, got: %v", err)
+	}
+}
+
+func TestGCSSink_SummaryJSON_NewFieldsAndTruncation(t *testing.T) {
+	fakeClient := fakes.NewFakeStorageClient()
+	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	rate := 0.90
+	ci := &v1alpha1.ConfidenceInterval{
+		Lower:      0.75,
+		Upper:      0.98,
+		Confidence: 0.95,
+		Method:     "wilson",
+	}
+	sd := 0.08
+	costUSD := 0.04
+	latency := 0.42
+	scoreVal := 1.0
+
+	samples := []artifacts.TaskSampleSummary{
+		{
+			ID:             "sample-001",
+			Epoch:          1,
+			Score:          &scoreVal,
+			Status:         "pass",
+			LatencySeconds: &latency,
+			Tokens: &artifacts.TaskSampleTokens{
+				Input:  50,
+				Output: 10,
+			},
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "gcs-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            "benchmark/speed",
+		Model:             "gemini-2.5-flash",
+		Commit:            "abcdef012345",
+		ControllerVersion: "v2.0.0",
+		Scorer:            "exact_match",
+		SampleCount:       len(samples),
+		SuccessRate:       &rate,
+		SuccessRateCI:     ci,
+		SuccessRateSD:     &sd,
+		CostUSD:           &costUSD,
+		CostSource:        v1alpha1.CostSourceDefault,
+		Samples:           samples,
+		Successes:         1,
+	}
+
+	uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, uri)
+	if err != nil {
+		t.Fatalf("ReadTaskSummary failed: %v", err)
+	}
+
+	if summary.SchemaVersion != 1 {
+		t.Errorf("Expected SchemaVersion=1, got %d", summary.SchemaVersion)
+	}
+	if summary.RunName != "gcs-run" {
+		t.Errorf("Expected RunName=gcs-run, got %q", summary.RunName)
+	}
+	if summary.RunNamespace != "eval-runner" {
+		t.Errorf("Expected RunNamespace=eval-runner, got %q", summary.RunNamespace)
+	}
+	if summary.ControllerVersion != "v2.0.0" {
+		t.Errorf("Expected ControllerVersion=v2.0.0, got %q", summary.ControllerVersion)
+	}
+	if summary.Scorer != "exact_match" {
+		t.Errorf("Expected Scorer=exact_match, got %q", summary.Scorer)
+	}
+	if summary.SuccessRate == nil || *summary.SuccessRate != 0.90 {
+		t.Errorf("Expected SuccessRate=0.90, got %v", summary.SuccessRate)
+	}
+	if summary.SuccessRateCI == nil || summary.SuccessRateCI.Method != "wilson" {
+		t.Errorf("Expected SuccessRateCI.Method=wilson, got %+v", summary.SuccessRateCI)
+	}
+	if summary.SuccessRateSD == nil || *summary.SuccessRateSD != 0.08 {
+		t.Errorf("Expected SuccessRateSD=0.08, got %v", summary.SuccessRateSD)
+	}
+	if summary.CostUSD == nil || *summary.CostUSD != 0.04 {
+		t.Errorf("Expected CostUSD=0.04, got %v", summary.CostUSD)
+	}
+	if summary.CostSource != v1alpha1.CostSourceDefault {
+		t.Errorf("Expected CostSource=default, got %q", summary.CostSource)
+	}
+	if len(summary.Samples) != 1 {
+		t.Fatalf("Expected 1 sample, got %d", len(summary.Samples))
+	}
+	if summary.SampleCount != 1 {
+		t.Errorf("Expected SampleCount=1, got %d", summary.SampleCount)
+	}
+	if summary.SamplesTruncated {
+		t.Errorf("Expected SamplesTruncated=false, got true")
+	}
+
+	// Verify truncation on > 10,000 samples
+	largeSamples := make([]artifacts.TaskSampleSummary, 10002)
+	for i := range largeSamples {
+		largeSamples[i] = artifacts.TaskSampleSummary{ID: fmt.Sprintf("sample-%d", i+1)}
+	}
+	meta.Samples = largeSamples
+	meta.SampleCount = len(largeSamples)
+	uriLarge, err := sink.StoreArtifact(t.Context(), meta, "inspect-large.json", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+	summaryLarge, err := artifacts.ReadTaskSummary(t.Context(), sink, uriLarge)
+	if err != nil {
+		t.Fatalf("ReadTaskSummary failed: %v", err)
+	}
+	if !summaryLarge.SamplesTruncated {
+		t.Errorf("Expected SamplesTruncated=true for 10002 samples, got false")
+	}
+	if summaryLarge.SampleCount != 10002 {
+		t.Errorf("Expected SampleCount=10002, got %d", summaryLarge.SampleCount)
+	}
+	if len(summaryLarge.Samples) != artifacts.MaxSummarySamples {
+		t.Errorf("Expected %d samples, got %d", artifacts.MaxSummarySamples, len(summaryLarge.Samples))
 	}
 }

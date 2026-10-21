@@ -1210,7 +1210,10 @@ const taskSamplesListTemplate = `
       <div class="msg-alert" style="margin-bottom:16px">
         <strong>Log Truncated:</strong> {{ .TruncatedMessage }}
       </div>
-      {{ else }}
+      {{ else }}{{ with .WarningMessage }}
+      <div class="msg-alert" style="margin-bottom:16px">
+        {{ . }}
+      </div>{{ end }}
       <table class="table" style="margin-top:16px">
         <thead>
           <tr>

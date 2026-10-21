@@ -2033,6 +2033,74 @@ func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]arti
 	return samples, false, nil
 }
 
+func (s *Server) loadTaskSamplesFromSummary(ctx context.Context, logPath string) ([]artifacts.ParsedInspectSample, bool, error) {
+	summaryURI := artifacts.TaskSummaryURI(logPath)
+	if s.cache != nil {
+		if samples, truncated, parseErr, ok := s.cache.getWithTruncated(summaryURI); ok {
+			if parseErr != nil {
+				return nil, false, parseErr
+			}
+			return samples, truncated, nil
+		}
+	}
+
+	summary, err := artifacts.ReadTaskSummary(ctx, s.reloadableSink, summaryURI)
+	if err != nil {
+		if s.cache != nil {
+			s.cache.setWithTruncated(summaryURI, 0, nil, false, err)
+		}
+		return nil, false, err
+	}
+
+	if len(summary.Samples) == 0 {
+		return nil, false, fmt.Errorf("summary contains no samples")
+	}
+
+	parsed := make([]artifacts.ParsedInspectSample, 0, len(summary.Samples))
+	for _, sample := range summary.Samples {
+		scoreStr := "—"
+		hasScore := false
+		if sample.Score != nil {
+			scoreStr = fmt.Sprintf("%.2f", *sample.Score)
+			hasScore = true
+		}
+
+		status := sample.Status
+		if status == "" {
+			status = "unknown"
+		}
+
+		var latency *float64
+		if sample.LatencySeconds != nil {
+			latency = sample.LatencySeconds
+		}
+
+		var inputTokens, outputTokens int
+		if sample.Tokens != nil {
+			inputTokens = sample.Tokens.Input
+			outputTokens = sample.Tokens.Output
+		}
+
+		parsed = append(parsed, artifacts.ParsedInspectSample{
+			ID:           sample.ID,
+			Epoch:        sample.Epoch,
+			HasScore:     hasScore,
+			Score:        sample.Score,
+			ScoreStr:     scoreStr,
+			Status:       status,
+			Latency:      latency,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+		})
+	}
+
+	if s.cache != nil {
+		s.cache.setWithTruncated(summaryURI, 0, parsed, summary.SamplesTruncated, nil)
+	}
+
+	return parsed, summary.SamplesTruncated, nil
+}
+
 func hasComparisonPrefix(path string) bool {
 	clean := strings.TrimSpace(path)
 	if strings.HasPrefix(clean, "gs://") {
@@ -2479,6 +2547,19 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 	}
 
 	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
+	if isTruncated || err != nil {
+		// Fallback to summary.json when the full log exceeded the load cap or could not be parsed.
+		if summarySamples, samplesTruncated, summaryErr := s.loadTaskSamplesFromSummary(ctx, logPath); summaryErr == nil && len(summarySamples) > 0 {
+			samples = summarySamples
+			err = nil
+			isTruncated = false
+			if samplesTruncated {
+				view.WarningMessage = "This task evaluated more than 10,000 samples. Showing the first 10,000 samples from summary.json."
+			} else {
+				view.WarningMessage = "Showing sample outcomes from summary.json because the evaluation log could not be loaded."
+			}
+		}
+	}
 	if isTruncated {
 		view.IsTruncatedLog = true
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Sample details cannot be displayed."

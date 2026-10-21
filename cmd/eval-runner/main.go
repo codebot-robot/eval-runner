@@ -356,6 +356,7 @@ func main() {
 		ModelPricesDisabled:  clusterConfig.ModelPricesDisabled,
 		SampleRunnerImage:    sampleRunnerImage,
 		ArtifactSink:         reloadableSink,
+		ControllerVersion:    version.String(),
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

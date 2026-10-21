@@ -2339,6 +2339,7 @@ type TaskSamplesListView struct {
 	NextLink         string
 	IsTruncatedLog   bool
 	TruncatedMessage string
+	WarningMessage   string
 	StorageMessage   string
 	ArtifactFooter   string
 	Version          string
