@@ -1370,12 +1370,14 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			WithStatusSubresource(candRunLocal, baseRun, comp).
 			Build()
 
+		testNow := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 		reconciler := &ComparisonReconciler{
 			Client:              cl,
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
 			GitHubTokenSecret:   "github-token",
+			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -1423,8 +1425,28 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		if mid.Status.Reporting.LastPostedHash != h1 {
 			t.Fatalf("expected lastPostedHash to remain %s when report failed, got %s", h1, mid.Status.Reporting.LastPostedHash)
 		}
+		if mid.Status.Reporting.Message != "" {
+			t.Fatalf("expected reporting message to remain empty on transient failure, got %q", mid.Status.Reporting.Message)
+		}
+		if mid.Status.Reporting.Attempts != 1 {
+			t.Fatalf("expected reporting attempts 1, got %d", mid.Status.Reporting.Attempts)
+		}
 
-		// 3. Next reconcile with healthy server retries and posts final report
+		// Immediate reconcile before due time: does not consume attempt, does not make requests
+		reqCountBeforeSame := len(server.RequestLog())
+		resSame, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected error on immediate reconcile: %v", err)
+		}
+		if resSame.RequeueAfter != 10*time.Second {
+			t.Errorf("expected RequeueAfter 10s on immediate reconcile, got %v", resSame.RequeueAfter)
+		}
+		if len(server.RequestLog()) != reqCountBeforeSame {
+			t.Errorf("expected no GitHub requests before retry is due, got %d", len(server.RequestLog())-reqCountBeforeSame)
+		}
+
+		// 3. Advance time past backoff delay: healthy server retries and posts final report
+		testNow = testNow.Add(11 * time.Second)
 		reqCountBefore := len(server.RequestLog())
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("retry Reconcile error: %v", err)
@@ -1882,12 +1904,14 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			WithStatusSubresource(candRun, baseRun, comp).
 			Build()
 
+		testNow := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 		reconciler := &ComparisonReconciler{
 			Client:              cl,
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
 			GitHubTokenSecret:   "github-token",
+			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -1918,7 +1942,8 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			t.Errorf("expected CheckRunID 0, got %d", updated1.Status.Reporting.CheckRunID)
 		}
 
-		// 2. Second reconcile (check run error is cleared)
+		// 2. Second reconcile (check run error is cleared) after retry backoff
+		testNow = testNow.Add(11 * time.Second)
 		// Hash gate does not swallow because LastPostedHash is empty; check run is created!
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("second Reconcile error: %v", err)
@@ -2106,6 +2131,421 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		}
 		if !strings.Contains(updated.Status.Reporting.Message, "did not contain an app slug") {
 			t.Errorf("expected reporting.message to contain 'did not contain an app slug', got: %q", updated.Status.Reporting.Message)
+		}
+	})
+
+	t.Run("token endpoint transient failure at completion retries on next reconcile", func(t *testing.T) {
+		ctx := t.Context()
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("failed to generate test RSA key: %v", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+		})
+
+		appSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "github-token",
+				Namespace: "eval-runner",
+			},
+			Data: map[string][]byte{
+				"app-id":          []byte("12345"),
+				"installation-id": []byte("67890"),
+				"private-key":     pemBytes,
+			},
+		}
+
+		comp := makeComp("comp-token-retry")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, appSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		testNow := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubBaseURL:       server.URL(),
+			Now:                 func() time.Time { return testNow },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-token-retry"}}
+
+		// 1. Token endpoint fails once with 500 at completion reporting
+		server.InjectPathError("POST", "/app/installations/67890/access_tokens", 500, `{"message":"token server error"}`)
+
+		_, err = reconciler.Reconcile(ctx, req)
+		if err == nil {
+			t.Fatalf("expected error from failed token endpoint on completion reporting, got nil")
+		}
+
+		var updated1 v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &updated1); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated1.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Fatalf("expected phase Completed, got %s", updated1.Status.Phase)
+		}
+		if updated1.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if updated1.Status.Reporting.Message != "" {
+			t.Errorf("expected reporting.message to be empty on transient failure, got %q", updated1.Status.Reporting.Message)
+		}
+		if updated1.Status.Reporting.Attempts != 1 {
+			t.Errorf("expected reporting.attempts 1, got %d", updated1.Status.Reporting.Attempts)
+		}
+		if updated1.Status.Reporting.NextAttemptAt == nil {
+			t.Fatalf("expected non-nil nextAttemptAt")
+		}
+		expectedNext := testNow.Add(10 * time.Second)
+		if !updated1.Status.Reporting.NextAttemptAt.Equal(&metav1.Time{Time: expectedNext}) {
+			t.Errorf("expected nextAttemptAt %v, got %v", expectedNext, updated1.Status.Reporting.NextAttemptAt.Time)
+		}
+
+		// Immediate reconcile before due time does not consume attempt and makes 0 new requests
+		reqCountBeforeSame := len(server.RequestLog())
+		resSame, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("unexpected error on immediate reconcile: %v", err)
+		}
+		if resSame.RequeueAfter != 10*time.Second {
+			t.Errorf("expected RequeueAfter 10s, got %v", resSame.RequeueAfter)
+		}
+		if len(server.RequestLog()) != reqCountBeforeSame {
+			t.Errorf("expected 0 new requests before retry is due, got %d", len(server.RequestLog())-reqCountBeforeSame)
+		}
+
+		// 2. Next reconcile after backoff delay: healthy token endpoint posts final comment and check run
+		testNow = testNow.Add(11 * time.Second)
+		reqCountBefore := len(server.RequestLog())
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("retry Reconcile error: %v", err)
+		}
+
+		var updated2 v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &updated2); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated2.Status.Reporting.Message != "" {
+			t.Errorf("expected empty message after successful reporting, got %q", updated2.Status.Reporting.Message)
+		}
+		if updated2.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected non-zero CommentID")
+		}
+		if updated2.Status.Reporting.CheckRunID == 0 {
+			t.Errorf("expected non-zero CheckRunID")
+		}
+		if updated2.Status.Reporting.LastPostedHash == "" {
+			t.Errorf("expected non-empty LastPostedHash")
+		}
+		if updated2.Status.Reporting.Attempts != 0 {
+			t.Errorf("expected attempts reset to 0, got %d", updated2.Status.Reporting.Attempts)
+		}
+		if updated2.Status.Reporting.NextAttemptAt != nil {
+			t.Errorf("expected nextAttemptAt cleared, got %v", updated2.Status.Reporting.NextAttemptAt)
+		}
+		if len(server.Comments()) != 1 {
+			t.Errorf("expected 1 comment on server, got %d", len(server.Comments()))
+		}
+		checkRuns := server.CheckRuns()
+		if len(checkRuns) != 1 {
+			t.Fatalf("expected 1 check run on server, got %d", len(checkRuns))
+		}
+		if checkRuns[0].Status != "completed" {
+			t.Errorf("expected check run status 'completed', got %q", checkRuns[0].Status)
+		}
+		if len(server.RequestLog()) <= reqCountBefore {
+			t.Errorf("expected new requests on retry")
+		}
+
+		// 3. Steady-state terminal reconcile: 0 new requests, 0 status writes
+		reqCountSteady := len(server.RequestLog())
+		resSteady, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("steady-state Reconcile error: %v", err)
+		}
+		if resSteady.RequeueAfter != 0 {
+			t.Errorf("expected RequeueAfter 0, got %v", resSteady.RequeueAfter)
+		}
+		if len(server.RequestLog()) != reqCountSteady {
+			t.Errorf("expected 0 new requests on steady-state terminal reconcile, got %d", len(server.RequestLog())-reqCountSteady)
+		}
+		var steadyComp v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &steadyComp); err != nil {
+			t.Fatalf("Get steadyComp error: %v", err)
+		}
+		if steadyComp.ResourceVersion != updated2.ResourceVersion {
+			t.Errorf("expected 0 status writes on steady-state terminal reconcile, resourceVersion changed")
+		}
+	})
+
+	t.Run("token endpoint transient failures capped at limit with permanent message", func(t *testing.T) {
+		ctx := t.Context()
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("failed to generate test RSA key: %v", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+		})
+
+		appSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "github-token",
+				Namespace: "eval-runner",
+			},
+			Data: map[string][]byte{
+				"app-id":          []byte("12345"),
+				"installation-id": []byte("67890"),
+				"private-key":     pemBytes,
+			},
+		}
+
+		comp := makeComp("comp-token-cap")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp, appSecret).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		testNow := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubBaseURL:       server.URL(),
+			Now:                 func() time.Time { return testNow },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-token-cap"}}
+
+		// Attempt 1: Token endpoint fails
+		server.InjectPathError("POST", "/app/installations/67890/access_tokens", 500, `{"message":"token server error 1"}`)
+		_, err = reconciler.Reconcile(ctx, req)
+		if err == nil {
+			t.Fatalf("expected error on attempt 1")
+		}
+
+		var compAttempt1 v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &compAttempt1); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if compAttempt1.Status.Reporting.Message != "" {
+			t.Errorf("expected empty message on attempt 1, got %q", compAttempt1.Status.Reporting.Message)
+		}
+		if compAttempt1.Status.Reporting.Attempts != 1 {
+			t.Errorf("expected attempts 1, got %d", compAttempt1.Status.Reporting.Attempts)
+		}
+
+		// Attempt 2: Advance time past 10s backoff, token endpoint fails again
+		testNow = testNow.Add(11 * time.Second)
+		server.InjectPathError("POST", "/app/installations/67890/access_tokens", 500, `{"message":"token server error 2"}`)
+		_, err = reconciler.Reconcile(ctx, req)
+		if err == nil {
+			t.Fatalf("expected error on attempt 2")
+		}
+
+		var compAttempt2 v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &compAttempt2); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if compAttempt2.Status.Reporting.Message != "" {
+			t.Errorf("expected empty message on attempt 2, got %q", compAttempt2.Status.Reporting.Message)
+		}
+		if compAttempt2.Status.Reporting.Attempts != 2 {
+			t.Errorf("expected attempts 2, got %d", compAttempt2.Status.Reporting.Attempts)
+		}
+
+		// Attempt 3: Advance time past 1m backoff, token endpoint fails third time
+		testNow = testNow.Add(61 * time.Second)
+		server.InjectPathError("POST", "/app/installations/67890/access_tokens", 500, `{"message":"token server error 3"}`)
+		_, err = reconciler.Reconcile(ctx, req)
+		if err == nil {
+			t.Fatalf("expected error on attempt 3")
+		}
+
+		var compAttempt3 v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &compAttempt3); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if compAttempt3.Status.Reporting.Message != "" {
+			t.Errorf("expected empty message on attempt 3, got %q", compAttempt3.Status.Reporting.Message)
+		}
+		if compAttempt3.Status.Reporting.Attempts != 3 {
+			t.Errorf("expected attempts 3, got %d", compAttempt3.Status.Reporting.Attempts)
+		}
+
+		// Attempt 4: Advance time past 5m backoff, token endpoint fails fourth time reaching cap (MaxReportingAttempts = 4)
+		testNow = testNow.Add(301 * time.Second)
+		server.InjectPathError("POST", "/app/installations/67890/access_tokens", 500, `{"message":"token server error 4"}`)
+		res4, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("expected nil error on cap exhaustion (stops retrying), got: %v", err)
+		}
+		if res4.RequeueAfter != 0 {
+			t.Errorf("expected RequeueAfter 0, got %v", res4.RequeueAfter)
+		}
+
+		var compCapped v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &compCapped); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if compCapped.Status.Reporting.Attempts != 4 {
+			t.Errorf("expected attempts 4, got %d", compCapped.Status.Reporting.Attempts)
+		}
+		if compCapped.Status.Reporting.NextAttemptAt != nil {
+			t.Errorf("expected nextAttemptAt nil, got %v", compCapped.Status.Reporting.NextAttemptAt)
+		}
+		if !strings.Contains(compCapped.Status.Reporting.Message, "token server error 4") {
+			t.Errorf("expected reporting.message to contain 'token server error 4', got %q", compCapped.Status.Reporting.Message)
+		}
+
+		// Subsequent reconcile: steady state, zero new requests, zero status writes
+		reqCountBefore := len(server.RequestLog())
+		resSteady, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("steady-state reconcile error: %v", err)
+		}
+		if resSteady.RequeueAfter != 0 {
+			t.Errorf("expected RequeueAfter 0, got %v", resSteady.RequeueAfter)
+		}
+		if len(server.RequestLog()) != reqCountBefore {
+			t.Errorf("expected 0 new requests on subsequent reconcile after cap, got %d", len(server.RequestLog())-reqCountBefore)
+		}
+		var steadyComp v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &steadyComp); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if steadyComp.ResourceVersion != compCapped.ResourceVersion {
+			t.Errorf("expected zero status writes on steady-state reconcile after cap")
+		}
+	})
+
+	t.Run("in-progress transient errors do not burn attempt cap", func(t *testing.T) {
+		ctx := t.Context()
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		candRunLocal := candRun.DeepCopy()
+		candRunLocal.Status.Phase = v1alpha1.RunPhaseRunning
+		candRunLocal.Status.Tasks[0].Phase = v1alpha1.TaskPhaseRunning
+
+		comp := makeComp("comp-running-blips")
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRunLocal, baseRun, comp, tokenSecret).
+			WithStatusSubresource(candRunLocal, baseRun, comp).
+			Build()
+
+		testNow := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			Now:                 func() time.Time { return testNow },
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-running-blips"}}
+
+		// 3 Running blips with no clock advance: none should consume attempts or set permanent message
+		for i := 1; i <= 3; i++ {
+			server.InjectError(500, fmt.Sprintf(`{"message":"in-progress error %d"}`, i))
+			_, err := reconciler.Reconcile(ctx, req)
+			if err == nil {
+				t.Fatalf("expected error on in-progress reconcile %d, got nil", i)
+			}
+			var cur v1alpha1.Comparison
+			if err := cl.Get(ctx, req.NamespacedName, &cur); err != nil {
+				t.Fatalf("Get error: %v", err)
+			}
+			if cur.Status.Reporting != nil {
+				if cur.Status.Reporting.Attempts != 0 {
+					t.Errorf("expected attempts 0 during running phase, got %d", cur.Status.Reporting.Attempts)
+				}
+				if cur.Status.Reporting.Message != "" {
+					t.Errorf("expected empty message during running phase, got %q", cur.Status.Reporting.Message)
+				}
+			}
+		}
+
+		// Candidate Run completes; 1 blip at completion: attempts bumps to 1, message remains empty
+		candRunLocal.Status.Phase = v1alpha1.RunPhaseCompleted
+		candRunLocal.Status.Tasks[0].Phase = v1alpha1.TaskPhaseCompleted
+		if err := cl.Status().Update(ctx, candRunLocal); err != nil {
+			t.Fatalf("failed updating candidate run status: %v", err)
+		}
+
+		server.InjectError(500, `{"message":"completion reporting error"}`)
+		_, err := reconciler.Reconcile(ctx, req)
+		if err == nil {
+			t.Fatalf("expected error on completion report failure, got nil")
+		}
+
+		var mid v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &mid); err != nil {
+			t.Fatalf("Get mid error: %v", err)
+		}
+		if mid.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Fatalf("expected phase Completed, got %s", mid.Status.Phase)
+		}
+		if mid.Status.Reporting == nil {
+			t.Fatalf("expected non-nil Status.Reporting")
+		}
+		if mid.Status.Reporting.Attempts != 1 {
+			t.Errorf("expected attempts 1 at completion failure, got %d", mid.Status.Reporting.Attempts)
+		}
+		if mid.Status.Reporting.Message != "" {
+			t.Errorf("expected empty message on transient completion failure, got %q", mid.Status.Reporting.Message)
+		}
+
+		// Healthy reconcile after backoff delay: posts final report and completes check run
+		testNow = testNow.Add(11 * time.Second)
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("retry Reconcile error: %v", err)
+		}
+
+		var finalComp v1alpha1.Comparison
+		if err := cl.Get(ctx, req.NamespacedName, &finalComp); err != nil {
+			t.Fatalf("Get finalComp error: %v", err)
+		}
+		if finalComp.Status.Reporting.Message != "" {
+			t.Errorf("expected empty message on success, got %q", finalComp.Status.Reporting.Message)
+		}
+		if finalComp.Status.Reporting.LastPostedHash == "" {
+			t.Errorf("expected non-empty LastPostedHash")
+		}
+		if len(server.Comments()) != 1 {
+			t.Errorf("expected 1 comment, got %d", len(server.Comments()))
+		}
+		checkRuns := server.CheckRuns()
+		if len(checkRuns) != 1 || checkRuns[0].Status != "completed" {
+			t.Errorf("expected 1 completed check run, got %v", checkRuns)
 		}
 	})
 }
@@ -9061,13 +9501,15 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 			t.Fatalf("expected error from failed GitHub report on Completed comparison with TTL, got nil")
 		}
 
-		// 2. Second reconcile with GitHub recovered (InjectError was one-shot) should succeed and schedule TTL RequeueAfter
+		// 2. Second reconcile after reporting retry backoff with GitHub recovered (InjectError was one-shot) should succeed and schedule TTL RequeueAfter
+		now = now.Add(10 * time.Second)
 		res, err := reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("unexpected error on second reconcile: %v", err)
 		}
-		if res.RequeueAfter != 50*time.Minute {
-			t.Errorf("expected RequeueAfter 50m, got %v", res.RequeueAfter)
+		expectedWait := 50*time.Minute - 10*time.Second
+		if res.RequeueAfter != expectedWait {
+			t.Errorf("expected RequeueAfter %v, got %v", expectedWait, res.RequeueAfter)
 		}
 		if len(server.Comments()) != 1 {
 			t.Errorf("expected 1 comment posted to GitHub, got %d", len(server.Comments()))
