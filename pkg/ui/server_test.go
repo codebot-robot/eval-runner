@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,7 +45,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -472,6 +475,15 @@ func TestServer_ReloadConfigMap_FooterReflectsNewValueWithoutRestart(t *testing.
 		},
 	}
 	clientset := k8sfake.NewSimpleClientset(cmWatch)
+
+	watchReady := make(chan struct{})
+	var watchOnce sync.Once
+	clientset.PrependWatchReactor("configmaps", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		w, err := clientset.Tracker().Watch(action.GetResource(), action.GetNamespace())
+		watchOnce.Do(func() { close(watchReady) })
+		return true, w, err
+	})
+
 	serverWatch := NewServer(Config{Client: fakeClient, DefaultNamespace: "eval-runner"})
 
 	watchDone := make(chan struct{}, 10)
@@ -492,6 +504,12 @@ func TestServer_ReloadConfigMap_FooterReflectsNewValueWithoutRestart(t *testing.
 	serverWatch.ServeHTTP(wWatch1, req)
 	if !strings.Contains(wWatch1.Body.String(), "artifacts: gs://watch-eval-bucket") {
 		t.Errorf("expected footer to reflect gs://watch-eval-bucket, got: %s", wWatch1.Body.String())
+	}
+
+	select {
+	case <-watchReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for watch registration")
 	}
 
 	// Update ConfigMap via fake clientset

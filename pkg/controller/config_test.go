@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,7 +41,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -2036,6 +2039,14 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 
 	clientset := k8sfake.NewSimpleClientset(initialCM)
 
+	watchReady := make(chan struct{})
+	var watchOnce sync.Once
+	clientset.PrependWatchReactor("configmaps", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		w, err := clientset.Tracker().Watch(action.GetResource(), action.GetNamespace())
+		watchOnce.Do(func() { close(watchReady) })
+		return true, w, err
+	})
+
 	var factoryCalls []string
 	var createdSinks []*trackingTestSink
 
@@ -2091,6 +2102,12 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 	case <-reloadDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for initial watch callback")
+	}
+
+	select {
+	case <-watchReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for watch registration")
 	}
 
 	if len(factoryCalls) != 1 || factoryCalls[0] != "initial-bucket" {
