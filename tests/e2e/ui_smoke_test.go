@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/ui"
 )
 
@@ -120,7 +121,33 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Errorf("expected run name %q in scoped run detail HTML", runName)
 	}
 
-	// 4. Curl /pulls page
+	// 4. Curl repository overview page (repo home)
+	repoHomeURL := baseURL + repoRef.Path()
+	respHome, err := http.Get(repoHomeURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", repoHomeURL, err)
+	}
+	bodyHome, _ := io.ReadAll(respHome.Body)
+	respHome.Body.Close()
+	if respHome.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected repo home status: %d body=%s", respHome.StatusCode, string(bodyHome))
+	}
+	if requireSamples {
+		rawPhase := strings.TrimSpace(harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.status.phase}"))
+		if rawPhase == string(v1alpha1.RunPhaseCompleted) {
+			if !strings.Contains(string(bodyHome), `class="suite-row"`) || !strings.Contains(string(bodyHome), ">docs<") {
+				t.Errorf("expected suite row for docs in repo home HTML")
+			}
+			taskIDsOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.status.tasks[*].id}")
+			for _, taskID := range strings.Fields(taskIDsOut) {
+				if !strings.Contains(string(bodyHome), taskID) {
+					t.Errorf("expected eval %q in repo home HTML", taskID)
+				}
+			}
+		}
+	}
+
+	// 5. Curl /pulls page
 	pullsURL := baseURL + "/pulls"
 	respPulls, err := http.Get(pullsURL)
 	if err != nil {

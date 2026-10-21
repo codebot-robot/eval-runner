@@ -6319,13 +6319,13 @@ func TestServerRepoRoutes(t *testing.T) {
 			name:       "repo overview",
 			path:       "/github.com/gke-labs/eval-runner",
 			wantStatus: http.StatusOK,
-			wantBody:   "docs-eval-cand-05ce4d8",
+			wantBody:   "Overview",
 		},
 		{
 			name:       "repo overview with trailing slash",
 			path:       "/github.com/gke-labs/eval-runner/",
 			wantStatus: http.StatusOK,
-			wantBody:   "docs-eval-cand-05ce4d8",
+			wantBody:   "Overview",
 		},
 		{
 			name:       "repo runs list",
