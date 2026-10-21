@@ -771,6 +771,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		ArtifactFooter:   FormatArtifactFooter(s.ArtifactSink()),
 		Version:          s.cfg.Version,
 		Message:          run.Status.Message,
+		ManifestSource:   run.Status.ManifestSource,
 		Metric:           metricFilter,
 		TotalCost:        totalCostFormatted,
 		TokensSummary:    totalTokensFormatted,

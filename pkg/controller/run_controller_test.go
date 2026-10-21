@@ -15,6 +15,8 @@
 package controller
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -211,6 +213,9 @@ func TestReconcilePodReadySuccess(t *testing.T) {
 	}
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
 		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
+	}
+	if updatedRun.Status.ManifestSource != v1alpha1.ManifestSourceList {
+		t.Errorf("Expected manifestSource %q, got %q", v1alpha1.ManifestSourceList, updatedRun.Status.ManifestSource)
 	}
 	if updatedRun.Status.Discovery == nil || updatedRun.Status.Discovery.TaskCount != 2 {
 		t.Fatalf("Expected 2 tasks in discovery, got: %+v", updatedRun.Status.Discovery)
@@ -1362,6 +1367,228 @@ func TestStepBasedFailures(t *testing.T) {
 				t.Errorf("Expected non-clone failure not to mention retry attempts, got: %s", updatedRun.Status.Message)
 			}
 		})
+	}
+}
+
+func TestReconcileDiscovery_TestCommandTransportError(t *testing.T) {
+	// Add a controller test with ExecFn returning codes.Unavailable for the test call (expect failure, no scan)
+	scanCalled := false
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "test -f .evals/list") {
+				return nil, status.Error(codes.Unavailable, "sandboxd transport unavailable")
+			}
+			if len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "scan.tar") {
+				scanCalled = true
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+	f := newDiscoveringRunFixture(t, fakeClient)
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "step test -f .evals/list failed") || !strings.Contains(updatedRun.Status.Message, "unavailable") {
+		t.Errorf("Expected status message to report test failure, got: %s", updatedRun.Status.Message)
+	}
+	if scanCalled {
+		t.Errorf("Scan fallback must NOT be called on transport error")
+	}
+}
+
+func TestReconcileDiscovery_EvalsListAbsent_ScanFallback(t *testing.T) {
+	// exit 1 on test -> Running with synthesized tasks
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	pyContent := []byte("from inspect_ai import task\n\n@task\ndef sample_eval():\n    pass\n")
+	tw.WriteHeader(&tar.Header{
+		Name: "evals/sample.py",
+		Mode: 0644,
+		Size: int64(len(pyContent)),
+	})
+	tw.Write(pyContent)
+	tw.Close()
+
+	fakeClient := &sandboxclient.FakeClient{
+		EvalsListAbsent: true,
+		ScanTarBytes:    tarBuf.Bytes(),
+	}
+
+	scheme := setupScheme(t)
+	runName := "test-scan-run"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "google/gemini-3.5-flash-lite",
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    fakeClient,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseRunning {
+		t.Errorf("Expected phase Running, got %s (message: %s)", updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+	if updatedRun.Status.ManifestSource != v1alpha1.ManifestSourceInspectScan {
+		t.Errorf("Expected manifestSource %q, got %q", v1alpha1.ManifestSourceInspectScan, updatedRun.Status.ManifestSource)
+	}
+	if updatedRun.Status.Discovery == nil || updatedRun.Status.Discovery.TaskCount != 1 {
+		t.Fatalf("Expected 1 task in discovery status, got: %+v", updatedRun.Status.Discovery)
+	}
+	if len(updatedRun.Status.Tasks) != 1 || updatedRun.Status.Tasks[0].ID != "evals/sample_eval" {
+		t.Errorf("Expected task evals/sample_eval, got: %+v", updatedRun.Status.Tasks)
+	}
+}
+
+func TestReconcileDiscovery_PresentButUnreadableFails(t *testing.T) {
+	// present-but-unreadable list fails the Run, it never falls back
+	scanCalled := false
+	fakeClient := &sandboxclient.FakeClient{
+		EvalsListAbsent: false,
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "test -f .evals/list") {
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			if len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "./.evals/list") {
+				return &sandboxclient.ExecuteResult{
+					ExitCode: 126,
+					Stderr:   "/bin/sh: ./.evals/list: Permission denied",
+				}, nil
+			}
+			if len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "scan.tar") {
+				scanCalled = true
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+	f := newDiscoveringRunFixture(t, fakeClient)
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "step ./.evals/list failed with exit code 126") {
+		t.Errorf("Expected status message to mention exit code 126, got: %s", updatedRun.Status.Message)
+	}
+	if scanCalled {
+		t.Errorf("Must never fall back to scan when .evals/list is present but unreadable")
+	}
+}
+
+func TestReconcileDiscovery_ScanFallback_CollisionsAndCaps(t *testing.T) {
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	// Colliding tasks in same dir
+	content1 := []byte("from inspect_ai import task\n\n@task\ndef common_task():\n    pass\n")
+	tw.WriteHeader(&tar.Header{
+		Name: "evals/a.py",
+		Mode: 0644,
+		Size: int64(len(content1)),
+	})
+	tw.Write(content1)
+	content2 := []byte("from inspect_ai import task\n\n@task\ndef common_task():\n    pass\n")
+	tw.WriteHeader(&tar.Header{
+		Name: "evals/b.py",
+		Mode: 0644,
+		Size: int64(len(content2)),
+	})
+	tw.Write(content2)
+	tw.Close()
+
+	fakeClient := &sandboxclient.FakeClient{
+		EvalsListAbsent: true,
+		ScanTarBytes:    tarBuf.Bytes(),
+	}
+	f := newDiscoveringRunFixture(t, fakeClient)
+	_, err := f.reconciler.Reconcile(t.Context(), f.req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase Discovered, got %s", updatedRun.Status.Phase)
+	}
+	if updatedRun.Status.ManifestSource != v1alpha1.ManifestSourceInspectScan {
+		t.Errorf("Expected manifestSource %q, got %q", v1alpha1.ManifestSourceInspectScan, updatedRun.Status.ManifestSource)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "task ID collision on \"evals/common_task\"") {
+		t.Errorf("Expected collision note in status.Message, got: %s", updatedRun.Status.Message)
+	}
+	expectedIDs := []string{"evals/a/common_task", "evals/b/common_task"}
+	if len(updatedRun.Status.Discovery.TaskIDs) != 2 {
+		t.Fatalf("Expected 2 task IDs, got: %+v", updatedRun.Status.Discovery.TaskIDs)
+	}
+	for i, id := range expectedIDs {
+		if updatedRun.Status.Discovery.TaskIDs[i] != id {
+			t.Errorf("Expected task ID %q, got %q", id, updatedRun.Status.Discovery.TaskIDs[i])
+		}
 	}
 }
 

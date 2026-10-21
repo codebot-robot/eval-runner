@@ -338,8 +338,24 @@ const (
 	DefaultCohort = "default"
 )
 
+// ManifestSource defines how the task manifest was discovered.
+// +kubebuilder:validation:Enum=list;inspect-scan
+type ManifestSource string
+
+const (
+	// ManifestSourceList indicates the manifest was discovered by executing .evals/list.
+	ManifestSourceList ManifestSource = "list"
+
+	// ManifestSourceInspectScan indicates the manifest was synthesized by scanning Python files for Inspect tasks.
+	ManifestSourceInspectScan ManifestSource = "inspect-scan"
+)
+
 // Manifest is the parsed output of .evals/list.
 type Manifest struct {
+	// Source indicates how the manifest was generated (e.g., "inspect-scan").
+	// +optional
+	Source string `json:"source,omitempty"`
+
 	// Images lists the images declared by the repository.
 	// +optional
 	Images []ManifestImage `json:"images,omitempty"`
@@ -426,6 +442,10 @@ type RunStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ManifestSource indicates how the task manifest was discovered (list or inspect-scan).
+	// +optional
+	ManifestSource ManifestSource `json:"manifestSource,omitempty"`
 
 	// Discovery records pointers, hash, and counts for the discovered manifest.
 	// +optional

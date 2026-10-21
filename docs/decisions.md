@@ -339,6 +339,30 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Declarative manifests provide unambiguous provenance, avoid brittle directory structure assumptions, and allow teams to clearly separate suite expansion from regressions.
 
+---
+
+### ADR-031: Inspect Task Discovery Fallback via Hybrid Archive Scan (#313)
+- **Status**: Decided
+- **Context**:
+  Concept §2.3 and architecture §2.3 specified fallback task discovery when a repository lacks a `.evals/list` executable, allowing repositories using the Inspect AI framework to be evaluated with zero manifest configuration.
+- **Decision**:
+  1. **Hybrid Execution Model**:
+     In accordance with ADR-004 (the controller never clones repository code directly), the discovery sandbox archives candidate Python files using `git ls-files -z -- '*.py'` (falling back to `find` excluding `.git`, `.venv`, `node_modules`, and `vendor` bounded to 5,000 files if not a git checkout), and pipes them into `/workspace/out/scan.tar` via BusyBox `tar -cf - -T -` (writing an empty file if no Python files match). The controller fetches `scan.tar` via bounded `sandboxd.ReadFile` (capped at 1 MiB), safely unpacks into a temporary directory verifying path-traversal safety, skipping symlinks, and forcing 0600/0700 file modes, and executes the scanner in Go.
+  2. **Trigger Semantics**:
+     Absence of `.evals/list` must be confirmed explicitly by running `test -f .evals/list` in the sandbox. Exit 0 indicates presence, proceeding to the normal `.evals/list` execution path (where unreadable or non-executable files fail the Run immediately without fallback). Exit 1 triggers the Inspect scan fallback. Any other exit code or transport/gRPC failure fails the Run immediately. An empty `.evals/list` does not trigger scan fallback.
+  3. **Go Line-Based Scanner vs. AST Trade-off**:
+     Running a Python AST parser inside the discovery sandbox was rejected to avoid running untrusted Python code or installing heavy Python runtimes in the minimal discovery image. Building a full Python AST parser in Go was rejected as disproportionate complexity. Instead, a line-based Go scanner is used:
+     - Candidate files must contain a code-level import of `inspect_ai` (`import inspect_ai` or `from inspect_ai import ...`). Aliases (e.g. `import inspect_ai as ia`) are unsupported.
+     - Triple-quoted strings (`"""` and `'''`) track code vs. string context across lines. The code state is determined at the start of each line, and updated across the whole line by scanning quote tokens in order with the first opener fixing the matching closer. This correctly handles multi-line docstrings, mid-line openers (e.g. `return f"""`, `X = """`), and prevents false positive decorator matches inside docstrings.
+     - Decorators `@task`, `@task(`, and `@inspect_ai.task` are detected at column 0 only (ignoring class methods and docstring mentions), tolerating trailing `# comments` and tracking multi-line argument balancing until parentheses close, followed by function definition extraction (`def <name>` / `async def <name>`).
+  4. **Task Synthesis and Collision Disambiguation**:
+     Tasks are synthesized with `id = <relative-dir>/<function>` (or `<function>` if at root), `workdir = <dir of file>`, `spec = <file>@<function>`, `paths = [<dir>/**]` (or `**` if root), no resources, and default cohort. When multiple tasks produce identical IDs, collisions are disambiguated deterministically to `<dir>/<file-stem>/<function>` (or `<file-stem>/<function>` if at root), and recorded in `status.message`.
+  5. **Caps & Provenance**:
+     The scanner enforces caps of 5,000 files and 200 tasks; reached caps are recorded in `status.message` and the Discovered condition message. Discovered tasks are sorted by ID and validated via `ValidateManifest`. Provenance is tracked with `Run.status.manifestSource` enum `list | inspect-scan`, the stored manifest JSON records `source: "inspect-scan"`, and the web UI displays a one-line note on the Run detail page only when `manifestSource == "inspect-scan"`.
+- **Rationale**:
+  The hybrid model strictly respects isolation and bounded communication boundaries, avoids executing arbitrary repository scripts during discovery when no manifest is provided, and provides deterministic zero-config evaluation for Inspect projects.
+
+
 
 
 
