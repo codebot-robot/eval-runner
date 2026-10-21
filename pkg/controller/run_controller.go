@@ -37,6 +37,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	"github.com/gke-labs/eval-runner/pkg/version"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -199,6 +200,9 @@ type RunReconciler struct {
 	// ControllerNamespace is the namespace where the controller runs (defaults to eval-runner).
 	ControllerNamespace string
 
+	// ControllerVersion is the version or build identifier of the controller persisted in summary.json.
+	ControllerVersion string
+
 	// PKIManager coordinates controller CA and per-sandbox server cert Secrets.
 	PKIManager *pki.Manager
 
@@ -230,6 +234,13 @@ func (r *RunReconciler) controllerNamespace() string {
 		return r.ControllerNamespace
 	}
 	return discovery.DefaultControllerNamespace
+}
+
+func (r *RunReconciler) controllerVersion() string {
+	if r.ControllerVersion != "" {
+		return r.ControllerVersion
+	}
+	return version.Get()
 }
 
 func (r *RunReconciler) sandboxdImage() string {
@@ -2390,28 +2401,66 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}
 
+	var successRate *float64
+	var successRateCI *v1alpha1.ConfidenceInterval
+	var successRateSD *float64
+
+	if agg.IsBinary() {
+		est := stats.Proportion(agg.Successes, agg.Samples, 0.95)
+		rate := est.Point
+		successRate = &rate
+		successRateCI = &v1alpha1.ConfidenceInterval{
+			Lower:      est.CI.Lower,
+			Upper:      est.CI.Upper,
+			Confidence: 0.95,
+			Method:     "wilson",
+		}
+	} else {
+		est := stats.Mean(agg.Scores, 0.95)
+		rate := est.Point
+		successRate = &rate
+		successRateCI = &v1alpha1.ConfidenceInterval{
+			Lower:      est.CI.Lower,
+			Upper:      est.CI.Upper,
+			Confidence: 0.95,
+			Method:     "t",
+		}
+		successRateSD = est.SD
+	}
+
+	sampleSummaries, primaryScorer, err := artifacts.ExtractTaskSampleSummaries(logBytes)
+	if err != nil {
+		logger.V(1).Info("failed to extract task sample summaries from inspect log", "task", taskID, "error", err)
+	}
+
 	finishTime := r.now()
 	var artifactSampleRange *artifacts.SampleRange
 	if effRange != nil {
 		artifactSampleRange = &artifacts.SampleRange{Start: effRange.Start, End: effRange.End}
 	}
 	meta := artifacts.RunMetadata{
-		RunName:         run.Name,
-		RunNamespace:    run.Namespace,
-		TaskID:          taskID,
-		Model:           run.Spec.Model,
-		Commit:          run.Spec.Repo.Commit,
-		Samples:         agg.Samples,
-		Successes:       agg.Successes,
-		MeanScore:       agg.MeanScore,
-		StartedAt:       &startTime,
-		FinishedAt:      &finishTime,
-		SampleRange:     artifactSampleRange,
-		Tokens:          tokens,
-		Latency:         latency,
-		CostUSD:         costUSD,
-		CostSource:      costSource,
-		PossibleSamples: datasetSamples,
+		RunName:           run.Name,
+		RunNamespace:      run.Namespace,
+		ControllerVersion: r.controllerVersion(),
+		TaskID:            taskID,
+		Model:             run.Spec.Model,
+		Commit:            run.Spec.Repo.Commit,
+		Scorer:            primaryScorer,
+		SampleCount:       agg.Samples,
+		Samples:           sampleSummaries,
+		Successes:         agg.Successes,
+		MeanScore:         agg.MeanScore,
+		SuccessRate:       successRate,
+		SuccessRateCI:     successRateCI,
+		SuccessRateSD:     successRateSD,
+		StartedAt:         &startTime,
+		FinishedAt:        &finishTime,
+		SampleRange:       artifactSampleRange,
+		Tokens:            tokens,
+		Latency:           latency,
+		CostUSD:           costUSD,
+		CostSource:        costSource,
+		PossibleSamples:   datasetSamples,
 	}
 	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
 	if storeErr != nil {
@@ -2440,34 +2489,6 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			possibleSamples: datasetSamples,
 		}
 	}
-
-	var successRate *float64
-	var successRateCI *v1alpha1.ConfidenceInterval
-	var successRateSD *float64
-
-	if agg.IsBinary() {
-		est := stats.Proportion(agg.Successes, agg.Samples, 0.95)
-		rate := est.Point
-		successRate = &rate
-		successRateCI = &v1alpha1.ConfidenceInterval{
-			Lower:      est.CI.Lower,
-			Upper:      est.CI.Upper,
-			Confidence: 0.95,
-			Method:     "wilson",
-		}
-	} else {
-		est := stats.Mean(agg.Scores, 0.95)
-		rate := est.Point
-		successRate = &rate
-		successRateCI = &v1alpha1.ConfidenceInterval{
-			Lower:      est.CI.Lower,
-			Upper:      est.CI.Upper,
-			Confidence: 0.95,
-			Method:     "t",
-		}
-		successRateSD = est.SD
-	}
-
 	var v1Tokens *v1alpha1.TaskTokens
 	if tokens != nil {
 		v1Tokens = &v1alpha1.TaskTokens{
