@@ -382,6 +382,7 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 				BatchSize:         wp.cfg.DefaultBatchSize,
 				MaxSamplesPerTask: wp.cfg.DefaultMaxSamplesPerTask,
 			},
+			BudgetUSD: wp.cfg.DefaultBudgetUSD,
 			PullRequest: &v1alpha1.PullRequestSpec{
 				Repository: item.TargetRepo,
 				Number:     prNum,
@@ -697,6 +698,13 @@ func (wp *WorkerPool) createOrUpdateComparison(ctx context.Context, comp *v1alph
 			existing.Spec.Sampling.BatchSize != comp.Spec.Sampling.BatchSize ||
 			existing.Spec.Sampling.MaxSamplesPerTask != comp.Spec.Sampling.MaxSamplesPerTask {
 			existing.Spec.Sampling = comp.Spec.Sampling.DeepCopy()
+			needsUpdate = true
+		}
+	}
+
+	if comp.Spec.BudgetUSD != nil {
+		if existing.Spec.BudgetUSD == nil || *existing.Spec.BudgetUSD != *comp.Spec.BudgetUSD {
+			existing.Spec.BudgetUSD = comp.Spec.BudgetUSD
 			needsUpdate = true
 		}
 	}

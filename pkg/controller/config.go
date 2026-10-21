@@ -125,6 +125,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyDefaultLimit:             {},
 	configkeys.ConfigMapKeyDefaultBatchSize:         {},
 	configkeys.ConfigMapKeyDefaultMaxSamplesPerTask: {},
+	configkeys.ConfigMapKeyDefaultBudgetUSD:         {},
 	configkeys.ConfigMapKeyDefaultCohort:            {},
 	configkeys.ConfigMapKeyCommandUsers:             {},
 	configkeys.ConfigMapKeyAffinityMode:             {},

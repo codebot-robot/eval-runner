@@ -65,6 +65,9 @@ const (
 	// ConfigMapKeyDefaultMaxSamplesPerTask is the ConfigMap key for the default maximum samples per task.
 	ConfigMapKeyDefaultMaxSamplesPerTask = configkeys.ConfigMapKeyDefaultMaxSamplesPerTask
 
+	// ConfigMapKeyDefaultBudgetUSD is the ConfigMap key for the default budget in USD.
+	ConfigMapKeyDefaultBudgetUSD = configkeys.ConfigMapKeyDefaultBudgetUSD
+
 	// ConfigMapKeyDefaultCohort is the ConfigMap key for the default cohort.
 	ConfigMapKeyDefaultCohort = configkeys.ConfigMapKeyDefaultCohort
 
@@ -90,6 +93,7 @@ type Config struct {
 	DefaultLimit             *int
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
+	DefaultBudgetUSD         *float64
 	WebhookRepositories      []string
 	Workers                  int
 	QueueSize                int
@@ -112,6 +116,7 @@ type RawWebhookFlags struct {
 	DefaultLimit             *int
 	DefaultBatchSize         *int
 	DefaultMaxSamplesPerTask *int
+	DefaultBudgetUSD         *float64
 	WebhookRepositories      string
 	Workers                  int
 	QueueSize                int
@@ -246,6 +251,21 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 				cfg.DefaultMaxSamplesPerTask = ms
 			}
 		}
+		if val, ok := cm.Data[ConfigMapKeyDefaultBudgetUSD]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.DefaultBudgetUSD = nil
+				} else {
+					budget, err := strconv.ParseFloat(trimmed, 64)
+					if err != nil || budget < 0 {
+						return Config{}, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be a non-negative number",
+							ConfigMapKeyDefaultBudgetUSD, val, cm.Namespace, cm.Name)
+					}
+					cfg.DefaultBudgetUSD = &budget
+				}
+			}
+		}
 		if val, ok := cm.Data[ConfigMapKeyWebhookRepositories]; ok {
 			cfg.WebhookRepositories = ParseRepositoryList(val)
 		}
@@ -277,6 +297,9 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 	}
 	if flags.IsExplicit("default-max-samples-per-task") && flags.DefaultMaxSamplesPerTask != nil {
 		cfg.DefaultMaxSamplesPerTask = *flags.DefaultMaxSamplesPerTask
+	}
+	if flags.IsExplicit("default-budget-usd") && flags.DefaultBudgetUSD != nil {
+		cfg.DefaultBudgetUSD = flags.DefaultBudgetUSD
 	}
 	if flags.IsExplicit("webhook-repositories") {
 		cfg.WebhookRepositories = ParseRepositoryList(flags.WebhookRepositories)

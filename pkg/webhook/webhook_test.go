@@ -1307,15 +1307,83 @@ func TestResolveWebhookConfig_AdaptiveSamplingAndKeys(t *testing.T) {
 	}
 }
 
+func TestResolveWebhookConfig_DefaultBudgetUSD(t *testing.T) {
+	// 1. ConfigMap parses defaultBudgetUSD
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyDefaultBudgetUSD: "0.50",
+		},
+	}
+	cfg, err := ResolveWebhookConfig(cm, RawWebhookFlags{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DefaultBudgetUSD == nil || *cfg.DefaultBudgetUSD != 0.50 {
+		t.Errorf("expected DefaultBudgetUSD 0.50, got %v", cfg.DefaultBudgetUSD)
+	}
+
+	// 2. ConfigMap sentinel "none" disables default budget
+	cmDisabled := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyDefaultBudgetUSD: "none",
+		},
+	}
+	cfgDisabled, err := ResolveWebhookConfig(cmDisabled, RawWebhookFlags{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgDisabled.DefaultBudgetUSD != nil {
+		t.Errorf("expected DefaultBudgetUSD nil for 'none', got %v", cfgDisabled.DefaultBudgetUSD)
+	}
+
+	// 3. Negative budget in ConfigMap returns error
+	cmNeg := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyDefaultBudgetUSD: "-1.0",
+		},
+	}
+	if _, err := ResolveWebhookConfig(cmNeg, RawWebhookFlags{}, nil); err == nil {
+		t.Errorf("expected error for negative defaultBudgetUSD")
+	}
+
+	// 4. Non-numeric budget in ConfigMap returns error
+	cmBad := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyDefaultBudgetUSD: "not-a-number",
+		},
+	}
+	if _, err := ResolveWebhookConfig(cmBad, RawWebhookFlags{}, nil); err == nil {
+		t.Errorf("expected error for non-numeric defaultBudgetUSD")
+	}
+
+	// 5. Explicit flag overrides ConfigMap
+	bFlag := 1.25
+	flags := RawWebhookFlags{
+		DefaultBudgetUSD: &bFlag,
+		Explicit: map[string]bool{
+			"default-budget-usd": true,
+		},
+	}
+	cfgFlag, err := ResolveWebhookConfig(cm, flags, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgFlag.DefaultBudgetUSD == nil || *cfgFlag.DefaultBudgetUSD != 1.25 {
+		t.Errorf("expected explicit flag to override defaultBudgetUSD, got %v", cfgFlag.DefaultBudgetUSD)
+	}
+}
+
 func TestWorker_SetsSamplingFromConfigMap(t *testing.T) {
 	scheme := newTestScheme()
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
+	bVal := 0.75
 	cfg := Config{
 		Namespace:                "eval-runner",
 		DefaultModel:             "mockllm/model",
 		DefaultBatchSize:         12,
 		DefaultMaxSamplesPerTask: 48,
+		DefaultBudgetUSD:         &bVal,
 		Client:                   cl,
 	}
 	worker := NewWorkerPool(cfg)
@@ -1367,6 +1435,9 @@ func TestWorker_SetsSamplingFromConfigMap(t *testing.T) {
 	}
 	if comp.Spec.Sampling.BatchSize != 12 || comp.Spec.Sampling.MaxSamplesPerTask != 48 {
 		t.Errorf("expected Sampling {12, 48}, got %+v", comp.Spec.Sampling)
+	}
+	if comp.Spec.BudgetUSD == nil || *comp.Spec.BudgetUSD != 0.75 {
+		t.Errorf("expected BudgetUSD 0.75, got %v", comp.Spec.BudgetUSD)
 	}
 
 	// Test push warm baseline run gets sampleRange {1, defaultBatchSize}
