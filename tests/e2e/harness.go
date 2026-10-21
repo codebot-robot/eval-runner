@@ -442,6 +442,10 @@ func (h *Harness) PortForwardUI(port int) (baseURL string, cleanup func()) {
 			if err := cmd.Process.Kill(); err != nil {
 				h.t.Logf("warning: failed to kill port-forward process: %v", err)
 			}
+			if err := cmd.Wait(); err != nil {
+				// The process was killed, so an exit error is expected.
+				h.t.Logf("port-forward process terminated: %v", err)
+			}
 		}
 	}
 

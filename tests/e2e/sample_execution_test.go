@@ -541,7 +541,7 @@ spec:
 		}
 
 		// Verify trajectory viewer pages via UI port-forward
-		runUISmoke(t, harness, runName)
+		runUISmoke(t, harness, runName, true)
 
 		baseURL, uiCleanup := harness.PortForwardUI(18088)
 		defer uiCleanup()
