@@ -186,6 +186,13 @@ When artifact storage is missing or unconfigured:
   The missing sink is also logged on the UI pod (`artifact storage not configured for UI`).
 - **Run Detail Links**: When `s.cfg.ArtifactSink` is nil, task IDs that have a log path are rendered on the Run detail page (`/runs/{namespace}/{name}`) without hyperlinks alongside an `(artifacts unavailable)` note, preventing navigation to dead ends.
 
+#### Informer-Backed Caching and API Traffic
+To eliminate per-request Kubernetes API traffic on list and detail views, the UI server runs a `controller-runtime` cache (`client.Reader`) backed by informers started once at process start:
+- **Informer scoping & bounded memory**: The cache is strictly scoped to `Run` and `Comparison` resources in the default namespace (`eval-runner`). Informers are never created for high-volume objects like `Sandbox` resources or `Pod`s, keeping memory consumption strictly bounded.
+- **Default namespace vs. cross-namespace**: Handlers query the cache for objects in the default namespace, reducing per-request API calls to zero. The direct Kubernetes client is preserved as a fallback and for explicit cross-namespace overrides (`?namespace=`).
+- **Eventual consistency trade-off**: Data served from the informer cache reflects informer sync state with eventual consistency (typically a latency of a second or two between Kubernetes API writes and dashboard display).
+- **Startup readiness**: The `/healthz` HTTP endpoint returns `503 Service Unavailable` on startup until the informer cache has synced its initial state with the Kubernetes API server, ensuring traffic is only routed to ready replicas while `/livez` independently reports container liveness.
+
 ### Two Namespaces
 
 The system is deployed into two distinct namespaces:
