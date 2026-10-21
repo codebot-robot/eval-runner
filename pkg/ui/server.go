@@ -1984,6 +1984,12 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 	s.renderSampleTranscript(w, r, ns, name, taskID, sampleID, matchedTask.LogPath)
 }
 
+// Task samples list size guards.
+const (
+	pageSize              = 200
+	maxSampleTooltipBytes = 512
+)
+
 func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, ns, name, taskID, commit, model, logPath string) {
 	ctx := r.Context()
 	view := TaskSamplesListView{
@@ -2027,7 +2033,6 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 		}
 	}
 
-	const pageSize = 200
 	totalPages := 1
 	if totalSamples > 0 {
 		totalPages = int(math.Ceil(float64(totalSamples) / float64(pageSize)))
@@ -2082,9 +2087,9 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 			StatusClass:        statusClass,
 			InputPreview:       TruncateRunes(sRecord.Input, 200),
 			OutputPreview:      TruncateRunes(sRecord.Output, 200),
-			Target:             sRecord.Target,
+			Target:             TruncateFieldBytes(sRecord.Target, maxSampleTooltipBytes),
 			TargetPreview:      TruncateRunes(sRecord.Target, sampleNotePreviewRunes),
-			Explanation:        sRecord.Explanation,
+			Explanation:        TruncateFieldBytes(sRecord.Explanation, maxSampleTooltipBytes),
 			ExplanationPreview: TruncateRunes(sRecord.Explanation, sampleNotePreviewRunes),
 			LatencyStr:         FormatLatency(sRecord.Latency),
 			TokensStr:          FormatTokens(sRecord.TotalTokens),

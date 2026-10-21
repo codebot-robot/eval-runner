@@ -2897,6 +2897,136 @@ func TestServerSampleTranscript_Truncation(t *testing.T) {
 	})
 }
 
+func TestServerTaskSamplesList_Truncation(t *testing.T) {
+	scheme := newTestScheme(t)
+	sink := artifacts.NewInMemorySink()
+
+	commit := "abcdef1234567890"
+	taskID := "triage/runbook_lookup"
+	meanScore := 1.0
+	now := time.Now()
+	meta := artifacts.RunMetadata{
+		TaskID:     taskID,
+		Commit:     commit,
+		Model:      "gemini-2.5-pro",
+		Samples:    2,
+		Successes:  2,
+		MeanScore:  &meanScore,
+		StartedAt:  &now,
+		FinishedAt: &now,
+	}
+
+	// 100 KiB explanation (102,400 bytes)
+	explanation100k := strings.Repeat("a", 100*1024)
+	// 100 KiB target (102,400 bytes)
+	target100k := strings.Repeat("b", 100*1024)
+
+	rawJSON := fmt.Sprintf(`{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "triage/runbook_lookup", "scorers": [{"name": "accuracy"}]},
+		"samples": [
+			{
+				"id": "sample-oversized-explanation",
+				"target": "Expected pass rule",
+				"scores": {
+					"accuracy": {
+						"value": 1.0,
+						"explanation": %q
+					}
+				}
+			},
+			{
+				"id": "sample-oversized-target",
+				"target": %q,
+				"scores": {
+					"accuracy": {
+						"value": 1.0,
+						"explanation": "Short explanation"
+					}
+				}
+			}
+		]
+	}`, explanation100k, target100k)
+
+	logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(rawJSON))
+	if err != nil {
+		t.Fatalf("failed to store artifact in InMemorySink: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "oversized-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: commit,
+			},
+			Model: "gemini-2.5-pro",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: logURI,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		Build()
+
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+		ArtifactSink:     sink,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+
+	// Truncation notes should be present for both oversized explanation and target tooltips
+	expectedExpNote := fmt.Sprintf("truncated, %d bytes total", len(explanation100k))
+	if !strings.Contains(body, expectedExpNote) {
+		t.Errorf("expected body to contain explanation truncation note %q", expectedExpNote)
+	}
+
+	expectedTargetNote := fmt.Sprintf("truncated, %d bytes total", len(target100k))
+	if !strings.Contains(body, expectedTargetNote) {
+		t.Errorf("expected body to contain target truncation note %q", expectedTargetNote)
+	}
+
+	// Body must be well under 100 KiB (each tooltip capped at 512 bytes + HTML template skeleton)
+	if len(body) >= 50*1024 {
+		t.Errorf("expected body to be well under 100 KiB, got %d bytes", len(body))
+	}
+
+	// The sample rows must still link to the transcripts
+	expectedExpLink := "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-explanation"
+	if !strings.Contains(body, expectedExpLink) {
+		t.Errorf("expected body to link to sample transcript %q", expectedExpLink)
+	}
+
+	expectedTargetLink := "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-target"
+	if !strings.Contains(body, expectedTargetLink) {
+		t.Errorf("expected body to link to sample transcript %q", expectedTargetLink)
+	}
+}
+
 func TestComparisonCIHistory(t *testing.T) {
 	scheme := newTestScheme(t)
 	baseDir := t.TempDir()
