@@ -209,6 +209,13 @@ stringData:
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")
 
+	// Assert controller reconciled baseline egress NetworkPolicy with 3 rules on kind (FQDN absent variant).
+	egressRulesJSON := h.runCmd("kubectl", "-n", "eval-runner-sandbox", "get", "networkpolicy", "eval-runner-sandbox-egress", "-o", "jsonpath={.spec.egress}")
+	rulesCount := h.runCmd("kubectl", "-n", "eval-runner-sandbox", "get", "networkpolicy", "eval-runner-sandbox-egress", "-o", "jsonpath={len(.spec.egress)}")
+	if strings.TrimSpace(rulesCount) != "3" {
+		h.t.Fatalf("expected 3 egress rules on eval-runner-sandbox-egress on kind, got %s (egress: %s)", rulesCount, egressRulesJSON)
+	}
+
 	// Apply UI Deployment with image rewritten for kind local image
 	uiDeployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/ui-deployment.yaml"))
 	if err != nil {

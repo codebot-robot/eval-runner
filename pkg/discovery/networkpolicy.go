@@ -100,10 +100,9 @@ func ParseHostList(s string) []string {
 // RenderSandboxEgressNetworkPolicy renders the baseline NetworkPolicy for sandbox egress.
 // When fqdnActive is false (e.g. non-Dataplane V2 clusters, kind, or when egress hosts is "none"),
 // it allows DNS, in-cluster git fixture on 9418, and internet egress on 80, 443, 9418.
-// When fqdnActive is true (FQDNNetworkPolicy is active), the internet rule allows only
-// ports not covered by hostnames (none by default; keep 9418 to the fixture), removing
-// the 0.0.0.0/0:443 and :80 rules so that HTTPS/HTTP egress is narrowed to the declared hosts.
-func RenderSandboxEgressNetworkPolicy(name, namespace string, fqdnActive bool, extraInternetPorts ...int32) *networkingv1.NetworkPolicy {
+// When fqdnActive is true (FQDNNetworkPolicy is active), the internet rule is omitted entirely,
+// removing the 0.0.0.0/0:443 and :80 rules so that HTTPS egress is narrowed strictly to declared hosts.
+func RenderSandboxEgressNetworkPolicy(name, namespace string, fqdnActive bool) *networkingv1.NetworkPolicy {
 	udpProto := corev1.ProtocolUDP
 	tcpProto := corev1.ProtocolTCP
 
@@ -169,27 +168,9 @@ func RenderSandboxEgressNetworkPolicy(name, namespace string, fqdnActive bool, e
 	var egressRules []networkingv1.NetworkPolicyEgressRule
 	egressRules = append(egressRules, dnsRule)
 
-	// Internet rule:
-	// When fqdnActive is false, allow 80, 443, 9418.
-	// When fqdnActive is true, allow only extraInternetPorts (none by default).
-	var internetPorts []int32
+	// Internet rule: only present when FQDN is inactive.
 	if !fqdnActive {
-		internetPorts = []int32{80, 443, 9418}
-	}
-	for _, p := range extraInternetPorts {
-		found := false
-		for _, existing := range internetPorts {
-			if existing == p {
-				found = true
-				break
-			}
-		}
-		if !found {
-			internetPorts = append(internetPorts, p)
-		}
-	}
-
-	if len(internetPorts) > 0 {
+		internetPorts := []int32{80, 443, 9418}
 		var ports []networkingv1.NetworkPolicyPort
 		for _, p := range internetPorts {
 			portVal := p
@@ -245,8 +226,8 @@ func RenderSandboxEgressNetworkPolicy(name, namespace string, fqdnActive bool, e
 }
 
 // RenderSandboxEgressNetworkPolicyYAML renders the baseline egress policy and returns its YAML string representation.
-func RenderSandboxEgressNetworkPolicyYAML(name, namespace string, fqdnActive bool, extraInternetPorts ...int32) (string, error) {
-	np := RenderSandboxEgressNetworkPolicy(name, namespace, fqdnActive, extraInternetPorts...)
+func RenderSandboxEgressNetworkPolicyYAML(name, namespace string, fqdnActive bool) (string, error) {
+	np := RenderSandboxEgressNetworkPolicy(name, namespace, fqdnActive)
 	data, err := yaml.Marshal(np)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal NetworkPolicy to YAML: %w", err)

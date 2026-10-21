@@ -31,6 +31,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -255,6 +256,7 @@ func main() {
 				DisableFor: []client.Object{
 					&corev1.Secret{},
 					&corev1.ConfigMap{},
+					&networkingv1.NetworkPolicy{},
 				},
 			},
 		},

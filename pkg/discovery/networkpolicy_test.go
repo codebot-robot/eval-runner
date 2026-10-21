@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -229,6 +230,9 @@ func TestRenderSandboxEgressNetworkPolicy_FQDNAbsent(t *testing.T) {
 	if !hasTCP53 {
 		t.Errorf("expected TCP port 53 in DNS egress rule")
 	}
+	if len(dnsRule.Ports) != 2 {
+		t.Errorf("expected exactly 2 ports in DNS egress rule, got %d", len(dnsRule.Ports))
+	}
 
 	// Rule 2: Internet Git / HTTP / HTTPS
 	internetRule := egressPolicy.Spec.Egress[1]
@@ -259,6 +263,10 @@ func TestRenderSandboxEgressNetworkPolicy_FQDNAbsent(t *testing.T) {
 		if !exceptMap[expectedCIDR] {
 			t.Errorf("expected internet rule ipBlock.except to contain %s, got %v", expectedCIDR, toPeer.IPBlock.Except)
 		}
+	}
+
+	if len(internetRule.Ports) != 3 {
+		t.Errorf("expected exactly 3 ports in internet egress rule, got %d", len(internetRule.Ports))
 	}
 
 	expectedInternetPorts := map[int32]bool{80: false, 443: false, 9418: false}
@@ -420,6 +428,24 @@ func TestRenderSandboxEgressNetworkPolicyYAML_RoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(yamlActive, "port: 9418") {
 		t.Errorf("expected port 9418 to fixture in YAML when FQDN active, got:\n%s", yamlActive)
+	}
+}
+
+func TestRenderSandboxEgressNetworkPolicy_GoldenMatch(t *testing.T) {
+	goldenBytes, err := os.ReadFile(filepath.Join("testdata", "sandbox-egress-golden.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read golden sandbox egress manifest: %v", err)
+	}
+
+	var goldenPolicy networkingv1.NetworkPolicy
+	if err := yaml.Unmarshal(goldenBytes, &goldenPolicy); err != nil {
+		t.Fatalf("failed to unmarshal golden sandbox egress manifest: %v", err)
+	}
+
+	renderedPolicy := RenderSandboxEgressNetworkPolicy(DefaultSandboxEgressNetworkPolicyName, DefaultSandboxNamespace, false)
+	if !reflect.DeepEqual(renderedPolicy.Spec, goldenPolicy.Spec) {
+		t.Errorf("rendered FQDN-absent policy .spec differs from #281 golden manifest:\nrendered: %+v\ngolden:   %+v",
+			renderedPolicy.Spec, goldenPolicy.Spec)
 	}
 }
 

@@ -446,8 +446,8 @@ The components use strictly namespaced RBAC with **no ClusterRole**:
    - *OwnerReferencesPermissionEnforcement admission note*: Mutating `ownerReferences` on an existing Run (used when reusing a completed baseline batch Run to append a non-controller owner reference) requires `delete` permissions on `runs` under the `OwnerReferencesPermissionEnforcement` admission plugin, and setting `blockOwnerDeletion: true` requires `update` on `comparisons/finalizers`. Neither admission plugin check is enabled by default on standard GKE or kind clusters. If enabled in hardened environments, the controller's Role would require `delete` on `runs` and `update` on `comparisons/finalizers`.
 2. **In namespace `eval-runner-sandbox` (Role `eval-runner-controller-sandbox`)**:
    - `agents.x-k8s.io/sandboxes`: `create`, `get`, `list`, `watch`, `delete`.
-   - `networking.k8s.io/networkpolicies`: `create`, `get`, `list`, `watch`, `update`, `patch`, `delete` (used to reconcile and watch baseline egress NetworkPolicy in eval-runner-sandbox).
-   - `networking.gke.io/fqdnnetworkpolicies`: `create`, `get`, `list`, `watch`, `update`, `patch`, `delete` (used to reconcile and watch FQDNNetworkPolicy in eval-runner-sandbox).
+   - `networking.k8s.io/networkpolicies`: `create`, `get`, `watch`, `update`, `patch`, `delete` (used to reconcile and watch the baseline egress NetworkPolicy in eval-runner-sandbox via a namespaced single-object watch; no informer or ClusterRole).
+   - `networking.gke.io/fqdnnetworkpolicies`: `create`, `get`, `watch`, `update`, `patch`, `delete` (used to reconcile and watch FQDNNetworkPolicy in eval-runner-sandbox via a namespaced single-object watch).
    - Core `pods`: `get`, `list`, `watch` (used to look up sandbox pod IP addresses; `pods/exec` is dropped).
    - Core `configmaps`: `get`, `create`, `update` (used to publish public CA certificate `sandbox-ca`).
    - Core `secrets`: `get`, `create`, `delete` (used for per-sandbox server cert Secrets and reading optional `model-credentials`).

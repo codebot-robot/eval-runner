@@ -220,13 +220,14 @@ func TestSandboxEgressWatcher_RepairOnWatchEventAndSync(t *testing.T) {
 
 	initialHosts := []string{"github.com", "*.googleapis.com"}
 	watcher := NewSandboxEgressWatcher(SandboxEgressWatcherOptions{
-		Client:       ctrlClient,
-		KubeClient:   kubeClientset,
-		Namespace:    ns,
-		FQDNVersion:  fqdnVersion,
-		Logger:       logger,
-		ResyncPeriod: 100 * time.Millisecond,
-		InitialHosts: initialHosts,
+		Client:           ctrlClient,
+		KubeClient:       kubeClientset,
+		Namespace:        ns,
+		FQDNVersion:      fqdnVersion,
+		Logger:           logger,
+		ResyncPeriod:     100 * time.Millisecond,
+		MinWatchInterval: 10 * time.Millisecond,
+		InitialHosts:     initialHosts,
 	})
 
 	// Start watcher in background
@@ -309,4 +310,64 @@ func requireEventually(t *testing.T, condition func() bool, msg string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out: %s", msg)
+}
+
+func TestReconcile_ToleratesServerSideDefaultedFields(t *testing.T) {
+	ctx := t.Context()
+	s := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(s); err != nil {
+		t.Fatalf("failed to add clientgo scheme: %v", err)
+	}
+
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+	logger := logr.Discard()
+	ns := "eval-runner-sandbox"
+	fqdnName := discovery.DefaultFQDNNetworkPolicyName
+	fqdnVersion := discovery.FQDNNetworkPolicyAPIVersion
+
+	hosts := []string{"github.com", "*.googleapis.com"}
+
+	// 1. Initial reconcile creates FQDNNetworkPolicy
+	if err := ReconcileFQDNNetworkPolicy(ctx, c, fqdnVersion, ns, hosts, logger); err != nil {
+		t.Fatalf("unexpected error creating FQDNNetworkPolicy: %v", err)
+	}
+
+	// 2. Fetch created object and inject server-side defaulted extra field into spec
+	fqdnNP := &unstructured.Unstructured{}
+	fqdnNP.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   discovery.FQDNNetworkPolicyGroup,
+		Version: "v1alpha1",
+		Kind:    discovery.FQDNNetworkPolicyKind,
+	})
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: fqdnName}, fqdnNP); err != nil {
+		t.Fatalf("failed to get FQDNNetworkPolicy: %v", err)
+	}
+
+	specMap := fqdnNP.Object["spec"].(map[string]any)
+	specMap["serverDefaultedField"] = "default-value"
+	if err := c.Update(ctx, fqdnNP); err != nil {
+		t.Fatalf("failed to update FQDNNetworkPolicy with defaulted field: %v", err)
+	}
+
+	// Record resource version after server default injection
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: fqdnName}, fqdnNP); err != nil {
+		t.Fatalf("failed to get FQDNNetworkPolicy: %v", err)
+	}
+	rvBefore := fqdnNP.GetResourceVersion()
+
+	// 3. Reconcile again: DeepDerivative must consider desired a subset of existing and perform NO update
+	if err := ReconcileFQDNNetworkPolicy(ctx, c, fqdnVersion, ns, hosts, logger); err != nil {
+		t.Fatalf("unexpected error reconciling FQDNNetworkPolicy: %v", err)
+	}
+
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: fqdnName}, fqdnNP); err != nil {
+		t.Fatalf("failed to get FQDNNetworkPolicy: %v", err)
+	}
+	rvAfter := fqdnNP.GetResourceVersion()
+	if rvBefore != rvAfter {
+		t.Errorf("expected no second update when stored spec has server-defaulted extra field; rv changed from %s to %s", rvBefore, rvAfter)
+	}
+	if fqdnNP.Object["spec"].(map[string]any)["serverDefaultedField"] != "default-value" {
+		t.Errorf("expected serverDefaultedField to be preserved, got %v", fqdnNP.Object["spec"])
+	}
 }

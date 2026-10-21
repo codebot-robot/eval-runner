@@ -18,16 +18,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"sync"
 	"time"
 
+	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/go-logr/logr"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
@@ -35,6 +37,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+var adoptLogOnce sync.Once
 
 // ReconcileSandboxEgressNetworkPolicy reconciles the baseline egress NetworkPolicy (eval-runner-sandbox-egress)
 // in the specified namespace.
@@ -68,7 +72,7 @@ func ReconcileSandboxEgressNetworkPolicy(
 		return fmt.Errorf("failed to get sandbox egress NetworkPolicy %s/%s: %w", namespace, name, err)
 	}
 
-	if !reflect.DeepEqual(existing.Spec, desired.Spec) {
+	if len(existing.Spec.Egress) != len(desired.Spec.Egress) || !equality.Semantic.DeepDerivative(desired.Spec, existing.Spec) {
 		existing.Spec = desired.Spec
 		if updateErr := c.Update(ctx, existing); updateErr != nil {
 			return fmt.Errorf("failed to update sandbox egress NetworkPolicy %s/%s: %w", namespace, name, updateErr)
@@ -78,6 +82,14 @@ func ReconcileSandboxEgressNetworkPolicy(
 			"name", name,
 			"fqdnActive", fqdnActive,
 		)
+	} else {
+		adoptLogOnce.Do(func() {
+			logger.Info("adopted existing sandbox egress NetworkPolicy",
+				"namespace", namespace,
+				"name", name,
+				"fqdnActive", fqdnActive,
+			)
+		})
 	}
 
 	return nil
@@ -126,88 +138,31 @@ func WatchSandboxEgressNetworkPolicy(
 	}
 
 	fieldSelector := "metadata.name=" + name
-	var rv string
 
-	np, err := client.NetworkingV1().NetworkPolicies(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err == nil {
-		rv = np.ResourceVersion
-	} else if apierrors.IsNotFound(err) {
-		rv = ""
-	} else if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	backoff := 1 * time.Second
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		watcher, err := client.NetworkingV1().NetworkPolicies(namespace).Watch(ctx, metav1.ListOptions{
-			FieldSelector:   fieldSelector,
-			ResourceVersion: rv,
-		})
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
+	return sinkconfig.WatchNamedResource(ctx, sinkconfig.WatchNamedResourceOptions{
+		Get: func(ctx context.Context) (metav1.Object, error) {
+			return client.NetworkingV1().NetworkPolicies(namespace).Get(ctx, name, metav1.GetOptions{})
+		},
+		Watch: func(ctx context.Context, rv string) (watch.Interface, error) {
+			return client.NetworkingV1().NetworkPolicies(namespace).Watch(ctx, metav1.ListOptions{
+				FieldSelector:       fieldSelector,
+				ResourceVersion:     rv,
+				AllowWatchBookmarks: true,
+			})
+		},
+		OnEvent: func(eventType watch.EventType, obj runtime.Object) {
+			if onEvent == nil {
+				return
 			}
-			if backoff < 15*time.Second {
-				backoff *= 2
+			if eventType == watch.Deleted || obj == nil {
+				onEvent(watch.Deleted, nil)
+				return
 			}
-			np, err := client.NetworkingV1().NetworkPolicies(namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil {
-				rv = np.ResourceVersion
-			} else if apierrors.IsNotFound(err) {
-				rv = ""
-				if onEvent != nil {
-					onEvent(watch.Deleted, nil)
-				}
+			if np, ok := obj.(*networkingv1.NetworkPolicy); ok {
+				onEvent(eventType, np)
 			}
-			continue
-		}
-
-		backoff = 1 * time.Second
-
-		stopped := false
-		for !stopped {
-			select {
-			case <-ctx.Done():
-				watcher.Stop()
-				return ctx.Err()
-			case event, ok := <-watcher.ResultChan():
-				if !ok {
-					stopped = true
-					break
-				}
-				switch event.Type {
-				case watch.Added, watch.Modified:
-					if updatedNP, ok := event.Object.(*networkingv1.NetworkPolicy); ok {
-						if updatedNP.ResourceVersion != "" && updatedNP.ResourceVersion == rv {
-							continue
-						}
-						rv = updatedNP.ResourceVersion
-						if onEvent != nil {
-							onEvent(event.Type, updatedNP)
-						}
-					}
-				case watch.Deleted:
-					rv = ""
-					var deletedNP *networkingv1.NetworkPolicy
-					if p, ok := event.Object.(*networkingv1.NetworkPolicy); ok {
-						deletedNP = p
-					}
-					if onEvent != nil {
-						onEvent(watch.Deleted, deletedNP)
-					}
-				}
-			}
-		}
-	}
+		},
+	})
 }
 
 // WatchSandboxFQDNNetworkPolicy watches the sandbox FQDNNetworkPolicy in namespace using dynamic client.
@@ -227,112 +182,57 @@ func WatchSandboxFQDNNetworkPolicy(
 	}
 
 	fieldSelector := "metadata.name=" + name
-	var rv string
 
-	u, err := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err == nil {
-		rv = u.GetResourceVersion()
-	} else if apierrors.IsNotFound(err) {
-		rv = ""
-	} else if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	backoff := 1 * time.Second
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		watcher, err := dynClient.Resource(gvr).Namespace(namespace).Watch(ctx, metav1.ListOptions{
-			FieldSelector:   fieldSelector,
-			ResourceVersion: rv,
-		})
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
+	return sinkconfig.WatchNamedResource(ctx, sinkconfig.WatchNamedResourceOptions{
+		Get: func(ctx context.Context) (metav1.Object, error) {
+			return dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		},
+		Watch: func(ctx context.Context, rv string) (watch.Interface, error) {
+			return dynClient.Resource(gvr).Namespace(namespace).Watch(ctx, metav1.ListOptions{
+				FieldSelector:       fieldSelector,
+				ResourceVersion:     rv,
+				AllowWatchBookmarks: true,
+			})
+		},
+		OnEvent: func(eventType watch.EventType, obj runtime.Object) {
+			if onEvent == nil {
+				return
 			}
-			if backoff < 15*time.Second {
-				backoff *= 2
+			if eventType == watch.Deleted || obj == nil {
+				onEvent(watch.Deleted, nil)
+				return
 			}
-			u, err := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil {
-				rv = u.GetResourceVersion()
-			} else if apierrors.IsNotFound(err) {
-				rv = ""
-				if onEvent != nil {
-					onEvent(watch.Deleted, nil)
-				}
+			if u, ok := obj.(*unstructured.Unstructured); ok {
+				onEvent(eventType, u)
 			}
-			continue
-		}
-
-		backoff = 1 * time.Second
-
-		stopped := false
-		for !stopped {
-			select {
-			case <-ctx.Done():
-				watcher.Stop()
-				return ctx.Err()
-			case event, ok := <-watcher.ResultChan():
-				if !ok {
-					stopped = true
-					break
-				}
-				switch event.Type {
-				case watch.Added, watch.Modified:
-					if updatedU, ok := event.Object.(*unstructured.Unstructured); ok {
-						if updatedU.GetResourceVersion() != "" && updatedU.GetResourceVersion() == rv {
-							continue
-						}
-						rv = updatedU.GetResourceVersion()
-						if onEvent != nil {
-							onEvent(event.Type, updatedU)
-						}
-					}
-				case watch.Deleted:
-					rv = ""
-					var deletedU *unstructured.Unstructured
-					if u, ok := event.Object.(*unstructured.Unstructured); ok {
-						deletedU = u
-					}
-					if onEvent != nil {
-						onEvent(watch.Deleted, deletedU)
-					}
-				}
-			}
-		}
-	}
+		},
+	})
 }
 
 // SandboxEgressWatcherOptions holds configuration options for SandboxEgressWatcher.
 type SandboxEgressWatcherOptions struct {
-	Client        client.Client
-	KubeClient    kubernetes.Interface
-	DynamicClient dynamic.Interface
-	Namespace     string
-	FQDNVersion   string
-	Logger        logr.Logger
-	ResyncPeriod  time.Duration
-	InitialHosts  []string
+	Client           client.Client
+	KubeClient       kubernetes.Interface
+	DynamicClient    dynamic.Interface
+	Namespace        string
+	FQDNVersion      string
+	Logger           logr.Logger
+	ResyncPeriod     time.Duration
+	MinWatchInterval time.Duration
+	InitialHosts     []string
 }
 
 // SandboxEgressWatcher manages the reconciliation, watching, and automatic repair
 // of the sandbox egress policies (baseline NetworkPolicy and FQDNNetworkPolicy).
 type SandboxEgressWatcher struct {
-	client        client.Client
-	kubeClient    kubernetes.Interface
-	dynamicClient dynamic.Interface
-	namespace     string
-	fqdnVersion   string
-	logger        logr.Logger
-	resyncPeriod  time.Duration
+	client           client.Client
+	kubeClient       kubernetes.Interface
+	dynamicClient    dynamic.Interface
+	namespace        string
+	fqdnVersion      string
+	logger           logr.Logger
+	resyncPeriod     time.Duration
+	minWatchInterval time.Duration
 
 	reconcileMu  sync.Mutex
 	mu           sync.RWMutex
@@ -346,16 +246,21 @@ func NewSandboxEgressWatcher(opts SandboxEgressWatcherOptions) *SandboxEgressWat
 	if period <= 0 {
 		period = 1 * time.Minute
 	}
+	minInterval := opts.MinWatchInterval
+	if minInterval <= 0 {
+		minInterval = 5 * time.Second
+	}
 	return &SandboxEgressWatcher{
-		client:        opts.Client,
-		kubeClient:    opts.KubeClient,
-		dynamicClient: opts.DynamicClient,
-		namespace:     opts.Namespace,
-		fqdnVersion:   opts.FQDNVersion,
-		logger:        opts.Logger,
-		resyncPeriod:  period,
-		currentHosts:  discovery.CloneSandboxEgressHosts(opts.InitialHosts),
-		triggerCh:     make(chan struct{}, 1),
+		client:           opts.Client,
+		kubeClient:       opts.KubeClient,
+		dynamicClient:    opts.DynamicClient,
+		namespace:        opts.Namespace,
+		fqdnVersion:      opts.FQDNVersion,
+		logger:           opts.Logger,
+		resyncPeriod:     period,
+		minWatchInterval: minInterval,
+		currentHosts:     discovery.CloneSandboxEgressHosts(opts.InitialHosts),
+		triggerCh:        make(chan struct{}, 1),
 	}
 }
 
@@ -399,20 +304,7 @@ func (w *SandboxEgressWatcher) Start(ctx context.Context) error {
 	if w.kubeClient != nil {
 		go func() {
 			err := WatchSandboxEgressNetworkPolicy(ctx, w.kubeClient, w.namespace, discovery.DefaultSandboxEgressNetworkPolicyName, func(eventType watch.EventType, np *networkingv1.NetworkPolicy) {
-				if eventType == watch.Deleted {
-					w.Trigger()
-					return
-				}
-				if eventType == watch.Modified && np != nil {
-					w.mu.RLock()
-					hosts := w.currentHosts
-					fqdnActive := w.fqdnVersion != "" && len(hosts) > 0
-					w.mu.RUnlock()
-					desired := discovery.RenderSandboxEgressNetworkPolicy(discovery.DefaultSandboxEgressNetworkPolicyName, w.namespace, fqdnActive)
-					if !reflect.DeepEqual(np.Spec, desired.Spec) {
-						w.Trigger()
-					}
-				}
+				w.Trigger()
 			})
 			if err != nil && !errors.Is(err, context.Canceled) {
 				w.logger.Error(err, "sandbox egress NetworkPolicy watcher exited")
@@ -433,26 +325,7 @@ func (w *SandboxEgressWatcher) Start(ctx context.Context) error {
 			}
 			go func() {
 				err := WatchSandboxFQDNNetworkPolicy(ctx, w.dynamicClient, gvr, w.namespace, discovery.DefaultFQDNNetworkPolicyName, func(eventType watch.EventType, u *unstructured.Unstructured) {
-					if eventType == watch.Deleted {
-						w.mu.RLock()
-						active := len(w.currentHosts) > 0
-						w.mu.RUnlock()
-						if active {
-							w.Trigger()
-						}
-						return
-					}
-					if eventType == watch.Modified && u != nil {
-						w.mu.RLock()
-						hosts := w.currentHosts
-						w.mu.RUnlock()
-						if len(hosts) > 0 {
-							desired := discovery.RenderFQDNNetworkPolicyWithVersion(w.fqdnVersion, discovery.DefaultFQDNNetworkPolicyName, w.namespace, hosts)
-							if !reflect.DeepEqual(u.Object["spec"], desired.Object["spec"]) {
-								w.Trigger()
-							}
-						}
-					}
+					w.Trigger()
 				})
 				if err != nil && !errors.Is(err, context.Canceled) {
 					w.logger.Error(err, "sandbox FQDNNetworkPolicy watcher exited")
@@ -461,15 +334,26 @@ func (w *SandboxEgressWatcher) Start(ctx context.Context) error {
 		}
 	}
 
-	// 4. Main reconcile loop driven by triggers and periodic resync ticker
+	// 4. Main reconcile loop driven by triggers (rate-limited) and periodic resync ticker
 	ticker := time.NewTicker(w.resyncPeriod)
 	defer ticker.Stop()
+
+	var lastWatchReconcile time.Time
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-w.triggerCh:
+			now := time.Now()
+			if elapsed := now.Sub(lastWatchReconcile); elapsed < w.minWatchInterval {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(w.minWatchInterval - elapsed):
+				}
+			}
+			lastWatchReconcile = time.Now()
 			if err := w.Reconcile(ctx); err != nil {
 				w.logger.Error(err, "error repairing sandbox egress policies on watch event")
 			}

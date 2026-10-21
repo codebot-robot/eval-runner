@@ -17,10 +17,10 @@ package controller
 import (
 	"context"
 	"fmt"
-	"reflect"
 
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -110,7 +110,7 @@ func ReconcileFQDNNetworkPolicy(
 
 	// Compare spec and update if changed
 	desiredSpec := desired.Object["spec"]
-	if !reflect.DeepEqual(existing.Object["spec"], desiredSpec) {
+	if !equality.Semantic.DeepDerivative(desiredSpec, existing.Object["spec"]) {
 		existing.Object["spec"] = desiredSpec
 		if updateErr := c.Update(ctx, existing); updateErr != nil {
 			return fmt.Errorf("failed to update FQDNNetworkPolicy %s/%s: %w", namespace, name, updateErr)
