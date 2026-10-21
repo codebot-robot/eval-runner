@@ -1970,6 +1970,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].MeanScore = res.meanScore
 				status.Tasks[i].SuccessRate = res.successRate
 				status.Tasks[i].SuccessRateCI = res.successRateCI
+				status.Tasks[i].SuccessRateSD = res.successRateSD
 				status.Tasks[i].Message = res.message
 				status.Tasks[i].LogPath = res.logPath
 				status.Tasks[i].Tokens = res.tokens
@@ -2039,6 +2040,7 @@ type taskExecutionResult struct {
 	meanScore       *float64
 	successRate     *float64
 	successRateCI   *v1alpha1.ConfidenceInterval
+	successRateSD   *float64
 	tokens          *v1alpha1.TaskTokens
 	latency         *v1alpha1.TaskLatency
 	costUSD         *float64
@@ -2441,6 +2443,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	var successRate *float64
 	var successRateCI *v1alpha1.ConfidenceInterval
+	var successRateSD *float64
 
 	if agg.IsBinary() {
 		est := stats.Proportion(agg.Successes, agg.Samples, 0.95)
@@ -2462,6 +2465,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			Confidence: 0.95,
 			Method:     "t",
 		}
+		successRateSD = est.SD
 	}
 
 	var v1Tokens *v1alpha1.TaskTokens
@@ -2494,6 +2498,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		meanScore:       agg.MeanScore,
 		successRate:     successRate,
 		successRateCI:   successRateCI,
+		successRateSD:   successRateSD,
 		tokens:          v1Tokens,
 		latency:         v1Latency,
 		costUSD:         costUSD,

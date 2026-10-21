@@ -4190,6 +4190,186 @@ func TestServerSeries_HostileEscaping(t *testing.T) {
 	})
 }
 
+func TestServerSeries_ThreeRunGoldenWithSignificantMoveAndGap(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	est1 := stats.Proportion(20, 100, 0.95)
+	est2 := stats.Proportion(80, 100, 0.95)
+
+	run1 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-1111111",
+			Namespace: "custom-ns",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": "2026-10-20T01:00:00Z",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Cohort: "cohort-gold",
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "1111111111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "docs/readme_comprehension",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     100,
+					Successes:   20,
+					SuccessRate: &est1.Point,
+					SuccessRateCI: &v1alpha1.ConfidenceInterval{
+						Lower:      est1.CI.Lower,
+						Upper:      est1.CI.Upper,
+						Confidence: est1.Confidence,
+						Method:     est1.Method,
+					},
+				},
+			},
+		},
+	}
+
+	run2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-2222222",
+			Namespace: "custom-ns",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": "2026-10-20T02:00:00Z",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Cohort: "cohort-gold",
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "2222222222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "docs/readme_comprehension",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     100,
+					Successes:   80,
+					SuccessRate: &est2.Point,
+					SuccessRateCI: &v1alpha1.ConfidenceInterval{
+						Lower:      est2.CI.Lower,
+						Upper:      est2.CI.Upper,
+						Confidence: est2.Confidence,
+						Method:     est2.Method,
+					},
+				},
+			},
+		},
+	}
+
+	run3 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-3333333",
+			Namespace: "custom-ns",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/repo":   "gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": "2026-10-20T03:00:00Z",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Cohort: "cohort-gold",
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "3333333333333333333333333333333333333333",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseFailed,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "docs/readme_comprehension",
+					Phase:   v1alpha1.TaskPhaseFailed,
+					Message: "task deadline exceeded",
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run1, run2, run3).Build()
+	server := NewServer(Config{Client: cl})
+
+	t.Run("SeriesDetail", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?cohort=cohort-gold&namespace=custom-ns", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		unescaped := html.UnescapeString(body)
+
+		// Significant move chip: good class, human-readable Newcombe method tooltip
+		newcombeTooltip := FormatMethodTooltip("newcombe")
+		if !strings.Contains(body, fmt.Sprintf(`class="chip good" title="%s"`, newcombeTooltip)) {
+			t.Errorf("expected chip good with newcombe tooltip in body:\n%s", body)
+		}
+		// Formatted delta string for significant move (exact Wilson bounds produce [+0.47, +0.69])
+		if !strings.Contains(unescaped, `Δ +0.60 [+0.47, +0.69]`) {
+			t.Errorf("expected Δ +0.60 [+0.47, +0.69] in unescaped body:\n%s", unescaped)
+		}
+
+		// Gap row: delta skipped
+		if !strings.Contains(body, "base-3333333") {
+			t.Errorf("expected base-3333333 in body")
+		}
+
+		// SVG: coloured polyline segment with stroke="var(--good)"
+		if !strings.Contains(body, `stroke="var(--good)"`) {
+			t.Errorf("expected stroke=\"var(--good)\" in SVG polyline")
+		}
+
+		// Query params preserved in links
+		if !strings.Contains(body, `cohort=cohort-gold`) || !strings.Contains(body, `namespace=custom-ns`) {
+			t.Errorf("expected cohort and namespace params in links")
+		}
+
+		assertGolden(t, "series_detail_three_runs.golden.html", body)
+	})
+
+	t.Run("SeriesList", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/series?cohort=cohort-gold&namespace=custom-ns", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		unescaped := html.UnescapeString(body)
+		expectedTooltip := fmt.Sprintf("docs/readme_comprehension · %s", FormatMethodTooltip("newcombe"))
+		// Last Move shows the significant move from run2 vs run1 with task name and method tooltip
+		if !strings.Contains(body, fmt.Sprintf(`class="chip good" title="%s"`, expectedTooltip)) || !strings.Contains(unescaped, `Δ +0.60 [+0.47, +0.69]`) {
+			t.Errorf("expected Last Move with chip good and Δ +0.60 [+0.47, +0.69] in series list, got body:\n%s", body)
+		}
+		if !strings.Contains(body, `cohort=cohort-gold`) || !strings.Contains(body, `namespace=custom-ns`) {
+			t.Errorf("expected cohort and namespace params in series list links")
+		}
+	})
+}
+
 func TestServerRunDetail_MetricFilter(t *testing.T) {
 	scheme := newTestScheme(t)
 	baseRun, candRun, comp := sampleFixtures()

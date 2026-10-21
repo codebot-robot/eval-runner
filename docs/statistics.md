@@ -64,6 +64,35 @@ The controller selects the interval method dynamically based on parsed scores: i
 - **Small $n$ ($n = 2, 3$)**: The critical value $t^*$ is very large ($t^* = 12.71$ for $df=1$, $t^* = 4.30$ for $df=2$), reflecting genuine uncertainty when estimating variance from very few observations.
 - **Support bounds**: Because eval scores are bounded in $[0, 1]$, intervals are clamped to $[0.0, 1.0]$.
 
+### 1.3 Unpaired Difference Between Two Commits
+
+On the series page (`/series/{repohash}/{branch}`), consecutive commits evaluated on `main` answer the question: *"Did main move, and by how much?"*
+
+Unlike pull-request comparisons where samples are paired on identical sample IDs (§2.1), consecutive main-branch commits are independent evaluations (different windows or batches). Paired difference methods cannot be applied. Instead, `eval-runner` bounds the difference $\Delta = \theta_{\text{curr}} - \theta_{\text{prev}}$ using `stats.DifferenceUnpaired(a, b Estimate, confidence float64) DeltaEstimate`.
+
+#### Method Selection
+- **Newcombe's Hybrid-Wilson Interval (`Method: "newcombe"`)**: When both evaluations use binary scoring (`Method: "wilson"`), the difference interval is computed via Robert G. Newcombe's hybrid score method (Method 10, *Statistics in Medicine* 1998):
+  Given individual Wilson score limits $(l_1, u_1)$ for $p_1$ and $(l_2, u_2)$ for $p_2$:
+  $$d = p_1 - p_2$$
+  $$L = d - \sqrt{(p_1 - l_1)^2 + (u_2 - p_2)^2}$$
+  $$U = d + \sqrt{(u_1 - p_1)^2 + (p_2 - l_2)^2}$$
+  The resulting interval $[L, U]$ is clamped to $[-1.0, 1.0]$. For example, comparing $56/70$ ($0.80$) against $48/80$ ($0.60$) yields $\Delta = +0.20$ with a 95% CI of $[+0.052, +0.334]$.
+- **Welch's t-Interval (`Method: "welch"`)**: When either evaluation uses continuous partial-credit scoring (`Method: "t"`), the difference interval is computed via Welch's two-sample t-interval using sample means, sample standard deviations ($s_1, s_2$, recorded in `stats.Estimate.SD` and `status.tasks[].successRateSD`), and sample sizes ($n_1, n_2$):
+  $$se = \sqrt{\frac{s_1^2}{n_1} + \frac{s_2^2}{n_2}}$$
+  Degrees of freedom are computed using the Welch–Satterthwaite equation:
+  $$df = \frac{\left(\frac{s_1^2}{n_1} + \frac{s_2^2}{n_2}\right)^2}{\frac{(s_1^2 / n_1)^2}{n_1 - 1} + \frac{(s_2^2 / n_2)^2}{n_2 - 1}}$$
+  $$\text{Margin} = t^*_{df} \cdot se, \quad \text{CI} = \left[\max\left(-1, d - \text{Margin}\right), \; \min\left(1, d + \text{Margin}\right)\right]$$
+  If either sample has $n \le 1$ (sample variance undefined), the function returns the full support interval $[-1.0, 1.0]$.
+  When an estimate lacks a recorded sample standard deviation (e.g. mixed Wilson/t comparisons or legacy task statuses evaluated before `successRateSD` was recorded), the standard deviation is conservatively estimated from Bernoulli variance with Bessel's correction: $s = \sqrt{\frac{p(1-p)n}{n-1}}$. For legacy statuses with mean 0.0 or 1.0, this yields $s = 0$ matching the existing zero-width interval behavior when $\text{se} = 0$.
+
+#### Significance and Visualisation
+- **Significance Chips**:
+  - `good` (green): Lower bound $> 0$ (the 95% CI excludes zero on the positive side, indicating a statistically significant improvement).
+  - `bad` (red): Upper bound $< 0$ (the 95% CI excludes zero on the negative side, indicating a statistically significant regression).
+  - `neutral` (gray): The 95% CI spans zero (the move is consistent with sampling noise).
+- **SVG Colouring**: In the series graph, polyline segments between consecutive commits are colored green (`var(--good)`) or red (`var(--bad)`) when the 95% CI excludes zero, and purple (`var(--indigo)`) when neutral. Missing evaluation points (gaps) break the polyline and skip the delta.
+- **Index Row**: The `/series` index table displays the "Last Move" between the last two completed evaluation points of the alphabetically-first task in the repository series, with a tooltip indicating the selected task and estimation method.
+
 ---
 
 ## 2. Paired Baseline Comparison (PR vs Base)

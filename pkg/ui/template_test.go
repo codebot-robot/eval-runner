@@ -17,6 +17,7 @@ package ui
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"html"
 	"math"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 	"github.com/pmezard/go-difflib/difflib"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -2468,16 +2470,26 @@ func TestComparisonActions(t *testing.T) {
 }
 
 func sampleSeriesListView() SeriesListView {
+	lastMove := stats.DeltaEstimate{
+		Delta:      0.10,
+		CI:         stats.Interval{Lower: -0.10, Upper: 0.27},
+		Confidence: 0.95,
+		Method:     "newcombe",
+	}
 	return SeriesListView{
 		ActiveTab: NavTabSeries,
 		Namespace: "eval-runner",
 		Series: []SeriesListRow{
 			{
-				Repository: "gke-labs/eval-runner",
-				RepoHash:   "2cc24c2",
-				Branch:     "main",
-				RunCount:   42,
-				Link:       "/series/2cc24c2/main",
+				Repository:     "gke-labs/eval-runner",
+				RepoHash:       "2cc24c2",
+				Branch:         "main",
+				RunCount:       42,
+				Link:           "/series/2cc24c2/main",
+				LastMove:       &lastMove,
+				LastMoveStr:    FormatDeltaCI(lastMove.Delta, lastMove.CI.Lower, lastMove.CI.Upper),
+				LastMoveChip:   DeltaChipClass(lastMove.CI),
+				LastMoveMethod: fmt.Sprintf("%s · %s", "triage/runbook_lookup", FormatMethodTooltip(lastMove.Method)),
 			},
 		},
 		TotalCount: 1,
@@ -2503,8 +2515,10 @@ func sampleSeriesDetailView() SeriesDetailView {
 			Phase:          v1alpha1.TaskPhaseCompleted,
 			PhaseChip:      "good",
 			Samples:        "10",
+			SamplesCount:   10,
 			RateStr:        "0.75",
 			CIStr:          "[0.60, 0.88]",
+			DeltaPrevStr:   "—",
 			TokensStr:      "1,200",
 			CostStr:        "$0.05",
 			RunLink:        "/runs/eval-runner/base-1111111",
@@ -2527,6 +2541,7 @@ func sampleSeriesDetailView() SeriesDetailView {
 			Phase:          v1alpha1.TaskPhaseCompleted,
 			PhaseChip:      "good",
 			Samples:        "10",
+			SamplesCount:   10,
 			RateStr:        "0.85",
 			CIStr:          "[0.70, 0.94]",
 			TokensStr:      "1,300",
@@ -2544,6 +2559,14 @@ func sampleSeriesDetailView() SeriesDetailView {
 	}
 	_ = cost1
 	_ = cost2
+
+	est0 := items[0].Estimate()
+	est1 := items[1].Estimate()
+	delta := stats.DifferenceUnpaired(est1, est0, 0.95)
+	items[1].DeltaPrev = &delta
+	items[1].DeltaPrevMethod = FormatMethodTooltip(delta.Method)
+	items[1].DeltaPrevChip = DeltaChipClass(delta.CI)
+	items[1].DeltaPrevStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
 
 	svg := BuildSeriesSVG(items)
 

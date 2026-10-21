@@ -809,6 +809,11 @@ func (in *TaskStatus) DeepCopyInto(out *TaskStatus) {
 		*out = new(ConfidenceInterval)
 		**out = **in
 	}
+	if in.SuccessRateSD != nil {
+		in, out := &in.SuccessRateSD, &out.SuccessRateSD
+		*out = new(float64)
+		**out = **in
+	}
 	if in.SampleRange != nil {
 		in, out := &in.SampleRange, &out.SampleRange
 		*out = new(SampleRange)

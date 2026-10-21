@@ -153,6 +153,7 @@ status:
 | `meanScore` | `*float64` | Mean of per-sample scores. Numeric values are taken as-is (unclamped), 'C'/'CORRECT'/'YES'/'TRUE' map to 1.0, 'P'/'PARTIAL' map to 0.5, and 'I'/'INCORRECT'/'N'/'NOANSWER' map to 0.0. |
 | `successRate` | `*float64` | Point estimate of the task success rate in [0, 1]. |
 | `successRateCI` | `*ConfidenceInterval` | 95% confidence interval for success rate. See [ConfidenceInterval](#confidenceinterval) and [Statistics](statistics.md). |
+| `successRateSD` | `*float64` | Sample standard deviation of scores (for non-binary scorers via `stats.Mean`). |
 | `message` | `string` | Failure detail or bounded error information if the task failed. |
 | `logPath` | `string` | Storage path or URI where the raw Inspect log was stored by the artifact sink. |
 | `sampleRange` | `*SampleRange` | Sample window evaluated for this task (`{start, end}`). |

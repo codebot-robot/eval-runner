@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/stats"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -1233,7 +1234,7 @@ func BuildComparisonHistorySVG(points []ComparisonHistoryPoint, margin float64) 
 		yMax = 0.20
 	}
 
-	marginY := y1 - (margin/yMax)*(y1-y0)
+	marginY := y1 - float64((margin/yMax)*(y1-y0))
 	marginLabel := fmt.Sprintf("margin ±%.2f", margin)
 
 	var pointsAttrBuilder strings.Builder
@@ -1241,7 +1242,9 @@ func BuildComparisonHistorySVG(points []ComparisonHistoryPoint, margin float64) 
 
 	for i, pt := range points {
 		cx := x0 + (float64(pt.N)/float64(nMax))*(x1-x0)
-		cy := y1 - (pt.CIWidth/yMax)*(y1-y0)
+		cy := y1 - float64((pt.CIWidth/yMax)*(y1-y0))
+		cx = math.Round(cx*10.0) / 10.0
+		cy = math.Round(cy*10.0) / 10.0
 		circles[i] = SVGCircle{CX: cx, CY: cy, R: 4.0}
 
 		if i > 0 {
@@ -1310,11 +1313,15 @@ func CleanRepo(repoOrURL string) string {
 
 // SeriesListRow represents a repository and branch entry in the /series list view.
 type SeriesListRow struct {
-	Repository string
-	RepoHash   string
-	Branch     string
-	RunCount   int
-	Link       string
+	Repository     string
+	RepoHash       string
+	Branch         string
+	RunCount       int
+	Link           string
+	LastMove       *stats.DeltaEstimate
+	LastMoveStr    string
+	LastMoveChip   string
+	LastMoveMethod string
 }
 
 // SeriesListView is the view model for GET /series.
@@ -1352,9 +1359,34 @@ type SeriesItem struct {
 	CostTooltip    string
 	RunLink        string
 
-	HasPoint    bool
-	SuccessRate *float64
-	CI          *v1alpha1.ConfidenceInterval
+	HasPoint     bool
+	SuccessRate  *float64
+	CI           *v1alpha1.ConfidenceInterval
+	SD           *float64
+	SamplesCount int
+
+	DeltaPrev       *stats.DeltaEstimate
+	DeltaPrevStr    string
+	DeltaPrevChip   string
+	DeltaPrevMethod string
+}
+
+// Estimate converts the SeriesItem point and CI into a stats.Estimate.
+func (it SeriesItem) Estimate() stats.Estimate {
+	if it.SuccessRate == nil {
+		return stats.Estimate{}
+	}
+	est := stats.Estimate{
+		Point: *it.SuccessRate,
+		N:     it.SamplesCount,
+		SD:    it.SD,
+	}
+	if it.CI != nil {
+		est.CI = stats.Interval{Lower: it.CI.Lower, Upper: it.CI.Upper}
+		est.Confidence = it.CI.Confidence
+		est.Method = it.CI.Method
+	}
+	return est
 }
 
 // SeriesDetailView is the view model for GET /series/{repohash}/{branch}.
@@ -1376,6 +1408,12 @@ type SeriesDetailView struct {
 	BackLink              string
 }
 
+// SVGPolyline represents a connected line of points with a stroke color.
+type SVGPolyline struct {
+	Points string
+	Stroke string
+}
+
 // SeriesSVG holds precomputed numeric coordinates for inline SVG rendering of a task series.
 type SeriesSVG struct {
 	ViewBox    string
@@ -1383,11 +1421,11 @@ type SeriesSVG struct {
 	Y0         float64
 	X1         float64
 	Y1         float64
-	Polylines  []string    // list of "x1,y1 x2,y2 ..." for each contiguous polyline segment
-	Polygons   []string    // list of "x0,yu0 ... xk,yuk xk,ylk ... x0,yl0" for shaded CI band
-	Circles    []SVGCircle // data points
-	XAxisTicks []SVGTick   // ticks for commits along X-axis
-	YAxisTicks []SVGTick   // ticks for success rate along Y-axis
+	Polylines  []SVGPolyline // list of polyline segments with stroke styling
+	Polygons   []string      // list of "x0,yu0 ... xk,yuk xk,ylk ... x0,yl0" for shaded CI band
+	Circles    []SVGCircle   // data points
+	XAxisTicks []SVGTick     // ticks for commits along X-axis
+	YAxisTicks []SVGTick     // ticks for success rate along Y-axis
 }
 
 // BuildSeriesSVG generates server-side numeric SVG coordinates for success rate vs commit series.
@@ -1438,7 +1476,7 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 		xTicks = append(xTicks, SVGTick{X: cxLast, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: items[N-1].CommitSHAShort})
 	}
 
-	var polylines []string
+	var polylines []SVGPolyline
 	var polygons []string
 	var circles []SVGCircle
 
@@ -1453,6 +1491,7 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 	}
 
 	var curLine []pt2D
+	var curLineStroke string
 	var curCI []ci2D
 
 	flushLine := func() {
@@ -1464,9 +1503,17 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 				}
 				sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.y))
 			}
-			polylines = append(polylines, sb.String())
+			stroke := curLineStroke
+			if stroke == "" {
+				stroke = "var(--indigo)"
+			}
+			polylines = append(polylines, SVGPolyline{
+				Points: sb.String(),
+				Stroke: stroke,
+			})
 		}
 		curLine = nil
+		curLineStroke = ""
 	}
 
 	flushCI := func() {
@@ -1516,10 +1563,37 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 		} else if rate > 1.0 {
 			rate = 1.0
 		}
-		cy := y1 - rate*(y1-y0)
+		cy := y1 - float64(rate*(y1-y0))
+		cx = math.Round(cx*10.0) / 10.0
+		cy = math.Round(cy*10.0) / 10.0
 
+		pt := pt2D{x: cx, y: cy}
 		circles = append(circles, SVGCircle{CX: cx, CY: cy, R: 4.0})
-		curLine = append(curLine, pt2D{x: cx, y: cy})
+
+		if len(curLine) == 0 {
+			curLine = append(curLine, pt)
+		} else {
+			segStroke := "var(--indigo)"
+			if it.DeltaPrev != nil {
+				if it.DeltaPrev.CI.Lower > 0 {
+					segStroke = "var(--good)"
+				} else if it.DeltaPrev.CI.Upper < 0 {
+					segStroke = "var(--bad)"
+				}
+			}
+
+			if len(curLine) == 1 {
+				curLineStroke = segStroke
+				curLine = append(curLine, pt)
+			} else if segStroke == curLineStroke {
+				curLine = append(curLine, pt)
+			} else {
+				prevPt := curLine[len(curLine)-1]
+				flushLine()
+				curLine = []pt2D{prevPt, pt}
+				curLineStroke = segStroke
+			}
+		}
 
 		if it.CI != nil {
 			lo := it.CI.Lower
@@ -1534,8 +1608,10 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 			} else if hi > 1.0 {
 				hi = 1.0
 			}
-			yUpper := y1 - hi*(y1-y0)
-			yLower := y1 - lo*(y1-y0)
+			yUpper := y1 - float64(hi*(y1-y0))
+			yLower := y1 - float64(lo*(y1-y0))
+			yUpper = math.Round(yUpper*10.0) / 10.0
+			yLower = math.Round(yLower*10.0) / 10.0
 			curCI = append(curCI, ci2D{x: cx, yUpper: yUpper, yLower: yLower})
 		} else {
 			flushCI()
@@ -1557,6 +1633,57 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 		XAxisTicks: xTicks,
 		YAxisTicks: yTicks,
 	}
+}
+
+// FormatMethodTooltip returns a human-readable tooltip describing the estimation method.
+func FormatMethodTooltip(method string) string {
+	switch method {
+	case "newcombe":
+		return "Newcombe hybrid Wilson interval (unpaired; different sample windows)"
+	case "welch":
+		return "Welch t interval from (mean, sd, n) (unpaired)"
+	default:
+		return method
+	}
+}
+
+// estimateFromTaskStatus converts a completed TaskStatus into a stats.Estimate.
+func estimateFromTaskStatus(t *v1alpha1.TaskStatus) stats.Estimate {
+	if t == nil || t.SuccessRate == nil {
+		return stats.Estimate{}
+	}
+	est := stats.Estimate{
+		Point: *t.SuccessRate,
+		N:     t.Samples,
+		SD:    t.SuccessRateSD,
+	}
+	if t.SuccessRateCI != nil {
+		est.CI = stats.Interval{Lower: t.SuccessRateCI.Lower, Upper: t.SuccessRateCI.Upper}
+		est.Confidence = t.SuccessRateCI.Confidence
+		est.Method = t.SuccessRateCI.Method
+	}
+	return est
+}
+
+// FormatDeltaCI formats a delta point estimate and confidence interval,
+// e.g. "Δ −0.05 [−0.21, +0.11]".
+func FormatDeltaCI(delta, lower, upper float64) string {
+	dStr, _ := signedFixed(delta, 2)
+	lStr, _ := signedFixed(lower, 2)
+	uStr, _ := signedFixed(upper, 2)
+	return fmt.Sprintf("Δ %s [%s, %s]", dStr, lStr, uStr)
+}
+
+// DeltaChipClass returns "good", "bad", or "neutral" based on whether
+// the confidence interval excludes zero.
+func DeltaChipClass(ci stats.Interval) string {
+	if ci.Lower > 0 {
+		return "good"
+	}
+	if ci.Upper < 0 {
+		return "bad"
+	}
+	return "neutral"
 }
 
 // NewComparisonDetailView constructs a ComparisonDetailView from a Comparison and optional Runs.
