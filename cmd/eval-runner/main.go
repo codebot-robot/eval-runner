@@ -97,6 +97,7 @@ func main() {
 	var commandUsers string
 	var pollProgressInterval time.Duration
 	var affinityMode string
+	var sandboxEgressHosts string
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -123,6 +124,7 @@ func main() {
 	flag.Int64Var(&artifactMaxUploadBytes, "artifact-max-upload-bytes", gcs.DefaultMaxUploadBytes, "Maximum size in bytes of an uploaded Inspect log before truncation (sets capped in summary.json if exceeded)")
 	flag.DurationVar(&comparisonTTL, "comparison-ttl", 0, "TTL duration for retaining Completed Comparisons (default 0 = disabled)")
 	flag.StringVar(&affinityMode, "affinity-mode", configkeys.AffinityModeOrder, "Changed-file task affinity mode (\"order\" or \"prune\")")
+	flag.StringVar(&sandboxEgressHosts, "sandbox-egress-hosts", "", "Comma-separated allow-list of FQDN hostnames for sandbox HTTPS egress")
 
 	opts := zap.Options{
 		Development: true,
@@ -152,6 +154,7 @@ func main() {
 		commandUsers,
 		pollProgressInterval,
 		affinityMode,
+		sandboxEgressHosts,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -360,6 +363,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	fqdnVersion, fqdnSupported, err := discovery.DetectFQDNNetworkPolicyAPIVersion(discoveryClient)
+	if err != nil {
+		setupLog.Info("unable to detect FQDNNetworkPolicy support; skipping FQDN egress narrowing", "error", err)
+	}
+	var fqdnSyncFunc func(ctx context.Context, hosts []string) error
+	if fqdnSupported {
+		setupLog.Info("FQDNNetworkPolicy supported; configuring sandbox HTTPS egress narrowing",
+			"apiVersion", fqdnVersion,
+			"namespace", sandboxNamespace,
+			"hosts", clusterConfig.SandboxEgressHosts,
+		)
+		fqdnCtx, fqdnCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer fqdnCancel()
+		if err := controller.ReconcileFQDNNetworkPolicy(fqdnCtx, mgr.GetClient(), fqdnVersion, sandboxNamespace, clusterConfig.SandboxEgressHosts, setupLog); err != nil {
+			setupLog.Error(err, "failed initial reconcile of FQDNNetworkPolicy; continuing")
+		}
+		fqdnSyncFunc = func(ctx context.Context, hosts []string) error {
+			return controller.ReconcileFQDNNetworkPolicy(ctx, mgr.GetClient(), fqdnVersion, sandboxNamespace, hosts, setupLog)
+		}
+	} else {
+		setupLog.Info("FQDNNetworkPolicy CRD not found in cluster; sandbox FQDN egress narrowing disabled until restart (requires GKE Dataplane V2 with --enable-fqdn-network-policy)")
+	}
+
 	reloader := controller.NewConfigReloader(controller.ConfigReloaderOptions{
 		RawFlags:       rawFlags,
 		Logger:         setupLog,
@@ -367,6 +393,7 @@ func main() {
 		RunReconciler:  reconciler,
 		CompReconciler: comparisonReconciler,
 		InitialConfig:  &clusterConfig,
+		FQDNSyncFunc:   fqdnSyncFunc,
 	})
 
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {

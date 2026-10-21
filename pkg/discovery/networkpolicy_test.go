@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -302,4 +303,220 @@ func TestSandboxNetworkPolicies(t *testing.T) {
 			t.Errorf("expected port 9418 for git fixture, got %v", gitPort.Port)
 		}
 	})
+}
+
+func TestRenderFQDNNetworkPolicy_DefaultHosts(t *testing.T) {
+	u := RenderFQDNNetworkPolicy(DefaultFQDNNetworkPolicyName, DefaultSandboxNamespace, DefaultSandboxEgressHosts)
+	if u == nil {
+		t.Fatal("expected non-nil unstructured object")
+	}
+
+	if u.GetAPIVersion() != FQDNNetworkPolicyAPIVersion {
+		t.Errorf("expected apiVersion %s, got %s", FQDNNetworkPolicyAPIVersion, u.GetAPIVersion())
+	}
+	if u.GetKind() != FQDNNetworkPolicyKind {
+		t.Errorf("expected kind %s, got %s", FQDNNetworkPolicyKind, u.GetKind())
+	}
+	if u.GetName() != DefaultFQDNNetworkPolicyName {
+		t.Errorf("expected name %s, got %s", DefaultFQDNNetworkPolicyName, u.GetName())
+	}
+	if u.GetNamespace() != DefaultSandboxNamespace {
+		t.Errorf("expected namespace %s, got %s", DefaultSandboxNamespace, u.GetNamespace())
+	}
+
+	spec, ok := u.Object["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any spec, got %T", u.Object["spec"])
+	}
+
+	// Verify podSelector
+	podSelector, ok := spec["podSelector"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected podSelector in spec")
+	}
+	matchLabels, ok := podSelector["matchLabels"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected matchLabels in podSelector")
+	}
+	if matchLabels[LabelSandbox] != "true" {
+		t.Errorf("expected podSelector %s=true, got %v", LabelSandbox, matchLabels[LabelSandbox])
+	}
+
+	// Verify egress rule
+	egress, ok := spec["egress"].([]any)
+	if !ok || len(egress) != 1 {
+		t.Fatalf("expected 1 egress rule, got %v", spec["egress"])
+	}
+	rule, ok := egress[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map rule, got %T", egress[0])
+	}
+
+	// Verify ports: TCP 443
+	ports, ok := rule["ports"].([]any)
+	if !ok || len(ports) != 1 {
+		t.Fatalf("expected 1 port, got %v", rule["ports"])
+	}
+	port, ok := ports[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map port, got %T", ports[0])
+	}
+	if port["protocol"] != "TCP" || port["port"] != int64(443) {
+		t.Errorf("expected TCP 443, got %v", port)
+	}
+
+	// Verify matches
+	matches, ok := rule["matches"].([]any)
+	if !ok || len(matches) != len(DefaultSandboxEgressHosts) {
+		t.Fatalf("expected %d matches, got %d (%v)", len(DefaultSandboxEgressHosts), len(matches), rule["matches"])
+	}
+
+	// Check each host is rendered with pattern (for wildcards) or name (for exact)
+	for i, host := range DefaultSandboxEgressHosts {
+		m, ok := matches[i].(map[string]any)
+		if !ok {
+			t.Fatalf("expected match map, got %T", matches[i])
+		}
+		if strings.Contains(host, "*") {
+			if m["pattern"] != host {
+				t.Errorf("host %s: expected pattern %q, got %v", host, host, m["pattern"])
+			}
+			if _, hasName := m["name"]; hasName {
+				t.Errorf("host %s: pattern match should not have name field", host)
+			}
+		} else {
+			if m["name"] != host {
+				t.Errorf("host %s: expected name %q, got %v", host, host, m["name"])
+			}
+			if _, hasPattern := m["pattern"]; hasPattern {
+				t.Errorf("host %s: name match should not have pattern field", host)
+			}
+		}
+	}
+}
+
+func TestRenderFQDNNetworkPolicy_CustomHosts(t *testing.T) {
+	customHosts := []string{
+		"*.googleapis.com",
+		"github.com",
+		"api.openai.com",
+		"*.anthropic.com",
+		"  github.com  ", // duplicate with whitespace
+	}
+
+	u := RenderFQDNNetworkPolicy("custom-fqdn-policy", "custom-ns", customHosts)
+	if u.GetName() != "custom-fqdn-policy" || u.GetNamespace() != "custom-ns" {
+		t.Errorf("unexpected name/namespace: %s/%s", u.GetNamespace(), u.GetName())
+	}
+
+	spec := u.Object["spec"].(map[string]any)
+	egress := spec["egress"].([]any)
+	rule := egress[0].(map[string]any)
+	matches := rule["matches"].([]any)
+
+	// Should be deduplicated to 4 items
+	if len(matches) != 4 {
+		t.Fatalf("expected 4 matches after deduplication, got %d", len(matches))
+	}
+
+	expectedMatches := []map[string]string{
+		{"pattern": "*.googleapis.com"},
+		{"name": "github.com"},
+		{"name": "api.openai.com"},
+		{"pattern": "*.anthropic.com"},
+	}
+
+	for i, exp := range expectedMatches {
+		m := matches[i].(map[string]any)
+		for k, v := range exp {
+			if m[k] != v {
+				t.Errorf("match %d: expected %s=%q, got %v", i, k, v, m[k])
+			}
+		}
+	}
+}
+
+func TestRenderFQDNNetworkPolicy_VersionFallback(t *testing.T) {
+	hosts := []string{"github.com", "*.googleapis.com"}
+	u := RenderFQDNNetworkPolicyWithVersion(FQDNNetworkPolicyAPIVersionV1Alpha3, "legacy-policy", "legacy-ns", hosts)
+
+	if u.GetAPIVersion() != FQDNNetworkPolicyAPIVersionV1Alpha3 {
+		t.Errorf("expected apiVersion %s, got %s", FQDNNetworkPolicyAPIVersionV1Alpha3, u.GetAPIVersion())
+	}
+
+	spec := u.Object["spec"].(map[string]any)
+	egress := spec["egress"].([]any)
+	rule := egress[0].(map[string]any)
+
+	// v1alpha3 uses to[].fqdns
+	toPeers, ok := rule["to"].([]any)
+	if !ok || len(toPeers) != 1 {
+		t.Fatalf("expected to peers in v1alpha3 rule, got %v", rule["to"])
+	}
+	toPeer := toPeers[0].(map[string]any)
+	fqdns, ok := toPeer["fqdns"].([]any)
+	if !ok || len(fqdns) != 2 {
+		t.Fatalf("expected 2 fqdns in v1alpha3, got %v", toPeer["fqdns"])
+	}
+	if fqdns[0] != "github.com" || fqdns[1] != "*.googleapis.com" {
+		t.Errorf("unexpected fqdns: %v", fqdns)
+	}
+}
+
+func TestRenderFQDNNetworkPolicy_EmptyHosts(t *testing.T) {
+	u := RenderFQDNNetworkPolicy("empty-policy", "empty-ns", nil)
+	spec := u.Object["spec"].(map[string]any)
+	if _, hasEgress := spec["egress"]; hasEgress {
+		t.Errorf("expected no egress rule for empty hosts, got %v", spec["egress"])
+	}
+}
+
+func TestRenderFQDNNetworkPolicyYAML_RoundTrip(t *testing.T) {
+	yamlStr, err := RenderFQDNNetworkPolicyYAML(FQDNNetworkPolicyAPIVersion, DefaultFQDNNetworkPolicyName, DefaultSandboxNamespace, DefaultSandboxEgressHosts)
+	if err != nil {
+		t.Fatalf("failed to render YAML: %v", err)
+	}
+
+	if !strings.Contains(yamlStr, "apiVersion: networking.gke.io/v1alpha1") {
+		t.Errorf("expected apiVersion in YAML, got:\n%s", yamlStr)
+	}
+	if !strings.Contains(yamlStr, "kind: FQDNNetworkPolicy") {
+		t.Errorf("expected kind in YAML, got:\n%s", yamlStr)
+	}
+	if !strings.Contains(yamlStr, "eval-runner-sandbox-fqdn-egress") {
+		t.Errorf("expected policy name in YAML, got:\n%s", yamlStr)
+	}
+	if !strings.Contains(yamlStr, "port: 443") {
+		t.Errorf("expected port 443 in YAML, got:\n%s", yamlStr)
+	}
+	if !strings.Contains(yamlStr, "pattern: '*.googleapis.com'") && !strings.Contains(yamlStr, "pattern: \"*.googleapis.com\"") && !strings.Contains(yamlStr, "pattern: \\*.googleapis.com") {
+		t.Errorf("expected pattern for googleapis in YAML, got:\n%s", yamlStr)
+	}
+}
+
+func TestParseHostList(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{"github.com", []string{"github.com"}},
+		{"github.com, *.googleapis.com", []string{"github.com", "*.googleapis.com"}},
+		{" github.com , *.googleapis.com , github.com ", []string{"github.com", "*.googleapis.com"}},
+		{"a.com,,b.com,  ,", []string{"a.com", "b.com"}},
+	}
+
+	for _, tt := range tests {
+		got := ParseHostList(tt.input)
+		if len(got) != len(tt.expected) {
+			t.Errorf("ParseHostList(%q) = %v, expected %v", tt.input, got, tt.expected)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.expected[i] {
+				t.Errorf("ParseHostList(%q)[%d] = %q, expected %q", tt.input, i, got[i], tt.expected[i])
+			}
+		}
+	}
 }

@@ -82,6 +82,8 @@ const (
 	ConfigMapKeyCommandUsers = "commandUsers"
 	// ConfigMapKeyAffinityMode is the ConfigMap key for changed-file task affinity mode ("order" or "prune").
 	ConfigMapKeyAffinityMode = "affinityMode"
+	// ConfigMapKeySandboxEgressHosts is the ConfigMap key for comma-separated allowed FQDN egress hostnames for sandboxes.
+	ConfigMapKeySandboxEgressHosts = "sandboxEgressHosts"
 )
 
 const (
