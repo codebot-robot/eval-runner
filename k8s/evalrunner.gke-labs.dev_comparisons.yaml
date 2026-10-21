@@ -420,6 +420,10 @@ spec:
                 description: Reporting records the status of GitHub PR comment and
                   check run reporting.
                 properties:
+                  attempts:
+                    description: Attempts is the number of times the controller has
+                      attempted to report to GitHub.
+                    type: integer
                   checkRunID:
                     description: CheckRunID is the GitHub check run ID created or
                       updated for this comparison.
@@ -437,6 +441,12 @@ spec:
                   message:
                     description: Message records error or status details (e.g. "disabled"
                       or permanent error message).
+                    type: string
+                  nextAttemptAt:
+                    description: |-
+                      NextAttemptAt is the earliest time when the controller should next attempt reporting.
+                      If nil or in the past, reporting is eligible immediately.
+                    format: date-time
                     type: string
                 type: object
               summary:

@@ -393,6 +393,8 @@ Inspect log provider-specific totals are dropped so that `total` is strictly and
 | `checkRunID` | `int64` | GitHub check run ID created and updated for this comparison. |
 | `lastPostedHash` | `string` | Idempotency SHA-256 hash across markdown comment body and check run state. |
 | `message` | `string` | Informational status message (e.g. `"disabled"`, permanent error message). |
+| `attempts` | `int` | Number of times the controller has attempted to report to GitHub for the current update. |
+| `nextAttemptAt` | `metav1.Time` | Earliest time for the next reporting retry attempt. |
 
 Check run titles display per-label counts: `<VERDICT>: N improved, M unchanged, K regressed, J inconclusive` built from `status.tasks[].label` (omitting zero buckets). The check run conclusion for `INCONCLUSIVE` comparisons is governed by the `inconclusivePolicy` cluster ConfigMap key: `"neutral"` (default, non-blocking) or `"failure"` (blocks merging).
 

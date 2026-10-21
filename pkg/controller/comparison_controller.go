@@ -87,21 +87,22 @@ type GitHubCredentials struct {
 // ComparisonReconciler reconciles a Comparison object.
 type ComparisonReconciler struct {
 	client.Client
-	Scheme               *runtime.Scheme
-	ArtifactSink         artifacts.ArtifactSink
-	ControllerNamespace  string
-	GitHubTokenSecret    string
-	GitHubAppSecret      string
-	UIBaseURL            string
-	InconclusivePolicy   string
-	GitHubBaseURL        string
-	GitHubClientFactory  func(creds GitHubCredentials) github.Client
-	ComparisonTTL        time.Duration
-	CommandRetryInterval time.Duration
-	CommandUsers         []string
-	AffinityMode         string
-	Now                  func() time.Time
-	ModelPrices          map[string]ModelPrice
+	Scheme                 *runtime.Scheme
+	ArtifactSink           artifacts.ArtifactSink
+	ControllerNamespace    string
+	GitHubTokenSecret      string
+	GitHubAppSecret        string
+	UIBaseURL              string
+	InconclusivePolicy     string
+	GitHubBaseURL          string
+	GitHubClientFactory    func(creds GitHubCredentials) github.Client
+	ComparisonTTL          time.Duration
+	CommandRetryInterval   time.Duration
+	ReportingRetryInterval time.Duration
+	CommandUsers           []string
+	AffinityMode           string
+	Now                    func() time.Time
+	ModelPrices            map[string]ModelPrice
 
 	cachedAppMu   sync.Mutex
 	cachedAppKey  string
@@ -193,6 +194,38 @@ func (r *ComparisonReconciler) earliestPendingCommandWait(comp *v1alpha1.Compari
 		}
 	}
 	return minWait, found
+}
+
+func (r *ComparisonReconciler) reportingBackoff(attempts int, err error) time.Duration {
+	var rle *github.RateLimitError
+	if errors.As(err, &rle) && rle.RetryAfter > 0 {
+		return rle.RetryAfter
+	}
+	if r.ReportingRetryInterval > 0 {
+		return r.ReportingRetryInterval
+	}
+	switch attempts {
+	case 1:
+		return 10 * time.Second
+	case 2:
+		return 1 * time.Minute
+	default:
+		return 5 * time.Minute
+	}
+}
+
+func (r *ComparisonReconciler) earliestReportingWait(comp *v1alpha1.Comparison) (time.Duration, bool) {
+	if comp == nil || comp.Spec.PullRequest == nil || comp.Status.Reporting == nil || comp.Status.Reporting.NextAttemptAt == nil {
+		return 0, false
+	}
+	if comp.Status.Reporting.Message != "" {
+		return 0, false
+	}
+	now := r.now()
+	if !comp.Status.Reporting.NextAttemptAt.After(now) {
+		return 0, false
+	}
+	return comp.Status.Reporting.NextAttemptAt.Sub(now), true
 }
 
 func (r *ComparisonReconciler) now() time.Time {
@@ -298,7 +331,10 @@ func (r *ComparisonReconciler) getGitHubClient(ctx context.Context) (github.Clie
 		if appID != "" && installationID != "" && len(privKey) > 0 {
 			appAuth, err := r.getOrCreateAppAuth(&secret, appID, installationID, appSlug, privKey)
 			if err != nil {
-				return nil, fmt.Errorf("invalid app credentials: %w", err)
+				return nil, &github.PermanentError{
+					StatusCode: 0,
+					Message:    fmt.Sprintf("invalid app credentials: %v", err),
+				}
 			}
 
 			creds := GitHubCredentials{
@@ -577,6 +613,34 @@ func (r *ComparisonReconciler) processPendingCommands(ctx context.Context, comp 
 	return nil
 }
 
+func (r *ComparisonReconciler) handleTransientReportingError(
+	comp *v1alpha1.Comparison,
+	err error,
+) error {
+	now := r.now()
+	if comp.Status.Reporting == nil {
+		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+	}
+	attempts := comp.Status.Reporting.Attempts + 1
+	if attempts < v1alpha1.MaxReportingAttempts {
+		delay := r.reportingBackoff(attempts, err)
+		nextTime := metav1.NewTime(now.Add(delay))
+		comp.Status.Reporting.Attempts = attempts
+		comp.Status.Reporting.NextAttemptAt = &nextTime
+		comp.Status.Reporting.Message = ""
+		return err
+	}
+
+	// Max attempts reached: record permanent message and stop retrying
+	comp.Status.Reporting.Attempts = attempts
+	comp.Status.Reporting.NextAttemptAt = nil
+	comp.Status.Reporting.Message = fmt.Sprintf("reporting failed after %d attempts: %v", attempts, err)
+	return nil
+}
+
+// reportToGitHub handles GitHub PR comment and check run reporting.
+// Errors not matching github.PermanentError (5xx, token endpoint errors, rate limits, transport errors, or secret Get errors)
+// are treated as transient.
 func (r *ComparisonReconciler) reportToGitHub(
 	ctx context.Context,
 	comp *v1alpha1.Comparison,
@@ -586,20 +650,35 @@ func (r *ComparisonReconciler) reportToGitHub(
 		return nil
 	}
 
+	// When nextAttemptAt is in the future, skip reporting without consuming attempts.
+	if comp.Status.Reporting != nil && comp.Status.Reporting.NextAttemptAt != nil && comp.Status.Reporting.NextAttemptAt.After(r.now()) {
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	ghClient, err := r.getGitHubClient(ctx)
 	if err != nil {
-		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
-			Message: err.Error(),
+		if github.IsPermanent(err) {
+			if comp.Status.Reporting == nil {
+				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+			}
+			comp.Status.Reporting.Message = err.Error()
+			comp.Status.Reporting.NextAttemptAt = nil
+			return nil
 		}
-		return nil
+		if !isTerminalComparisonPhase(comp.Status.Phase) {
+			return err
+		}
+		return r.handleTransientReportingError(comp, err)
 	}
 	if ghClient == nil {
-		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{
-			Message: "disabled",
+		if comp.Status.Reporting == nil {
+			comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
 		}
+		comp.Status.Reporting.Message = "disabled"
+		comp.Status.Reporting.NextAttemptAt = nil
 		return nil
 	}
 
@@ -609,7 +688,22 @@ func (r *ComparisonReconciler) reportToGitHub(
 	})
 	repStatus, err := reporter.Report(ctx, comp, baseRun, candRun)
 	if repStatus != nil {
-		comp.Status.Reporting = repStatus
+		if comp.Status.Reporting == nil {
+			comp.Status.Reporting = repStatus
+		} else {
+			if repStatus.CommentID != 0 {
+				comp.Status.Reporting.CommentID = repStatus.CommentID
+			}
+			if repStatus.CheckRunID != 0 {
+				comp.Status.Reporting.CheckRunID = repStatus.CheckRunID
+			}
+			if repStatus.LastPostedHash != "" {
+				comp.Status.Reporting.LastPostedHash = repStatus.LastPostedHash
+			}
+			if repStatus.Message != "" {
+				comp.Status.Reporting.Message = repStatus.Message
+			}
+		}
 	}
 	if err != nil {
 		if github.IsPermanent(err) {
@@ -617,9 +711,21 @@ func (r *ComparisonReconciler) reportToGitHub(
 				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
 			}
 			comp.Status.Reporting.Message = err.Error()
+			comp.Status.Reporting.NextAttemptAt = nil
 			return nil
 		}
-		return err
+		if !isTerminalComparisonPhase(comp.Status.Phase) {
+			return err
+		}
+		return r.handleTransientReportingError(comp, err)
+	}
+
+	if comp.Status.Reporting != nil {
+		comp.Status.Reporting.Attempts = 0
+		comp.Status.Reporting.NextAttemptAt = nil
+		if repStatus != nil {
+			comp.Status.Reporting.Message = repStatus.Message
+		}
 	}
 
 	return nil
@@ -1377,34 +1483,39 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			needsReporting := comp.Spec.PullRequest != nil &&
 				(comp.Status.Reporting == nil || comp.Status.Reporting.Message == "")
 			if needsReporting {
-				var bRun, cRun v1alpha1.Run
-				baseErr := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Baseline.Run}, &bRun)
-				candErr := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Candidate.Run}, &cRun)
-				if baseErr == nil && candErr == nil {
-					prevReporting := comp.Status.Reporting.DeepCopy()
-					if err := r.reportToGitHub(ctx, &comp, &bRun, &cRun); err != nil {
-						return ctrl.Result{}, err
-					}
-					if !equality.Semantic.DeepEqual(prevReporting, comp.Status.Reporting) {
-						reportingStatus := comp.Status.Reporting.DeepCopy()
-						key := types.NamespacedName{Namespace: comp.Namespace, Name: comp.Name}
-						if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-							var cur v1alpha1.Comparison
-							if err := r.Get(ctx, key, &cur); err != nil {
-								return err
-							}
-							cur.Status.Reporting = reportingStatus
-							return r.Status().Update(ctx, &cur)
-						}); err != nil {
-							return ctrl.Result{}, fmt.Errorf("failed to update reporting status for comparison %s: %w", comp.Name, err)
-						}
-					}
+				if comp.Status.Reporting != nil && comp.Status.Reporting.NextAttemptAt != nil && comp.Status.Reporting.NextAttemptAt.After(r.now()) {
+					// Time-gated: not yet eligible for retry; do not consume an attempt.
 				} else {
-					if baseErr != nil && !apierrors.IsNotFound(baseErr) {
-						return ctrl.Result{}, fmt.Errorf("failed to get baseline run %s: %w", comp.Spec.Baseline.Run, baseErr)
-					}
-					if candErr != nil && !apierrors.IsNotFound(candErr) {
-						return ctrl.Result{}, fmt.Errorf("failed to get candidate run %s: %w", comp.Spec.Candidate.Run, candErr)
+					var bRun, cRun v1alpha1.Run
+					baseErr := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Baseline.Run}, &bRun)
+					candErr := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Candidate.Run}, &cRun)
+					if baseErr == nil && candErr == nil {
+						prevReporting := comp.Status.Reporting.DeepCopy()
+						reportErr := r.reportToGitHub(ctx, &comp, &bRun, &cRun)
+						if !equality.Semantic.DeepEqual(prevReporting, comp.Status.Reporting) {
+							reportingStatus := comp.Status.Reporting.DeepCopy()
+							key := types.NamespacedName{Namespace: comp.Namespace, Name: comp.Name}
+							if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+								var cur v1alpha1.Comparison
+								if err := r.Get(ctx, key, &cur); err != nil {
+									return err
+								}
+								cur.Status.Reporting = reportingStatus
+								return r.Status().Update(ctx, &cur)
+							}); err != nil {
+								return ctrl.Result{}, fmt.Errorf("failed to update reporting status for comparison %s: %w", comp.Name, err)
+							}
+						}
+						if reportErr != nil {
+							return ctrl.Result{}, reportErr
+						}
+					} else {
+						if baseErr != nil && !apierrors.IsNotFound(baseErr) {
+							return ctrl.Result{}, fmt.Errorf("failed to get baseline run %s: %w", comp.Spec.Baseline.Run, baseErr)
+						}
+						if candErr != nil && !apierrors.IsNotFound(candErr) {
+							return ctrl.Result{}, fmt.Errorf("failed to get candidate run %s: %w", comp.Spec.Candidate.Run, candErr)
+						}
 					}
 				}
 			}
@@ -1416,6 +1527,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				}
 			}
 			if wait, hasPending := r.earliestPendingCommandWait(&comp); hasPending {
+				if result.RequeueAfter == 0 || wait < result.RequeueAfter {
+					result.RequeueAfter = wait
+				}
+			}
+			if wait, hasReporting := r.earliestReportingWait(&comp); hasReporting {
 				if result.RequeueAfter == 0 || wait < result.RequeueAfter {
 					result.RequeueAfter = wait
 				}
@@ -2942,6 +3058,9 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 		return ctrl.Result{}, reportErr
 	}
 	if wait, hasPending := r.earliestPendingCommandWait(&latest); hasPending {
+		return ctrl.Result{RequeueAfter: wait}, nil
+	}
+	if wait, hasReporting := r.earliestReportingWait(&latest); hasReporting {
 		return ctrl.Result{RequeueAfter: wait}, nil
 	}
 	return ctrl.Result{}, nil
