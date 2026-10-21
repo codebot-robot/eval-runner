@@ -1936,6 +1936,52 @@ func TestComparisonSummary(t *testing.T) {
 		}
 	})
 
+	t.Run("CostWithDefaultPricesProvenance", func(t *testing.T) {
+		cost := 0.01
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				CostUSD:         &cost,
+				PossibleSamples: 100,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task-1",
+						Pairs:      16,
+						SamplesRun: 32,
+						CostSource: v1alpha1.CostSourceDefault,
+					},
+				},
+			},
+		}
+		sum := ComparisonSummary(comp, nil, nil)
+		expected := "$0.01 spent (default prices), 32 of 100 possible samples"
+		if sum.SamplesSummary != expected {
+			t.Errorf("expected SamplesSummary %q, got %q", expected, sum.SamplesSummary)
+		}
+	})
+
+	t.Run("CostWithConfigMapPricesProvenance", func(t *testing.T) {
+		cost := 0.01
+		comp := &v1alpha1.Comparison{
+			Status: v1alpha1.ComparisonStatus{
+				CostUSD:         &cost,
+				PossibleSamples: 100,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task-1",
+						Pairs:      16,
+						SamplesRun: 32,
+						CostSource: v1alpha1.CostSourceConfigMap,
+					},
+				},
+			},
+		}
+		sum := ComparisonSummary(comp, nil, nil)
+		expected := "$0.01 spent, 32 of 100 possible samples"
+		if sum.SamplesSummary != expected {
+			t.Errorf("expected SamplesSummary %q, got %q", expected, sum.SamplesSummary)
+		}
+	})
+
 	t.Run("PossibleSamplesOnly", func(t *testing.T) {
 		comp := &v1alpha1.Comparison{
 			Status: v1alpha1.ComparisonStatus{
@@ -2441,5 +2487,60 @@ func TestFormatLogURL(t *testing.T) {
 				t.Errorf("FormatLogURL(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunDetail_CostTooltip(t *testing.T) {
+	view := sampleRunDetailView()
+	view.Tasks = []RunTaskRow{
+		{
+			ID:          "task-default-cost",
+			Phase:       v1alpha1.TaskPhaseCompleted,
+			CostStr:     "$0.0270",
+			CostSource:  v1alpha1.CostSourceDefault,
+			CostTooltip: "default prices",
+		},
+		{
+			ID:          "task-configmap-cost",
+			Phase:       v1alpha1.TaskPhaseCompleted,
+			CostStr:     "$0.1400",
+			CostSource:  v1alpha1.CostSourceConfigMap,
+			CostTooltip: "configmap prices",
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmplRunDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to render run detail: %v", err)
+	}
+	html := buf.String()
+	if !strings.Contains(html, `<td class="num mono" title="default prices">$0.0270</td>`) {
+		t.Errorf("expected default prices tooltip in run detail, got:\n%s", html)
+	}
+	if !strings.Contains(html, `<td class="num mono" title="configmap prices">$0.1400</td>`) {
+		t.Errorf("expected configmap prices tooltip in run detail, got:\n%s", html)
+	}
+}
+
+func TestComparisonTable_CostTooltip(t *testing.T) {
+	tasks := []ComparisonTaskRow{
+		{
+			ID:              "task-cost-default",
+			CostStr:         "$0.0540",
+			CostTooltip:     "default prices",
+			CandCostStr:     "$0.0270",
+			CandCostTooltip: "default prices",
+			BaseCostStr:     "$0.0270",
+			BaseCostTooltip: "default prices",
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := RenderComparisonTable(&buf, ComparisonTableView{Tasks: tasks, Metric: "cost", HasCost: true}); err != nil {
+		t.Fatalf("failed to render comparison table: %v", err)
+	}
+	html := buf.String()
+	if !strings.Contains(html, `title="default prices"`) {
+		t.Errorf("expected default prices tooltip in comparison cost table, got:\n%s", html)
 	}
 }

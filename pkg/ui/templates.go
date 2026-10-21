@@ -521,7 +521,7 @@ const runDetailTemplate = `
                 {{ end }}
                 {{ end }}
                 {{ if or (eq $.Metric "all") (eq $.Metric "") (eq $.Metric "cost") }}
-                <td class="num mono">{{ .CostStr }}</td>
+                <td class="num mono"{{ if .CostTooltip }} title="{{ .CostTooltip }}"{{ end }}>{{ .CostStr }}</td>
                 {{ end }}
                 <td class="num">{{ if gt .Samples 0 }}{{ .Successes }}/{{ .Samples }}{{ if .SampleRange }} <span style="font-size:11px;color:var(--muted)">({{ .SampleRange }})</span>{{ end }}{{ else }}—{{ end }}</td>
                 {{ if or (eq $.Metric "all") (eq $.Metric "") (eq $.Metric "rate") }}
@@ -845,8 +845,8 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
         <td class="num mono">{{ if and .Tokens (gt .Tokens.Reasoning 0) }}+R {{ .Tokens.Reasoning }}{{ else }}—{{ end }}</td>
         <td class="num">{{ if gt .SamplesRun 0 }}{{ .SamplesRun }}{{ else if gt .Pairs 0 }}{{ .Pairs }}{{ else }}—{{ end }}</td>
         {{ else if eq $.Metric "cost" }}
-        <td class="num mono">{{ if .BaseCostStr }}{{ .BaseCostStr }}{{ else }}—{{ end }}</td>
-        <td class="num mono">{{ if .CandCostStr }}{{ .CandCostStr }}{{ else if .CostStr }}{{ .CostStr }}{{ else }}—{{ end }}</td>
+        <td class="num mono"{{ if .BaseCostTooltip }} title="{{ .BaseCostTooltip }}"{{ end }}>{{ if .BaseCostStr }}{{ .BaseCostStr }}{{ else }}—{{ end }}</td>
+        <td class="num mono"{{ if or .CandCostTooltip .CostTooltip }} title="{{ if .CandCostTooltip }}{{ .CandCostTooltip }}{{ else }}{{ .CostTooltip }}{{ end }}"{{ end }}>{{ if .CandCostStr }}{{ .CandCostStr }}{{ else if .CostStr }}{{ .CostStr }}{{ else }}—{{ end }}</td>
         <td class="num mono">{{ if .DeltaCostStr }}{{ .DeltaCostStr }}{{ else }}—{{ end }}</td>
         <td class="num mono">{{ if .CandTokensStr }}{{ .CandTokensStr }}{{ else if .Tokens }}{{ .Tokens.Total }}{{ else }}—{{ end }}</td>
         <td class="num">{{ if gt .SamplesRun 0 }}{{ .SamplesRun }}{{ else if gt .Pairs 0 }}{{ .Pairs }}{{ else }}—{{ end }}</td>
@@ -880,7 +880,7 @@ const ComparisonTableTemplate = `{{ define "comparison_table" }}
         <td class="num" style="font-size:13px">{{ if .CandLatencyStr }}{{ .CandLatencyStr }}{{ else if .LatencyStr }}{{ .LatencyStr }}{{ else }}—{{ end }}</td>
         {{ end }}
         {{ if or (eq $.Metric "cost") (and (or (eq $.Metric "all") (eq $.Metric "")) $.HasCost) }}
-        <td class="num" style="font-size:13px">{{ if .CandCostStr }}{{ .CandCostStr }}{{ else if .CostStr }}{{ .CostStr }}{{ else }}—{{ end }}</td>
+        <td class="num" style="font-size:13px"{{ if or .CandCostTooltip .CostTooltip }} title="{{ if .CandCostTooltip }}{{ .CandCostTooltip }}{{ else }}{{ .CostTooltip }}{{ end }}"{{ end }}>{{ if .CandCostStr }}{{ .CandCostStr }}{{ else if .CostStr }}{{ .CostStr }}{{ else }}—{{ end }}</td>
         {{ end }}
         {{ end }}
       </tr>
@@ -1763,7 +1763,7 @@ const seriesDetailTemplate = `
                 <td class="num">{{ .RateStr }}</td>
                 <td class="num" style="font-size:13px">{{ .CIStr }}</td>
                 <td class="num">{{ .TokensStr }}</td>
-                <td class="num">{{ .CostStr }}</td>
+                <td class="num"{{ if .CostTooltip }} title="{{ .CostTooltip }}"{{ end }}>{{ .CostStr }}</td>
                 <td><a href="{{ .RunLink }}" class="mono" style="font-size:13px">{{ .RunName }}</a></td>
               </tr>
               {{ else }}
