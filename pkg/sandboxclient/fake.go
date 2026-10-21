@@ -41,8 +41,9 @@ type FakeClient struct {
 	ListStderr string
 	ListErr    error
 
-	RepoDir string
-	RepoTar []byte
+	EvalsListAbsent bool
+	RepoDir         string
+	RepoTar         []byte
 
 	CloneErr    error
 	CloneExit   int
@@ -203,23 +204,20 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 
 	if cmd0 == "test" && len(cfg.Command) >= 3 && cfg.Command[2] == ".evals/list" {
 		f.mu.Lock()
+		absent := f.EvalsListAbsent
 		listErr := f.ListErr
 		repoDir := f.RepoDir
-		listStdout := f.ListStdout
-		manifestBytes := f.ManifestBytes
 		f.mu.Unlock()
 
-		if listErr != nil {
-			if status.Code(listErr) == codes.NotFound || strings.Contains(strings.ToLower(listErr.Error()), "not found") {
-				return &ExecuteResult{ExitCode: 1}, nil
-			}
+		if absent {
+			return &ExecuteResult{ExitCode: 1}, nil
 		}
 		if repoDir != "" {
 			if _, err := os.Stat(filepath.Join(repoDir, ".evals/list")); os.IsNotExist(err) {
 				return &ExecuteResult{ExitCode: 1}, nil
 			}
 		}
-		if repoDir == "" && listErr == nil && listStdout == "" && manifestBytes == nil {
+		if listErr != nil && (status.Code(listErr) == codes.NotFound || strings.Contains(strings.ToLower(listErr.Error()), "not found")) {
 			return &ExecuteResult{ExitCode: 1}, nil
 		}
 		return &ExecuteResult{ExitCode: 0}, nil

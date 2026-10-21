@@ -2988,6 +2988,58 @@ def summary_eval():
 			t.Errorf("Expected ManifestSource %s, got %s", v1alpha1.ManifestSourceList, updatedWithList.Status.ManifestSource)
 		}
 	})
+
+	t.Run("TestEvalsListTransportErrorFailsRunWithoutFallback", func(t *testing.T) {
+		errClient := &sandboxclient.FakeClient{
+			RepoDir: repoDir,
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "test" {
+					return nil, status.Error(codes.Unavailable, "sandbox connection unavailable")
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}
+
+		runTransportErr := run.DeepCopy()
+		runTransportErr.Name = "test-run-transport-err"
+
+		sbTransportErr := discovery.BuildSandbox(runTransportErr, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+		podTransportErr := pod.DeepCopy()
+		podTransportErr.Name = discovery.SandboxNameForRun(runTransportErr.Name)
+
+		clTransportErr := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(runTransportErr, sbTransportErr, podTransportErr).
+			WithStatusSubresource(runTransportErr).
+			Build()
+
+		recTransportErr := &RunReconciler{
+			Client:           clTransportErr,
+			Scheme:           scheme,
+			SandboxClient:    errClient,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+
+		reqTransportErr := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runTransportErr.Name}}
+		_, err := recTransportErr.Reconcile(t.Context(), reqTransportErr)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedTransportErr v1alpha1.Run
+		if err := clTransportErr.Get(t.Context(), reqTransportErr.NamespacedName, &updatedTransportErr); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+		if updatedTransportErr.Status.Phase != v1alpha1.RunPhaseFailed {
+			t.Errorf("Expected phase Failed on transport error, got %s", updatedTransportErr.Status.Phase)
+		}
+		if !strings.Contains(updatedTransportErr.Status.Message, "step test -f .evals/list failed") {
+			t.Errorf("Expected status message to name 'step test -f .evals/list failed', got: %s", updatedTransportErr.Status.Message)
+		}
+		if updatedTransportErr.Status.ManifestSource != "" {
+			t.Errorf("Expected ManifestSource to be empty on failed test, got %s", updatedTransportErr.Status.ManifestSource)
+		}
+	})
 }
 
 func TestReconcileSampleExecutionFullLifecycle(t *testing.T) {
