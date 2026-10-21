@@ -27,6 +27,7 @@ type logCacheEntry struct {
 	dataLen   int64
 	samples   []artifacts.ParsedInspectSample
 	parseErr  error
+	truncated bool
 	createdAt time.Time
 	prev      *logCacheEntry
 	next      *logCacheEntry
@@ -57,27 +58,33 @@ func newLogLRUCache(maxBytes int64, ttl time.Duration) *logLRUCache {
 	}
 }
 
-// get retrieves cached samples if present and not expired, moving the entry to the head.
-func (c *logLRUCache) get(key string) ([]artifacts.ParsedInspectSample, error, bool) {
+// getWithTruncated retrieves cached samples and the truncated flag if present and not expired, moving the entry to the head.
+func (c *logLRUCache) getWithTruncated(key string) ([]artifacts.ParsedInspectSample, bool, error, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	entry, ok := c.entries[key]
 	if !ok {
-		return nil, nil, false
+		return nil, false, nil, false
 	}
 
 	if time.Since(entry.createdAt) > c.ttl {
 		c.removeEntry(entry)
-		return nil, nil, false
+		return nil, false, nil, false
 	}
 
 	c.moveToHead(entry)
-	return entry.samples, entry.parseErr, true
+	return entry.samples, entry.truncated, entry.parseErr, true
 }
 
-// set adds or replaces a cache entry, evicting the least recently used entries if maxBytes is exceeded.
-func (c *logLRUCache) set(key string, dataLen int64, samples []artifacts.ParsedInspectSample, parseErr error) {
+// get retrieves cached samples if present and not expired, moving the entry to the head.
+func (c *logLRUCache) get(key string) ([]artifacts.ParsedInspectSample, error, bool) {
+	samples, _, parseErr, ok := c.getWithTruncated(key)
+	return samples, parseErr, ok
+}
+
+// setWithTruncated adds or replaces a cache entry including the truncated flag.
+func (c *logLRUCache) setWithTruncated(key string, dataLen int64, samples []artifacts.ParsedInspectSample, truncated bool, parseErr error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -97,6 +104,7 @@ func (c *logLRUCache) set(key string, dataLen int64, samples []artifacts.ParsedI
 		key:       key,
 		dataLen:   dataLen,
 		samples:   samples,
+		truncated: truncated,
 		parseErr:  parseErr,
 		createdAt: time.Now(),
 	}
@@ -104,6 +112,11 @@ func (c *logLRUCache) set(key string, dataLen int64, samples []artifacts.ParsedI
 	c.entries[key] = entry
 	c.insertAtHead(entry)
 	c.totalBytes += dataLen
+}
+
+// set adds or replaces a cache entry, evicting the least recently used entries if maxBytes is exceeded.
+func (c *logLRUCache) set(key string, dataLen int64, samples []artifacts.ParsedInspectSample, parseErr error) {
+	c.setWithTruncated(key, dataLen, samples, false, parseErr)
 }
 
 func (c *logLRUCache) moveToHead(e *logCacheEntry) {
