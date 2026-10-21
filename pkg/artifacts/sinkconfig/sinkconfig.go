@@ -147,21 +147,58 @@ func WatchConfigMap(ctx context.Context, client kubernetes.Interface, namespace,
 		name = DefaultConfigMapName
 	}
 
+	return WatchNamedObject(
+		ctx,
+		name,
+		func(ctx context.Context) (metav1.Object, error) {
+			return client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		},
+		func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+			return client.CoreV1().ConfigMaps(namespace).Watch(ctx, opts)
+		},
+		func(obj metav1.Object) {
+			if obj == nil {
+				onChange(nil)
+				return
+			}
+			if cm, ok := obj.(*corev1.ConfigMap); ok {
+				onChange(cm)
+			}
+		},
+	)
+}
+
+// WatchNamedObject watches a single named Kubernetes object using provided get and watch functions.
+// It handles watch.Bookmark (refreshing resourceVersion) and watch.Error (stopping, short sleep,
+// re-Get, and triggering onChange) with AllowWatchBookmarks: true.
+// On Added and Modified events, onChange is invoked with the updated object.
+// On Deleted events or when the object is not found, onChange is invoked with nil.
+func WatchNamedObject(
+	ctx context.Context,
+	name string,
+	getFn func(ctx context.Context) (metav1.Object, error),
+	watchFn func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error),
+	onChange func(obj metav1.Object),
+) error {
+	if getFn == nil || watchFn == nil || onChange == nil {
+		return errors.New("getFn, watchFn, and onChange must not be nil")
+	}
+
 	fieldSelector := "metadata.name=" + name
 
 	// Initial Get
 	var rv string
-	cm, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+	obj, err := getFn(ctx)
 	if err == nil {
-		rv = cm.ResourceVersion
-		onChange(cm)
+		rv = obj.GetResourceVersion()
+		onChange(obj)
 	} else if apierrors.IsNotFound(err) {
 		rv = ""
 		onChange(nil)
 	} else if ctx.Err() != nil {
 		return ctx.Err()
 	} else {
-		return fmt.Errorf("failed to get initial configmap %s/%s: %w", namespace, name, err)
+		return fmt.Errorf("failed to get initial object %s: %w", name, err)
 	}
 
 	backoff := 1 * time.Second
@@ -173,9 +210,10 @@ func WatchConfigMap(ctx context.Context, client kubernetes.Interface, namespace,
 		default:
 		}
 
-		watcher, err := client.CoreV1().ConfigMaps(namespace).Watch(ctx, metav1.ListOptions{
-			FieldSelector:   fieldSelector,
-			ResourceVersion: rv,
+		watcher, err := watchFn(ctx, metav1.ListOptions{
+			FieldSelector:       fieldSelector,
+			ResourceVersion:     rv,
+			AllowWatchBookmarks: true,
 		})
 		if err != nil {
 			select {
@@ -186,10 +224,10 @@ func WatchConfigMap(ctx context.Context, client kubernetes.Interface, namespace,
 			if backoff < 15*time.Second {
 				backoff *= 2
 			}
-			cm, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+			obj, err := getFn(ctx)
 			if err == nil {
-				rv = cm.ResourceVersion
-				onChange(cm)
+				rv = obj.GetResourceVersion()
+				onChange(obj)
 			} else if apierrors.IsNotFound(err) {
 				rv = ""
 				onChange(nil)
@@ -212,12 +250,12 @@ func WatchConfigMap(ctx context.Context, client kubernetes.Interface, namespace,
 				}
 				switch event.Type {
 				case watch.Added, watch.Modified:
-					if updatedCM, ok := event.Object.(*corev1.ConfigMap); ok {
-						if updatedCM.ResourceVersion != "" && updatedCM.ResourceVersion == rv {
+					if updatedObj, ok := event.Object.(metav1.Object); ok {
+						if updatedObj.GetResourceVersion() != "" && updatedObj.GetResourceVersion() == rv {
 							continue
 						}
-						rv = updatedCM.ResourceVersion
-						onChange(updatedCM)
+						rv = updatedObj.GetResourceVersion()
+						onChange(updatedObj)
 					}
 				case watch.Deleted:
 					rv = ""
@@ -240,10 +278,10 @@ func WatchConfigMap(ctx context.Context, client kubernetes.Interface, namespace,
 		case <-time.After(500 * time.Millisecond):
 		}
 
-		cm, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		obj, err := getFn(ctx)
 		if err == nil {
-			rv = cm.ResourceVersion
-			onChange(cm)
+			rv = obj.GetResourceVersion()
+			onChange(obj)
 		} else if apierrors.IsNotFound(err) {
 			rv = ""
 			onChange(nil)
