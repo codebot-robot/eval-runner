@@ -347,18 +347,18 @@ Future pull requests that introduce an architectural decision should append an e
   Concept §2.3 (docs/concept/functionality.md): when a repository has no `.evals/list`, discover Inspect tasks directly so a repo can be evaluated with zero manifest setup. Previously, discovery failed immediately when `.evals/list` was missing.
 - **Decision**:
   1. **Authoritative `.evals/list`**:
-     When `.evals/list` is present, it remains authoritative. If `.evals/list` fails (non-zero exit code, execution error, invalid JSON, or empty task list), discovery fails permanently without fallback. An empty manifest output from `.evals/list` is not a fallback trigger.
-  2. **Fallback Scanning on Absence**:
-     Only when `.evals/list` is absent, the runner falls back to scanning the repository checkout for Python files matching `**/*.py` that define Inspect tasks.
-  3. **Inspect Task Detection**:
-     Candidate files must import `inspect_ai` (e.g. `import inspect_ai` or `from inspect_ai...`) and declare function definitions (`def` or `async def`) decorated with `@task` or `@inspect_ai.task`.
+     When `.evals/list` is present (confirmed via `test -f .evals/list` exiting 0), it remains authoritative. If checking presence fails with a transport/gRPC error or exit code other than 1, or if executing `.evals/list` fails (non-zero exit code, execution error, invalid JSON, or empty task list), discovery fails permanently without fallback. An empty manifest output from `.evals/list` is not a fallback trigger. Only confirmed absence (`test -f` exit code 1) triggers fallback.
+  2. **Hybrid Execution Model**:
+     The untrusted sandbox (`alpine/git:v2.47.2`) packages candidate `.py` files and `.gitignore` via `git ls-files` (or `find` capped at 5,000 files) into `/workspace/out/scan.tar`. The controller pulls this archive through the bounded sandboxd `ReadFile` channel (10 MiB limit) and extracts it into an isolated temporary directory under `/tmp` (an `emptyDir` volume under `readOnlyRootFilesystem`). Untrusted archive bytes are extracted with path traversal validation and forced safe permissions (`0600` for files, `0700` for directories).
+  3. **Inspect Task Detection (Regex vs AST Trade-off)**:
+     Because the pinned discovery container image has `git` and `sh` but no Python runtime, AST parsing via `python -I` inside the sandbox would require Python in the discovery image or mounting Python runtimes. A regex and line-based scanner in Go (`pkg/discovery/scan.go`) is chosen as the pragmatic alternative. Decorator detection is hardened by enforcing column-0 placement for top-level decorators and function definitions (excluding indented class methods), skipping multiline docstring blocks (`"""` and `'''`), and tracking decorator parenthesis nesting across multiline `@task(...)` declarations. Candidate files must import `inspect_ai`.
   4. **Exclusions**:
      The scan always excludes `.git`, `.venv`, `node_modules`, and `vendor` directories, as well as paths matching `.gitignore` if present in the repository.
-  5. **Caps**:
-     Scanning is capped at 5,000 files visited and 200 tasks synthesized. When a cap is hit, scanning stops cleanly and the cap is recorded in `Run.status.message`.
+  5. **Caps & Collision Disambiguation**:
+     Scanning is capped at 5,000 files visited and 200 tasks synthesized. When a cap is hit, scanning stops cleanly and the cap is recorded in `Run.status.message`. When multiple files in the same directory define the same function name, task IDs are deterministically disambiguated as `<dir>/<file-stem>/<function>` (or `<file-stem>/<function>` at root) and recorded in `Run.status.message`.
   6. **Synthesized Manifest & Provenance**:
      Tasks are synthesized with:
-     - `id`: `<relative-dir>/<function>` (or `<function>` if at repo root), preserving slashes.
+     - `id`: `<relative-dir>/<function>` (or `<function>` if at repo root), preserving slashes (disambiguated with file-stem if colliding).
      - `workdir`: directory containing the file (`.` if at root).
      - `spec`: `<file>@<function>`.
      - `paths`: `[<dir>/**]` (or `["**"]` if at root).
@@ -368,7 +368,7 @@ Future pull requests that introduce an architectural decision should append an e
   7. **Status & UI Provenance**:
      `Run.status.manifestSource` records `"list"` or `"inspect-scan"`. When `"inspect-scan"`, the UI displays a one-line provenance note on the Run detail page.
 - **Rationale**:
-  Enables zero-manifest evaluation for Inspect-based repositories while preserving the determinism and isolation of `.evals/list` entrypoints when present.
+  Enables zero-manifest evaluation for Inspect-based repositories while preserving the determinism, security boundary, and isolation of `.evals/list` entrypoints when present.
 
 
 
