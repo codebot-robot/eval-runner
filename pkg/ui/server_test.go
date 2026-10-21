@@ -213,21 +213,25 @@ func TestServerHealthz(t *testing.T) {
 	}
 }
 
-func TestServerRootRedirect(t *testing.T) {
+func TestServerRepoIndex(t *testing.T) {
 	scheme := newTestScheme(t)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	baseRun, candRun, comp := sampleFixtures()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
 	server := NewServer(Config{Client: fakeClient})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
-	if w.Code != http.StatusFound {
-		t.Fatalf("expected 302 Found, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
 	}
-	loc := w.Header().Get("Location")
-	if loc != "/runs" {
-		t.Errorf("expected redirect to /runs, got %q", loc)
+	body := w.Body.String()
+	if !strings.Contains(body, "Repositories") {
+		t.Errorf("expected body to contain 'Repositories', got: %s", body)
+	}
+	if !strings.Contains(body, "github.com/gke-labs/eval-runner") {
+		t.Errorf("expected body to contain repository name, got: %s", body)
 	}
 }
 
@@ -6133,10 +6137,13 @@ func TestServerServesListsFromInjectedReaderWithoutDirectClient(t *testing.T) {
 		url      string
 		wantBody string
 	}{
+		{"/", "github.com/org/repo"},
 		{"/runs", "base-cached-run-default"},
 		{"/comparisons", "cached-comp-default"},
 		{"/pulls", "cached-comp-default"},
 		{"/series", "org/repo"},
+		{"/github.com/org/repo/runs", "base-cached-run-default"},
+		{"/github.com/org/repo/comparisons", "cached-comp-default"},
 	}
 
 	for _, ep := range listEndpoints {
@@ -6166,6 +6173,8 @@ func TestServerServesListsFromInjectedReaderWithoutDirectClient(t *testing.T) {
 	}{
 		{"/runs/eval-runner/base-cached-run-default", "base-cached-run-default"},
 		{"/comparisons/eval-runner/cached-comp-default", "cached-comp-default"},
+		{"/github.com/org/repo/runs/base-cached-run-default", "base-cached-run-default"},
+		{"/github.com/org/repo/comparisons/cached-comp-default", "cached-comp-default"},
 	}
 	for _, ep := range detailEndpoints {
 		t.Run("default_ns_detail_"+ep.url, func(t *testing.T) {
@@ -6274,4 +6283,451 @@ func TestServerHealthz_CacheSync(t *testing.T) {
 			t.Errorf("expected body 'ok', got %q", w.Body.String())
 		}
 	})
+}
+
+func TestServerRepoRoutes(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	routes := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "repo overview",
+			path:       "/github.com/gke-labs/eval-runner",
+			wantStatus: http.StatusOK,
+			wantBody:   "docs-eval-cand-05ce4d8",
+		},
+		{
+			name:       "repo overview with trailing slash",
+			path:       "/github.com/gke-labs/eval-runner/",
+			wantStatus: http.StatusOK,
+			wantBody:   "docs-eval-cand-05ce4d8",
+		},
+		{
+			name:       "repo runs list",
+			path:       "/github.com/gke-labs/eval-runner/runs",
+			wantStatus: http.StatusOK,
+			wantBody:   "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8",
+		},
+		{
+			name:       "repo runs list trailing slash",
+			path:       "/github.com/gke-labs/eval-runner/runs/",
+			wantStatus: http.StatusOK,
+			wantBody:   "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8",
+		},
+		{
+			name:       "repo run detail",
+			path:       "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8",
+			wantStatus: http.StatusOK,
+			wantBody:   "docs-eval-cand-05ce4d8",
+		},
+		{
+			name:       "repo comparisons list",
+			path:       "/github.com/gke-labs/eval-runner/comparisons",
+			wantStatus: http.StatusOK,
+			wantBody:   "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit",
+		},
+		{
+			name:       "repo comparisons list trailing slash",
+			path:       "/github.com/gke-labs/eval-runner/comparisons/",
+			wantStatus: http.StatusOK,
+			wantBody:   "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit",
+		},
+		{
+			name:       "repo comparison detail",
+			path:       "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit",
+			wantStatus: http.StatusOK,
+			wantBody:   "docs-eval-same-commit",
+		},
+	}
+
+	for _, tc := range routes {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("GET %s got status %d, want %d", tc.path, w.Code, tc.wantStatus)
+			}
+			if tc.wantBody != "" && !strings.Contains(w.Body.String(), tc.wantBody) {
+				t.Errorf("GET %s body does not contain %q", tc.path, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestServerRepoFiltering(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	runA := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-a",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/orgA/repoA.git",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+	runB := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-b",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/orgB/repoB.git",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	compA := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-a",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-8 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "orgA/repoA",
+			},
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "run-a",
+			},
+		},
+	}
+	compB := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-b",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-3 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "orgB/repoB",
+			},
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "run-b",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runA, runB, compA, compB).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	// Repo index should list both
+	reqIndex := httptest.NewRequest(http.MethodGet, "/", nil)
+	wIndex := httptest.NewRecorder()
+	server.ServeHTTP(wIndex, reqIndex)
+	if wIndex.Code != http.StatusOK {
+		t.Fatalf("GET / failed: %d", wIndex.Code)
+	}
+	bodyIndex := wIndex.Body.String()
+	if !strings.Contains(bodyIndex, "github.com/orgA/repoA") || !strings.Contains(bodyIndex, "github.com/orgB/repoB") {
+		t.Errorf("repo index does not contain both repos: %s", bodyIndex)
+	}
+
+	// Repo A runs should contain run-a and not run-b
+	reqRunsA := httptest.NewRequest(http.MethodGet, "/github.com/orgA/repoA/runs", nil)
+	wRunsA := httptest.NewRecorder()
+	server.ServeHTTP(wRunsA, reqRunsA)
+	if wRunsA.Code != http.StatusOK {
+		t.Fatalf("GET /github.com/orgA/repoA/runs failed: %d", wRunsA.Code)
+	}
+	bodyRunsA := wRunsA.Body.String()
+	if !strings.Contains(bodyRunsA, "run-a") || strings.Contains(bodyRunsA, "run-b") {
+		t.Errorf("expected repoA runs to contain run-a and not run-b, got: %s", bodyRunsA)
+	}
+
+	// Repo B runs should contain run-b and not run-a
+	reqRunsB := httptest.NewRequest(http.MethodGet, "/github.com/orgB/repoB/runs", nil)
+	wRunsB := httptest.NewRecorder()
+	server.ServeHTTP(wRunsB, reqRunsB)
+	if wRunsB.Code != http.StatusOK {
+		t.Fatalf("GET /github.com/orgB/repoB/runs failed: %d", wRunsB.Code)
+	}
+	bodyRunsB := wRunsB.Body.String()
+	if !strings.Contains(bodyRunsB, "run-b") || strings.Contains(bodyRunsB, "run-a") {
+		t.Errorf("expected repoB runs to contain run-b and not run-a, got: %s", bodyRunsB)
+	}
+
+	// Repo A comparisons should contain comp-a and not comp-b
+	reqCompsA := httptest.NewRequest(http.MethodGet, "/github.com/orgA/repoA/comparisons", nil)
+	wCompsA := httptest.NewRecorder()
+	server.ServeHTTP(wCompsA, reqCompsA)
+	if wCompsA.Code != http.StatusOK {
+		t.Fatalf("GET /github.com/orgA/repoA/comparisons failed: %d", wCompsA.Code)
+	}
+	bodyCompsA := wCompsA.Body.String()
+	if !strings.Contains(bodyCompsA, "comp-a") || strings.Contains(bodyCompsA, "comp-b") {
+		t.Errorf("expected repoA comparisons to contain comp-a and not comp-b, got: %s", bodyCompsA)
+	}
+}
+
+func TestServerRepoCrossRepo404(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	runA := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-a",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/orgA/repoA.git",
+			},
+		},
+	}
+	compA := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-a",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "orgA/repoA",
+			},
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "run-a",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runA, compA).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{
+			name: "run detail from wrong repo",
+			path: "/github.com/orgB/repoB/runs/run-a",
+		},
+		{
+			name: "run task from wrong repo",
+			path: "/github.com/orgB/repoB/runs/run-a/tasks/test-task/samples",
+		},
+		{
+			name: "comparison detail from wrong repo",
+			path: "/github.com/orgB/repoB/comparisons/comp-a",
+		},
+		{
+			name: "host without dot",
+			path: "/localhost/orgA/repoA/runs",
+		},
+		{
+			name: "dot-dot in owner",
+			path: "/github.com/%2e%2e/repoA/runs",
+		},
+		{
+			name: "dot in repo name",
+			path: "/github.com/orgA/%2e/runs",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("GET %s got status %d, want 404 Not Found", tc.path, w.Code)
+			}
+		})
+	}
+}
+
+func TestServerRepoNamespacePropagation(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "custom-run",
+			Namespace: "staging",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/gke-labs/eval-runner.git",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	// Non-default namespace request
+	reqCustom := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs?namespace=staging", nil)
+	wCustom := httptest.NewRecorder()
+	server.ServeHTTP(wCustom, reqCustom)
+	if wCustom.Code != http.StatusOK {
+		t.Fatalf("GET /runs with custom ns failed: %d", wCustom.Code)
+	}
+	bodyCustom := wCustom.Body.String()
+	if !strings.Contains(bodyCustom, "?namespace=staging") {
+		t.Errorf("expected links in custom ns to contain '?namespace=staging', got: %s", bodyCustom)
+	}
+
+	// Default namespace request
+	runDefault := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/gke-labs/eval-runner.git",
+			},
+		},
+	}
+	serverDefault := NewServer(Config{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(runDefault).Build()})
+	reqDefault := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs", nil)
+	wDefault := httptest.NewRecorder()
+	serverDefault.ServeHTTP(wDefault, reqDefault)
+	if wDefault.Code != http.StatusOK {
+		t.Fatalf("GET /runs with default ns failed: %d", wDefault.Code)
+	}
+	bodyDefault := wDefault.Body.String()
+	if strings.Contains(bodyDefault, "?namespace=") {
+		t.Errorf("expected links in default ns to NOT contain '?namespace=', got: %s", bodyDefault)
+	}
+
+	// Non-default Config.DefaultNamespace test:
+	// When server's default namespace is "other", accessing without ?namespace= uses "other",
+	// so links must NOT carry ?namespace=. Accessing with ?namespace=eval-runner MUST carry ?namespace=eval-runner.
+	runOther := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-run",
+			Namespace: "other",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/gke-labs/eval-runner.git",
+			},
+		},
+	}
+	serverOther := NewServer(Config{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithObjects(runOther, runDefault).Build(),
+		DefaultNamespace: "other",
+	})
+	reqOther := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs", nil)
+	wOther := httptest.NewRecorder()
+	serverOther.ServeHTTP(wOther, reqOther)
+	if wOther.Code != http.StatusOK {
+		t.Fatalf("GET /runs with Config.DefaultNamespace=other failed: %d", wOther.Code)
+	}
+	bodyOther := wOther.Body.String()
+	if strings.Contains(bodyOther, "?namespace=") {
+		t.Errorf("expected links in server default ns (other) to NOT contain '?namespace=', got: %s", bodyOther)
+	}
+
+	reqOtherExplicit := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs?namespace=eval-runner", nil)
+	wOtherExplicit := httptest.NewRecorder()
+	serverOther.ServeHTTP(wOtherExplicit, reqOtherExplicit)
+	if wOtherExplicit.Code != http.StatusOK {
+		t.Fatalf("GET /runs?namespace=eval-runner with Config.DefaultNamespace=other failed: %d", wOtherExplicit.Code)
+	}
+	bodyOtherExplicit := wOtherExplicit.Body.String()
+	if !strings.Contains(bodyOtherExplicit, "?namespace=eval-runner") {
+		t.Errorf("expected links to contain '?namespace=eval-runner' when differing from Config.DefaultNamespace=other, got: %s", bodyOtherExplicit)
+	}
+
+	// Metric filter chips on run detail page retain ?namespace=staging
+	reqRunDetail := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/custom-run?namespace=staging", nil)
+	wRunDetail := httptest.NewRecorder()
+	server.ServeHTTP(wRunDetail, reqRunDetail)
+	if wRunDetail.Code != http.StatusOK {
+		t.Fatalf("GET /runs/custom-run?namespace=staging failed: %d", wRunDetail.Code)
+	}
+	bodyRunDetail := wRunDetail.Body.String()
+	for _, m := range []string{"all", "rate", "latency", "tokens", "cost"} {
+		wantSubstr := fmt.Sprintf(`href="?metric=%s&amp;namespace=staging"`, m)
+		badSubstr := fmt.Sprintf(`href="?metric=%s"`, m)
+		if strings.Contains(bodyRunDetail, badSubstr) {
+			t.Errorf("run detail rendered metric chip without namespace: %s", badSubstr)
+		}
+		if !strings.Contains(bodyRunDetail, wantSubstr) {
+			t.Errorf("run detail missing metric chip with namespace: %s", wantSubstr)
+		}
+	}
+
+	// Metric filter chips on comparison detail page retain ?namespace=staging
+	compStaging := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "custom-comp",
+			Namespace: "staging",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+			},
+		},
+	}
+	serverStagingComp := NewServer(Config{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(compStaging).Build()})
+	reqCompDetail := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/custom-comp?namespace=staging", nil)
+	wCompDetail := httptest.NewRecorder()
+	serverStagingComp.ServeHTTP(wCompDetail, reqCompDetail)
+	if wCompDetail.Code != http.StatusOK {
+		t.Fatalf("GET /comparisons/custom-comp?namespace=staging failed: %d", wCompDetail.Code)
+	}
+	bodyCompDetail := wCompDetail.Body.String()
+	for _, m := range []string{"all", "rate", "latency", "tokens", "cost"} {
+		wantSubstr := fmt.Sprintf(`href="?metric=%s&amp;namespace=staging"`, m)
+		badSubstr := fmt.Sprintf(`href="?metric=%s"`, m)
+		if strings.Contains(bodyCompDetail, badSubstr) {
+			t.Errorf("comparison detail rendered metric chip without namespace: %s", badSubstr)
+		}
+		if !strings.Contains(bodyCompDetail, wantSubstr) {
+			t.Errorf("comparison detail missing metric chip with namespace: %s", wantSubstr)
+		}
+	}
+}
+
+func TestServerRepoComparisonDetailNoRunsHref(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET comparison detail failed: %d", w.Code)
+	}
+
+	body := w.Body.String()
+
+	// Verify status.tasks are rendered
+	if !strings.Contains(body, "triage/runbook_lookup") {
+		t.Fatalf("expected task triage/runbook_lookup to be rendered in body")
+	}
+
+	// Crucial assertion: Must contain NO href="/runs/
+	if strings.Contains(body, `href="/runs/`) {
+		t.Errorf("repository-scoped comparison detail page contains legacy href=\"/runs/:\n%s", body)
+	}
+
+	// Must contain repository-scoped run hrefs
+	if !strings.Contains(body, `href="/github.com/gke-labs/eval-runner/runs/`) {
+		t.Errorf("expected repository-scoped comparison detail page to contain href=\"/github.com/gke-labs/eval-runner/runs/:\n%s", body)
+	}
 }

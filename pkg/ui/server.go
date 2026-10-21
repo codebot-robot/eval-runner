@@ -139,6 +139,7 @@ type Config struct {
 type Server struct {
 	cfg              Config
 	mux              *http.ServeMux
+	repoMux          *http.ServeMux
 	cache            *logLRUCache
 	compCache        *comparisonLRUCache
 	reloadableSink   *artifacts.ReloadableSink
@@ -180,6 +181,7 @@ func NewServer(cfg Config) *Server {
 	s := &Server{
 		cfg:            cfg,
 		mux:            http.NewServeMux(),
+		repoMux:        http.NewServeMux(),
 		cache:          newLogLRUCache(64*1024*1024, 1*time.Hour),
 		compCache:      newComparisonLRUCache(32*1024*1024, 1*time.Hour),
 		reloadableSink: relSink,
@@ -283,7 +285,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /livez", s.handleLivez)
-	s.mux.HandleFunc("GET /{$}", s.handleRoot)
+	s.mux.HandleFunc("GET /{$}", s.handleRepoIndex)
 	s.mux.HandleFunc("GET /runs", s.handleRunsList)
 	s.mux.HandleFunc("GET /runs/{$}", s.handleRunsList)
 	s.mux.HandleFunc("GET /runs/{namespace}/{name}", s.handleRunDetail)
@@ -296,7 +298,34 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /pulls/{$}", s.handlePullsList)
 	s.mux.HandleFunc("GET /pulls/{repohash}/{number}", s.handlePullDetail)
 	s.mux.HandleFunc("GET /series", s.handleSeriesList)
+	s.mux.HandleFunc("GET /series/{$}", s.handleSeriesList)
 	s.mux.HandleFunc("GET /series/{repohash}/{branch...}", s.handleSeriesDetail)
+
+	// Catch-all for repository-scoped routes dispatched to repoMux
+	s.mux.HandleFunc("GET /{host}/{rest...}", s.handleRepoScoped)
+
+	// Repository-scoped routes registered on repoMux
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}", s.handleRepoOverview)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/{$}", s.handleRepoOverview)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/runs", s.handleRepoRunsList)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/runs/{$}", s.handleRepoRunsList)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/runs/{name}", s.handleRepoRunDetail)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/runs/{name}/tasks", s.handleRepoRunTasks)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/runs/{name}/tasks/{rest...}", s.handleRepoRunTasks)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/comparisons", s.handleRepoComparisonsList)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/comparisons/{$}", s.handleRepoComparisonsList)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/comparisons/{name}", s.handleRepoComparisonDetail)
+}
+
+func (s *Server) handleRepoScoped(w http.ResponseWriter, r *http.Request) {
+	s.repoMux.ServeHTTP(w, r)
+}
+
+func (s *Server) linkNamespace(ns string) string {
+	if ns == s.cfg.DefaultNamespace {
+		return ""
+	}
+	return ns
 }
 
 func parseMetricFilter(r *http.Request) MetricFilter {
@@ -343,8 +372,117 @@ func httpError(w http.ResponseWriter, status int, public string, detail string, 
 	http.Error(w, public, status)
 }
 
-func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/runs", http.StatusFound)
+func (s *Server) parseRouteRepo(r *http.Request) (RepoRef, bool) {
+	host := r.PathValue("host")
+	owner := r.PathValue("owner")
+	name := r.PathValue("repo")
+	ref := RepoRef{
+		Host:  strings.ToLower(strings.TrimSpace(host)),
+		Owner: strings.TrimSpace(owner),
+		Name:  strings.TrimSpace(name),
+	}
+	if !ref.IsValid() {
+		return RepoRef{}, false
+	}
+	return ref, true
+}
+
+func (s *Server) handleRepoIndex(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	reader := s.readerFor(ns)
+
+	var runList v1alpha1.RunList
+	if err := reader.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "", err)
+		return
+	}
+
+	var compList v1alpha1.ComparisonList
+	if err := reader.List(ctx, &compList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list comparisons", "", err)
+		return
+	}
+
+	type repoCounts struct {
+		ref         RepoRef
+		runs        int
+		comparisons int
+	}
+	repoMap := make(map[string]*repoCounts)
+
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		if ref, ok := runRepoRef(run); ok {
+			key := strings.ToLower(ref.String())
+			if rc, exists := repoMap[key]; exists {
+				rc.runs++
+			} else {
+				repoMap[key] = &repoCounts{
+					ref:  ref,
+					runs: 1,
+				}
+			}
+		}
+	}
+
+	for i := range compList.Items {
+		comp := &compList.Items[i]
+		if ref, ok := comparisonRepoRef(ctx, comp, reader); ok {
+			key := strings.ToLower(ref.String())
+			if rc, exists := repoMap[key]; exists {
+				rc.comparisons++
+			} else {
+				repoMap[key] = &repoCounts{
+					ref:         ref,
+					comparisons: 1,
+				}
+			}
+		}
+	}
+
+	linkNS := s.linkNamespace(ns)
+	repoItems := make([]RepoListItem, 0, len(repoMap))
+	for _, rc := range repoMap {
+		repoItems = append(repoItems, RepoListItem{
+			Host:             rc.ref.Host,
+			Owner:            rc.ref.Owner,
+			Name:             rc.ref.Name,
+			Repository:       rc.ref.String(),
+			RunsCount:        rc.runs,
+			ComparisonsCount: rc.comparisons,
+			Link:             repoLink(rc.ref, "", linkNS),
+		})
+	}
+
+	sort.Slice(repoItems, func(i, j int) bool {
+		return repoItems[i].Repository < repoItems[j].Repository
+	})
+
+	view := RepoIndexView{
+		Namespace:     ns,
+		LinkNamespace: linkNS,
+		Repositories:  repoItems,
+		TotalCount:    len(repoItems),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := RenderRepoIndex(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
 }
 
 func (s *Server) namespaceFor(r *http.Request) (string, error) {
@@ -499,6 +637,178 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleRepoOverview(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	s.renderRepoRuns(w, r, ns, ref, NavTabOverview)
+}
+
+func (s *Server) handleRepoRunsList(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	s.renderRepoRuns(w, r, ns, ref, NavTabRuns)
+}
+
+func (s *Server) renderRepoRuns(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, tab NavTab) {
+	ctx := r.Context()
+	linkNS := s.linkNamespace(ns)
+	offset, limit, err := parsePagination(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid pagination params", "invalid pagination query params", err)
+		return
+	}
+
+	var runList v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list runs", fmt.Sprintf("failed to list runs in namespace %s", ns), err)
+		return
+	}
+
+	var filtered []v1alpha1.Run
+	for i := range runList.Items {
+		run := runList.Items[i]
+		if runRef, ok := runRepoRef(&run); ok && runRef.Equal(ref) {
+			filtered = append(filtered, run)
+		}
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		if !filtered[i].CreationTimestamp.Equal(&filtered[j].CreationTimestamp) {
+			return filtered[i].CreationTimestamp.After(filtered[j].CreationTimestamp.Time)
+		}
+		return filtered[i].Name < filtered[j].Name
+	})
+
+	totalCount := len(filtered)
+	start := offset
+	if start > totalCount {
+		start = totalCount
+	}
+	end := start + limit
+	if end > totalCount {
+		end = totalCount
+	}
+
+	page := filtered[start:end]
+	items := make([]RunListItem, 0, len(page))
+	for _, run := range page {
+		tasksCompleted := 0
+		for _, t := range run.Status.Tasks {
+			if t.Phase == v1alpha1.TaskPhaseCompleted {
+				tasksCompleted++
+			}
+		}
+
+		samples := 0
+		rates := "—"
+		tasks := "—"
+		if len(run.Status.Tasks) > 0 {
+			tasks = fmt.Sprintf("%d/%d", tasksCompleted, len(run.Status.Tasks))
+		}
+		if run.Status.Summary != nil {
+			if run.Status.Summary.Tasks != "" {
+				tasks = run.Status.Summary.Tasks
+			}
+			samples = run.Status.Summary.TotalSamples
+			rates = run.Status.Summary.Rates
+		} else if run.Status.Discovery != nil && run.Status.Discovery.TaskCount > 0 {
+			tasks = fmt.Sprintf("0/%d", run.Status.Discovery.TaskCount)
+		}
+
+		var sampleRangeStr string
+		if run.Spec.SampleRange != nil {
+			sampleRangeStr = fmt.Sprintf("samples %d-%d", run.Spec.SampleRange.Start, run.Spec.SampleRange.End)
+		} else {
+			for _, t := range run.Status.Tasks {
+				if t.SampleRange != nil && run.Spec.Limit == nil {
+					sampleRangeStr = fmt.Sprintf("samples %d-%d", t.SampleRange.Start, t.SampleRange.End)
+					break
+				}
+			}
+		}
+
+		items = append(items, RunListItem{
+			Name:        run.Name,
+			Namespace:   run.Namespace,
+			Phase:       run.Status.Phase,
+			PhaseChip:   phaseChipClass(run.Status.Phase),
+			Tasks:       tasks,
+			Samples:     samples,
+			SampleRange: sampleRangeStr,
+			Rates:       rates,
+			Commit:      ShortCommit(run.Spec.Repo.Commit),
+			Age:         FormatAge(run.CreationTimestamp),
+			Link:        repoLink(ref, "/runs/"+run.Name, linkNS),
+		})
+	}
+
+	hasMore := end < totalCount
+	hasPrev := start > 0
+
+	basePath := ref.Path()
+	if tab == NavTabRuns {
+		basePath = ref.Path() + "/runs"
+	}
+
+	var nextLink, prevLink string
+	if hasMore {
+		nextLink = buildPageURL(basePath, r.URL.Query(), end, limit)
+	}
+	if hasPrev {
+		prevOffset := start - limit
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		prevLink = buildPageURL(basePath, r.URL.Query(), prevOffset, limit)
+	}
+
+	showingRange := ""
+	if totalCount > 0 {
+		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalCount)
+	}
+
+	view := RunsListView{
+		ActiveTab:     tab,
+		Repo:          ref,
+		Namespace:     ns,
+		LinkNamespace: linkNS,
+		Runs:          items,
+		TotalCount:    totalCount,
+		Offset:        start,
+		Limit:         limit,
+		HasMore:       hasMore,
+		NextLink:      nextLink,
+		HasPrev:       hasPrev,
+		PrevLink:      prevLink,
+		ShowingRange:  showingRange,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmplRunsList.Execute(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
+}
+
 func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns := r.PathValue("namespace")
@@ -522,6 +832,53 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.renderRunDetail(w, r, &run, ns, RepoRef{})
+}
+
+func (s *Server) handleRepoRunDetail(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	name := r.PathValue("name")
+	if !isValidResourceName(name) {
+		httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid run name: %q", name), nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	ctx := r.Context()
+	var run v1alpha1.Run
+	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
+		if apierrors.IsNotFound(err) {
+			httpError(w, http.StatusNotFound, "run not found", "", nil)
+			return
+		}
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to run denied", fmt.Sprintf("access to run %s/%s denied", ns, name), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to get run", fmt.Sprintf("failed to get run %s/%s", ns, name), err)
+		return
+	}
+
+	runRef, ok := runRepoRef(&run)
+	if !ok || !runRef.Equal(ref) {
+		httpError(w, http.StatusNotFound, "run not found", fmt.Sprintf("run %s/%s does not belong to repo %s", ns, name, ref), nil)
+		return
+	}
+
+	s.renderRunDetail(w, r, &run, ns, ref)
+}
+
+func (s *Server) renderRunDetail(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run, ns string, ref RepoRef) {
+	name := run.Name
+	linkNS := s.linkNamespace(ns)
 	// Parse metric filter query param
 	metricFilter := parseMetricFilter(r)
 
@@ -562,7 +919,11 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		hasStorage := s.hasArtifactStorage()
 		artifactsUnavailable := !hasStorage && task.LogPath != ""
 		if task.LogPath != "" && hasStorage {
-			samplesLink = BuildTaskSamplesListLink(ns, name, task.ID)
+			if ref.Host != "" {
+				samplesLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", name, url.PathEscape(task.ID)), linkNS)
+			} else {
+				samplesLink = BuildTaskSamplesListLink(ns, name, task.ID)
+			}
 		}
 
 		samplesDone := task.SamplesDone
@@ -758,8 +1119,10 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 
 	view := RunDetailView{
 		ActiveTab:        NavTabRuns,
+		Repo:             ref,
 		Name:             run.Name,
 		Namespace:        run.Namespace,
+		LinkNamespace:    linkNS,
 		Phase:            run.Status.Phase,
 		PhaseChip:        phaseChipClass(run.Status.Phase),
 		RepoURL:          run.Spec.Repo.URL,
@@ -900,6 +1263,173 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleRepoComparisonsList(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	linkNS := s.linkNamespace(ns)
+	offset, limit, err := parsePagination(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid pagination params", "invalid pagination query params", err)
+		return
+	}
+	kind := ParseComparisonKind(r.URL.Query().Get("kind"))
+
+	ctx := r.Context()
+	reader := s.readerFor(ns)
+	var compList v1alpha1.ComparisonList
+	if err := reader.List(ctx, &compList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list comparisons", fmt.Sprintf("failed to list comparisons in namespace %s", ns), err)
+		return
+	}
+
+	var filteredComps []v1alpha1.Comparison
+	for i := range compList.Items {
+		comp := compList.Items[i]
+		if compRef, ok := comparisonRepoRef(ctx, &comp, reader); ok && compRef.Equal(ref) {
+			filteredComps = append(filteredComps, comp)
+		}
+	}
+
+	var runs map[string]*v1alpha1.Run
+	if len(filteredComps) > 0 {
+		runs = s.runsByName(ctx, ns)
+	}
+
+	rows, totalCount := comparisonListRows(filteredComps, kind, runs)
+
+	totalRows := len(rows)
+	start := offset
+	if start > totalRows {
+		start = totalRows
+	}
+	end := start + limit
+	if end > totalRows {
+		end = totalRows
+	}
+
+	var items []ComparisonListItem
+	var groups []ComparisonGroupRow
+	for _, row := range rows[start:end] {
+		if row.isGroup() {
+			group := row.groupRow(runs)
+			group.CandidateLink = repoLink(ref, "/runs/"+row.candidate, linkNS)
+			if group.VsBaseline != nil {
+				group.VsBaseline.Link = repoLink(ref, "/comparisons/"+group.VsBaseline.Name, linkNS)
+				if group.VsBaseline.BaselineRun != "" {
+					group.VsBaseline.BaselineLink = repoLink(ref, "/runs/"+group.VsBaseline.BaselineRun, linkNS)
+				}
+				for oi := range group.VsBaseline.Older {
+					group.VsBaseline.Older[oi].Link = repoLink(ref, "/comparisons/"+group.VsBaseline.Older[oi].Name, linkNS)
+				}
+			}
+			if group.VsPrevious != nil {
+				group.VsPrevious.Link = repoLink(ref, "/comparisons/"+group.VsPrevious.Name, linkNS)
+				if group.VsPrevious.BaselineRun != "" {
+					group.VsPrevious.BaselineLink = repoLink(ref, "/runs/"+group.VsPrevious.BaselineRun, linkNS)
+				}
+				for oi := range group.VsPrevious.Older {
+					group.VsPrevious.Older[oi].Link = repoLink(ref, "/comparisons/"+group.VsPrevious.Older[oi].Name, linkNS)
+				}
+			}
+			groups = append(groups, group)
+		} else {
+			item := row.listItem(runs)
+			item.Link = repoLink(ref, "/comparisons/"+item.Name, linkNS)
+			items = append(items, item)
+		}
+	}
+
+	hasMore := end < totalRows
+	hasPrev := start > 0
+
+	basePath := ref.Path() + "/comparisons"
+	var nextLink, prevLink string
+	if hasMore {
+		nextLink = buildPageURL(basePath, r.URL.Query(), end, limit)
+	}
+	if hasPrev {
+		prevOffset := start - limit
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		prevLink = buildPageURL(basePath, r.URL.Query(), prevOffset, limit)
+	}
+
+	showingRange := ""
+	if totalRows > 0 {
+		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalRows)
+	}
+
+	query := r.URL.Query()
+	view := ComparisonsListView{
+		ActiveTab:          NavTabComparisons,
+		Repo:               ref,
+		Namespace:          ns,
+		LinkNamespace:      linkNS,
+		Comparisons:        items,
+		TotalCount:         totalCount,
+		Offset:             start,
+		Limit:              limit,
+		HasMore:            hasMore,
+		NextLink:           nextLink,
+		HasPrev:            hasPrev,
+		PrevLink:           prevLink,
+		ShowingRange:       showingRange,
+		Kind:               kind,
+		KindLabelKey:       kindLabelKey(kind),
+		ShowKindFilter:     kind != ComparisonKindAll || hasLabeledComparison(filteredComps),
+		KindAllLink:        comparisonsKindLinkForRepo(ref, linkNS, query, ComparisonKindAll),
+		KindBaselineLink:   comparisonsKindLinkForRepo(ref, linkNS, query, ComparisonKindBaseline),
+		KindPreviousLink:   comparisonsKindLinkForRepo(ref, linkNS, query, ComparisonKindPrevious),
+		Groups:             groups,
+		ShowGroups:         len(groups) > 0 || kind != ComparisonKindAll,
+		ShowBaselineColumn: kind != ComparisonKindPrevious,
+		ShowPreviousColumn: kind != ComparisonKindBaseline,
+		ShowFlat:           kind == ComparisonKindAll && (len(items) > 0 || len(groups) == 0),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmplComparisonsList.Execute(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
+}
+
+func comparisonsKindLinkForRepo(ref RepoRef, linkNS string, query url.Values, kind ComparisonKind) string {
+	q := make(url.Values)
+	for k, v := range query {
+		q[k] = v
+	}
+	q.Del("offset")
+	if kind == ComparisonKindAll {
+		q.Del("kind")
+	} else {
+		q.Set("kind", string(kind))
+	}
+	base := repoLink(ref, "/comparisons", linkNS)
+	encoded := q.Encode()
+	if encoded == "" {
+		return base
+	}
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + encoded
+}
+
 // runsByName lists the Runs in ns once per request so that each Comparison row can resolve
 // its baseline and candidate Runs. A failed list is logged and returns nil: rows then show
 // missing run deltas, and candidate groups are ordered by Comparison creation time.
@@ -939,6 +1469,53 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	s.renderComparisonDetail(w, r, &comp, ns, RepoRef{})
+}
+
+func (s *Server) handleRepoComparisonDetail(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	name := r.PathValue("name")
+	if !isValidResourceName(name) {
+		httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid comparison name: %q", name), nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	ctx := r.Context()
+	var comp v1alpha1.Comparison
+	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &comp); err != nil {
+		if apierrors.IsNotFound(err) {
+			httpError(w, http.StatusNotFound, "comparison not found", "", nil)
+			return
+		}
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to comparison denied", fmt.Sprintf("access to comparison %s/%s denied", ns, name), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to get comparison", fmt.Sprintf("failed to get comparison %s/%s", ns, name), err)
+		return
+	}
+
+	compRef, ok := comparisonRepoRef(ctx, &comp, s.readerFor(ns))
+	if !ok || !compRef.Equal(ref) {
+		httpError(w, http.StatusNotFound, "comparison not found", fmt.Sprintf("comparison %s/%s does not belong to repo %s", ns, name, ref), nil)
+		return
+	}
+
+	s.renderComparisonDetail(w, r, &comp, ns, ref)
+}
+
+func (s *Server) renderComparisonDetail(w http.ResponseWriter, r *http.Request, comp *v1alpha1.Comparison, ns string, ref RepoRef) {
+	ctx := r.Context()
+	linkNS := s.linkNamespace(ns)
 	// Fetch baseline and candidate Run resources to discover commits and sample counts
 	var baseRunPtr, candRunPtr *v1alpha1.Run
 	if comp.Spec.Baseline.Run != "" {
@@ -965,10 +1542,10 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	view := NewComparisonDetailView(&comp, baseRunPtr, candRunPtr)
+	view := NewComparisonDetailView(comp, baseRunPtr, candRunPtr, ref, linkNS)
 	view.Version = s.cfg.Version
 	view.Metric = parseMetricFilter(r)
-	s.populateComparisonHistories(ctx, &comp, &view)
+	s.populateComparisonHistories(ctx, comp, &view)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplComparisonDetail.Execute(w, view); err != nil {
@@ -2473,6 +3050,61 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.renderRunTasks(w, r, &run, ns, RepoRef{}, taskID, sampleID)
+}
+
+func (s *Server) handleRepoRunTasks(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	name := r.PathValue("name")
+	rest := r.PathValue("rest")
+
+	if !isValidResourceName(name) {
+		httpError(w, http.StatusBadRequest, "invalid route params", "", nil)
+		return
+	}
+
+	taskID, sampleID, ok := parseRunTaskRest(rest, r.URL.Query(), r.URL.Fragment, r.URL.RawFragment)
+	if !ok || taskID == "" {
+		httpError(w, http.StatusNotFound, "not found", "", nil)
+		return
+	}
+
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	ctx := r.Context()
+	var run v1alpha1.Run
+	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
+		if apierrors.IsNotFound(err) {
+			httpError(w, http.StatusNotFound, "run not found", "", nil)
+			return
+		}
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden", fmt.Sprintf("access to run %s/%s denied", ns, name), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to get run", fmt.Sprintf("failed to get run %s/%s", ns, name), err)
+		return
+	}
+
+	runRef, ok := runRepoRef(&run)
+	if !ok || !runRef.Equal(ref) {
+		httpError(w, http.StatusNotFound, "run not found", fmt.Sprintf("run %s/%s does not belong to repo %s", ns, name, ref), nil)
+		return
+	}
+
+	s.renderRunTasks(w, r, &run, ns, ref, taskID, sampleID)
+}
+
+func (s *Server) renderRunTasks(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run, ns string, ref RepoRef, taskID, sampleID string) {
+	name := run.Name
 	var matchedTask *v1alpha1.TaskStatus
 	for i := range run.Status.Tasks {
 		if run.Status.Tasks[i].ID == taskID {
@@ -2495,10 +3127,13 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 
 	if !s.hasArtifactStorage() {
 		log.Printf("artifact storage not configured for UI (namespace=%s, run=%s, task=%s)", ns, name, taskID)
+		linkNS := s.linkNamespace(ns)
 		if sampleID == "" {
 			view := TaskSamplesListView{
 				ActiveTab:      NavTabRuns,
+				Repo:           ref,
 				Namespace:      ns,
+				LinkNamespace:  linkNS,
 				RunName:        name,
 				TaskID:         taskID,
 				EscapedTaskID:  url.PathEscape(taskID),
@@ -2517,7 +3152,9 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		view := SampleTranscriptView{
 			ActiveTab:       NavTabRuns,
+			Repo:            ref,
 			Namespace:       ns,
+			LinkNamespace:   linkNS,
 			RunName:         name,
 			TaskID:          taskID,
 			EscapedTaskID:   url.PathEscape(taskID),
@@ -2536,10 +3173,10 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sampleID == "" {
-		s.renderTaskSamplesList(w, r, ns, name, taskID, commit, run.Spec.Model, matchedTask.LogPath)
+		s.renderTaskSamplesList(w, r, ns, ref, name, taskID, commit, run.Spec.Model, matchedTask.LogPath)
 		return
 	}
-	s.renderSampleTranscript(w, r, ns, name, taskID, sampleID, matchedTask.LogPath)
+	s.renderSampleTranscript(w, r, ns, ref, name, taskID, sampleID, matchedTask.LogPath)
 }
 
 // Task samples list size guards.
@@ -2548,11 +3185,14 @@ const (
 	maxSampleTooltipBytes = 512
 )
 
-func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, ns, name, taskID, commit, model, logPath string) {
+func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, name, taskID, commit, model, logPath string) {
 	ctx := r.Context()
+	linkNS := s.linkNamespace(ns)
 	view := TaskSamplesListView{
 		ActiveTab:      NavTabRuns,
+		Repo:           ref,
 		Namespace:      ns,
+		LinkNamespace:  linkNS,
 		RunName:        name,
 		TaskID:         taskID,
 		EscapedTaskID:  url.PathEscape(taskID),
@@ -2648,7 +3288,12 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 	}
 	view.ShowingEnd = endIdx
 
-	baseLink := BuildTaskSamplesListLink(ns, name, taskID)
+	var baseLink string
+	if ref.Host != "" {
+		baseLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", name, url.PathEscape(taskID)), linkNS)
+	} else {
+		baseLink = BuildTaskSamplesListLink(ns, name, taskID)
+	}
 	if page > 1 {
 		view.HasPrev = true
 		view.PrevLink = fmt.Sprintf("%s?page=%d", baseLink, page-1)
@@ -2667,9 +3312,14 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 			statusClass = "bad"
 		}
 
-		link := ""
+		// In summary.json fallback mode the transcript cannot render, so do not link to it.
+		var sampleLink string
 		if !isFallback {
-			link = BuildTaskSampleLink(ns, name, taskID, sRecord.ID)
+			if ref.Host != "" {
+				sampleLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples/%s", name, url.PathEscape(taskID), url.PathEscape(sRecord.ID)), linkNS)
+			} else {
+				sampleLink = BuildTaskSampleLink(ns, name, taskID, sRecord.ID)
+			}
 		}
 
 		sampleRows = append(sampleRows, TaskSampleRow{
@@ -2686,7 +3336,7 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 			ExplanationPreview: TruncateRunes(sRecord.Explanation, sampleNotePreviewRunes),
 			LatencyStr:         FormatLatency(sRecord.Latency),
 			TokensStr:          FormatTokens(sRecord.TotalTokens),
-			Link:               link,
+			Link:               sampleLink,
 		})
 	}
 	view.Samples = sampleRows
@@ -2704,11 +3354,14 @@ const (
 	maxTranscriptFieldBytes = 16 * 1024
 )
 
-func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, ns, name, taskID, sampleID, logPath string) {
+func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, name, taskID, sampleID, logPath string) {
 	ctx := r.Context()
+	linkNS := s.linkNamespace(ns)
 	view := SampleTranscriptView{
 		ActiveTab:       NavTabRuns,
+		Repo:            ref,
 		Namespace:       ns,
+		LinkNamespace:   linkNS,
 		RunName:         name,
 		TaskID:          taskID,
 		EscapedTaskID:   url.PathEscape(taskID),
