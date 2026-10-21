@@ -242,6 +242,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 </style>
 </head>
 <body>
+  
   <header class="header-bar">
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
@@ -266,25 +267,27 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
             <tr>
               <th>Repository</th>
               <th>PR</th>
-              <th>Head</th>
+              <th>Base → Head</th>
               <th>Verdict</th>
               <th>Samples</th>
               <th>Batches</th>
               <th>Completed</th>
+              <th>Age</th>
               <th>Comparison</th>
             </tr>
           </thead>
           <tbody>
             
             <tr>
-              <td><a href="/pulls/2cc24c2/42" style="font-weight:600">gke-labs/eval-runner</a></td>
-              <td><a href="https://github.com/gke-labs/eval-runner/pull/42" target="_blank" rel="noopener">#42</a></td>
-              <td><span class="mono" style="font-size:13px">05ce4d8</span></td>
+              <td><a href="/github.com/gke-labs/eval-runner/pulls" style="font-weight:600">gke-labs/eval-runner</a></td>
+              <td><a href="/github.com/gke-labs/eval-runner/pulls/42" style="font-weight:600">#42</a> <a href="https://github.com/gke-labs/eval-runner/pull/42" target="_blank" rel="noopener" style="font-size:12px;color:var(--muted);margin-left:4px">GitHub ↗</a></td>
+              <td><span class="mono" style="font-size:13px">a81d0c4 → 05ce4d8</span></td>
               <td><span class="chip good"><span class="dot"></span>IMPROVED</span> <span class="mono" style="font-size:12px;color:var(--muted)">(P=0.98)</span></td>
               <td class="num">96</td>
               <td class="num">2</td>
               <td style="color:var(--muted);font-size:13px">5m</td>
-              <td><a href="/comparisons/eval-runner/pr-42" class="mono" style="font-size:13px">pr-42</a></td>
+              <td style="color:var(--muted);font-size:13px">10m</td>
+              <td><a href="/github.com/gke-labs/eval-runner/comparisons/pr-42" class="mono" style="font-size:13px">pr-42</a></td>
             </tr>
             
           </tbody>

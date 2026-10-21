@@ -315,6 +315,9 @@ func (s *Server) routes() {
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/comparisons", s.handleRepoComparisonsList)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/comparisons/{$}", s.handleRepoComparisonsList)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/comparisons/{name}", s.handleRepoComparisonDetail)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls", s.handleRepoPullsList)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls/{$}", s.handleRepoPullsList)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls/{number}", s.handleRepoPullDetail)
 }
 
 func (s *Server) handleRepoScoped(w http.ResponseWriter, r *http.Request) {
@@ -1553,6 +1556,75 @@ func (s *Server) renderComparisonDetail(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
+type prGroup struct {
+	repoRef     RepoRef
+	repository  string
+	repoHash    string
+	number      int
+	comparisons []v1alpha1.Comparison
+}
+
+func groupPullRequests(comps []v1alpha1.Comparison, filter *RepoRef) []prGroup {
+	groupsMap := make(map[string]*prGroup)
+	var groupKeys []string
+
+	for _, comp := range comps {
+		if comp.Spec.PullRequest == nil || comp.Spec.PullRequest.Repository == "" || comp.Spec.PullRequest.Number <= 0 {
+			continue
+		}
+		repo := comp.Spec.PullRequest.Repository
+		prNum := comp.Spec.PullRequest.Number
+
+		compRef, ok := pullRequestRepoRef(repo)
+
+		if filter != nil {
+			if !ok || !compRef.Equal(*filter) {
+				continue
+			}
+		}
+
+		key := fmt.Sprintf("%s#%d", strings.ToLower(strings.TrimSpace(repo)), prNum)
+		grp, exists := groupsMap[key]
+		if !exists {
+			grp = &prGroup{
+				repoRef:    compRef,
+				repository: repo,
+				repoHash:   RepoHash(repo),
+				number:     prNum,
+			}
+			groupsMap[key] = grp
+			groupKeys = append(groupKeys, key)
+		}
+		grp.comparisons = append(grp.comparisons, comp)
+	}
+
+	groups := make([]prGroup, 0, len(groupKeys))
+	for _, key := range groupKeys {
+		grp := groupsMap[key]
+		sort.Slice(grp.comparisons, func(i, j int) bool {
+			if !grp.comparisons[i].CreationTimestamp.Equal(&grp.comparisons[j].CreationTimestamp) {
+				return grp.comparisons[i].CreationTimestamp.After(grp.comparisons[j].CreationTimestamp.Time)
+			}
+			return grp.comparisons[i].Name < grp.comparisons[j].Name
+		})
+		groups = append(groups, *grp)
+	}
+
+	sort.Slice(groups, func(i, j int) bool {
+		latestI := groups[i].comparisons[0]
+		latestJ := groups[j].comparisons[0]
+		if !latestI.CreationTimestamp.Equal(&latestJ.CreationTimestamp) {
+			return latestI.CreationTimestamp.After(latestJ.CreationTimestamp.Time)
+		}
+		if groups[i].repository != groups[j].repository {
+			return groups[i].repository < groups[j].repository
+		}
+		return groups[i].number < groups[j].number
+	})
+
+	return groups
+}
+
 func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
@@ -1572,7 +1644,11 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid pr number in query: %q", numberQuery), nil)
 			return
 		}
-		s.renderPullHistory(w, r, ns, repoQuery, num)
+		var refPtr *RepoRef
+		if ref, ok := pullRequestRepoRef(repoQuery); ok {
+			refPtr = &ref
+		}
+		s.renderPullHistory(w, r, ns, refPtr, repoQuery, num)
 		return
 	}
 
@@ -1592,62 +1668,7 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type prGroup struct {
-		repository  string
-		repoHash    string
-		number      int
-		comparisons []v1alpha1.Comparison
-	}
-
-	groupsMap := make(map[string]*prGroup)
-	var groupKeys []string
-
-	for _, comp := range compList.Items {
-		if comp.Spec.PullRequest == nil || comp.Spec.PullRequest.Repository == "" || comp.Spec.PullRequest.Number <= 0 {
-			continue
-		}
-		repo := comp.Spec.PullRequest.Repository
-		prNum := comp.Spec.PullRequest.Number
-		key := fmt.Sprintf("%s#%d", strings.ToLower(strings.TrimSpace(repo)), prNum)
-
-		grp, exists := groupsMap[key]
-		if !exists {
-			grp = &prGroup{
-				repository: repo,
-				repoHash:   RepoHash(repo),
-				number:     prNum,
-			}
-			groupsMap[key] = grp
-			groupKeys = append(groupKeys, key)
-		}
-		grp.comparisons = append(grp.comparisons, comp)
-	}
-
-	// For each group, sort comparisons newest first (by CreationTimestamp descending, tiebreaker Name ascending)
-	groups := make([]*prGroup, 0, len(groupKeys))
-	for _, key := range groupKeys {
-		grp := groupsMap[key]
-		sort.Slice(grp.comparisons, func(i, j int) bool {
-			if !grp.comparisons[i].CreationTimestamp.Equal(&grp.comparisons[j].CreationTimestamp) {
-				return grp.comparisons[i].CreationTimestamp.After(grp.comparisons[j].CreationTimestamp.Time)
-			}
-			return grp.comparisons[i].Name < grp.comparisons[j].Name
-		})
-		groups = append(groups, grp)
-	}
-
-	// Sort groups newest head first (by latest comparison CreationTimestamp descending, tiebreaker repo, then number)
-	sort.Slice(groups, func(i, j int) bool {
-		latestI := groups[i].comparisons[0]
-		latestJ := groups[j].comparisons[0]
-		if !latestI.CreationTimestamp.Equal(&latestJ.CreationTimestamp) {
-			return latestI.CreationTimestamp.After(latestJ.CreationTimestamp.Time)
-		}
-		if groups[i].repository != groups[j].repository {
-			return groups[i].repository < groups[j].repository
-		}
-		return groups[i].number < groups[j].number
-	})
+	groups := groupPullRequests(compList.Items, nil)
 
 	totalCount := len(groups)
 	start := offset
@@ -1659,6 +1680,7 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 		end = totalCount
 	}
 
+	linkNS := s.linkNamespace(ns)
 	pageGroups := groups[start:end]
 	items := make([]PullRequestListItem, 0, len(pageGroups))
 	for _, grp := range pageGroups {
@@ -1668,9 +1690,25 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 			pImp = fmt.Sprintf("%.2f", *latest.Status.PImprovement)
 		}
 
-		historyLink := fmt.Sprintf("/pulls/%s/%d", grp.repoHash, grp.number)
-		if ns != s.cfg.DefaultNamespace {
-			historyLink += "?namespace=" + url.QueryEscape(ns)
+		headSHA := ""
+		baseSHA := ""
+		if latest.Spec.PullRequest != nil {
+			headSHA = latest.Spec.PullRequest.HeadSHA
+			baseSHA = latest.Spec.PullRequest.BaseSHA
+		}
+
+		historyLink := repoLink(grp.repoRef, fmt.Sprintf("/pulls/%d", grp.number), linkNS)
+		comparisonLink := repoLink(grp.repoRef, "/comparisons/"+latest.Name, linkNS)
+		repoLnk := repoLink(grp.repoRef, "/pulls", linkNS)
+		if grp.repoRef.Host == "" {
+			historyLink = fmt.Sprintf("/pulls/%s/%d", grp.repoHash, grp.number)
+			comparisonLink = fmt.Sprintf("/comparisons/%s/%s", latest.Namespace, latest.Name)
+			repoLnk = "/pulls"
+			if linkNS != "" {
+				historyLink += "?namespace=" + url.QueryEscape(linkNS)
+				comparisonLink += "?namespace=" + url.QueryEscape(linkNS)
+				repoLnk += "?namespace=" + url.QueryEscape(linkNS)
+			}
 		}
 
 		items = append(items, PullRequestListItem{
@@ -1678,17 +1716,21 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 			RepoHash:       grp.repoHash,
 			Number:         grp.number,
 			GitHubURL:      BuildGitHubPRURL(grp.repository, grp.number),
-			HeadSHA:        latest.Spec.PullRequest.HeadSHA,
-			HeadSHAShort:   ShortCommit(latest.Spec.PullRequest.HeadSHA),
+			HeadSHA:        headSHA,
+			HeadSHAShort:   ShortCommit(headSHA),
+			BaseSHA:        baseSHA,
+			BaseSHAShort:   ShortCommit(baseSHA),
 			Verdict:        latest.Status.Verdict,
 			VerdictChip:    verdictChipClass(latest.Status.Verdict),
 			PImprovement:   pImp,
 			SamplesRun:     ComparisonSamplesRun(&latest),
 			Batches:        len(latest.Status.Batches),
 			CompletionTime: FormatCompletionTime(latest.Status.CompletionTime),
+			Age:            FormatAge(latest.CreationTimestamp),
 			ComparisonName: latest.Name,
-			ComparisonLink: fmt.Sprintf("/comparisons/%s/%s", latest.Namespace, latest.Name),
+			ComparisonLink: comparisonLink,
 			HistoryLink:    historyLink,
+			RepoLink:       repoLnk,
 			Namespace:      latest.Namespace,
 		})
 	}
@@ -1714,17 +1756,141 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := PullRequestsListView{
-		ActiveTab:    NavTabPulls,
-		Namespace:    ns,
-		Pulls:        items,
-		TotalCount:   totalCount,
-		Offset:       start,
-		Limit:        limit,
-		HasMore:      hasMore,
-		NextLink:     nextLink,
-		HasPrev:      hasPrev,
-		PrevLink:     prevLink,
-		ShowingRange: showingRange,
+		ActiveTab:     NavTabPulls,
+		Namespace:     ns,
+		LinkNamespace: linkNS,
+		Pulls:         items,
+		TotalCount:    totalCount,
+		Offset:        start,
+		Limit:         limit,
+		HasMore:       hasMore,
+		NextLink:      nextLink,
+		HasPrev:       hasPrev,
+		PrevLink:      prevLink,
+		ShowingRange:  showingRange,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmplPullsList.Execute(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
+}
+
+func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	offset, limit, err := parsePagination(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid pagination params", "invalid pagination query params", err)
+		return
+	}
+	ctx := r.Context()
+	var compList v1alpha1.ComparisonList
+	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list comparisons", fmt.Sprintf("failed to list comparisons in namespace %s", ns), err)
+		return
+	}
+
+	groups := groupPullRequests(compList.Items, &ref)
+
+	totalCount := len(groups)
+	start := offset
+	if start > totalCount {
+		start = totalCount
+	}
+	end := start + limit
+	if end > totalCount {
+		end = totalCount
+	}
+
+	linkNS := s.linkNamespace(ns)
+	pageGroups := groups[start:end]
+	items := make([]PullRequestListItem, 0, len(pageGroups))
+	for _, grp := range pageGroups {
+		latest := grp.comparisons[0]
+		pImp := "—"
+		if latest.Status.PImprovement != nil {
+			pImp = fmt.Sprintf("%.2f", *latest.Status.PImprovement)
+		}
+
+		headSHA := ""
+		baseSHA := ""
+		if latest.Spec.PullRequest != nil {
+			headSHA = latest.Spec.PullRequest.HeadSHA
+			baseSHA = latest.Spec.PullRequest.BaseSHA
+		}
+
+		items = append(items, PullRequestListItem{
+			Repository:     ref.Owner + "/" + ref.Name,
+			RepoHash:       RepoHash(ref.Owner + "/" + ref.Name),
+			Number:         grp.number,
+			GitHubURL:      BuildGitHubPRURL(ref.Owner+"/"+ref.Name, grp.number),
+			HeadSHA:        headSHA,
+			HeadSHAShort:   ShortCommit(headSHA),
+			BaseSHA:        baseSHA,
+			BaseSHAShort:   ShortCommit(baseSHA),
+			Verdict:        latest.Status.Verdict,
+			VerdictChip:    verdictChipClass(latest.Status.Verdict),
+			PImprovement:   pImp,
+			SamplesRun:     ComparisonSamplesRun(&latest),
+			Batches:        len(latest.Status.Batches),
+			CompletionTime: FormatCompletionTime(latest.Status.CompletionTime),
+			Age:            FormatAge(latest.CreationTimestamp),
+			ComparisonName: latest.Name,
+			ComparisonLink: repoLink(ref, "/comparisons/"+latest.Name, linkNS),
+			HistoryLink:    repoLink(ref, fmt.Sprintf("/pulls/%d", grp.number), linkNS),
+			RepoLink:       repoLink(ref, "/pulls", linkNS),
+			Namespace:      latest.Namespace,
+		})
+	}
+
+	hasMore := end < totalCount
+	hasPrev := start > 0
+
+	var nextLink, prevLink string
+	basePath := ref.Path() + "/pulls"
+	if hasMore {
+		nextLink = buildPageURL(basePath, r.URL.Query(), end, limit)
+	}
+	if hasPrev {
+		prevOffset := start - limit
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		prevLink = buildPageURL(basePath, r.URL.Query(), prevOffset, limit)
+	}
+
+	showingRange := ""
+	if totalCount > 0 {
+		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalCount)
+	}
+
+	view := PullRequestsListView{
+		ActiveTab:     NavTabPulls,
+		Repo:          ref,
+		Namespace:     ns,
+		LinkNamespace: linkNS,
+		Pulls:         items,
+		TotalCount:    totalCount,
+		Offset:        start,
+		Limit:         limit,
+		HasMore:       hasMore,
+		NextLink:      nextLink,
+		HasPrev:       hasPrev,
+		PrevLink:      prevLink,
+		ShowingRange:  showingRange,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1752,10 +1918,57 @@ func (s *Server) handlePullDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.renderPullHistory(w, r, ns, repohash, num)
+	ctx := r.Context()
+	var compList v1alpha1.ComparisonList
+	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list comparisons", fmt.Sprintf("failed to list comparisons in namespace %s", ns), err)
+		return
+	}
+	linkNS := s.linkNamespace(ns)
+	for _, comp := range compList.Items {
+		if comp.Spec.PullRequest == nil || comp.Spec.PullRequest.Number != num {
+			continue
+		}
+		repo := comp.Spec.PullRequest.Repository
+		hash := RepoHash(repo)
+		if strings.EqualFold(hash, repohash) || strings.EqualFold(repo, repohash) {
+			if ref, ok := pullRequestRepoRef(repo); ok {
+				target := repoLink(ref, fmt.Sprintf("/pulls/%d", num), linkNS)
+				http.Redirect(w, r, target, http.StatusFound)
+				return
+			}
+		}
+	}
+
+	s.renderPullHistory(w, r, ns, nil, repohash, num)
 }
 
-func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns string, repoOrHash string, num int) {
+func (s *Server) handleRepoPullDetail(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	numberStr := r.PathValue("number")
+	num, err := strconv.Atoi(numberStr)
+	if err != nil || num <= 0 {
+		httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid pr number: %q", numberStr), nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+
+	s.renderPullHistory(w, r, ns, &ref, ref.Owner+"/"+ref.Name, num)
+}
+
+func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns string, filter *RepoRef, repoOrHash string, num int) {
 	ctx := r.Context()
 	var compList v1alpha1.ComparisonList
 	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
@@ -1773,18 +1986,40 @@ func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns st
 		if comp.Spec.PullRequest == nil || comp.Spec.PullRequest.Number != num {
 			continue
 		}
-		repo := comp.Spec.PullRequest.Repository
-		hash := RepoHash(repo)
-		if strings.EqualFold(hash, repoOrHash) || strings.EqualFold(repo, repoOrHash) {
+		if filter != nil {
+			compRef, ok := pullRequestRepoRef(comp.Spec.PullRequest.Repository)
+			if !ok || !compRef.Equal(*filter) {
+				continue
+			}
 			matched = append(matched, comp)
 			if repoDisplay == "" {
-				repoDisplay = repo
+				repoDisplay = filter.Owner + "/" + filter.Name
 			}
+		} else {
+			repo := comp.Spec.PullRequest.Repository
+			hash := RepoHash(repo)
+			if strings.EqualFold(hash, repoOrHash) || strings.EqualFold(repo, repoOrHash) {
+				matched = append(matched, comp)
+				if repoDisplay == "" {
+					repoDisplay = repo
+				}
+			}
+		}
+	}
+	if repoDisplay == "" {
+		if filter != nil {
+			repoDisplay = filter.Owner + "/" + filter.Name
+		} else {
+			repoDisplay = repoOrHash
 		}
 	}
 
 	if len(matched) == 0 {
-		httpError(w, http.StatusNotFound, "pull request not found", fmt.Sprintf("no comparisons for %s #%d in %s", repoOrHash, num, ns), nil)
+		targetDesc := repoOrHash
+		if filter != nil {
+			targetDesc = filter.String()
+		}
+		httpError(w, http.StatusNotFound, "pull request not found", fmt.Sprintf("no comparisons for %s #%d in %s", targetDesc, num, ns), nil)
 		return
 	}
 
@@ -1796,6 +2031,7 @@ func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns st
 		return matched[i].Name < matched[j].Name
 	})
 
+	linkNS := s.linkNamespace(ns)
 	historyItems := make([]PullRequestHistoryItem, 0, len(matched))
 	for _, comp := range matched {
 		pImp := "—"
@@ -1810,6 +2046,25 @@ func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns st
 			baseSHA = comp.Spec.PullRequest.BaseSHA
 		}
 
+		link := fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name)
+		candLink := ""
+		baseLink := ""
+		if comp.Spec.Candidate.Run != "" {
+			candLink = fmt.Sprintf("/runs/%s/%s", comp.Namespace, comp.Spec.Candidate.Run)
+		}
+		if comp.Spec.Baseline.Run != "" {
+			baseLink = fmt.Sprintf("/runs/%s/%s", comp.Namespace, comp.Spec.Baseline.Run)
+		}
+		if filter != nil {
+			link = repoLink(*filter, "/comparisons/"+comp.Name, linkNS)
+			if comp.Spec.Candidate.Run != "" {
+				candLink = repoLink(*filter, "/runs/"+comp.Spec.Candidate.Run, linkNS)
+			}
+			if comp.Spec.Baseline.Run != "" {
+				baseLink = repoLink(*filter, "/runs/"+comp.Spec.Baseline.Run, linkNS)
+			}
+		}
+
 		historyItems = append(historyItems, PullRequestHistoryItem{
 			Name:           comp.Name,
 			Namespace:      comp.Namespace,
@@ -1817,6 +2072,10 @@ func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns st
 			HeadSHAShort:   ShortCommit(headSHA),
 			BaseSHA:        baseSHA,
 			BaseSHAShort:   ShortCommit(baseSHA),
+			CandidateRun:   comp.Spec.Candidate.Run,
+			BaselineRun:    comp.Spec.Baseline.Run,
+			CandidateLink:  candLink,
+			BaselineLink:   baseLink,
 			Verdict:        comp.Status.Verdict,
 			VerdictChip:    verdictChipClass(comp.Status.Verdict),
 			PImprovement:   pImp,
@@ -1824,26 +2083,35 @@ func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns st
 			Batches:        len(comp.Status.Batches),
 			CompletionTime: FormatCompletionTime(comp.Status.CompletionTime),
 			Age:            FormatAge(comp.CreationTimestamp),
-			Link:           fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name),
+			Link:           link,
 		})
 	}
 
 	backLink := "/pulls"
-	if ns != s.cfg.DefaultNamespace {
-		backLink += "?namespace=" + url.QueryEscape(ns)
+	if filter != nil {
+		backLink = repoLink(*filter, "/pulls", linkNS)
+	} else if linkNS != "" {
+		backLink += "?namespace=" + url.QueryEscape(linkNS)
+	}
+
+	var repoRef RepoRef
+	if filter != nil {
+		repoRef = *filter
 	}
 
 	view := PullRequestDetailView{
-		ActiveTab:   NavTabPulls,
-		Namespace:   ns,
-		Repository:  repoDisplay,
-		RepoHash:    RepoHash(repoDisplay),
-		Number:      num,
-		GitHubURL:   BuildGitHubPRURL(repoDisplay, num),
-		BackLink:    backLink,
-		Comparisons: historyItems,
-		TotalCount:  len(historyItems),
-		Version:     s.cfg.Version,
+		ActiveTab:     NavTabPulls,
+		Repo:          repoRef,
+		Namespace:     ns,
+		LinkNamespace: linkNS,
+		Repository:    repoDisplay,
+		RepoHash:      RepoHash(repoDisplay),
+		Number:        num,
+		GitHubURL:     BuildGitHubPRURL(repoDisplay, num),
+		BackLink:      backLink,
+		Comparisons:   historyItems,
+		TotalCount:    len(historyItems),
+		Version:       s.cfg.Version,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

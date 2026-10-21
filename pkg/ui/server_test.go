@@ -1188,12 +1188,11 @@ func TestServerPullsList(t *testing.T) {
 	if !strings.Contains(body, "https://github.com/gke-labs/eval-runner/pull/10") {
 		t.Errorf("expected GitHub link for PR 10")
 	}
-	if !strings.Contains(body, "/comparisons/eval-runner/pr-10-head2") {
+	if !strings.Contains(body, "/github.com/gke-labs/eval-runner/comparisons/pr-10-head2") {
 		t.Errorf("expected Comparison link for PR 10")
 	}
-	hashGke := RepoHash("gke-labs/eval-runner")
-	if !strings.Contains(body, fmt.Sprintf("/pulls/%s/10", hashGke)) {
-		t.Errorf("expected history link for PR 10: /pulls/%s/10", hashGke)
+	if !strings.Contains(body, "/github.com/gke-labs/eval-runner/pulls/10") {
+		t.Errorf("expected history link for PR 10: /github.com/gke-labs/eval-runner/pulls/10")
 	}
 
 	// 5. Assert columns: Head 2222222, Verdict IMPROVED, P=0.95, Samples 96, Batches 2
@@ -1281,10 +1280,22 @@ func TestServerPullDetail(t *testing.T) {
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", w.Code)
+		if w.Code != http.StatusFound {
+			t.Fatalf("expected 302 redirect for /pulls/%s/42, got %d", hash, w.Code)
 		}
-		body := w.Body.String()
+		loc := w.Header().Get("Location")
+		if loc != "/github.com/gke-labs/eval-runner/pulls/42" {
+			t.Errorf("expected redirect to /github.com/gke-labs/eval-runner/pulls/42, got %q", loc)
+		}
+
+		reqTarget := httptest.NewRequest(http.MethodGet, loc, nil)
+		wTarget := httptest.NewRecorder()
+		server.ServeHTTP(wTarget, reqTarget)
+
+		if wTarget.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for %s, got %d", loc, wTarget.Code)
+		}
+		body := wTarget.Body.String()
 
 		// Title and links
 		if !strings.Contains(body, "gke-labs/eval-runner") || !strings.Contains(body, "#42") {
@@ -1695,6 +1706,13 @@ func TestServerWebhookE2EFixture(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/pulls/%s/305", hash), nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
+
+		if w.Code == http.StatusFound {
+			loc := w.Header().Get("Location")
+			req = httptest.NewRequest(http.MethodGet, loc, nil)
+			w = httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+		}
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d", w.Code)
@@ -6730,4 +6748,390 @@ func TestServerRepoComparisonDetailNoRunsHref(t *testing.T) {
 	if !strings.Contains(body, `href="/github.com/gke-labs/eval-runner/runs/`) {
 		t.Errorf("expected repository-scoped comparison detail page to contain href=\"/github.com/gke-labs/eval-runner/runs/:\n%s", body)
 	}
+}
+
+func TestServerRepoPullsUnit(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+
+	// Repo A objects (with mixed-case repository string in Comparison to test casing normalization)
+	runA := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-a-101",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/org-a/repo-a.git",
+			},
+		},
+	}
+	runABase := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-a",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-30 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/org-a/repo-a.git",
+			},
+		},
+	}
+	compA101 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-a-101",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-8 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-a"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "run-a-101"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "Org-A/Repo-A",
+				Number:     101,
+				HeadSHA:    "aaaa101",
+				BaseSHA:    "aaaa000",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictImproved,
+		},
+	}
+
+	// Fork PR for Repo A: Candidate Run comes from a fork repository
+	runFork := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-fork-102",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-6 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/fork-user/repo-a.git",
+			},
+		},
+	}
+	compAFork102 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-a-102",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-5 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-a"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "run-fork-102"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-a/repo-a",
+				Number:     102,
+				HeadSHA:    "fork102",
+				BaseSHA:    "aaaa000",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+		},
+	}
+
+	compA103 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-a-103",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-4 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-a"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "run-a-101"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-a/repo-a",
+				Number:     103,
+				HeadSHA:    "aaaa103",
+				BaseSHA:    "aaaa000",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictRegressed,
+		},
+	}
+
+	// Repo B objects (same PR number 101)
+	runB := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-b-101",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-7 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/org-b/repo-b.git",
+			},
+		},
+	}
+	compB101 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-b-101",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-7 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-a"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "run-b-101"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-b/repo-b",
+				Number:     101,
+				HeadSHA:    "bbbb101",
+				BaseSHA:    "bbbb000",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+		},
+	}
+
+	// Custom namespace comparison
+	compCustomNS := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-custom-101",
+			Namespace:         "custom-ns",
+			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-a"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "run-a-101"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-a/repo-a",
+				Number:     101,
+				HeadSHA:    "aaaa101",
+				BaseSHA:    "aaaa000",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictImproved,
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(runA, runABase, runFork, runB, compA101, compAFork102, compA103, compB101, compCustomNS).
+		Build()
+
+	server := NewServer(Config{
+		Client:           cl,
+		DefaultNamespace: "eval-runner",
+	})
+
+	// 1. Two repos with the same PR number -> only the path repo's PRs listed
+	t.Run("TwoReposSamePRNumber_ListFilter", func(t *testing.T) {
+		reqA := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls", nil)
+		wA := httptest.NewRecorder()
+		server.ServeHTTP(wA, reqA)
+
+		if wA.Code != http.StatusOK {
+			t.Fatalf("GET org-a/repo-a/pulls returned code %d, want 200", wA.Code)
+		}
+		bodyA := wA.Body.String()
+		if !strings.Contains(bodyA, "comp-a-101") {
+			t.Errorf("expected comp-a-101 in org-a pulls")
+		}
+		if strings.Contains(bodyA, "comp-b-101") {
+			t.Errorf("unexpected comp-b-101 in org-a pulls")
+		}
+
+		reqB := httptest.NewRequest(http.MethodGet, "/github.com/org-b/repo-b/pulls", nil)
+		wB := httptest.NewRecorder()
+		server.ServeHTTP(wB, reqB)
+
+		if wB.Code != http.StatusOK {
+			t.Fatalf("GET org-b/repo-b/pulls returned code %d, want 200", wB.Code)
+		}
+		bodyB := wB.Body.String()
+		if !strings.Contains(bodyB, "comp-b-101") {
+			t.Errorf("expected comp-b-101 in org-b pulls")
+		}
+		if strings.Contains(bodyB, "comp-a-101") {
+			t.Errorf("unexpected comp-a-101 in org-b pulls")
+		}
+	})
+
+	t.Run("TwoReposSamePRNumber_DetailFilter", func(t *testing.T) {
+		reqA := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls/101", nil)
+		wA := httptest.NewRecorder()
+		server.ServeHTTP(wA, reqA)
+
+		if wA.Code != http.StatusOK {
+			t.Fatalf("GET org-a/repo-a/pulls/101 returned code %d, want 200", wA.Code)
+		}
+		bodyA := wA.Body.String()
+		if !strings.Contains(bodyA, "comp-a-101") {
+			t.Errorf("expected comp-a-101 in org-a PR 101 detail")
+		}
+		if strings.Contains(bodyA, "comp-b-101") {
+			t.Errorf("unexpected comp-b-101 in org-a PR 101 detail")
+		}
+
+		reqB := httptest.NewRequest(http.MethodGet, "/github.com/org-b/repo-b/pulls/101", nil)
+		wB := httptest.NewRecorder()
+		server.ServeHTTP(wB, reqB)
+
+		if wB.Code != http.StatusOK {
+			t.Fatalf("GET org-b/repo-b/pulls/101 returned code %d, want 200", wB.Code)
+		}
+		bodyB := wB.Body.String()
+		if !strings.Contains(bodyB, "comp-b-101") {
+			t.Errorf("expected comp-b-101 in org-b PR 101 detail")
+		}
+		if strings.Contains(bodyB, "comp-a-101") {
+			t.Errorf("unexpected comp-a-101 in org-b PR 101 detail")
+		}
+	})
+
+	// 2. A fork candidate Run does not create a second repo entry
+	t.Run("ForkCandidateRunDoesNotCreateSecondRepoEntry", func(t *testing.T) {
+		allComps := []v1alpha1.Comparison{*compA101, *compAFork102, *compA103, *compB101}
+		groups := groupPullRequests(allComps, nil)
+
+		for _, grp := range groups {
+			if strings.Contains(grp.repository, "fork-user") {
+				t.Fatalf("unexpected group with repository %q from candidate run", grp.repository)
+			}
+		}
+
+		reqPulls := httptest.NewRequest(http.MethodGet, "/pulls", nil)
+		wPulls := httptest.NewRecorder()
+		server.ServeHTTP(wPulls, reqPulls)
+		if strings.Contains(wPulls.Body.String(), "fork-user") {
+			t.Errorf("unexpected fork-user in /pulls list view")
+		}
+
+		// GET /github.com/fork-user/repo-a/pulls should show empty state
+		reqFork := httptest.NewRequest(http.MethodGet, "/github.com/fork-user/repo-a/pulls", nil)
+		wFork := httptest.NewRecorder()
+		server.ServeHTTP(wFork, reqFork)
+		if wFork.Code != http.StatusOK {
+			t.Fatalf("GET fork pulls returned code %d, want 200", wFork.Code)
+		}
+		if !strings.Contains(wFork.Body.String(), "No pull requests found") {
+			t.Errorf("expected empty state in fork repo pulls")
+		}
+	})
+
+	// 3. ?offset/limit pagination
+	t.Run("OffsetLimitPagination", func(t *testing.T) {
+		// org-a has 3 PRs: 101, 102, 103
+		reqPage1 := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls?limit=2&offset=0", nil)
+		wPage1 := httptest.NewRecorder()
+		server.ServeHTTP(wPage1, reqPage1)
+
+		if wPage1.Code != http.StatusOK {
+			t.Fatalf("GET page 1 returned code %d, want 200", wPage1.Code)
+		}
+		bodyPage1 := wPage1.Body.String()
+		if !strings.Contains(bodyPage1, "Showing 1–2 of 3") {
+			t.Errorf("expected 'Showing 1–2 of 3' on page 1, got:\n%s", bodyPage1)
+		}
+		if !strings.Contains(bodyPage1, "More →") {
+			t.Errorf("expected 'More →' link on page 1")
+		}
+
+		reqPage2 := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls?limit=2&offset=2", nil)
+		wPage2 := httptest.NewRecorder()
+		server.ServeHTTP(wPage2, reqPage2)
+
+		if wPage2.Code != http.StatusOK {
+			t.Fatalf("GET page 2 returned code %d, want 200", wPage2.Code)
+		}
+		bodyPage2 := wPage2.Body.String()
+		if !strings.Contains(bodyPage2, "Showing 3–3 of 3") {
+			t.Errorf("expected 'Showing 3–3 of 3' on page 2, got:\n%s", bodyPage2)
+		}
+		if !strings.Contains(bodyPage2, "← Previous") {
+			t.Errorf("expected '← Previous' link on page 2")
+		}
+	})
+
+	// 4. 404 for a PR number absent in that repo and non-github host
+	t.Run("PRNumberAbsent404", func(t *testing.T) {
+		// Absent PR number in repo-a
+		req404 := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls/999", nil)
+		w404 := httptest.NewRecorder()
+		server.ServeHTTP(w404, req404)
+
+		if w404.Code != http.StatusNotFound {
+			t.Errorf("GET absent PR 999 returned code %d, want 404", w404.Code)
+		}
+
+		// Non-github host detail returns 404
+		reqNonGitHub := httptest.NewRequest(http.MethodGet, "/gitlab.com/org-a/repo-a/pulls/101", nil)
+		wNonGitHub := httptest.NewRecorder()
+		server.ServeHTTP(wNonGitHub, reqNonGitHub)
+
+		if wNonGitHub.Code != http.StatusNotFound {
+			t.Errorf("GET non-github pulls detail returned code %d, want 404", wNonGitHub.Code)
+		}
+
+		// Non-github host list returns 200 with "No pull requests found" (Nit 3)
+		reqNonGitHubList := httptest.NewRequest(http.MethodGet, "/gitlab.com/org-a/repo-a/pulls", nil)
+		wNonGitHubList := httptest.NewRecorder()
+		server.ServeHTTP(wNonGitHubList, reqNonGitHubList)
+
+		if wNonGitHubList.Code != http.StatusOK {
+			t.Fatalf("GET non-github pulls list returned code %d, want 200", wNonGitHubList.Code)
+		}
+		if !strings.Contains(wNonGitHubList.Body.String(), "No pull requests found") {
+			t.Errorf("expected 'No pull requests found' on non-github pulls list")
+		}
+	})
+
+	// 5. ?namespace= propagation
+	t.Run("NamespacePropagation", func(t *testing.T) {
+		reqList := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls?namespace=custom-ns", nil)
+		wList := httptest.NewRecorder()
+		server.ServeHTTP(wList, reqList)
+
+		if wList.Code != http.StatusOK {
+			t.Fatalf("GET custom-ns pulls list returned code %d, want 200", wList.Code)
+		}
+		bodyList := wList.Body.String()
+		if !strings.Contains(bodyList, "comp-custom-101") {
+			t.Errorf("expected comp-custom-101 in custom-ns pulls list")
+		}
+		if !strings.Contains(bodyList, "?namespace=custom-ns") {
+			t.Errorf("expected ?namespace=custom-ns propagation in pulls list")
+		}
+
+		reqDetail := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls/101?namespace=custom-ns", nil)
+		wDetail := httptest.NewRecorder()
+		server.ServeHTTP(wDetail, reqDetail)
+
+		if wDetail.Code != http.StatusOK {
+			t.Fatalf("GET custom-ns pull detail returned code %d, want 200", wDetail.Code)
+		}
+		bodyDetail := wDetail.Body.String()
+		if !strings.Contains(bodyDetail, "comp-custom-101") {
+			t.Errorf("expected comp-custom-101 in custom-ns pull detail")
+		}
+		if !strings.Contains(bodyDetail, "?namespace=custom-ns") {
+			t.Errorf("expected ?namespace=custom-ns propagation in pull detail")
+		}
+	})
+
+	// 6. Mixed-case repo casing in heading (Nit 4)
+	t.Run("MixedCaseHeadingNormalization", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls/101", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /github.com/org-a/repo-a/pulls/101 returned code %d, want 200", w.Code)
+		}
+		body := w.Body.String()
+		// Heading should use the filter's normalized lower-case path, not raw "Org-A/Repo-A"
+		if strings.Contains(body, "Org-A/Repo-A") {
+			t.Errorf("expected heading to use filter casing org-a/repo-a, but found Org-A/Repo-A")
+		}
+		if !strings.Contains(body, "org-a/repo-a") {
+			t.Errorf("expected heading to contain org-a/repo-a")
+		}
+	})
 }
