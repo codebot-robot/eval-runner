@@ -94,7 +94,7 @@ func main() {
 		maxSamplesPtr = &defaultMaxSamplesPerTask
 	}
 	var budgetPtr *float64
-	if explicit["default-budget-usd"] && defaultBudgetUSD > 0 {
+	if explicit["default-budget-usd"] && defaultBudgetUSD >= 0 {
 		budgetPtr = &defaultBudgetUSD
 	}
 
