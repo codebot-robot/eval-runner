@@ -30,6 +30,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
+	"github.com/gke-labs/eval-runner/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -100,6 +101,7 @@ func main() {
 	var pollProgressInterval time.Duration
 	var affinityMode string
 	var sandboxEgressHosts string
+	var showVersion bool
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
@@ -127,6 +129,7 @@ func main() {
 	flag.DurationVar(&comparisonTTL, "comparison-ttl", 0, "TTL duration for retaining Completed Comparisons (default 0 = disabled)")
 	flag.StringVar(&affinityMode, "affinity-mode", configkeys.AffinityModeOrder, "Changed-file task affinity mode (\"order\" or \"prune\")")
 	flag.StringVar(&sandboxEgressHosts, "sandbox-egress-hosts", "", "Comma-separated allow-list of FQDN hostnames for sandbox HTTPS egress")
+	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 
 	opts := zap.Options{
 		Development: true,
@@ -134,7 +137,13 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	if showVersion {
+		fmt.Println(version.String())
+		os.Exit(0)
+	}
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	setupLog.Info("starting eval-runner controller", "version", version.String())
 
 	rawFlags := controller.FlagsFromFlagSet(
 		flag.CommandLine,

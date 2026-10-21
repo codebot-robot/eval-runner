@@ -132,6 +132,7 @@ type Config struct {
 	ArtifactSink     artifacts.ArtifactSink
 	InitialBucket    string
 	InitialDir       string
+	Version          string
 }
 
 // Server serves read-only web views of Runs and Comparisons.
@@ -768,6 +769,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		Age:              FormatAge(run.CreationTimestamp),
 		ArtifactsPrefix:  run.Status.Artifacts,
 		ArtifactFooter:   FormatArtifactFooter(s.ArtifactSink()),
+		Version:          s.cfg.Version,
 		Message:          run.Status.Message,
 		Metric:           metricFilter,
 		TotalCost:        totalCostFormatted,
@@ -963,6 +965,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	}
 
 	view := NewComparisonDetailView(&comp, baseRunPtr, candRunPtr)
+	view.Version = s.cfg.Version
 	view.Metric = parseMetricFilter(r)
 	s.populateComparisonHistories(ctx, &comp, &view)
 
@@ -1262,6 +1265,7 @@ func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns st
 		BackLink:    backLink,
 		Comparisons: historyItems,
 		TotalCount:  len(historyItems),
+		Version:     s.cfg.Version,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1988,6 +1992,7 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		CohortsLink:           cohortsLink,
 		CohortLegend:          cohortLegend,
 		CohortRows:            cohortRows,
+		Version:               s.cfg.Version,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2417,6 +2422,7 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 				LogPath:        matchedTask.LogPath,
 				StorageMessage: "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config",
 				ArtifactFooter: FormatArtifactFooter(s.ArtifactSink()),
+				Version:        s.cfg.Version,
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			if err := tmplTaskSamplesList.Execute(w, view); err != nil {
@@ -2435,6 +2441,7 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 			LogPath:         matchedTask.LogPath,
 			StorageMessage:  "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config",
 			ArtifactFooter:  FormatArtifactFooter(s.ArtifactSink()),
+			Version:         s.cfg.Version,
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmplSampleTranscript.Execute(w, view); err != nil {
@@ -2468,6 +2475,7 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 		Model:          model,
 		LogPath:        logPath,
 		ArtifactFooter: FormatArtifactFooter(s.ArtifactSink()),
+		Version:        s.cfg.Version,
 	}
 
 	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
@@ -2589,6 +2597,7 @@ func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, 
 		EscapedSampleID: url.PathEscape(sampleID),
 		LogPath:         logPath,
 		ArtifactFooter:  FormatArtifactFooter(s.ArtifactSink()),
+		Version:         s.cfg.Version,
 	}
 
 	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)

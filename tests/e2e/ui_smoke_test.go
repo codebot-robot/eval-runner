@@ -93,6 +93,10 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 	if !strings.Contains(string(bodyRun), runName) {
 		t.Errorf("expected run name %q in run detail HTML", runName)
 	}
+	reFooter := regexp.MustCompile(`<span>eval-runner [0-9a-f]{40}(-dirty)?</span>`)
+	if !reFooter.MatchString(string(bodyRun)) {
+		t.Errorf("expected run detail HTML footer to contain stamped eval-runner version")
+	}
 
 	// 3. Curl /pulls page
 	pullsURL := baseURL + "/pulls"

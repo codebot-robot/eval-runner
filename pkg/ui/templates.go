@@ -558,6 +558,9 @@ const runDetailTemplate = `
       </div>
       <div class="card-footer">
         <span>{{ .ArtifactFooter }}</span>
+        {{- if .Version }}
+        <span>eval-runner {{ .Version }}</span>
+        {{- end }}
       </div>
     </div>
   </main>
@@ -1129,6 +1132,9 @@ const comparisonDetailTemplate = `
         {{ if .SummaryPath }}
         <span style="font-size:12px" class="mono" title="{{ .SummaryPath }}">{{ .SummaryPath }}</span>
         {{ end }}
+        {{- if .Version }}
+        <span>eval-runner {{ .Version }}</span>
+        {{- end }}
       </div>
     </div>
   </main>
@@ -1264,6 +1270,9 @@ const taskSamplesListTemplate = `
 
       <div class="card-footer">
         <span>{{ .ArtifactFooter }}</span>
+        {{- if .Version }}
+        <span>eval-runner {{ .Version }}</span>
+        {{- end }}
       </div>
     </div>
   </main>
@@ -1359,6 +1368,9 @@ const sampleTranscriptTemplate = `
 
       <div class="card-footer">
         <span>{{ .ArtifactFooter }}</span>
+        {{- if .Version }}
+        <span>eval-runner {{ .Version }}</span>
+        {{- end }}
       </div>
     </div>
   </main>
@@ -1534,6 +1546,9 @@ const pullDetailTemplate = `
         <span><b>Repository:</b> {{ .Repository }}</span>
         <span><b>PR:</b> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></span>
         <span><b>Comparisons:</b> {{ .TotalCount }}</span>
+        {{- if .Version }}
+        <span>eval-runner {{ .Version }}</span>
+        {{- end }}
       </div>
     </div>
   </main>
@@ -1850,6 +1865,9 @@ const seriesDetailTemplate = `
         <span><b>Repository:</b> {{ .Repository }}</span>
         <span><b>Branch:</b> {{ .Branch }}</span>
         <span><b>Total Runs:</b> {{ .TotalRuns }}</span>
+        {{- if .Version }}
+        <span>eval-runner {{ .Version }}</span>
+        {{- end }}
       </div>
     </div>
   </main>
