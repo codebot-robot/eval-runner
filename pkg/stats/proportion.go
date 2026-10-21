@@ -45,6 +45,7 @@ func Proportion(successes, n int, confidence float64) Estimate {
 			CI:         Interval{Lower: 0.0, Upper: 1.0},
 			Confidence: confidence,
 			N:          0,
+			Method:     "wilson",
 		}
 	}
 
@@ -72,6 +73,7 @@ func Proportion(successes, n int, confidence float64) Estimate {
 		CI:         Interval{Lower: lower, Upper: upper},
 		Confidence: confidence,
 		N:          n,
+		Method:     "wilson",
 	}
 }
 
@@ -98,6 +100,7 @@ func Mean(scores []float64, confidence float64) Estimate {
 			CI:         Interval{Lower: 0.0, Upper: 1.0},
 			Confidence: confidence,
 			N:          0,
+			Method:     "t",
 		}
 	}
 
@@ -108,6 +111,7 @@ func Mean(scores []float64, confidence float64) Estimate {
 			CI:         Interval{Lower: 0.0, Upper: 1.0},
 			Confidence: confidence,
 			N:          1,
+			Method:     "t",
 		}
 	}
 
@@ -123,6 +127,7 @@ func Mean(scores []float64, confidence float64) Estimate {
 		sumSq += d * d
 	}
 	variance := sumSq / float64(n-1)
+	sdVal := math.Sqrt(variance)
 	se := math.Sqrt(variance / float64(n))
 
 	if se == 0 {
@@ -132,6 +137,8 @@ func Mean(scores []float64, confidence float64) Estimate {
 			CI:         Interval{Lower: clamped, Upper: clamped},
 			Confidence: confidence,
 			N:          n,
+			Method:     "t",
+			SD:         &sdVal,
 		}
 	}
 
@@ -146,5 +153,7 @@ func Mean(scores []float64, confidence float64) Estimate {
 		CI:         Interval{Lower: lower, Upper: upper},
 		Confidence: confidence,
 		N:          n,
+		Method:     "t",
+		SD:         &sdVal,
 	}
 }

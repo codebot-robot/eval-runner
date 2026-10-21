@@ -26,6 +26,16 @@ type Estimate struct {
 	CI         Interval `json:"ci"`
 	Confidence float64  `json:"confidence"`
 	N          int      `json:"n"`
+	Method     string   `json:"method,omitempty"`
+	SD         *float64 `json:"sd,omitempty"`
+}
+
+// DeltaEstimate represents an unpaired difference between two estimates with a confidence interval.
+type DeltaEstimate struct {
+	Delta      float64  `json:"delta"`
+	CI         Interval `json:"ci"`
+	Confidence float64  `json:"confidence"`
+	Method     string   `json:"method"`
 }
 
 // SampleScore represents an evaluation score for a single sample.
