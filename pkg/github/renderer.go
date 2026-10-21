@@ -175,7 +175,7 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	hasTokens := false
 	hasAffinity := false
 	hasPImprovement := false
-	rows := ui.ComparisonRowsWithRuns(comp, baseRun, candRun)
+	rows := ui.ComparisonRowsWithRuns(comp, baseRun, candRun, ui.RepoRef{}, "")
 	for _, row := range rows {
 		if row.Tokens != nil {
 			hasTokens = true

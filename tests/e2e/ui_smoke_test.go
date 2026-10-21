@@ -25,6 +25,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gke-labs/eval-runner/pkg/ui"
 )
 
 type uiSmokeLogger interface {
@@ -98,7 +100,27 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Errorf("expected run detail HTML footer to contain stamped eval-runner version")
 	}
 
-	// 3. Curl /pulls page
+	// 3. Curl Run page via repository-scoped URL derived from spec.repo.url
+	repoURLOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.spec.repo.url}")
+	repoRef, ok := ui.ParseRepoURL(strings.TrimSpace(repoURLOut))
+	if !ok {
+		t.Fatalf("failed to parse repo URL %q for run %s", repoURLOut, runName)
+	}
+	scopedRunURL := fmt.Sprintf("%s%s/runs/%s", baseURL, repoRef.Path(), runName)
+	respScoped, err := http.Get(scopedRunURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", scopedRunURL, err)
+	}
+	bodyScoped, _ := io.ReadAll(respScoped.Body)
+	respScoped.Body.Close()
+	if respScoped.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected scoped run page status: %d body=%s", respScoped.StatusCode, string(bodyScoped))
+	}
+	if !strings.Contains(string(bodyScoped), runName) {
+		t.Errorf("expected run name %q in scoped run detail HTML", runName)
+	}
+
+	// 4. Curl /pulls page
 	pullsURL := baseURL + "/pulls"
 	respPulls, err := http.Get(pullsURL)
 	if err != nil {
@@ -110,7 +132,7 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Fatalf("unexpected pulls page status: %d body=%s", respPulls.StatusCode, string(bodyPulls))
 	}
 
-	// 4. Follow the first samples href from the run page, then the first sample href.
+	// 5. Follow the first samples href from the run page, then the first sample href.
 	followUISampleHops(t, baseURL, string(bodyRun), runURL, requireSamples)
 }
 

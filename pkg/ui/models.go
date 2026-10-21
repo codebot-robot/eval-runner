@@ -34,6 +34,7 @@ import (
 type NavTab string
 
 const (
+	NavTabOverview    NavTab = "overview"
 	NavTabPulls       NavTab = "pulls"
 	NavTabRuns        NavTab = "runs"
 	NavTabComparisons NavTab = "comparisons"
@@ -57,17 +58,38 @@ type RunListItem struct {
 
 // RunsListView is the view model for the /runs list page.
 type RunsListView struct {
-	ActiveTab    NavTab
-	Namespace    string
-	Runs         []RunListItem
-	TotalCount   int
-	Offset       int
-	Limit        int
-	HasMore      bool
-	NextLink     string
-	HasPrev      bool
-	PrevLink     string
-	ShowingRange string
+	ActiveTab     NavTab
+	Repo          RepoRef
+	Namespace     string
+	LinkNamespace string
+	Runs          []RunListItem
+	TotalCount    int
+	Offset        int
+	Limit         int
+	HasMore       bool
+	NextLink      string
+	HasPrev       bool
+	PrevLink      string
+	ShowingRange  string
+}
+
+// RepoListItem represents a single repository entry in the repository index list.
+type RepoListItem struct {
+	Host             string
+	Owner            string
+	Name             string
+	Repository       string
+	RunsCount        int
+	ComparisonsCount int
+	Link             string
+}
+
+// RepoIndexView is the view model for the repository index at GET /.
+type RepoIndexView struct {
+	Namespace     string
+	LinkNamespace string
+	Repositories  []RepoListItem
+	TotalCount    int
 }
 
 // RunTaskRow represents a single eval task in the /runs/<ns>/<name> detail view.
@@ -150,8 +172,10 @@ const (
 // RunDetailView is the view model for the /runs/<ns>/<name> detail page.
 type RunDetailView struct {
 	ActiveTab       NavTab
+	Repo            RepoRef
 	Name            string
 	Namespace       string
+	LinkNamespace   string
 	Phase           v1alpha1.RunPhase
 	PhaseChip       string
 	RepoURL         string
@@ -209,17 +233,19 @@ type ComparisonListItem struct {
 
 // ComparisonsListView is the view model for the /comparisons list page.
 type ComparisonsListView struct {
-	ActiveTab    NavTab
-	Namespace    string
-	Comparisons  []ComparisonListItem
-	TotalCount   int
-	Offset       int
-	Limit        int
-	HasMore      bool
-	NextLink     string
-	HasPrev      bool
-	PrevLink     string
-	ShowingRange string
+	ActiveTab     NavTab
+	Repo          RepoRef
+	Namespace     string
+	LinkNamespace string
+	Comparisons   []ComparisonListItem
+	TotalCount    int
+	Offset        int
+	Limit         int
+	HasMore       bool
+	NextLink      string
+	HasPrev       bool
+	PrevLink      string
+	ShowingRange  string
 
 	// Kind is the selected ?kind= filter.
 	Kind ComparisonKind
@@ -428,12 +454,13 @@ func FormatCostTooltip(source v1alpha1.CostSource) string {
 // ComparisonRows maps a Comparison resource into a slice of ComparisonTaskRow
 // suitable for rendering in both HTML sub-templates and Markdown comments.
 func ComparisonRows(comp *v1alpha1.Comparison) []ComparisonTaskRow {
-	return ComparisonRowsWithRuns(comp, nil, nil)
+	return ComparisonRowsWithRuns(comp, nil, nil, RepoRef{}, "")
 }
 
 // ComparisonRowsWithRuns maps a Comparison resource and resolves task latency,
 // tokens, and cost from the candidate and baseline Runs when available.
-func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) []ComparisonTaskRow {
+// When ref has a non-empty Host, task sample links use repoLink with linkNS.
+func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, ref RepoRef, linkNS string) []ComparisonTaskRow {
 	if comp == nil {
 		return nil
 	}
@@ -465,7 +492,11 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 			if task.BaseRate != nil {
 				baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
 			}
-			baseLink = BuildTaskSamplesListLink(comp.Namespace, baseRunName, task.ID)
+			if ref.Host != "" {
+				baseLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", baseRunName, url.PathEscape(task.ID)), linkNS)
+			} else {
+				baseLink = BuildTaskSamplesListLink(comp.Namespace, baseRunName, task.ID)
+			}
 		} else if task.BaseRate != nil {
 			baseRate = fmt.Sprintf("%.2f", *task.BaseRate)
 		}
@@ -480,7 +511,11 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 			if task.CandidateRate != nil {
 				candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
 			}
-			candLink = BuildTaskSamplesListLink(comp.Namespace, candRunName, task.ID)
+			if ref.Host != "" {
+				candLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", candRunName, url.PathEscape(task.ID)), linkNS)
+			} else {
+				candLink = BuildTaskSamplesListLink(comp.Namespace, candRunName, task.ID)
+			}
 		} else if task.CandidateRate != nil {
 			candRate = fmt.Sprintf("%.2f", *task.CandidateRate)
 		}
@@ -1063,16 +1098,18 @@ func ComparisonActions(comp *v1alpha1.Comparison) []ComparisonActionRow {
 
 // ComparisonDetailView is the view model for the /comparisons/<ns>/<name> detail page.
 type ComparisonDetailView struct {
-	ActiveTab    NavTab
-	Name         string
-	Namespace    string
-	Verdict      v1alpha1.ComparisonVerdict
-	VerdictChip  string
-	Headline     string // e.g. "3f9c2e1 vs a81d0c4 · P(improvement) = 0.98"
-	PImprovement string // e.g. "0.98"
-	SummaryPath  string
-	Message      string
-	Metric       MetricFilter
+	ActiveTab     NavTab
+	Repo          RepoRef
+	Name          string
+	Namespace     string
+	LinkNamespace string
+	Verdict       v1alpha1.ComparisonVerdict
+	VerdictChip   string
+	Headline      string // e.g. "3f9c2e1 vs a81d0c4 · P(improvement) = 0.98"
+	PImprovement  string // e.g. "0.98"
+	SummaryPath   string
+	Message       string
+	Metric        MetricFilter
 
 	Tasks           []ComparisonTaskRow
 	HasTokens       bool
@@ -1986,12 +2023,12 @@ func DeltaChipClass(ci stats.Interval) string {
 }
 
 // NewComparisonDetailView constructs a ComparisonDetailView from a Comparison and optional Runs.
-func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) ComparisonDetailView {
+func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, ref RepoRef, linkNS string) ComparisonDetailView {
 	if comp == nil {
 		return ComparisonDetailView{}
 	}
 	summary := ComparisonSummary(comp, baseRun, candRun)
-	taskRows := ComparisonRowsWithRuns(comp, baseRun, candRun)
+	taskRows := ComparisonRowsWithRuns(comp, baseRun, candRun, ref, linkNS)
 
 	hasTokens := false
 	hasLatency := false
@@ -2068,8 +2105,10 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 
 	return ComparisonDetailView{
 		ActiveTab:        NavTabComparisons,
+		Repo:             ref,
 		Name:             comp.Name,
 		Namespace:        comp.Namespace,
+		LinkNamespace:    linkNS,
 		Verdict:          comp.Status.Verdict,
 		VerdictChip:      verdictChipClass(comp.Status.Verdict),
 		Headline:         summary.Headline,
@@ -2320,7 +2359,9 @@ const sampleNotePreviewRunes = 140
 // TaskSamplesListView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples.
 type TaskSamplesListView struct {
 	ActiveTab        NavTab
+	Repo             RepoRef
 	Namespace        string
+	LinkNamespace    string
 	RunName          string
 	TaskID           string
 	EscapedTaskID    string
@@ -2358,7 +2399,9 @@ type TranscriptRowView struct {
 // SampleTranscriptView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples/{sample}.
 type SampleTranscriptView struct {
 	ActiveTab              NavTab
+	Repo                   RepoRef
 	Namespace              string
+	LinkNamespace          string
 	RunName                string
 	TaskID                 string
 	EscapedTaskID          string
