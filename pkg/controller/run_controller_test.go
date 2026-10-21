@@ -535,6 +535,76 @@ func TestReconcileTerminalRunIsNoop(t *testing.T) {
 	}
 }
 
+func TestReconcileCompletedRun_ForeignPrefixClean(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-foreign-completed",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "test-model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:     v1alpha1.RunPhaseCompleted,
+			Artifacts: "gs://old-bucket/runs/abc1234/",
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "task-1",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://old-bucket/runs/abc1234/task-1/log.json",
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	sink := artifacts.NewInMemorySink()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: "eval-runner",
+			Name:      "test-run-foreign-completed",
+		},
+	}
+
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error on completed run: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for completed run, got %+v", res)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("failed to get updated run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("expected phase %s, got %s", v1alpha1.RunPhaseCompleted, updatedRun.Status.Phase)
+	}
+	if updatedRun.Status.Artifacts != "gs://old-bucket/runs/abc1234/" {
+		t.Errorf("expected artifacts unchanged, got %s", updatedRun.Status.Artifacts)
+	}
+}
+
 func TestReconcileDeleteRunMidDiscoveryRemovesSandbox(t *testing.T) {
 	scheme := setupScheme(t)
 
