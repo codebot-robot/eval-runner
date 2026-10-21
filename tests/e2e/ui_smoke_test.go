@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/ui"
 )
 
@@ -81,8 +82,34 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Fatalf("unexpected /healthz response: status=%d body=%q", resp.StatusCode, string(body))
 	}
 
-	// 2. Curl Run page
+	// 2. Curl legacy Run page without redirect following to assert 308 and Location
+	repoURLOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.spec.repo.url}")
+	repoRef, ok := ui.ParseRepoURL(strings.TrimSpace(repoURLOut))
+	if !ok {
+		t.Fatalf("failed to parse repo URL %q for run %s", repoURLOut, runName)
+	}
+	expectedScopedPath := fmt.Sprintf("%s/runs/%s", repoRef.Path(), runName)
+	scopedRunURL := fmt.Sprintf("%s%s", baseURL, expectedScopedPath)
+
 	runURL := fmt.Sprintf("%s/runs/eval-runner/%s", baseURL, runName)
+	noRedirectClient := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	respLegacy, err := noRedirectClient.Get(runURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", runURL, err)
+	}
+	respLegacy.Body.Close()
+	if respLegacy.StatusCode != http.StatusPermanentRedirect {
+		t.Fatalf("expected 308 Permanent Redirect for %s, got %d", runURL, respLegacy.StatusCode)
+	}
+	if loc := respLegacy.Header.Get("Location"); loc != expectedScopedPath && loc != scopedRunURL {
+		t.Fatalf("expected Location %q, got %q", expectedScopedPath, loc)
+	}
+
+	// Follow legacy run URL with standard client to assert 200 OK
 	respRun, err := http.Get(runURL)
 	if err != nil {
 		t.Fatalf("failed to GET %s: %v", runURL, err)
@@ -100,13 +127,7 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Errorf("expected run detail HTML footer to contain stamped eval-runner version")
 	}
 
-	// 3. Curl Run page via repository-scoped URL derived from spec.repo.url
-	repoURLOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.spec.repo.url}")
-	repoRef, ok := ui.ParseRepoURL(strings.TrimSpace(repoURLOut))
-	if !ok {
-		t.Fatalf("failed to parse repo URL %q for run %s", repoURLOut, runName)
-	}
-	scopedRunURL := fmt.Sprintf("%s%s/runs/%s", baseURL, repoRef.Path(), runName)
+	// 3. Curl Run page via repository-scoped URL directly
 	respScoped, err := http.Get(scopedRunURL)
 	if err != nil {
 		t.Fatalf("failed to GET %s: %v", scopedRunURL, err)
@@ -120,7 +141,33 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Errorf("expected run name %q in scoped run detail HTML", runName)
 	}
 
-	// 4. Curl /pulls page
+	// 4. Curl repository overview page (repo home)
+	repoHomeURL := baseURL + repoRef.Path()
+	respHome, err := http.Get(repoHomeURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", repoHomeURL, err)
+	}
+	bodyHome, _ := io.ReadAll(respHome.Body)
+	respHome.Body.Close()
+	if respHome.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected repo home status: %d body=%s", respHome.StatusCode, string(bodyHome))
+	}
+	if requireSamples {
+		rawPhase := strings.TrimSpace(harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.status.phase}"))
+		if rawPhase == string(v1alpha1.RunPhaseCompleted) {
+			if !strings.Contains(string(bodyHome), `class="suite-row"`) || !strings.Contains(string(bodyHome), ">docs<") {
+				t.Errorf("expected suite row for docs in repo home HTML")
+			}
+			taskIDsOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.status.tasks[*].id}")
+			for _, taskID := range strings.Fields(taskIDsOut) {
+				if !strings.Contains(string(bodyHome), taskID) {
+					t.Errorf("expected eval %q in repo home HTML", taskID)
+				}
+			}
+		}
+	}
+
+	// 5. Curl /pulls page
 	pullsURL := baseURL + "/pulls"
 	respPulls, err := http.Get(pullsURL)
 	if err != nil {
@@ -154,7 +201,7 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 // or if either hop does not return 200. When requireSamples is false, it logs and skips
 // hops if no samples href is present.
 func followUISampleHops(t uiSmokeLogger, baseURL, bodyRun, runURL string, requireSamples bool) {
-	reSamples := regexp.MustCompile(`href="(/runs/[^"]+/samples)"`)
+	reSamples := regexp.MustCompile(`href="((?:/[^"]+)?/runs/[^"]+/samples)"`)
 	matchSamples := reSamples.FindStringSubmatch(bodyRun)
 	if len(matchSamples) <= 1 {
 		if requireSamples {

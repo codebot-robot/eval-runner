@@ -277,7 +277,7 @@ func TestServerRunDetail(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
 	server := NewServer(Config{Client: fakeClient})
 
-	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/docs-eval-cand-05ce4d8", nil)
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -313,7 +313,7 @@ func TestServerRunDetail(t *testing.T) {
 	if !strings.Contains(body, "cibar-01") {
 		t.Errorf("expected 0-1 CI bar element")
 	}
-	expectedLink := "/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples"
+	expectedLink := "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples"
 	if strings.Contains(body, expectedLink) {
 		t.Errorf("expected NO link to task samples list when ArtifactSink is nil")
 	}
@@ -371,7 +371,7 @@ func TestServer_FooterExposesVersion(t *testing.T) {
 	})
 
 	// 1. Run detail page footer contains version
-	reqRun := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/docs-eval-cand-05ce4d8", nil)
+	reqRun := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8", nil)
 	wRun := httptest.NewRecorder()
 	server.ServeHTTP(wRun, reqRun)
 	if wRun.Code != http.StatusOK {
@@ -383,7 +383,7 @@ func TestServer_FooterExposesVersion(t *testing.T) {
 	}
 
 	// 2. Comparison detail page footer contains version
-	reqComp := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit", nil)
+	reqComp := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit", nil)
 	wComp := httptest.NewRecorder()
 	server.ServeHTTP(wComp, reqComp)
 	if wComp.Code != http.StatusOK {
@@ -430,7 +430,7 @@ func TestServer_ReloadConfigMap_FooterReflectsNewValueWithoutRestart(t *testing.
 	// 1. Initial server without sink
 	server := NewServer(Config{Client: fakeClient, DefaultNamespace: "eval-runner"})
 
-	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/docs-eval-cand-05ce4d8", nil)
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8", nil)
 	w1 := httptest.NewRecorder()
 	server.ServeHTTP(w1, req)
 
@@ -887,7 +887,7 @@ func TestServerComparisonDetail(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
 	server := NewServer(Config{Client: fakeClient})
 
-	req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit", nil)
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -1002,7 +1002,7 @@ func TestServerComparisonDetail_BatchesAndTokens(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
 	server := NewServer(Config{Client: fakeClient})
 
-	req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-batches-tokens", nil)
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/comp-batches-tokens", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -2219,7 +2219,7 @@ func TestServerRunDetail_SampleRange(t *testing.T) {
 
 	server := NewServer(Config{Client: fakeClient})
 
-	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/range-run-detail", nil)
+	req := httptest.NewRequest(http.MethodGet, "/github.com/example/repo/runs/range-run-detail", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -2340,7 +2340,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("SamplesList_Success", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/triage%2Frunbook_lookup/samples", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2376,7 +2376,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("SampleTranscript_FailSample", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-019", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-019", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2412,7 +2412,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("SampleTranscript_PassSample", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-017", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-017", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2430,7 +2430,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("Negative_MissingLogPath_404", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/task%2Fno-log/samples", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/task%2Fno-log/samples", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2440,7 +2440,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("Negative_NoSuchTask_404", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/nonexistent%2Ftask/samples", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/nonexistent%2Ftask/samples", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2456,7 +2456,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("Negative_NoSuchRun_404", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/no-such-run/tasks/triage%2Frunbook_lookup/samples", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/no-such-run/tasks/triage%2Frunbook_lookup/samples", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2477,7 +2477,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 			DefaultNamespace: "eval-runner",
 			ArtifactSink:     nil,
 		})
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/triage%2Frunbook_lookup/samples", nil)
 		w := httptest.NewRecorder()
 		serverNoSink.ServeHTTP(w, req)
 
@@ -2496,7 +2496,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("Negative_PrefixMismatch_403", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/task%2Fbad-prefix/samples", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/task%2Fbad-prefix/samples", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2506,7 +2506,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("Negative_StorageFileNotFound_404", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/task%2Ffile-not-found/samples", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/task%2Ffile-not-found/samples", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2522,7 +2522,7 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	})
 
 	t.Run("Negative_NoSuchSample_404", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/no-such-sample", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/triage%2Frunbook_lookup/samples/no-such-sample", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -2564,8 +2564,8 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		})
 
 		paths := []string{
-			"/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples",
-			"/runs/eval-runner/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-017",
+			"/github.com/gke-labs/eval-runner/runs/sample-run/tasks/triage%2Frunbook_lookup/samples",
+			"/github.com/gke-labs/eval-runner/runs/sample-run/tasks/triage%2Frunbook_lookup/samples/sample-017",
 		}
 
 		for _, path := range paths {
@@ -3788,7 +3788,7 @@ func TestServerSampleTranscript_Truncation(t *testing.T) {
 	})
 
 	t.Run("OversizedExplanation_100KiB_Truncated", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-explanation", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-explanation", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -3809,7 +3809,7 @@ func TestServerSampleTranscript_Truncation(t *testing.T) {
 	})
 
 	t.Run("OversizedTarget_100KiB_Truncated", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-target", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-target", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -3921,7 +3921,7 @@ func TestServerTaskSamplesList_Truncation(t *testing.T) {
 		ArtifactSink:     sink,
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples", nil)
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/oversized-run/tasks/triage%2Frunbook_lookup/samples", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -3948,12 +3948,11 @@ func TestServerTaskSamplesList_Truncation(t *testing.T) {
 	}
 
 	// The sample rows must still link to the transcripts
-	expectedExpLink := "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-explanation"
+	expectedExpLink := "/github.com/gke-labs/eval-runner/runs/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-explanation"
 	if !strings.Contains(body, expectedExpLink) {
 		t.Errorf("expected body to link to sample transcript %q", expectedExpLink)
 	}
-
-	expectedTargetLink := "/runs/eval-runner/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-target"
+	expectedTargetLink := "/github.com/gke-labs/eval-runner/runs/oversized-run/tasks/triage%2Frunbook_lookup/samples/sample-oversized-target"
 	if !strings.Contains(body, expectedTargetLink) {
 		t.Errorf("expected body to link to sample transcript %q", expectedTargetLink)
 	}
@@ -4454,7 +4453,7 @@ func TestServerSeries_Selection(t *testing.T) {
 	})
 
 	t.Run("SeriesDetail_FiltersCorrectly", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4480,7 +4479,7 @@ func TestServerSeries_Selection(t *testing.T) {
 	})
 
 	t.Run("SeriesDetail_NotFound", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/nonexistent", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/nonexistent", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4548,7 +4547,7 @@ func TestServerSeries_Ordering(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runA, runB).Build()
 		server := NewServer(Config{Client: cl})
 
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4595,7 +4594,7 @@ func TestServerSeries_Ordering(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runNoAnnotation).Build()
 		server := NewServer(Config{Client: cl})
 
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4646,7 +4645,7 @@ func TestServerSeries_NCap(t *testing.T) {
 	server := NewServer(Config{Client: cl})
 
 	t.Run("DefaultCap50", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4669,7 +4668,7 @@ func TestServerSeries_NCap(t *testing.T) {
 	})
 
 	t.Run("NCapOver50_ClampedTo50", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?n=100", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main?n=100", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4680,7 +4679,7 @@ func TestServerSeries_NCap(t *testing.T) {
 	})
 
 	t.Run("ExplicitSmallerN", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?n=10", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main?n=10", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4761,7 +4760,7 @@ func TestServerSeries_CohortFilter(t *testing.T) {
 	})
 
 	t.Run("DetailFilteredByCohort", func(t *testing.T) {
-		reqAlpha := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?cohort=cohort-alpha", nil)
+		reqAlpha := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main?cohort=cohort-alpha", nil)
 		wAlpha := httptest.NewRecorder()
 		server.ServeHTTP(wAlpha, reqAlpha)
 
@@ -4825,7 +4824,7 @@ func TestServerSeries_HostileEscaping(t *testing.T) {
 	})
 
 	t.Run("DetailEscaping", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -4960,7 +4959,7 @@ func TestServerSeries_ThreeRunGoldenWithSignificantMoveAndGap(t *testing.T) {
 	t.Run("SeriesDetail", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/series/2cc24c2/main?cohort=cohort-gold&namespace=custom-ns", nil)
 		w := httptest.NewRecorder()
-		server.ServeHTTP(w, req)
+		server.renderSeriesDetailWithList(w, req, "custom-ns", RepoRef{}, "2cc24c2", "main", &v1alpha1.RunList{Items: []v1alpha1.Run{*run1, *run2, *run3}})
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -5276,7 +5275,7 @@ func TestServerSeries_CohortsView(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/series/"+repoHash+"/"+branch+"?view=cohorts", nil)
 		w := httptest.NewRecorder()
-		server.ServeHTTP(w, req)
+		server.renderSeriesDetailWithList(w, req, "eval-runner", RepoRef{}, repoHash, branch, &v1alpha1.RunList{Items: []v1alpha1.Run{*run1, *run2, *run3, *run4}})
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -5333,7 +5332,6 @@ func TestServerSeries_CohortsView(t *testing.T) {
 
 	t.Run("NoCohortsRendersSingleDefaultLine", func(t *testing.T) {
 		repoURL := "https://github.com/gke-labs/eval-runner"
-		repoHash := "2cc24c2"
 		branch := "main"
 		t0 := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
 
@@ -5410,7 +5408,7 @@ func TestServerSeries_CohortsView(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runA, runB).Build()
 		server := NewServer(Config{Client: fakeClient})
 
-		req := httptest.NewRequest(http.MethodGet, "/series/"+repoHash+"/"+branch+"?view=cohorts", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/"+branch+"?view=cohorts", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -5467,35 +5465,35 @@ func TestServerRunDetail_MetricFilter(t *testing.T) {
 	}{
 		{
 			name:         "all_metrics",
-			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=all",
+			url:          "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8?metric=all",
 			wantChips:    []string{`href="?metric=all" class="filter-chip active"`},
 			wantHeaders:  []string{"<th>latency (p50/p95)</th>", "<th>tokens</th>", "<th>cost</th>"},
 			wantContains: []string{"6.01s / 9.78s", "4399", "$0.0013"},
 		},
 		{
 			name:         "bogus_metric_fallback_all",
-			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=bogus",
+			url:          "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8?metric=bogus",
 			wantChips:    []string{`href="?metric=all" class="filter-chip active"`},
 			wantHeaders:  []string{"<th>latency (p50/p95)</th>", "<th>tokens</th>", "<th>cost</th>"},
 			wantContains: []string{"6.01s / 9.78s", "4399", "$0.0013"},
 		},
 		{
 			name:         "latency_filter",
-			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=latency",
+			url:          "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8?metric=latency",
 			wantChips:    []string{`href="?metric=latency" class="filter-chip active"`},
 			wantHeaders:  []string{"<th>latency (p50/p95)</th>"},
 			wantContains: []string{"6.01s / 9.78s"},
 		},
 		{
 			name:         "tokens_filter",
-			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=tokens",
+			url:          "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8?metric=tokens",
 			wantChips:    []string{`href="?metric=tokens" class="filter-chip active"`},
 			wantHeaders:  []string{"<th>tokens</th>", "<th>input</th>", "<th>output</th>", "<th>reasoning</th>"},
 			wantContains: []string{"4399", "2868", "1531", "133"},
 		},
 		{
 			name:         "cost_filter",
-			url:          "/runs/eval-runner/docs-eval-cand-05ce4d8?metric=cost",
+			url:          "/github.com/gke-labs/eval-runner/runs/docs-eval-cand-05ce4d8?metric=cost",
 			wantChips:    []string{`href="?metric=cost" class="filter-chip active"`},
 			wantHeaders:  []string{"<th>cost</th>"},
 			wantContains: []string{"$0.0013"},
@@ -5561,7 +5559,7 @@ func TestServerComparisonDetail_MetricFilter(t *testing.T) {
 	server := NewServer(Config{Client: fakeClient})
 
 	t.Run("latency_filter", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=latency", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit?metric=latency", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -5596,7 +5594,7 @@ func TestServerComparisonDetail_MetricFilter(t *testing.T) {
 	})
 
 	t.Run("tokens_filter", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=tokens", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit?metric=tokens", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -5637,7 +5635,7 @@ func TestServerComparisonDetail_MetricFilter(t *testing.T) {
 	})
 
 	t.Run("cost_filter", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=cost", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit?metric=cost", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -5672,7 +5670,7 @@ func TestServerComparisonDetail_MetricFilter(t *testing.T) {
 	})
 
 	t.Run("rate_filter", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=rate", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit?metric=rate", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -5704,7 +5702,7 @@ func TestServerComparisonDetail_MetricFilter(t *testing.T) {
 	})
 
 	t.Run("all_metrics", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit?metric=all", nil)
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/docs-eval-same-commit?metric=all", nil)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -6162,6 +6160,8 @@ func TestServerServesListsFromInjectedReaderWithoutDirectClient(t *testing.T) {
 		{"/series", "org/repo"},
 		{"/github.com/org/repo/runs", "base-cached-run-default"},
 		{"/github.com/org/repo/comparisons", "cached-comp-default"},
+		{"/github.com/org/repo/series", "org/repo"},
+		{"/github.com/org/repo/series/main", "org/repo"},
 	}
 
 	for _, ep := range listEndpoints {
@@ -6189,8 +6189,6 @@ func TestServerServesListsFromInjectedReaderWithoutDirectClient(t *testing.T) {
 		url      string
 		wantBody string
 	}{
-		{"/runs/eval-runner/base-cached-run-default", "base-cached-run-default"},
-		{"/comparisons/eval-runner/cached-comp-default", "cached-comp-default"},
 		{"/github.com/org/repo/runs/base-cached-run-default", "base-cached-run-default"},
 		{"/github.com/org/repo/comparisons/cached-comp-default", "cached-comp-default"},
 	}
@@ -6205,6 +6203,30 @@ func TestServerServesListsFromInjectedReaderWithoutDirectClient(t *testing.T) {
 			}
 			if !strings.Contains(w.Body.String(), ep.wantBody) {
 				t.Errorf("expected response from injected reader to contain %q", ep.wantBody)
+			}
+		})
+	}
+
+	// Verify that legacy redirects also resolve from cache without touching direct client
+	legacyRedirectEndpoints := []struct {
+		url          string
+		wantLocation string
+	}{
+		{"/runs/eval-runner/base-cached-run-default", "/github.com/org/repo/runs/base-cached-run-default"},
+		{"/comparisons/eval-runner/cached-comp-default", "/github.com/org/repo/comparisons/cached-comp-default"},
+		{"/series/" + RepoHash("org/repo") + "/main", "/github.com/org/repo/series/main"},
+	}
+	for _, ep := range legacyRedirectEndpoints {
+		t.Run("default_ns_legacy_redirect_"+ep.url, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep.url, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusPermanentRedirect {
+				t.Fatalf("expected 308 for %s, got %d", ep.url, w.Code)
+			}
+			if loc := w.Header().Get("Location"); loc != ep.wantLocation {
+				t.Errorf("expected Location %q for %s, got %q", ep.wantLocation, ep.url, loc)
 			}
 		})
 	}
@@ -6319,13 +6341,13 @@ func TestServerRepoRoutes(t *testing.T) {
 			name:       "repo overview",
 			path:       "/github.com/gke-labs/eval-runner",
 			wantStatus: http.StatusOK,
-			wantBody:   "docs-eval-cand-05ce4d8",
+			wantBody:   "Overview",
 		},
 		{
 			name:       "repo overview with trailing slash",
 			path:       "/github.com/gke-labs/eval-runner/",
 			wantStatus: http.StatusOK,
-			wantBody:   "docs-eval-cand-05ce4d8",
+			wantBody:   "Overview",
 		},
 		{
 			name:       "repo runs list",
@@ -7164,4 +7186,701 @@ func TestServerRepoPullsUnit(t *testing.T) {
 			t.Errorf("expected heading to contain org-a/repo-a")
 		}
 	})
+
+	// 7. Non-numeric, zero, and negative pull numbers answer 404 not found
+	t.Run("InvalidPullNumber_404", func(t *testing.T) {
+		for _, bad := range []string{"abc", "0", "-1"} {
+			req := httptest.NewRequest(http.MethodGet, "/github.com/org-a/repo-a/pulls/"+bad, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("GET /github.com/org-a/repo-a/pulls/%s returned code %d, want 404", bad, w.Code)
+			}
+			if strings.TrimSpace(w.Body.String()) != "not found" {
+				t.Errorf("expected 'not found' message, got %q", w.Body.String())
+			}
+		}
+	})
+}
+
+func TestServerRepoSeries(t *testing.T) {
+	scheme := newTestScheme(t)
+	rate := 0.8
+	ci := &v1alpha1.ConfidenceInterval{Lower: 0.6, Upper: 0.9, Confidence: 0.95, Method: "wilson"}
+
+	runMain := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-main-1",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:            "triage/lookup",
+					Phase:         v1alpha1.TaskPhaseCompleted,
+					Samples:       10,
+					SuccessRate:   &rate,
+					SuccessRateCI: ci,
+				},
+			},
+		},
+	}
+
+	branchSlash := "feature/branch-1"
+	runBranchSlash := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-branch-1",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": sanitizeBranchLabel(branchSlash),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:            "triage/lookup",
+					Phase:         v1alpha1.TaskPhaseCompleted,
+					Samples:       10,
+					SuccessRate:   &rate,
+					SuccessRateCI: ci,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runMain, runBranchSlash).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	t.Run("DefaultMainBranch_NoBranchInPath", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for /series default main, got %d: %s", w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "(main)") {
+			t.Errorf("expected (main) in card title, body: %s", body)
+		}
+		if !strings.Contains(body, `class="nav-link active">Series</a>`) {
+			t.Errorf("expected Series tab active, body: %s", body)
+		}
+		if !strings.Contains(body, "/github.com/gke-labs/eval-runner/runs/base-main-1") {
+			t.Errorf("expected repo-scoped run link in body")
+		}
+	})
+
+	t.Run("ExplicitMainBranch", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/main", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for /series/main, got %d: %s", w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "(main)") {
+			t.Errorf("expected (main) in card title, body: %s", body)
+		}
+		if !strings.Contains(body, `class="nav-link active">Series</a>`) {
+			t.Errorf("expected Series tab active, body: %s", body)
+		}
+	})
+
+	t.Run("BranchWithSlash", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/series/feature/branch-1", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for branch with slash, got %d: %s", w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "(feature/branch-1)") {
+			t.Errorf("expected (feature/branch-1) in card title, body: %s", body)
+		}
+		if !strings.Contains(body, `class="nav-link active">Series</a>`) {
+			t.Errorf("expected Series tab active, body: %s", body)
+		}
+		if !strings.Contains(body, "/github.com/gke-labs/eval-runner/runs/base-branch-1") {
+			t.Errorf("expected repo-scoped run link in body")
+		}
+	})
+
+	t.Run("UnknownRepository_404FixedString", func(t *testing.T) {
+		for _, path := range []string{
+			"/github.com/nonexistent/repo/series",
+			"/github.com/nonexistent/repo/series/main",
+		} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("expected 404 for unknown repository %s, got %d", path, w.Code)
+			}
+			if strings.TrimSpace(w.Body.String()) != "series not found" {
+				t.Errorf("expected fixed string 'series not found', got %q", w.Body.String())
+			}
+		}
+	})
+}
+
+func TestServerLegacyRedirects(t *testing.T) {
+	scheme := newTestScheme(t)
+	rate := 0.75
+	ci := &v1alpha1.ConfidenceInterval{Lower: 0.5, Upper: 0.9, Confidence: 0.95, Method: "wilson"}
+
+	runDefault := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "abcdef123456",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:            "triage/lookup",
+					Phase:         v1alpha1.TaskPhaseCompleted,
+					Samples:       5,
+					SuccessRate:   &rate,
+					SuccessRateCI: ci,
+				},
+			},
+		},
+	}
+
+	runCustom := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "custom-ns",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "abcdef123456",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:            "triage/lookup",
+					Phase:         v1alpha1.TaskPhaseCompleted,
+					Samples:       5,
+					SuccessRate:   &rate,
+					SuccessRateCI: ci,
+				},
+			},
+		},
+	}
+
+	baseBranchRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-run-branch",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": sanitizeBranchLabel("feature/branch-1"),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "111122223333",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "triage/lookup", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate, SuccessRateCI: ci},
+			},
+		},
+	}
+
+	compDefault := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-comp",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     101,
+			},
+		},
+	}
+
+	compCustom := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-comp",
+			Namespace: "custom-ns",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     101,
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(runDefault, runCustom, baseBranchRun, compDefault, compCustom).
+		Build()
+
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+	})
+
+	hash := RepoHash("gke-labs/eval-runner")
+
+	tests := []struct {
+		name         string
+		url          string
+		wantLocation string
+	}{
+		// /runs/{ns}/{name}
+		{
+			name:         "run_default_no_query",
+			url:          "/runs/eval-runner/test-run",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run",
+		},
+		{
+			name:         "run_default_with_metric",
+			url:          "/runs/eval-runner/test-run?metric=rate",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run?metric=rate",
+		},
+		{
+			name:         "run_custom_ns",
+			url:          "/runs/custom-ns/test-run",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run?namespace=custom-ns",
+		},
+		{
+			name:         "run_custom_ns_with_metric",
+			url:          "/runs/custom-ns/test-run?metric=latency",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run?metric=latency&namespace=custom-ns",
+		},
+
+		// /runs/{ns}/{name}/tasks
+		{
+			name:         "run_tasks_default_no_query",
+			url:          "/runs/eval-runner/test-run/tasks",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks",
+		},
+		{
+			name:         "run_tasks_default_with_metric",
+			url:          "/runs/eval-runner/test-run/tasks?metric=rate",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks?metric=rate",
+		},
+		{
+			name:         "run_tasks_custom_ns",
+			url:          "/runs/custom-ns/test-run/tasks",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks?namespace=custom-ns",
+		},
+		{
+			name:         "run_tasks_custom_ns_with_metric",
+			url:          "/runs/custom-ns/test-run/tasks?metric=tokens",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks?metric=tokens&namespace=custom-ns",
+		},
+
+		// /runs/{ns}/{name}/tasks/{rest...}
+		{
+			name:         "run_tasks_rest_default_no_query",
+			url:          "/runs/eval-runner/test-run/tasks/triage%2Flookup/samples",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks/triage%2Flookup/samples",
+		},
+		{
+			name:         "run_tasks_rest_default_with_metric",
+			url:          "/runs/eval-runner/test-run/tasks/triage%2Flookup/samples?metric=cost",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks/triage%2Flookup/samples?metric=cost",
+		},
+		{
+			name:         "run_tasks_rest_custom_ns",
+			url:          "/runs/custom-ns/test-run/tasks/triage%2Flookup/samples",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks/triage%2Flookup/samples?namespace=custom-ns",
+		},
+		{
+			name:         "run_tasks_rest_custom_ns_with_metric",
+			url:          "/runs/custom-ns/test-run/tasks/triage%2Flookup/samples?metric=rate",
+			wantLocation: "/github.com/gke-labs/eval-runner/runs/test-run/tasks/triage%2Flookup/samples?metric=rate&namespace=custom-ns",
+		},
+
+		// /comparisons/{ns}/{name}
+		{
+			name:         "comp_default_no_query",
+			url:          "/comparisons/eval-runner/test-comp",
+			wantLocation: "/github.com/gke-labs/eval-runner/comparisons/test-comp",
+		},
+		{
+			name:         "comp_default_with_metric",
+			url:          "/comparisons/eval-runner/test-comp?metric=latency",
+			wantLocation: "/github.com/gke-labs/eval-runner/comparisons/test-comp?metric=latency",
+		},
+		{
+			name:         "comp_custom_ns",
+			url:          "/comparisons/custom-ns/test-comp",
+			wantLocation: "/github.com/gke-labs/eval-runner/comparisons/test-comp?namespace=custom-ns",
+		},
+		{
+			name:         "comp_custom_ns_with_metric",
+			url:          "/comparisons/custom-ns/test-comp?metric=cost",
+			wantLocation: "/github.com/gke-labs/eval-runner/comparisons/test-comp?metric=cost&namespace=custom-ns",
+		},
+
+		// /github.com/{owner}/{repo}/pull/{number} (singular alias)
+		{
+			name:         "pull_alias_default_no_query",
+			url:          "/github.com/gke-labs/eval-runner/pull/101",
+			wantLocation: "/github.com/gke-labs/eval-runner/pulls/101",
+		},
+		{
+			name:         "pull_alias_with_metric",
+			url:          "/github.com/gke-labs/eval-runner/pull/101?metric=rate",
+			wantLocation: "/github.com/gke-labs/eval-runner/pulls/101?metric=rate",
+		},
+		{
+			name:         "pull_alias_custom_ns",
+			url:          "/github.com/gke-labs/eval-runner/pull/101?namespace=custom-ns",
+			wantLocation: "/github.com/gke-labs/eval-runner/pulls/101?namespace=custom-ns",
+		},
+
+		// /series/{repohash}/{branch...}
+		{
+			name:         "series_default_no_query",
+			url:          "/series/" + hash + "/main",
+			wantLocation: "/github.com/gke-labs/eval-runner/series/main",
+		},
+		{
+			name:         "series_default_with_metric",
+			url:          "/series/" + hash + "/main?metric=rate",
+			wantLocation: "/github.com/gke-labs/eval-runner/series/main?metric=rate",
+		},
+		{
+			name:         "series_custom_ns",
+			url:          "/series/" + hash + "/main?namespace=custom-ns",
+			wantLocation: "/github.com/gke-labs/eval-runner/series/main?namespace=custom-ns",
+		},
+		{
+			name:         "series_custom_ns_with_metric",
+			url:          "/series/" + hash + "/main?metric=tokens&namespace=custom-ns",
+			wantLocation: "/github.com/gke-labs/eval-runner/series/main?metric=tokens&namespace=custom-ns",
+		},
+		{
+			name:         "series_branch_with_slash",
+			url:          "/series/" + hash + "/feature/branch-1",
+			wantLocation: "/github.com/gke-labs/eval-runner/series/feature/branch-1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusPermanentRedirect {
+				t.Fatalf("expected 308 Permanent Redirect for %s, got %d", tc.url, w.Code)
+			}
+			if loc := w.Header().Get("Location"); loc != tc.wantLocation {
+				t.Errorf("for %s expected Location %q, got %q", tc.url, tc.wantLocation, loc)
+			}
+		})
+	}
+}
+
+func TestServerLegacyUnresolvableRepo(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	runNoURL := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-no-url",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted, LogPath: "/var/log/artifacts/inspect.json"},
+			},
+		},
+	}
+
+	compNoURL := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-no-url",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "run-no-url"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "run-no-url"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase: v1alpha1.ComparisonPhaseCompleted,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(runNoURL, compNoURL).
+		Build()
+
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+	})
+
+	t.Run("Run_NoURL_Returns200Legacy", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/run-no-url", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for unresolvable run, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "run-no-url") {
+			t.Errorf("expected legacy run detail page body to contain run-no-url")
+		}
+	})
+
+	t.Run("RunTasks_NoURL_Returns200Legacy", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/run-no-url/tasks/task-1/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for unresolvable run tasks, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "task-1") {
+			t.Errorf("expected legacy tasks page body to contain task-1")
+		}
+	})
+
+	t.Run("Comparison_NoURL_Returns200Legacy", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-no-url", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for unresolvable comparison, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "comp-no-url") {
+			t.Errorf("expected legacy comparison page body to contain comp-no-url")
+		}
+	})
+
+	t.Run("Series_HashCollidesTwoRepositories_Returns200Legacy", func(t *testing.T) {
+		// org/repo3403 and org/repo15792 both hash to 6f878fa
+		h1 := RepoHash("org/repo3403")
+		h2 := RepoHash("org/repo15792")
+		if h1 != h2 {
+			t.Fatalf("expected hash collision, got %s and %s", h1, h2)
+		}
+		collidingHash := h1
+
+		runRepo1 := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-colliding-1",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch": "main",
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/org/repo3403",
+					Commit: "111111111111",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted},
+				},
+			},
+		}
+
+		runRepo2 := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-colliding-2",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch": "main",
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/org/repo15792",
+					Commit: "222222222222",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "task-1", Phase: v1alpha1.TaskPhaseCompleted},
+				},
+			},
+		}
+
+		collisionClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runRepo1, runRepo2).Build()
+		collisionServer := NewServer(Config{Client: collisionClient, DefaultNamespace: "eval-runner"})
+
+		req := httptest.NewRequest(http.MethodGet, "/series/"+collidingHash+"/main", nil)
+		w := httptest.NewRecorder()
+		collisionServer.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for colliding repohash, got %d", w.Code)
+		}
+		if loc := w.Header().Get("Location"); loc != "" {
+			t.Errorf("expected no Location header on un-redirected legacy page, got %q", loc)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "base-colliding-1") && !strings.Contains(body, "base-colliding-2") {
+			t.Errorf("expected legacy series detail page to render colliding runs, got: %s", body)
+		}
+	})
+}
+
+func TestServerLegacyRedirect_NonDefaultNamespacePropagation(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	runCustomDefault := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-1",
+			Namespace: "team-staging",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/gke-labs/eval-runner.git",
+			},
+		},
+	}
+
+	runOther := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-1",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL: "https://github.com/gke-labs/eval-runner.git",
+			},
+		},
+	}
+
+	compCustomDefault := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-1",
+			Namespace: "team-staging",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+			},
+		},
+	}
+
+	compOther := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-1",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(runCustomDefault, runOther, compCustomDefault, compOther).
+		Build()
+
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "team-staging", // non-default DefaultNamespace
+	})
+
+	// Run in default namespace (team-staging) should NOT carry ?namespace=
+	req1 := httptest.NewRequest(http.MethodGet, "/runs/team-staging/run-1", nil)
+	w1 := httptest.NewRecorder()
+	server.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusPermanentRedirect {
+		t.Fatalf("expected 308, got %d", w1.Code)
+	}
+	if loc := w1.Header().Get("Location"); loc != "/github.com/gke-labs/eval-runner/runs/run-1" {
+		t.Errorf("expected no namespace param when ns matches DefaultNamespace, got Location %q", loc)
+	}
+
+	// Run in different namespace (eval-runner) MUST carry ?namespace=eval-runner
+	req2 := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/run-1", nil)
+	w2 := httptest.NewRecorder()
+	server.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusPermanentRedirect {
+		t.Fatalf("expected 308, got %d", w2.Code)
+	}
+	if loc := w2.Header().Get("Location"); loc != "/github.com/gke-labs/eval-runner/runs/run-1?namespace=eval-runner" {
+		t.Errorf("expected ?namespace=eval-runner when ns != DefaultNamespace, got Location %q", loc)
+	}
+
+	// Comparison in default namespace (team-staging) should NOT carry ?namespace=
+	reqComp1 := httptest.NewRequest(http.MethodGet, "/comparisons/team-staging/comp-1", nil)
+	wComp1 := httptest.NewRecorder()
+	server.ServeHTTP(wComp1, reqComp1)
+	if wComp1.Code != http.StatusPermanentRedirect {
+		t.Fatalf("expected 308, got %d", wComp1.Code)
+	}
+	if loc := wComp1.Header().Get("Location"); loc != "/github.com/gke-labs/eval-runner/comparisons/comp-1" {
+		t.Errorf("expected no namespace param when ns matches DefaultNamespace, got Location %q", loc)
+	}
+
+	// Comparison in different namespace (eval-runner) MUST carry ?namespace=eval-runner
+	reqComp2 := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/comp-1", nil)
+	wComp2 := httptest.NewRecorder()
+	server.ServeHTTP(wComp2, reqComp2)
+	if wComp2.Code != http.StatusPermanentRedirect {
+		t.Fatalf("expected 308, got %d", wComp2.Code)
+	}
+	if loc := wComp2.Header().Get("Location"); loc != "/github.com/gke-labs/eval-runner/comparisons/comp-1?namespace=eval-runner" {
+		t.Errorf("expected ?namespace=eval-runner when ns != DefaultNamespace, got Location %q", loc)
+	}
 }

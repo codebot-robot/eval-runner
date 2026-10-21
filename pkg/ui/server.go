@@ -38,6 +38,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -318,10 +319,27 @@ func (s *Server) routes() {
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls", s.handleRepoPullsList)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls/{$}", s.handleRepoPullsList)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls/{number}", s.handleRepoPullDetail)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pull/{number}", s.handleRepoPullAlias)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series", s.handleRepoSeries)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{$}", s.handleRepoSeries)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{branch...}", s.handleRepoSeries)
 }
 
 func (s *Server) handleRepoScoped(w http.ResponseWriter, r *http.Request) {
 	s.repoMux.ServeHTTP(w, r)
+}
+
+func (s *Server) redirectURLWithQuery(basePath string, r *http.Request, objNamespace string) string {
+	q := r.URL.Query()
+	if objNamespace != "" && objNamespace != s.cfg.DefaultNamespace {
+		q.Set("namespace", objNamespace)
+	} else {
+		q.Del("namespace")
+	}
+	if len(q) > 0 {
+		return basePath + "?" + q.Encode()
+	}
+	return basePath
 }
 
 func (s *Server) linkNamespace(ns string) string {
@@ -641,6 +659,68 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func runCommitSHA(run *v1alpha1.Run) string {
+	if run == nil {
+		return ""
+	}
+	if run.Spec.Repo.Commit != "" {
+		return run.Spec.Repo.Commit
+	}
+	return run.Labels["evalrunner.gke-labs.dev/head-sha"]
+}
+
+type seriesRun struct {
+	run        *v1alpha1.Run
+	commitTime time.Time
+	isFallback bool
+}
+
+// collectSeries finds completed base-* Runs for the given repository and branch in runs,
+// optionally filtered by cohort, ordered chronologically by commit time.
+func collectSeries(runs []v1alpha1.Run, ref RepoRef, branch, cohort string) []seriesRun {
+	var matched []seriesRun
+	for i := range runs {
+		run := &runs[i]
+		if run.Status.Phase != v1alpha1.RunPhaseCompleted {
+			continue
+		}
+		if !strings.HasPrefix(run.Name, "base-") {
+			continue
+		}
+		runBranch := run.Labels["evalrunner.gke-labs.dev/branch"]
+		if runBranch == "" {
+			continue
+		}
+		if runBranch != branch && runBranch != sanitizeBranchLabel(branch) {
+			continue
+		}
+		if cohort != "" && run.Spec.Cohort != cohort {
+			continue
+		}
+
+		runRepo, ok := runRepoRef(run)
+		if !ok || !runRepo.Equal(ref) {
+			continue
+		}
+
+		cTime, fallback := runCommitTime(run)
+		matched = append(matched, seriesRun{
+			run:        run,
+			commitTime: cTime,
+			isFallback: fallback,
+		})
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].commitTime.Equal(matched[j].commitTime) {
+			return matched[i].commitTime.Before(matched[j].commitTime)
+		}
+		return matched[i].run.Name < matched[j].run.Name
+	})
+
+	return matched
+}
+
 func (s *Server) handleRepoOverview(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.parseRouteRepo(r)
 	if !ok {
@@ -652,7 +732,580 @@ func (s *Server) handleRepoOverview(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
 		return
 	}
-	s.renderRepoRuns(w, r, ns, ref, NavTabOverview)
+	s.renderRepoOverview(w, r, ns, ref)
+}
+
+func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef) {
+	ctx := r.Context()
+	linkNS := s.linkNamespace(ns)
+	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	if branch == "" {
+		branch = "main"
+	}
+	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
+
+	// Single list call for Runs in namespace
+	var allRuns v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &allRuns, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+
+	var totalRuns int
+	for i := range allRuns.Items {
+		if rRef, ok := runRepoRef(&allRuns.Items[i]); ok && rRef.Equal(ref) {
+			totalRuns++
+		}
+	}
+
+	var compList v1alpha1.ComparisonList
+	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list comparisons", "k8s list comparisons failed", err)
+		return
+	}
+
+	var totalComparisons int
+	for i := range compList.Items {
+		if cRef, ok := comparisonRepoRef(ctx, &compList.Items[i], s.readerFor(ns)); ok && cRef.Equal(ref) {
+			totalComparisons++
+		}
+	}
+	totalPulls := len(groupPullRequests(compList.Items, &ref))
+
+	matched := collectSeries(allRuns.Items, ref, branch, cohortFilter)
+
+	if len(matched) == 0 {
+		view := RepoOverviewView{
+			ActiveTab:             NavTabOverview,
+			Repo:                  ref,
+			Namespace:             ns,
+			LinkNamespace:         linkNS,
+			Branch:                branch,
+			Cohort:                cohortFilter,
+			TotalRunsCount:        totalRuns,
+			RunsLink:              repoLink(ref, "/runs", linkNS),
+			TotalComparisonsCount: totalComparisons,
+			ComparisonsLink:       repoLink(ref, "/comparisons", linkNS),
+			TotalPullsCount:       totalPulls,
+			PullsLink:             repoLink(ref, "/pulls", linkNS),
+			IsEmpty:               true,
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := RenderRepoOverview(w, view); err != nil {
+			httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+		}
+		return
+	}
+
+	// Link to suite detail page when the route exists; false until suite page is registered
+	const suiteRouteExists = false
+
+	// Collect distinct commits in chronological order
+	type commitEntry struct {
+		sha        string
+		commitTime time.Time
+	}
+	var orderedCommits []commitEntry
+	seenCommits := make(map[string]bool)
+	for _, sr := range matched {
+		c := runCommitSHA(sr.run)
+		if c == "" {
+			continue
+		}
+		if !seenCommits[c] {
+			seenCommits[c] = true
+			orderedCommits = append(orderedCommits, commitEntry{
+				sha:        c,
+				commitTime: sr.commitTime,
+			})
+		}
+	}
+
+	// For sparklines, use up to the last 20 main-branch commits
+	sparklineCommits := orderedCommits
+	if len(sparklineCommits) > 20 {
+		sparklineCommits = sparklineCommits[len(sparklineCommits)-20:]
+	}
+
+	type obsData struct {
+		run        *v1alpha1.Run
+		task       *v1alpha1.TaskStatus
+		commitSHA  string
+		commitTime time.Time
+		successes  int
+		samples    int
+	}
+
+	// Group observations by task ID and commit SHA
+	evalObsByCommit := make(map[string]map[string][]obsData)
+	evalSet := make(map[string]bool)
+	evalSuites := make(map[string]string)
+	suitesMap := make(map[string]map[string]bool)
+
+	// Collect all completed task observations (only tasks with Samples > 0)
+	for _, sr := range matched {
+		run := sr.run
+		commit := runCommitSHA(run)
+		if commit == "" {
+			continue
+		}
+		for idx := range run.Status.Tasks {
+			t := &run.Status.Tasks[idx]
+			if t.ID == "" {
+				continue
+			}
+			if t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
+				evalSet[t.ID] = true
+				suite := SuiteOf(t.ID)
+				evalSuites[t.ID] = suite
+				if suitesMap[suite] == nil {
+					suitesMap[suite] = make(map[string]bool)
+				}
+				suitesMap[suite][t.ID] = true
+
+				samples := t.Samples
+				succ := t.Successes
+				if succ == 0 && t.SuccessRate != nil && *t.SuccessRate > 0 {
+					succ = int(math.Round(*t.SuccessRate * float64(samples)))
+				}
+
+				if evalObsByCommit[t.ID] == nil {
+					evalObsByCommit[t.ID] = make(map[string][]obsData)
+				}
+				evalObsByCommit[t.ID][commit] = append(evalObsByCommit[t.ID][commit], obsData{
+					run:        run,
+					task:       t,
+					commitSHA:  commit,
+					commitTime: sr.commitTime,
+					successes:  succ,
+					samples:    samples,
+				})
+			}
+		}
+	}
+
+	if len(evalSet) == 0 {
+		view := RepoOverviewView{
+			ActiveTab:             NavTabOverview,
+			Repo:                  ref,
+			Namespace:             ns,
+			LinkNamespace:         linkNS,
+			Branch:                branch,
+			Cohort:                cohortFilter,
+			TotalRunsCount:        totalRuns,
+			RunsLink:              repoLink(ref, "/runs", linkNS),
+			TotalComparisonsCount: totalComparisons,
+			ComparisonsLink:       repoLink(ref, "/comparisons", linkNS),
+			TotalPullsCount:       totalPulls,
+			PullsLink:             repoLink(ref, "/pulls", linkNS),
+			IsEmpty:               true,
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := RenderRepoOverview(w, view); err != nil {
+			httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+		}
+		return
+	}
+
+	var sortedSuiteNames []string
+	for sName := range suitesMap {
+		sortedSuiteNames = append(sortedSuiteNames, sName)
+	}
+	sort.Strings(sortedSuiteNames)
+
+	type evalScoreResult struct {
+		row         RepoOverviewEvalRow
+		point       float64
+		newestTasks []stats.TaskCounts
+		newestRun   *v1alpha1.Run
+		newestTime  time.Time
+	}
+
+	type suiteScoreResult struct {
+		row         RepoOverviewSuiteRow
+		point       float64
+		newestTasks []stats.TaskCounts
+		newestTime  time.Time
+	}
+
+	var suiteRows []RepoOverviewSuiteRow
+	var allSuitesResults []suiteScoreResult
+
+	for _, sName := range sortedSuiteNames {
+		var evalIDsInSuite []string
+		for eID := range suitesMap[sName] {
+			evalIDsInSuite = append(evalIDsInSuite, eID)
+		}
+		sort.Strings(evalIDsInSuite)
+
+		var evalRowsInSuite []RepoOverviewEvalRow
+		var evalResultsInSuite []evalScoreResult
+
+		for _, eID := range evalIDsInSuite {
+			// Find commits where eID has observations, in chronological order
+			var evalCommits []commitEntry
+			for _, c := range orderedCommits {
+				if len(evalObsByCommit[eID][c.sha]) > 0 {
+					evalCommits = append(evalCommits, c)
+				}
+			}
+
+			if len(evalCommits) == 0 {
+				continue
+			}
+
+			newestCommit := evalCommits[len(evalCommits)-1]
+			newestObs := evalObsByCommit[eID][newestCommit.sha]
+
+			var newestTasks []stats.TaskCounts
+			var latestRun *v1alpha1.Run
+			var latestTask *v1alpha1.TaskStatus
+			var newestTime time.Time
+			for _, o := range newestObs {
+				newestTasks = append(newestTasks, stats.TaskCounts{
+					Successes: o.successes,
+					Samples:   o.samples,
+				})
+				latestRun = o.run
+				latestTask = o.task
+				if o.commitTime.After(newestTime) {
+					newestTime = o.commitTime
+				}
+			}
+			if newestTime.IsZero() && latestRun != nil {
+				newestTime = latestRun.CreationTimestamp.Time
+			}
+
+			evalEst := stats.PooledWilson(newestTasks, 0.95)
+			evalScoreStr := fmt.Sprintf("%.2f", evalEst.Point)
+			evalCIStr := fmt.Sprintf("[%.2f, %.2f]", evalEst.CI.Lower, evalEst.CI.Upper)
+
+			// Delta vs previous commit for this eval
+			var evalDeltaStr string = "—"
+			var evalDeltaClass string
+			var evalHasDelta bool
+			if len(evalCommits) > 1 {
+				prevCommit := evalCommits[len(evalCommits)-2]
+				prevObs := evalObsByCommit[eID][prevCommit.sha]
+				var prevTasks []stats.TaskCounts
+				for _, o := range prevObs {
+					prevTasks = append(prevTasks, stats.TaskCounts{
+						Successes: o.successes,
+						Samples:   o.samples,
+					})
+				}
+				prevEst := stats.PooledWilson(prevTasks, 0.95)
+				delta := stats.DifferenceUnpaired(evalEst, prevEst, 0.95)
+				evalDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
+				evalDeltaClass = DeltaChipClass(delta.CI)
+				evalHasDelta = true
+			}
+
+			// Sparkline for eval over sparklineCommits
+			var evalSparkItems []SeriesItem
+			for _, sc := range sparklineCommits {
+				obsList := evalObsByCommit[eID][sc.sha]
+				sItem := SeriesItem{
+					CommitSHA:      sc.sha,
+					CommitSHAShort: ShortCommit(sc.sha),
+					CommitTime:     sc.commitTime,
+				}
+				if len(obsList) > 0 {
+					var cTasks []stats.TaskCounts
+					for _, o := range obsList {
+						cTasks = append(cTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
+					}
+					cEst := stats.PooledWilson(cTasks, 0.95)
+					p := cEst.Point
+					ci := v1alpha1.ConfidenceInterval{
+						Lower:      cEst.CI.Lower,
+						Upper:      cEst.CI.Upper,
+						Confidence: cEst.Confidence,
+						Method:     cEst.Method,
+					}
+					sItem.HasPoint = true
+					sItem.SuccessRate = &p
+					sItem.CI = &ci
+					sItem.ObsCount = len(obsList)
+				}
+				evalSparkItems = append(evalSparkItems, sItem)
+			}
+			evalSpark := BuildSparklineSVG(evalSparkItems)
+
+			evalRunLink := ""
+			evalSamplesLink := ""
+			if latestRun != nil {
+				evalRunLink = repoLink(ref, "/runs/"+latestRun.Name, linkNS)
+				if latestTask != nil && latestTask.LogPath != "" && s.hasArtifactStorage() {
+					evalSamplesLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", latestRun.Name, url.PathEscape(eID)), linkNS)
+				}
+			}
+
+			evalRow := RepoOverviewEvalRow{
+				ID:          eID,
+				SamplesLink: evalSamplesLink,
+				RunLink:     evalRunLink,
+				ScoreStr:    evalScoreStr,
+				CILabel:     evalCIStr,
+				DeltaStr:    evalDeltaStr,
+				DeltaClass:  evalDeltaClass,
+				HasDelta:    evalHasDelta,
+				Sparkline:   evalSpark,
+			}
+			evalRowsInSuite = append(evalRowsInSuite, evalRow)
+			evalResultsInSuite = append(evalResultsInSuite, evalScoreResult{
+				row:         evalRow,
+				point:       evalEst.Point,
+				newestTasks: newestTasks,
+				newestRun:   latestRun,
+				newestTime:  newestTime,
+			})
+		}
+
+		if len(evalResultsInSuite) == 0 {
+			continue
+		}
+
+		// Suite score at main = mean of its evals' scores with interval from pooled samples
+		var sumEvalScores float64
+		var suiteTasks []stats.TaskCounts
+		var newestSuiteTime time.Time
+		for _, er := range evalResultsInSuite {
+			sumEvalScores += er.point
+			suiteTasks = append(suiteTasks, er.newestTasks...)
+			if er.newestTime.After(newestSuiteTime) {
+				newestSuiteTime = er.newestTime
+			}
+		}
+		suiteScorePoint := sumEvalScores / float64(len(evalResultsInSuite))
+		suitePooledEst := stats.PooledWilson(suiteTasks, 0.95)
+		suiteScoreStr := fmt.Sprintf("%.2f", suiteScorePoint)
+		suiteCIStr := fmt.Sprintf("[%.2f, %.2f]", suitePooledEst.CI.Lower, suitePooledEst.CI.Upper)
+
+		// Suite delta vs previous commit
+		var suiteCommits []commitEntry
+		for _, c := range orderedCommits {
+			hasObs := false
+			for _, eID := range evalIDsInSuite {
+				if len(evalObsByCommit[eID][c.sha]) > 0 {
+					hasObs = true
+					break
+				}
+			}
+			if hasObs {
+				suiteCommits = append(suiteCommits, c)
+			}
+		}
+
+		var suiteDeltaStr string = "—"
+		var suiteDeltaClass string
+		var suiteHasDelta bool
+		if len(suiteCommits) > 1 {
+			prevCommit := suiteCommits[len(suiteCommits)-2]
+			var prevEvalScores []float64
+			var prevSuiteTasks []stats.TaskCounts
+			for _, eID := range evalIDsInSuite {
+				eObs := evalObsByCommit[eID][prevCommit.sha]
+				if len(eObs) > 0 {
+					var eTasks []stats.TaskCounts
+					for _, o := range eObs {
+						eTasks = append(eTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
+						prevSuiteTasks = append(prevSuiteTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
+					}
+					eEst := stats.PooledWilson(eTasks, 0.95)
+					prevEvalScores = append(prevEvalScores, eEst.Point)
+				}
+			}
+			if len(prevEvalScores) > 0 {
+				var prevSum float64
+				for _, s := range prevEvalScores {
+					prevSum += s
+				}
+				prevSuitePoint := prevSum / float64(len(prevEvalScores))
+				prevSuitePooled := stats.PooledWilson(prevSuiteTasks, 0.95)
+
+				curSuiteEst := stats.Estimate{
+					Point:  suiteScorePoint,
+					CI:     suitePooledEst.CI,
+					N:      suitePooledEst.N,
+					Method: "pooled-wilson",
+				}
+				prevSuiteEst := stats.Estimate{
+					Point:  prevSuitePoint,
+					CI:     prevSuitePooled.CI,
+					N:      prevSuitePooled.N,
+					Method: "pooled-wilson",
+				}
+				delta := stats.DifferenceUnpaired(curSuiteEst, prevSuiteEst, 0.95)
+				suiteDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
+				suiteDeltaClass = DeltaChipClass(delta.CI)
+				suiteHasDelta = true
+			}
+		}
+
+		// Sparkline for suite over sparklineCommits
+		var suiteSparkItems []SeriesItem
+		for _, sc := range sparklineCommits {
+			sItem := SeriesItem{
+				CommitSHA:      sc.sha,
+				CommitSHAShort: ShortCommit(sc.sha),
+				CommitTime:     sc.commitTime,
+			}
+			var cEvalsScores []float64
+			var cSuiteTasks []stats.TaskCounts
+			obsInSuite := 0
+			for _, eID := range evalIDsInSuite {
+				obsList := evalObsByCommit[eID][sc.sha]
+				if len(obsList) > 0 {
+					obsInSuite += len(obsList)
+					var eTasks []stats.TaskCounts
+					for _, o := range obsList {
+						eTasks = append(eTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
+						cSuiteTasks = append(cSuiteTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
+					}
+					eEst := stats.PooledWilson(eTasks, 0.95)
+					cEvalsScores = append(cEvalsScores, eEst.Point)
+				}
+			}
+			if len(cEvalsScores) > 0 {
+				sum := 0.0
+				for _, s := range cEvalsScores {
+					sum += s
+				}
+				meanScore := sum / float64(len(cEvalsScores))
+				cEst := stats.PooledWilson(cSuiteTasks, 0.95)
+				ci := v1alpha1.ConfidenceInterval{
+					Lower:      cEst.CI.Lower,
+					Upper:      cEst.CI.Upper,
+					Confidence: cEst.Confidence,
+					Method:     cEst.Method,
+				}
+				sItem.HasPoint = true
+				sItem.SuccessRate = &meanScore
+				sItem.CI = &ci
+				sItem.ObsCount = obsInSuite
+			}
+			suiteSparkItems = append(suiteSparkItems, sItem)
+		}
+		suiteSpark := BuildSparklineSVG(suiteSparkItems)
+
+		suiteLink := ""
+		if suiteRouteExists {
+			suiteLink = repoLink(ref, "/evals/"+url.PathEscape(sName), linkNS)
+		}
+
+		suiteRow := RepoOverviewSuiteRow{
+			Name:       sName,
+			SuiteLink:  suiteLink,
+			ScoreStr:   suiteScoreStr,
+			CILabel:    suiteCIStr,
+			EvalsCount: len(evalRowsInSuite),
+			DeltaStr:   suiteDeltaStr,
+			DeltaClass: suiteDeltaClass,
+			HasDelta:   suiteHasDelta,
+			Sparkline:  suiteSpark,
+			Evals:      evalRowsInSuite,
+		}
+		suiteRows = append(suiteRows, suiteRow)
+		allSuitesResults = append(allSuitesResults, suiteScoreResult{
+			row:         suiteRow,
+			point:       suiteScorePoint,
+			newestTasks: suiteTasks,
+			newestTime:  newestSuiteTime,
+		})
+	}
+
+	// Overall Headline: overall eval score at main with its 95% interval, the commit sha it was measured at, and the time of the newest observation.
+	var overallPoint float64
+	var allTasks []stats.TaskCounts
+	for _, sr := range allSuitesResults {
+		overallPoint += sr.point
+		allTasks = append(allTasks, sr.newestTasks...)
+	}
+	if len(allSuitesResults) > 0 {
+		overallPoint /= float64(len(allSuitesResults))
+	}
+	overallPooled := stats.PooledWilson(allTasks, 0.95)
+	overallScoreStr := fmt.Sprintf("%.2f", overallPoint)
+	overallCIStr := fmt.Sprintf("[%.2f, %.2f]", overallPooled.CI.Lower, overallPooled.CI.Upper)
+
+	// Derive headline commit and time from newest commit that actually has observations
+	var newestOverallCommitSHA string
+	var newestOverallTime time.Time
+	var newestRun *v1alpha1.Run
+	for i := len(orderedCommits) - 1; i >= 0; i-- {
+		c := orderedCommits[i]
+		hasAnyObs := false
+		for eID := range evalSet {
+			if len(evalObsByCommit[eID][c.sha]) > 0 {
+				hasAnyObs = true
+				break
+			}
+		}
+		if hasAnyObs {
+			newestOverallCommitSHA = c.sha
+			newestOverallTime = c.commitTime
+			for _, sr := range matched {
+				if runCommitSHA(sr.run) == c.sha {
+					newestRun = sr.run
+					break
+				}
+			}
+			break
+		}
+	}
+
+	overallCommitShort := ShortCommit(newestOverallCommitSHA)
+	var overallCommitLink string
+	if newestRun != nil {
+		overallCommitLink = repoLink(ref, "/runs/"+newestRun.Name, linkNS)
+	}
+
+	if newestOverallTime.IsZero() && newestRun != nil {
+		newestOverallTime, _ = runCommitTime(newestRun)
+		if newestOverallTime.IsZero() {
+			newestOverallTime = newestRun.CreationTimestamp.Time
+		}
+	}
+	overallTimeStr := FormatAge(metav1.Time{Time: newestOverallTime})
+	overallTimeUTC := newestOverallTime.UTC().Format(time.RFC3339)
+
+	view := RepoOverviewView{
+		ActiveTab:             NavTabOverview,
+		Repo:                  ref,
+		Namespace:             ns,
+		LinkNamespace:         linkNS,
+		Branch:                branch,
+		Cohort:                cohortFilter,
+		IsEmpty:               len(suiteRows) == 0,
+		OverallScore:          overallScoreStr,
+		OverallCILabel:        overallCIStr,
+		OverallCommitSHA:      newestOverallCommitSHA,
+		OverallCommitShort:    overallCommitShort,
+		OverallCommitLink:     overallCommitLink,
+		OverallTimeStr:        overallTimeStr,
+		OverallTimeUTC:        overallTimeUTC,
+		Suites:                suiteRows,
+		TotalRunsCount:        totalRuns,
+		RunsLink:              repoLink(ref, "/runs", linkNS),
+		TotalComparisonsCount: totalComparisons,
+		ComparisonsLink:       repoLink(ref, "/comparisons", linkNS),
+		TotalPullsCount:       totalPulls,
+		PullsLink:             repoLink(ref, "/pulls", linkNS),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := RenderRepoOverview(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
 }
 
 func (s *Server) handleRepoRunsList(w http.ResponseWriter, r *http.Request) {
@@ -833,6 +1486,12 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, http.StatusInternalServerError, "failed to get run", fmt.Sprintf("failed to get run %s/%s", ns, name), err)
+		return
+	}
+
+	if ref, ok := runRepoRef(&run); ok && !ref.IsZero() {
+		target := s.redirectURLWithQuery(ref.Path()+"/runs/"+name, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
 		return
 	}
 
@@ -1473,6 +2132,12 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if ref, ok := comparisonRepoRef(ctx, &comp, s.readerFor(ns)); ok && !ref.IsZero() {
+		target := s.redirectURLWithQuery(ref.Path()+"/comparisons/"+name, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
+
 	s.renderComparisonDetail(w, r, &comp, ns, RepoRef{})
 }
 
@@ -1957,7 +2622,7 @@ func (s *Server) handleRepoPullDetail(w http.ResponseWriter, r *http.Request) {
 	numberStr := r.PathValue("number")
 	num, err := strconv.Atoi(numberStr)
 	if err != nil || num <= 0 {
-		httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid pr number: %q", numberStr), nil)
+		httpError(w, http.StatusNotFound, "not found", fmt.Sprintf("invalid pr number: %q", numberStr), nil)
 		return
 	}
 	ns, err := s.namespaceFor(r)
@@ -1967,6 +2632,27 @@ func (s *Server) handleRepoPullDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderPullHistory(w, r, ns, &ref, ref.Owner+"/"+ref.Name, num)
+}
+
+func (s *Server) handleRepoPullAlias(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	numberStr := r.PathValue("number")
+	num, err := strconv.Atoi(numberStr)
+	if err != nil || num <= 0 {
+		httpError(w, http.StatusNotFound, "not found", fmt.Sprintf("invalid pr number: %q", numberStr), nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	target := s.redirectURLWithQuery(ref.Path()+fmt.Sprintf("/pulls/%d", num), r, ns)
+	http.Redirect(w, r, target, http.StatusPermanentRedirect)
 }
 
 func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns string, filter *RepoRef, repoOrHash string, num int) {
@@ -2341,6 +3027,50 @@ func (s *Server) handleSeriesList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// repoRefToHash returns the 7-character hexadecimal hash for a RepoRef.
+// Note: this assumes github.com ("owner/repo") normalization, which matches
+// legacy CleanRepo(url) behavior for github.com. For non-github URLs, legacy
+// CleanRepo left the URL untouched; repoRefToHash is only relied on for the
+// no-runs 404 path when no runs are present in the namespace to resolve from.
+func repoRefToHash(ref RepoRef) string {
+	if ref.Owner == "-" {
+		return RepoHash(ref.Name)
+	}
+	return RepoHash(ref.Owner + "/" + ref.Name)
+}
+
+func resolveRepoHash(ref RepoRef, runs []v1alpha1.Run) string {
+	for i := range runs {
+		run := &runs[i]
+		if rRef, ok := runRepoRef(run); ok && rRef.Equal(ref) {
+			repo := runRepository(run)
+			if repo != "" {
+				return RepoHash(repo)
+			}
+		}
+	}
+	return repoRefToHash(ref)
+}
+
+func (s *Server) handleRepoSeries(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	branch := r.PathValue("branch")
+	branch = strings.TrimSuffix(branch, "/")
+	if branch == "" {
+		branch = "main"
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	s.renderSeriesDetail(w, r, ns, ref, "", branch)
+}
+
 func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
@@ -2361,6 +3091,59 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var runList v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+
+	var matchingRefs []RepoRef
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		repo := runRepository(run)
+		h := RepoHash(repo)
+		if strings.EqualFold(h, repoOrHash) || strings.EqualFold(repo, repoOrHash) {
+			if rRef, ok := runRepoRef(run); ok && !rRef.IsZero() {
+				found := false
+				for _, existing := range matchingRefs {
+					if existing.Equal(rRef) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					matchingRefs = append(matchingRefs, rRef)
+				}
+			}
+		}
+	}
+	if len(matchingRefs) == 1 {
+		escapedPath := r.URL.EscapedPath()
+		legacyPrefix := fmt.Sprintf("/series/%s/", url.PathEscape(repoOrHash))
+		escapedBranch := strings.TrimPrefix(escapedPath, legacyPrefix)
+		if escapedBranch == "" || escapedBranch == escapedPath {
+			escapedBranch = branch
+		}
+		target := s.redirectURLWithQuery(matchingRefs[0].Path()+"/series/"+escapedBranch, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
+
+	s.renderSeriesDetailWithList(w, r, ns, RepoRef{}, repoOrHash, branch, &runList)
+}
+
+func (s *Server) renderSeriesDetail(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, repoOrHash, branch string) {
+	ctx := r.Context()
+	var runList v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+	s.renderSeriesDetailWithList(w, r, ns, ref, repoOrHash, branch, &runList)
+}
+
+func (s *Server) renderSeriesDetailWithList(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, repoOrHash, branch string, runList *v1alpha1.RunList) {
+	linkNS := s.linkNamespace(ns)
 	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
 
 	n := 50
@@ -2375,12 +3158,6 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 
 	taskFilter := strings.TrimSpace(r.URL.Query().Get("task"))
 
-	var runList v1alpha1.RunList
-	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
-		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
-		return
-	}
-
 	type runWithTime struct {
 		run        *v1alpha1.Run
 		commitTime time.Time
@@ -2390,6 +3167,11 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	var matched []runWithTime
 	var repoDisplay string
 	matchedRepoHash := repoOrHash
+	var targetRepoHash string
+	if !ref.IsZero() {
+		targetRepoHash = resolveRepoHash(ref, runList.Items)
+		matchedRepoHash = targetRepoHash
+	}
 
 	for i := range runList.Items {
 		run := &runList.Items[i]
@@ -2409,8 +3191,14 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 
 		repo := runRepository(run)
 		h := RepoHash(repo)
-		if !strings.EqualFold(h, repoOrHash) && !strings.EqualFold(repo, repoOrHash) {
-			continue
+		if !ref.IsZero() {
+			if !strings.EqualFold(h, targetRepoHash) {
+				continue
+			}
+		} else {
+			if !strings.EqualFold(h, repoOrHash) && !strings.EqualFold(repo, repoOrHash) {
+				continue
+			}
 		}
 		if repoDisplay == "" {
 			repoDisplay = repo
@@ -2426,8 +3214,22 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(matched) == 0 {
-		httpError(w, http.StatusNotFound, "series not found", fmt.Sprintf("no runs for repo %s branch %s in namespace %s", repoOrHash, branch, ns), nil)
+		var logMsg string
+		if !ref.IsZero() {
+			logMsg = fmt.Sprintf("no runs for repo %s branch %s in namespace %s", ref.String(), branch, ns)
+		} else {
+			logMsg = fmt.Sprintf("no runs for repo %s branch %s in namespace %s", repoOrHash, branch, ns)
+		}
+		httpError(w, http.StatusNotFound, "series not found", logMsg, nil)
 		return
+	}
+
+	if repoDisplay == "" && !ref.IsZero() {
+		if ref.Owner == "-" {
+			repoDisplay = ref.Name
+		} else {
+			repoDisplay = fmt.Sprintf("%s/%s", ref.Owner, ref.Name)
+		}
 	}
 
 	sort.Slice(matched, func(i, j int) bool {
@@ -2487,13 +3289,18 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		if n != 50 {
 			tParams.Set("n", strconv.Itoa(n))
 		}
-		if ns != s.cfg.DefaultNamespace {
-			tParams.Set("namespace", ns)
-		}
 		if cohortFilter != "" {
 			tParams.Set("cohort", cohortFilter)
 		}
-		link := fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), tParams.Encode())
+		var link string
+		if ref.Host != "" {
+			link = repoLink(ref, "/series/"+branch+"?"+tParams.Encode(), linkNS)
+		} else {
+			if ns != s.cfg.DefaultNamespace {
+				tParams.Set("namespace", ns)
+			}
+			link = fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), tParams.Encode())
+		}
 		taskLinks = append(taskLinks, SeriesTaskLink{
 			ID:     tid,
 			Link:   link,
@@ -2508,13 +3315,18 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	if n != 50 {
 		cParams.Set("n", strconv.Itoa(n))
 	}
-	if ns != s.cfg.DefaultNamespace {
-		cParams.Set("namespace", ns)
-	}
 	if cohortFilter != "" {
 		cParams.Set("cohort", cohortFilter)
 	}
-	cohortsLink := fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), cParams.Encode())
+	var cohortsLink string
+	if ref.Host != "" {
+		cohortsLink = repoLink(ref, "/series/"+branch+"?"+cParams.Encode(), linkNS)
+	} else {
+		if ns != s.cfg.DefaultNamespace {
+			cParams.Set("namespace", ns)
+		}
+		cohortsLink = fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), cParams.Encode())
+	}
 
 	var svg SeriesSVG
 	var items []SeriesItem
@@ -2735,7 +3547,7 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 				DeltaPrevStr:   "—",
 				TokensStr:      "—",
 				CostStr:        "—",
-				RunLink:        fmt.Sprintf("/runs/%s/%s", run.Namespace, run.Name),
+				RunLink:        runLink(ref, run.Name, linkNS, run.Namespace),
 			}
 
 			if matchedTask != nil && matchedTask.Phase == v1alpha1.TaskPhaseCompleted && matchedTask.SuccessRate != nil {
@@ -2808,22 +3620,32 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		svg = BuildSeriesSVG(items)
 	}
 
-	backLink := "/series"
-	bParams := url.Values{}
-	if ns != s.cfg.DefaultNamespace {
-		bParams.Set("namespace", ns)
-	}
-	if cohortFilter != "" {
-		bParams.Set("cohort", cohortFilter)
-	}
-	if len(bParams) > 0 {
-		backLink += "?" + bParams.Encode()
+	var backLink string
+	if ref.Host != "" {
+		bSuffix := "/series"
+		if cohortFilter != "" {
+			bSuffix += "?cohort=" + url.QueryEscape(cohortFilter)
+		}
+		backLink = repoLink(ref, bSuffix, linkNS)
+	} else {
+		backLink = "/series"
+		bParams := url.Values{}
+		if ns != s.cfg.DefaultNamespace {
+			bParams.Set("namespace", ns)
+		}
+		if cohortFilter != "" {
+			bParams.Set("cohort", cohortFilter)
+		}
+		if len(bParams) > 0 {
+			backLink += "?" + bParams.Encode()
+		}
 	}
 
 	view := SeriesDetailView{
 		ActiveTab:             NavTabSeries,
+		Repo:                  ref,
 		Namespace:             ns,
-		LinkNamespace:         s.linkNamespace(ns),
+		LinkNamespace:         linkNS,
 		Repository:            repoDisplay,
 		RepoHash:              matchedRepoHash,
 		Branch:                branch,
@@ -3304,12 +4126,6 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	taskID, sampleID, ok := parseRunTaskRest(rest, r.URL.Query(), r.URL.Fragment, r.URL.RawFragment)
-	if !ok || taskID == "" {
-		httpError(w, http.StatusNotFound, "not found", "", nil)
-		return
-	}
-
 	ctx := r.Context()
 	var run v1alpha1.Run
 	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
@@ -3318,6 +4134,27 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, http.StatusInternalServerError, "error loading run", fmt.Sprintf("error loading run %s/%s", ns, name), err)
+		return
+	}
+
+	if ref, ok := runRepoRef(&run); ok && !ref.IsZero() {
+		escapedPath := r.URL.EscapedPath()
+		legacyPrefix := fmt.Sprintf("/runs/%s/%s", url.PathEscape(ns), url.PathEscape(name))
+		suffix := strings.TrimPrefix(escapedPath, legacyPrefix)
+		if !strings.HasPrefix(suffix, "/tasks") {
+			suffix = "/tasks"
+			if rest != "" {
+				suffix += "/" + rest
+			}
+		}
+		target := s.redirectURLWithQuery(ref.Path()+"/runs/"+name+suffix, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
+
+	taskID, sampleID, ok := parseRunTaskRest(rest, r.URL.Query(), r.URL.Fragment, r.URL.RawFragment)
+	if !ok || taskID == "" {
+		httpError(w, http.StatusNotFound, "not found", "", nil)
 		return
 	}
 

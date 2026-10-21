@@ -478,7 +478,7 @@ spec:
 		})
 
 		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
-		runName := "gcs-emulator-sample-run"
+		runName := "base-gcs-sample-run"
 
 		// Clean up any existing run
 		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
@@ -489,6 +489,8 @@ kind: Run
 metadata:
   name: %s
   namespace: eval-runner
+  labels:
+    evalrunner.gke-labs.dev/branch: main
 spec:
   repo:
     url: git://git-server.eval-runner-sandbox.svc/docs-eval.git

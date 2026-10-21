@@ -274,6 +274,7 @@ const repoHeaderPartial = `{{- define "repo_header" }}
         <a href="{{ repoLink .Repo "/runs" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="{{ repoLink .Repo "/pulls" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull requests</a>
         <a href="{{ repoLink .Repo "/comparisons" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+        <a href="{{ repoLink .Repo "/series" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
       </nav>
       {{- else }}
       <a href="/runs" class="header-logo">eval-runner</a>
@@ -341,6 +342,223 @@ const repoIndexTemplate = `
         </table>
       </div>
     </div>
+  </main>
+</body>
+</html>
+`
+
+const repoOverviewTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ if .Repo.Name }}{{ .Repo.Name }} · {{ end }}Overview · eval-runner</title>
+  <style>` + baseCSS + `
+.overview-headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 24px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.overview-headline .headline-score {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.overview-headline .headline-ci {
+  font-size: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+.overview-headline .headline-meta {
+  font-size: 14px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.suite-row {
+  background: var(--neutral-soft);
+  font-weight: 600;
+}
+.suite-row td {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.eval-row td.eval-name {
+  padding-left: 32px;
+}
+.sparkline-svg {
+  display: block;
+}
+</style>
+</head>
+<body>
+  {{ template "repo_header" . }}
+
+  <main class="container">
+    {{- if .IsEmpty }}
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Overview</h1>
+        <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">{{ .Branch }}</span></span>
+      </div>
+      <div class="card-body">
+        <div class="empty-state">
+          <p>No observations recorded on <code class="mono">{{ .Branch }}</code>. Produce an observation by applying a baseline Run: <code class="mono">kubectl apply -f &lt;run.yaml&gt;</code></p>
+        </div>
+      </div>
+    </div>
+    {{- else }}
+    <!-- 1. Headline -->
+    <div class="overview-headline">
+      <div>
+        <span class="headline-score">{{ .OverallScore }}</span>
+        <span class="headline-ci">{{ .OverallCILabel }}</span>
+      </div>
+      <div class="headline-meta">
+        at commit {{ if .OverallCommitLink }}<a href="{{ .OverallCommitLink }}" class="mono">{{ .OverallCommitShort }}</a>{{ else }}<span class="mono">{{ .OverallCommitShort }}</span>{{ end }} · <span title="{{ .OverallTimeUTC }}">{{ .OverallTimeStr }}</span>
+      </div>
+    </div>
+
+    <!-- 2 & 3. Eval Suites & Evals Table -->
+    <div class="card">
+      <div class="card-header">
+        <h1 class="card-title">Eval Suites</h1>
+        <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">{{ .Branch }}</span></span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="ci">
+          <thead>
+            <tr>
+              <th>Suite / Eval</th>
+              <th>Score (95% CI)</th>
+              <th>Evals</th>
+              <th>Δ vs prev</th>
+              <th>Trend</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{- range .Suites }}
+            <tr class="suite-row">
+              <td>
+                {{- if .SuiteLink }}
+                <a href="{{ .SuiteLink }}" class="mono" style="font-weight:600">{{ .Name }}</a>
+                {{- else }}
+                <span class="mono" style="font-weight:600">{{ .Name }}</span>
+                {{- end }}
+              </td>
+              <td>
+                <span class="mono" style="font-weight:600">{{ .ScoreStr }}</span>
+                <span style="font-size:12px;color:var(--muted);margin-left:4px">{{ .CILabel }}</span>
+              </td>
+              <td class="num">{{ .EvalsCount }}</td>
+              <td>
+                {{- if .HasDelta }}
+                <span class="chip {{ .DeltaClass }}">{{ .DeltaStr }}</span>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+              <td>
+                {{- if .Sparkline.HasPoints }}
+                <svg viewBox="{{ .Sparkline.ViewBox }}" width="120" height="28" class="sparkline-svg">
+                  {{- range .Sparkline.Polygons }}
+                  <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+                  {{- end }}
+                  {{- range .Sparkline.Polylines }}
+                  <polyline points="{{ .Points }}" fill="none" stroke="{{ .Stroke }}" stroke-width="1.5"/>
+                  {{- end }}
+                  {{- range .Sparkline.Circles }}
+                  <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)"/>
+                  {{- end }}
+                  {{- range .Sparkline.Ticks }}
+                  <line x1="{{ .X1 }}" y1="{{ .Y1 }}" x2="{{ .X2 }}" y2="{{ .Y2 }}" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--indigo){{ end }}" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                  {{- end }}
+                </svg>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+            </tr>
+            {{- range .Evals }}
+            <tr class="eval-row">
+              <td class="eval-name mono">
+                {{- if .SamplesLink }}
+                <a href="{{ .SamplesLink }}">{{ .ID }}</a>
+                {{- else }}
+                {{ .ID }}
+                {{- end }}
+              </td>
+              <td>
+                {{- if .RunLink }}
+                <a href="{{ .RunLink }}" class="mono">{{ .ScoreStr }}</a>
+                {{- else }}
+                <span class="mono">{{ .ScoreStr }}</span>
+                {{- end }}
+                <span style="font-size:12px;color:var(--muted);margin-left:4px">{{ .CILabel }}</span>
+              </td>
+              <td class="num" style="color:var(--muted)">—</td>
+              <td>
+                {{- if .HasDelta }}
+                <span class="chip {{ .DeltaClass }}">{{ .DeltaStr }}</span>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+              <td>
+                {{- if .Sparkline.HasPoints }}
+                <svg viewBox="{{ .Sparkline.ViewBox }}" width="120" height="28" class="sparkline-svg">
+                  {{- range .Sparkline.Polygons }}
+                  <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+                  {{- end }}
+                  {{- range .Sparkline.Polylines }}
+                  <polyline points="{{ .Points }}" fill="none" stroke="{{ .Stroke }}" stroke-width="1.5"/>
+                  {{- end }}
+                  {{- range .Sparkline.Circles }}
+                  <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)"/>
+                  {{- end }}
+                  {{- range .Sparkline.Ticks }}
+                  <line x1="{{ .X1 }}" y1="{{ .Y1 }}" x2="{{ .X2 }}" y2="{{ .Y2 }}" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--indigo){{ end }}" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+                  {{- end }}
+                </svg>
+                {{- else }}
+                <span style="color:var(--muted)">—</span>
+                {{- end }}
+              </td>
+            </tr>
+            {{- end }}
+            {{- end }}
+          </tbody>
+        </table>
+      </div>
+      <div style="padding:14px 24px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);line-height:1.5">
+        Score at main for an eval is the pooled success rate (Wilson score interval) over the newest completed baseline observations on <code class="mono">{{ .Branch }}</code>. Suite scores are the mean of their evals' scores with the confidence interval from pooled samples. Overall score is the mean over suites.
+      </div>
+    </div>
+
+    <!-- 4. Tiles below the table -->
+    <div class="meta-grid" style="margin-top:24px">
+      <div class="meta-tile">
+        <div class="label">Runs</div>
+        <div class="value num"><a href="{{ .RunsLink }}">{{ .TotalRunsCount }}</a></div>
+      </div>
+      <div class="meta-tile">
+        <div class="label">Comparisons</div>
+        <div class="value num"><a href="{{ .ComparisonsLink }}">{{ .TotalComparisonsCount }}</a></div>
+      </div>
+      <div class="meta-tile">
+        <div class="label">Pull Requests</div>
+        <div class="value num"><a href="{{ .PullsLink }}">{{ .TotalPullsCount }}</a></div>
+      </div>
+    </div>
+    {{- end }}
   </main>
 </body>
 </html>
@@ -1457,6 +1675,7 @@ var (
 	tmplSeriesList       = parseTemplate("series_list", seriesListTemplate)
 	tmplSeriesDetail     = parseTemplate("series_detail", seriesDetailTemplate)
 	tmplRepoIndex        = parseTemplate("repo_index", repoIndexTemplate)
+	tmplRepoOverview     = parseTemplate("repo_overview", repoOverviewTemplate)
 
 	// TmplComparisonTable is the parsed template for the comparison table sub-template.
 	TmplComparisonTable = tmplComparisonTable
@@ -1736,6 +1955,9 @@ const seriesDetailTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
+{{- if .Repo.Host }}
+{{ template "repo_header" . }}
+{{- else }}
   <header class="header-bar">
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
@@ -1750,6 +1972,7 @@ const seriesDetailTemplate = `
     <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
     {{- end }}
   </header>
+{{- end }}
 
   <main class="container">
     <div class="card">
@@ -1945,4 +2168,9 @@ func RenderSeriesDetail(w io.Writer, view SeriesDetailView) error {
 // RenderRepoIndex renders the repository index template to the given writer.
 func RenderRepoIndex(w io.Writer, view RepoIndexView) error {
 	return tmplRepoIndex.Execute(w, view)
+}
+
+// RenderRepoOverview renders the repository overview template to the given writer.
+func RenderRepoOverview(w io.Writer, view RepoOverviewView) error {
+	return tmplRepoOverview.Execute(w, view)
 }
