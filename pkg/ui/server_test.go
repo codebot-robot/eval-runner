@@ -2205,15 +2205,20 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 	taskID := "triage/runbook_lookup"
 	meanScore := 0.5
 	now := time.Now()
+	s1Score := 1.0
+	s2Score := 0.0
 	meta := artifacts.RunMetadata{
 		TaskID:     taskID,
 		Commit:     commit,
 		Model:      "gemini-2.5-pro",
-		Samples:    2,
 		Successes:  1,
 		MeanScore:  &meanScore,
 		StartedAt:  &now,
 		FinishedAt: &now,
+		Samples: []artifacts.TaskSampleSummary{
+			{ID: "sample-017", Score: &s1Score, Status: "pass"},
+			{ID: "sample-019", Score: &s2Score, Status: "fail"},
+		},
 	}
 
 	logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", fixtureData)
@@ -2525,7 +2530,6 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 			TaskID:     "task/truncated",
 			Commit:     commit,
 			Model:      "gemini-2.5-pro",
-			Samples:    1,
 			StartedAt:  &now,
 			FinishedAt: &now,
 		}
@@ -2619,7 +2623,6 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 			TaskID:     "task/hostile",
 			Commit:     commit,
 			Model:      "gemini-2.5-pro",
-			Samples:    1,
 			StartedAt:  &now,
 			FinishedAt: &now,
 		}
@@ -2737,7 +2740,6 @@ func TestServerTaskSamples_InMemorySink_Drilldown(t *testing.T) {
 		TaskID:     taskID,
 		Commit:     commit,
 		Model:      "gemini-2.5-pro",
-		Samples:    2,
 		StartedAt:  &now,
 		FinishedAt: &now,
 	}
@@ -2885,6 +2887,122 @@ func TestServerTaskSamples_InMemorySink_Drilldown(t *testing.T) {
 			t.Errorf("expected 'artifacts: none' in body, got:\n%s", w.Body.String())
 		}
 	})
+}
+
+func TestServer_TaskSamplesFastPathWithSummaryJSON(t *testing.T) {
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+	commit := "commitfast1234"
+	taskID := "task/fast"
+
+	scoreVal := 1.0
+	sampleSummaries := []artifacts.TaskSampleSummary{
+		{
+			ID:     "sample-fast-1",
+			Score:  &scoreVal,
+			Status: "pass",
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "fast-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            taskID,
+		Commit:            commit,
+		Model:             "gemini-2.5-pro",
+		ControllerVersion: "v1.0.0",
+		Scorer:            "choice",
+		Samples:           sampleSummaries,
+	}
+
+	// Full log is unparsable invalid JSON: slow path cannot satisfy the request
+	invalidLog := []byte(`{"version": 2, "truncated_or_corrupt": true`)
+
+	logPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", invalidLog)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fast-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "gemini-2.5-pro",
+			Repo:  v1alpha1.RepoSpec{Commit: commit},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: logPath,
+				},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+
+	srv := NewServer(Config{Client: cl, ArtifactSink: sink})
+
+	// Request sample list: falls back to summary.json when full log is unparsable
+	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/fast-run/tasks/task%2Ffast/samples", nil)
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for sample list from summary fallback, got %d: %s", wList.Code, wList.Body.String())
+	}
+	if !strings.Contains(wList.Body.String(), "sample-fast-1") {
+		t.Errorf("expected sample-fast-1 in sample list HTML")
+	}
+
+	// Verify the cache key used is the summary URI, not the logPath
+	summaryURI := artifacts.TaskSummaryURI(logPath)
+	if _, _, ok := srv.cache.get(summaryURI); !ok {
+		t.Errorf("expected summaryURI %q to be cached in srv.cache", summaryURI)
+	}
+
+	// Verify truncation banner is rendered if samplesTruncated is true
+	metaTrunc := meta
+	metaTrunc.TaskID = "task/truncated"
+	metaTrunc.SamplesTruncated = true
+	truncLogPath, err := sink.StoreArtifact(t.Context(), metaTrunc, "inspect.json", invalidLog)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+	runTrunc := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fast-run-trunc",
+			Namespace: "eval-runner",
+		},
+		Spec: run.Spec,
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "task/truncated",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: truncLogPath,
+				},
+			},
+		},
+	}
+	clTrunc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runTrunc).Build()
+	srvTrunc := NewServer(Config{Client: clTrunc, ArtifactSink: sink})
+	reqTrunc := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/fast-run-trunc/tasks/task%2Ftruncated/samples", nil)
+	wTrunc := httptest.NewRecorder()
+	srvTrunc.ServeHTTP(wTrunc, reqTrunc)
+	if wTrunc.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for truncated sample list, got %d", wTrunc.Code)
+	}
+	if !strings.Contains(wTrunc.Body.String(), "10,000") {
+		t.Errorf("expected 10,000 truncation message in banner, got:\n%s", wTrunc.Body.String())
+	}
 }
 
 func TestLogLRUCache(t *testing.T) {
@@ -3058,7 +3176,6 @@ func TestServerSampleTranscript_Truncation(t *testing.T) {
 		TaskID:     taskID,
 		Commit:     commit,
 		Model:      "gemini-2.5-pro",
-		Samples:    2,
 		Successes:  2,
 		MeanScore:  &meanScore,
 		StartedAt:  &now,
@@ -3192,7 +3309,6 @@ func TestServerTaskSamplesList_Truncation(t *testing.T) {
 		TaskID:     taskID,
 		Commit:     commit,
 		Model:      "gemini-2.5-pro",
-		Samples:    2,
 		Successes:  2,
 		MeanScore:  &meanScore,
 		StartedAt:  &now,
