@@ -489,10 +489,16 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				if artifact.Tasks[0].Ties != tt.expectedTies {
 					t.Errorf("Artifact task Ties: got %d, want %d", artifact.Tasks[0].Ties, tt.expectedTies)
 				}
-				if taskRes.PImprovement == nil {
-					t.Errorf("Task PImprovement: got nil, want non-nil")
-				} else if artifact.Tasks[0].PImprovement != *taskRes.PImprovement {
-					t.Errorf("Artifact task PImprovement: got %v, want %v", artifact.Tasks[0].PImprovement, *taskRes.PImprovement)
+				if tt.expectedPairs > 0 {
+					if taskRes.PImprovement == nil {
+						t.Errorf("Task PImprovement: got nil, want non-nil")
+					} else if artifact.Tasks[0].PImprovement != *taskRes.PImprovement {
+						t.Errorf("Artifact task PImprovement: got %v, want %v", artifact.Tasks[0].PImprovement, *taskRes.PImprovement)
+					}
+				} else {
+					if taskRes.PImprovement != nil {
+						t.Errorf("Task PImprovement: got %v, want nil for 0 pairs", *taskRes.PImprovement)
+					}
 				}
 				if tt.expectedPairs > 0 && len(artifact.Tasks[0].PairsTable) != tt.expectedPairs {
 					t.Errorf("Artifact pairsTable length: got %d, want %d", len(artifact.Tasks[0].PairsTable), tt.expectedPairs)

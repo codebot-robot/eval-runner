@@ -2447,7 +2447,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			var partialStatuses []v1alpha1.ComparisonTaskStatus
 			for _, te := range taskEvals {
-				pImp := te.est.PImprovement
+				var pImp *float64
+				if te.est.NumPairs > 0 {
+					v := te.est.PImprovement
+					pImp = &v
+				}
 				ts := v1alpha1.ComparisonTaskStatus{
 					ID:            te.taskID,
 					BaseRate:      &te.est.BaseMean,
@@ -2457,7 +2461,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						Lower: te.est.CI.Lower,
 						Upper: te.est.CI.Upper,
 					},
-					PImprovement: &pImp,
+					PImprovement: pImp,
 					Pairs:        te.est.NumPairs,
 					Wins:         te.est.Wins,
 					Losses:       te.est.Losses,
@@ -2615,7 +2619,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 			var partialStatuses []v1alpha1.ComparisonTaskStatus
 			for _, te := range taskEvals {
-				pImp := te.est.PImprovement
+				var pImp *float64
+				if te.est.NumPairs > 0 {
+					v := te.est.PImprovement
+					pImp = &v
+				}
 				ts := v1alpha1.ComparisonTaskStatus{
 					ID:            te.taskID,
 					BaseRate:      &te.est.BaseMean,
@@ -2625,7 +2633,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 						Lower: te.est.CI.Lower,
 						Upper: te.est.CI.Upper,
 					},
-					PImprovement: &pImp,
+					PImprovement: pImp,
 					Pairs:        te.est.NumPairs,
 					Wins:         te.est.Wins,
 					Losses:       te.est.Losses,
@@ -2754,7 +2762,11 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	var taskArtifacts []ComparisonTaskArtifact
 
 	for _, te := range taskEvals {
-		pImp := te.est.PImprovement
+		var pImp *float64
+		if te.est.NumPairs > 0 {
+			v := te.est.PImprovement
+			pImp = &v
+		}
 		taskStatus := v1alpha1.ComparisonTaskStatus{
 			ID:            te.taskID,
 			BaseRate:      &te.est.BaseMean,
@@ -2764,7 +2776,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				Lower: te.est.CI.Lower,
 				Upper: te.est.CI.Upper,
 			},
-			PImprovement: &pImp,
+			PImprovement: pImp,
 			Pairs:        te.est.NumPairs,
 			Wins:         te.est.Wins,
 			Losses:       te.est.Losses,
