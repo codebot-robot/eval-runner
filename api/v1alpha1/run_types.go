@@ -338,8 +338,23 @@ const (
 	DefaultCohort = "default"
 )
 
-// Manifest is the parsed output of .evals/list.
+// ManifestSource indicates the provenance or discovery mechanism of the manifest.
+type ManifestSource string
+
+const (
+	// ManifestSourceList indicates the manifest was discovered by executing ./.evals/list.
+	ManifestSourceList ManifestSource = "list"
+
+	// ManifestSourceInspectScan indicates the manifest was synthesized by scanning for Inspect @task decorators.
+	ManifestSourceInspectScan ManifestSource = "inspect-scan"
+)
+
+// Manifest is the parsed output of .evals/list or synthesized by inspect-scan.
 type Manifest struct {
+	// Source indicates the provenance of the manifest (e.g. "list" or "inspect-scan").
+	// +optional
+	Source string `json:"source,omitempty"`
+
 	// Images lists the images declared by the repository.
 	// +optional
 	Images []ManifestImage `json:"images,omitempty"`
@@ -430,6 +445,11 @@ type RunStatus struct {
 	// Discovery records pointers, hash, and counts for the discovered manifest.
 	// +optional
 	Discovery *RunDiscoveryStatus `json:"discovery,omitempty"`
+
+	// ManifestSource indicates the discovery mechanism of the manifest ("list" or "inspect-scan").
+	// +kubebuilder:validation:Enum=list;inspect-scan
+	// +optional
+	ManifestSource ManifestSource `json:"manifestSource,omitempty"`
 
 	// DiscoveryDeadline is the deadline by which discovery must complete.
 	// +optional

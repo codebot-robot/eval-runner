@@ -245,6 +245,13 @@ spec:
                   must complete.
                 format: date-time
                 type: string
+              manifestSource:
+                description: ManifestSource indicates the discovery mechanism of the
+                  manifest ("list" or "inspect-scan").
+                enum:
+                - list
+                - inspect-scan
+                type: string
               message:
                 description: Message is human-readable detail on failure or current
                   status.
