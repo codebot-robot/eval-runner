@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4395,6 +4396,241 @@ func TestServerComparisonDetail_ReasonPanelRegressedTasksAndDeltas(t *testing.T)
 		}
 		if strings.Contains(w.Body.String(), `class="reason-panel"`) {
 			t.Errorf("did not expect a reason panel without a status message")
+		}
+	})
+}
+
+type countingReader struct {
+	client.Reader
+	calls atomic.Int32
+}
+
+func (c *countingReader) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	c.calls.Add(1)
+	return c.Reader.Get(ctx, key, obj, opts...)
+}
+
+func (c *countingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	c.calls.Add(1)
+	return c.Reader.List(ctx, list, opts...)
+}
+
+func TestServerServesListsFromInjectedReaderWithoutDirectClient(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	runCached := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-cached-run-default",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/org/repo",
+				Commit: "abcdef123456",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	compCached := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cached-comp-default",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-30 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "base-cached-run-default",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "base-cached-run-default",
+			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org/repo",
+				Number:     101,
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase: v1alpha1.ComparisonPhaseCompleted,
+		},
+	}
+
+	runDirect := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "direct-run-custom",
+			Namespace:         "custom-ns",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/org/repo",
+				Commit: "fedcba654321",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	cacheFake := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runCached, compCached).Build()
+	directFake := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runDirect).Build()
+	directSpy := &countingReader{Reader: directFake}
+
+	server := NewServer(Config{
+		Client:           directSpy,
+		Cache:            cacheFake,
+		DefaultNamespace: "eval-runner",
+	})
+
+	listEndpoints := []struct {
+		url      string
+		wantBody string
+	}{
+		{"/runs", "base-cached-run-default"},
+		{"/comparisons", "cached-comp-default"},
+		{"/pulls", "cached-comp-default"},
+		{"/series", "org/repo"},
+	}
+
+	for _, ep := range listEndpoints {
+		t.Run("default_ns_"+ep.url, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep.url, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK for %s, got %d", ep.url, w.Code)
+			}
+			if !strings.Contains(w.Body.String(), ep.wantBody) {
+				t.Errorf("expected response from injected reader to contain %q, body: %s", ep.wantBody, w.Body.String())
+			}
+		})
+	}
+
+	// Verify that direct client was NEVER called for the default namespace list requests
+	if calls := directSpy.calls.Load(); calls != 0 {
+		t.Fatalf("expected direct client to never be called for default namespace lists, but got %d calls", calls)
+	}
+
+	// Verify that detail handlers in default namespace also read from cache without touching direct client
+	detailEndpoints := []struct {
+		url      string
+		wantBody string
+	}{
+		{"/runs/eval-runner/base-cached-run-default", "base-cached-run-default"},
+		{"/comparisons/eval-runner/cached-comp-default", "cached-comp-default"},
+	}
+	for _, ep := range detailEndpoints {
+		t.Run("default_ns_detail_"+ep.url, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep.url, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK for %s, got %d", ep.url, w.Code)
+			}
+			if !strings.Contains(w.Body.String(), ep.wantBody) {
+				t.Errorf("expected response from injected reader to contain %q", ep.wantBody)
+			}
+		})
+	}
+	if calls := directSpy.calls.Load(); calls != 0 {
+		t.Fatalf("expected direct client to never be called for default namespace details, but got %d calls", calls)
+	}
+
+	// Cross-namespace override request must route to direct client
+	t.Run("cross_namespace_calls_direct_client", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs?namespace=custom-ns", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for cross-namespace request, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "direct-run-custom") {
+			t.Errorf("expected response to contain direct-run-custom, body: %s", w.Body.String())
+		}
+		if calls := directSpy.calls.Load(); calls == 0 {
+			t.Fatalf("expected direct client to be called for cross-namespace request, got 0 calls")
+		}
+	})
+}
+
+func TestServerHealthz_CacheSync(t *testing.T) {
+	scheme := newTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	t.Run("returns 503 until synced then 200", func(t *testing.T) {
+		var synced atomic.Bool
+		synced.Store(false)
+
+		server := NewServer(Config{
+			Client:           fakeClient,
+			CacheSyncChecker: synced.Load,
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected status 503, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "cache not synced") {
+			t.Errorf("expected body to contain 'cache not synced', got %q", w.Body.String())
+		}
+
+		// Cache sync completes
+		synced.Store(true)
+
+		w2 := httptest.NewRecorder()
+		server.ServeHTTP(w2, req)
+		if w2.Code != http.StatusOK {
+			t.Fatalf("expected status 200 after sync, got %d", w2.Code)
+		}
+		if strings.TrimSpace(w2.Body.String()) != "ok" {
+			t.Errorf("expected body 'ok', got %q", w2.Body.String())
+		}
+	})
+
+	t.Run("returns 200 when checker is nil", func(t *testing.T) {
+		server := NewServer(Config{
+			Client: fakeClient,
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w.Code)
+		}
+		if strings.TrimSpace(w.Body.String()) != "ok" {
+			t.Errorf("expected body 'ok', got %q", w.Body.String())
+		}
+	})
+
+	t.Run("livez returns 200 while cache is unsynced", func(t *testing.T) {
+		server := NewServer(Config{
+			Client:           fakeClient,
+			CacheSyncChecker: func() bool { return false },
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/livez", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200 for /livez, got %d", w.Code)
+		}
+		if strings.TrimSpace(w.Body.String()) != "ok" {
+			t.Errorf("expected body 'ok', got %q", w.Body.String())
 		}
 	})
 }

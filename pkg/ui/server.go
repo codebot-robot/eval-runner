@@ -121,6 +121,8 @@ func buildPageURL(baseURL string, query url.Values, newOffset int, limit int) st
 // Config configures the web UI server.
 type Config struct {
 	Client           client.Reader
+	Cache            client.Reader
+	CacheSyncChecker func() bool
 	DefaultNamespace string
 	ArtifactSink     artifacts.ArtifactSink
 }
@@ -131,6 +133,19 @@ type Server struct {
 	mux       *http.ServeMux
 	cache     *logLRUCache
 	compCache *comparisonLRUCache
+}
+
+// readerFor returns the cache reader for the default namespace when available,
+// falling back to the direct client for cross-namespace queries or when cache is not configured.
+func (s *Server) readerFor(ns string) client.Reader {
+	if s.cfg.Cache != nil && ns == s.cfg.DefaultNamespace {
+		return s.cfg.Cache
+	}
+	if s.cfg.Client != nil {
+		return s.cfg.Client
+	}
+	// Fallback to cache when Client is unset, allowing unit tests to inject a cache-only reader.
+	return s.cfg.Cache
 }
 
 // NewServer initializes a new Server with route registration.
@@ -157,6 +172,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /livez", s.handleLivez)
 	s.mux.HandleFunc("GET /{$}", s.handleRoot)
 	s.mux.HandleFunc("GET /runs", s.handleRunsList)
 	s.mux.HandleFunc("GET /runs/{$}", s.handleRunsList)
@@ -182,6 +198,22 @@ func parseMetricFilter(r *http.Request) MetricFilter {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.CacheSyncChecker != nil && !s.cfg.CacheSyncChecker() {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if _, err := w.Write([]byte("cache not synced\n")); err != nil {
+			return
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("ok\n")); err != nil {
+		return
+	}
+}
+
+func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("ok\n")); err != nil {
@@ -231,7 +263,7 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var runList v1alpha1.RunList
-	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
 		if apierrors.IsForbidden(err) {
 			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
@@ -367,7 +399,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var run v1alpha1.Run
-	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
+	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
 		if apierrors.IsNotFound(err) {
 			httpError(w, http.StatusNotFound, "run not found", "", nil)
 			return
@@ -661,7 +693,7 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 	kind := ParseComparisonKind(r.URL.Query().Get("kind"))
 
 	var compList v1alpha1.ComparisonList
-	if err := s.cfg.Client.List(ctx, &compList, client.InNamespace(ns)); err != nil {
+	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
 		if apierrors.IsForbidden(err) {
 			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
@@ -756,7 +788,7 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 // missing run deltas, and candidate groups are ordered by Comparison creation time.
 func (s *Server) runsByName(ctx context.Context, ns string) map[string]*v1alpha1.Run {
 	var runList v1alpha1.RunList
-	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
 		log.Printf("failed to list runs in namespace %s for the comparisons page: %v", ns, err)
 		return nil
 	}
@@ -777,7 +809,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var comp v1alpha1.Comparison
-	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &comp); err != nil {
+	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &comp); err != nil {
 		if apierrors.IsNotFound(err) {
 			httpError(w, http.StatusNotFound, "comparison not found", "", nil)
 			return
@@ -794,7 +826,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 	var baseRunPtr, candRunPtr *v1alpha1.Run
 	if comp.Spec.Baseline.Run != "" {
 		var baseRun v1alpha1.Run
-		if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: comp.Spec.Baseline.Run}, &baseRun); err != nil {
+		if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: comp.Spec.Baseline.Run}, &baseRun); err != nil {
 			if !apierrors.IsNotFound(err) {
 				// Non-fatal lookup error, continue with run name reference
 				_ = err
@@ -806,7 +838,7 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 
 	if comp.Spec.Candidate.Run != "" {
 		var candRun v1alpha1.Run
-		if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: comp.Spec.Candidate.Run}, &candRun); err != nil {
+		if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: comp.Spec.Candidate.Run}, &candRun); err != nil {
 			if !apierrors.IsNotFound(err) {
 				// Non-fatal lookup error, continue with run name reference
 				_ = err
@@ -856,7 +888,7 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var compList v1alpha1.ComparisonList
-	if err := s.cfg.Client.List(ctx, &compList, client.InNamespace(ns)); err != nil {
+	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
 		if apierrors.IsForbidden(err) {
 			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
@@ -1031,7 +1063,7 @@ func (s *Server) handlePullDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns string, repoOrHash string, num int) {
 	ctx := r.Context()
 	var compList v1alpha1.ComparisonList
-	if err := s.cfg.Client.List(ctx, &compList, client.InNamespace(ns)); err != nil {
+	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
 		if apierrors.IsForbidden(err) {
 			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
@@ -1183,7 +1215,7 @@ func (s *Server) handleSeriesList(w http.ResponseWriter, r *http.Request) {
 	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
 
 	var runList v1alpha1.RunList
-	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
 		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
 		return
 	}
@@ -1298,7 +1330,7 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	taskFilter := strings.TrimSpace(r.URL.Query().Get("task"))
 
 	var runList v1alpha1.RunList
-	if err := s.cfg.Client.List(ctx, &runList, client.InNamespace(ns)); err != nil {
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
 		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
 		return
 	}
@@ -1906,7 +1938,7 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	var run v1alpha1.Run
-	if err := s.cfg.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
+	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
 		if apierrors.IsNotFound(err) {
 			httpError(w, http.StatusNotFound, "run not found", "", nil)
 			return
