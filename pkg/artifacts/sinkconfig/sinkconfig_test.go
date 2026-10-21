@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
@@ -26,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -269,4 +272,103 @@ func TestLoadArtifactConfig(t *testing.T) {
 			t.Errorf("expected empty ArtifactDir for 'none', got %q", cfg.ArtifactDir)
 		}
 	})
+}
+
+func TestWatchConfigMap(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	initialCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       DefaultNamespace,
+			Name:            DefaultConfigMapName,
+			ResourceVersion: "1",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "gs://initial-bucket",
+		},
+	}
+
+	clientset := k8sfake.NewSimpleClientset(initialCM)
+
+	var mu sync.Mutex
+	var events []*corev1.ConfigMap
+	eventChan := make(chan struct{}, 10)
+
+	onChange := func(cm *corev1.ConfigMap) {
+		mu.Lock()
+		events = append(events, cm)
+		mu.Unlock()
+		eventChan <- struct{}{}
+	}
+
+	go func() {
+		_ = WatchConfigMap(ctx, clientset, DefaultNamespace, DefaultConfigMapName, onChange)
+	}()
+
+	// Wait for initial event
+	select {
+	case <-eventChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial watch event")
+	}
+
+	mu.Lock()
+	if len(events) != 1 || events[0] == nil || events[0].Data[configkeys.ConfigMapKeyArtifactBucket] != "gs://initial-bucket" {
+		t.Fatalf("expected initial event with gs://initial-bucket, got %+v", events)
+	}
+	mu.Unlock()
+
+	// Update the ConfigMap
+	updatedCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       DefaultNamespace,
+			Name:            DefaultConfigMapName,
+			ResourceVersion: "2",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "gs://updated-bucket",
+		},
+	}
+	_, err := clientset.CoreV1().ConfigMaps(DefaultNamespace).Update(ctx, updatedCM, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("failed to update configmap: %v", err)
+	}
+
+	// Wait for update event
+	select {
+	case <-eventChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update watch event")
+	}
+
+	mu.Lock()
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events, got %d", len(events))
+	}
+	lastEvent := events[len(events)-1]
+	if lastEvent == nil || lastEvent.Data[configkeys.ConfigMapKeyArtifactBucket] != "gs://updated-bucket" {
+		t.Fatalf("expected last event with gs://updated-bucket, got %+v", lastEvent)
+	}
+	mu.Unlock()
+
+	// Delete the ConfigMap
+	err = clientset.CoreV1().ConfigMaps(DefaultNamespace).Delete(ctx, DefaultConfigMapName, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("failed to delete configmap: %v", err)
+	}
+
+	// Wait for delete event
+	select {
+	case <-eventChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delete watch event")
+	}
+
+	mu.Lock()
+	lastEvent = events[len(events)-1]
+	if lastEvent != nil {
+		t.Fatalf("expected last event to be nil on delete, got %+v", lastEvent)
+	}
+	mu.Unlock()
 }
