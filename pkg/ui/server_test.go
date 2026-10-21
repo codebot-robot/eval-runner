@@ -354,6 +354,53 @@ func TestServerRunDetail(t *testing.T) {
 	}
 }
 
+func TestServer_FooterExposesVersion(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, candRun, comp := sampleFixtures()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
+
+	testVersion := "8f53b29f9fd379ab026138139e168780f53948f9-dirty"
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+		Version:          testVersion,
+	})
+
+	// 1. Run detail page footer contains version
+	reqRun := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/docs-eval-cand-05ce4d8", nil)
+	wRun := httptest.NewRecorder()
+	server.ServeHTTP(wRun, reqRun)
+	if wRun.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for run detail, got %d", wRun.Code)
+	}
+	expectedFooter := "<span>eval-runner " + testVersion + "</span>"
+	if !strings.Contains(wRun.Body.String(), expectedFooter) {
+		t.Errorf("expected footer to contain %q, got:\n%s", expectedFooter, wRun.Body.String())
+	}
+
+	// 2. Comparison detail page footer contains version
+	reqComp := httptest.NewRequest(http.MethodGet, "/comparisons/eval-runner/docs-eval-same-commit", nil)
+	wComp := httptest.NewRecorder()
+	server.ServeHTTP(wComp, reqComp)
+	if wComp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for comparison detail, got %d", wComp.Code)
+	}
+	if !strings.Contains(wComp.Body.String(), expectedFooter) {
+		t.Errorf("expected comparison footer to contain %q, got:\n%s", expectedFooter, wComp.Body.String())
+	}
+
+	// 3. Unconfigured version does not render version span
+	serverNoVer := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+	})
+	wNoVer := httptest.NewRecorder()
+	serverNoVer.ServeHTTP(wNoVer, reqRun)
+	if strings.Contains(wNoVer.Body.String(), "eval-runner "+testVersion) {
+		t.Errorf("expected unconfigured server not to render version in footer")
+	}
+}
+
 type mockFooterSink struct {
 	artifacts.ArtifactSink
 	bucket string

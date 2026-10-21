@@ -161,6 +161,7 @@ type RunDetailView struct {
 	Age             string
 	ArtifactsPrefix string
 	ArtifactFooter  string
+	Version         string
 	Message         string
 	Metric          MetricFilter
 	TotalCost       string
@@ -304,6 +305,7 @@ type PullRequestDetailView struct {
 	BackLink    string
 	Comparisons []PullRequestHistoryItem
 	TotalCount  int
+	Version     string
 }
 
 // RepoHash returns a deterministic 7-character lowercase hexadecimal SHA-256 hash
@@ -1092,6 +1094,9 @@ type ComparisonDetailView struct {
 	// Summary contains aggregate comparison headline and footer data.
 	Summary ComparisonSummaryData
 
+	// Version is the application/controller version.
+	Version string
+
 	// Footer data
 	BaseRun          string
 	BaseCommit       string
@@ -1413,6 +1418,7 @@ type SeriesDetailView struct {
 	CohortsLink           string
 	CohortLegend          []CohortLegendItem
 	CohortRows            []CohortSummaryRow
+	Version               string
 }
 
 // CohortLegendItem represents a single entry in the cohorts chart legend.
@@ -2335,6 +2341,7 @@ type TaskSamplesListView struct {
 	TruncatedMessage string
 	StorageMessage   string
 	ArtifactFooter   string
+	Version          string
 }
 
 // TranscriptRowView represents a single rendered transcript entry row.
@@ -2370,6 +2377,7 @@ type SampleTranscriptView struct {
 	TruncatedMessage       string
 	StorageMessage         string
 	ArtifactFooter         string
+	Version                string
 }
 
 // TruncateRunes truncates string s to maxRunes, appending "..." if truncated.
