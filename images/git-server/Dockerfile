@@ -41,6 +41,10 @@ RUN git config --global user.email "test@example.com" && \
     git commit -m "initial commit" && \
     git clone --bare /docs-work /git/docs-eval.git && \
     touch /git/docs-eval.git/git-daemon-export-ok && \
+    git rm -r .evals && \
+    git commit -m "remove evals list" && \
+    git clone --bare /docs-work /git/docs-no-manifest.git && \
+    touch /git/docs-no-manifest.git/git-daemon-export-ok && \
     chown -R 65534:65534 /git && \
     git config --system --add safe.directory '*' && \
     rm -rf /docs-work

@@ -339,6 +339,37 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Declarative manifests provide unambiguous provenance, avoid brittle directory structure assumptions, and allow teams to clearly separate suite expansion from regressions.
 
+---
+
+### ADR-031: Fallback Inspect @task Scanning When .evals/list Is Absent (#306)
+- **Status**: Decided
+- **Context**:
+  Concept §2.3 (docs/concept/functionality.md): when a repository has no `.evals/list`, discover Inspect tasks directly so a repo can be evaluated with zero manifest setup. Previously, discovery failed immediately when `.evals/list` was missing.
+- **Decision**:
+  1. **Authoritative `.evals/list`**:
+     When `.evals/list` is present, it remains authoritative. If `.evals/list` fails (non-zero exit code, execution error, invalid JSON, or empty task list), discovery fails permanently without fallback. An empty manifest output from `.evals/list` is not a fallback trigger.
+  2. **Fallback Scanning on Absence**:
+     Only when `.evals/list` is absent, the runner falls back to scanning the repository checkout for Python files matching `**/*.py` that define Inspect tasks.
+  3. **Inspect Task Detection**:
+     Candidate files must import `inspect_ai` (e.g. `import inspect_ai` or `from inspect_ai...`) and declare function definitions (`def` or `async def`) decorated with `@task` or `@inspect_ai.task`.
+  4. **Exclusions**:
+     The scan always excludes `.git`, `.venv`, `node_modules`, and `vendor` directories, as well as paths matching `.gitignore` if present in the repository.
+  5. **Caps**:
+     Scanning is capped at 5,000 files visited and 200 tasks synthesized. When a cap is hit, scanning stops cleanly and the cap is recorded in `Run.status.message`.
+  6. **Synthesized Manifest & Provenance**:
+     Tasks are synthesized with:
+     - `id`: `<relative-dir>/<function>` (or `<function>` if at repo root), preserving slashes.
+     - `workdir`: directory containing the file (`.` if at root).
+     - `spec`: `<file>@<function>`.
+     - `paths`: `[<dir>/**]` (or `["**"]` if at root).
+     - `resources`: empty list (`[]`).
+     - `cohort`: `"default"`.
+     The manifest is stored in artifact storage with `source: "inspect-scan"`.
+  7. **Status & UI Provenance**:
+     `Run.status.manifestSource` records `"list"` or `"inspect-scan"`. When `"inspect-scan"`, the UI displays a one-line provenance note on the Run detail page.
+- **Rationale**:
+  Enables zero-manifest evaluation for Inspect-based repositories while preserving the determinism and isolation of `.evals/list` entrypoints when present.
+
 
 
 

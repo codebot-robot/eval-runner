@@ -102,9 +102,7 @@ evals/escalation.py@escalation_policy
 evals/summary.py@summary_quality
 ```
 
-If there is no executable `.evals/list`, eval-runner falls back to Inspect's own task discovery and
-synthesises an equivalent manifest (one task per listed spec, `id` derived from the spec,
-no extra resources). Any other framework is supported by writing a `.evals/list` that prints its tasks.
+If `.evals/list` is absent (not when it fails; `.evals/list` remains authoritative when present), eval-runner falls back to scanning the repository checkout for Python files (`**/*.py`) importing `inspect_ai` with functions decorated with `@task` (ADR-031). It synthesises an equivalent manifest (`id = <dir>/<function>`, `workdir = <dir>`, `spec = <file>@<function>`, `paths = [<dir>/**]`, `resources = []`, `source = "inspect-scan"`) with caps at 5,000 files and 200 tasks. Any other framework or custom discovery is supported by writing a `.evals/list` entrypoint that prints its tasks.
 
 ### 2.4 Inspect compatibility
 

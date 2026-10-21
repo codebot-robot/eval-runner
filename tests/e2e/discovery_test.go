@@ -266,6 +266,41 @@ spec:
 		}
 	})
 
+	t.Run("FallbackInspectScanDiscoversTasks", func(t *testing.T) {
+		runName := "docs-no-manifest-run"
+		noManifestCommit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-no-manifest.git")
+		if noManifestCommit == "" {
+			t.Skip("docs-no-manifest.git not found in git-server")
+		}
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-no-manifest.git
+    commit: %s
+`, runName, noManifestCommit)
+
+		harness.KubectlApplyContent(manifest)
+
+		sandboxName := discovery.SandboxNameForRun(runName)
+		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+
+		run := harness.WaitForRunPhase("eval-runner", runName, "Discovered", 60*time.Second)
+		if run.Status.ManifestSource != v1alpha1.ManifestSourceInspectScan {
+			t.Errorf("Expected manifestSource to be inspect-scan, got: %s", run.Status.ManifestSource)
+		}
+		if run.Status.Discovery == nil || run.Status.Discovery.TaskCount == 0 {
+			t.Errorf("Expected tasks to be discovered via inspect scan, got discovery: %+v", run.Status.Discovery)
+		}
+
+		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+	})
+
 	t.Run("DeleteMidDiscovery", func(t *testing.T) {
 		runName := "support-agent-delete-mid-discovery"
 		manifest := fmt.Sprintf(`
