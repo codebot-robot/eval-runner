@@ -212,14 +212,11 @@ stringData:
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")
 
-	// Assert controller logs report a 40-hex VCS revision rather than 'devel'
+	// Assert controller startup logs report stamped 40-hex VCS revision rather than 'devel'
 	controllerLogs := h.runCmd("kubectl", "logs", "--namespace", "eval-runner", "deployment/eval-runner-controller")
-	reHex := regexp.MustCompile(`[0-9a-f]{40}`)
-	if !reHex.MatchString(controllerLogs) {
-		h.t.Fatalf("expected controller logs to contain a 40-hex VCS revision, got:\n%s", controllerLogs)
-	}
-	if strings.Contains(controllerLogs, `"version": "devel"`) || strings.Contains(controllerLogs, `"version":"devel"`) {
-		h.t.Fatalf("controller logged version 'devel' instead of VCS revision:\n%s", controllerLogs)
+	reVersion := regexp.MustCompile(`"version": "[0-9a-f]{40}(-dirty)?"`)
+	if !reVersion.MatchString(controllerLogs) {
+		h.t.Fatalf("expected controller logs to report stamped 40-hex VCS revision, got:\n%s", controllerLogs)
 	}
 
 	// Verify controller-owned sandbox egress NetworkPolicy reconciliation

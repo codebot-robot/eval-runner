@@ -141,10 +141,10 @@ Each Go image builds from the full git tree using `COPY . .` rather than a hand-
 - **Automatic VCS Stamping**: Go embeds version control metadata (`vcs.revision`, `vcs.time`, and `vcs.modified`) into the binary via `runtime/debug.ReadBuildInfo()` without needing `-ldflags` or manual build arguments.
 - **Reporting and Visibility**:
   - The controller logs the stamped VCS revision at startup (`{"version": "<sha>[-dirty]"}`).
-  - The UI displays `eval-runner <sha>[-dirty]` in page card footers.
-  - All three binaries support `--version` (or `-version`) to print the stamped git revision and exit cleanly (e.g. `docker run --rm <image> --version`).
+  - The UI displays `eval-runner <sha>[-dirty]` in page footers.
+  - All three binaries support `--version` (or `-version`) to print the stamped git revision and exit 0 before any Kubernetes client or network connection is initialized (allowing `docker run --rm <image> --version` to work in distroless environments without cluster access).
 - **Caching**: Docker dependency caching is preserved by running `COPY go.mod go.sum ./` and `RUN go mod download` with cache mounts (`--mount=type=cache,target=/go/pkg/mod` and `/root/.cache/go-build`) before `COPY . .`.
-- **`.dockerignore`**: A top-level `.dockerignore` excludes ephemeral build outputs (`.build/`, `bin/`), credentials, editor configs, and temporary caches, while explicitly keeping `.git` in the context so VCS stamping works.
+- **`.dockerignore`**: A top-level `.dockerignore` excludes ephemeral build outputs (`.build/`, `bin/`), local workspace configurations (`go.work`, `go.work.sum`), credentials, editor configs, and temporary caches, while explicitly keeping `.git` in the context so VCS stamping works. Note: because Go's VCS stamping runs `git status --porcelain` inside the build context, `.dockerignore` must not exclude any git-tracked files, or git inside the container will perceive them as deleted and stamp `-dirty`.
 
 ## Deploying to a Cluster (`ap deploy`)
 
