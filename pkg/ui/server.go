@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
+	"html/template"
 	"log"
 	"math"
 	"net/http"
@@ -2015,6 +2017,9 @@ func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]arti
 	data, err := s.reloadableSink.Load(ctx, logPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "exceeds maximum") {
+			if s.cache != nil {
+				s.cache.set(logPath, 0, nil, err)
+			}
 			return nil, true, err
 		}
 		return nil, false, err
@@ -2100,6 +2105,51 @@ func (s *Server) loadTaskSamplesFromSummary(ctx context.Context, logPath string)
 	}
 
 	return parsed, summary.SamplesTruncated, nil
+}
+
+func loadCapMiB(err error) int64 {
+	defaultMiB := artifacts.DefaultMaxLoadBytes / (1024 * 1024)
+	if err == nil {
+		return defaultMiB
+	}
+	msg := err.Error()
+	idx := strings.Index(msg, " of ")
+	if idx != -1 {
+		sub := msg[idx+4:]
+		if byteIdx := strings.Index(sub, " bytes"); byteIdx != -1 {
+			numStr := strings.TrimSpace(sub[:byteIdx])
+			if b, parseErr := strconv.ParseInt(numStr, 10, 64); parseErr == nil && b > 0 {
+				mib := b / (1024 * 1024)
+				if mib > 0 {
+					return mib
+				}
+			}
+		}
+	}
+	return defaultMiB
+}
+
+func isGCSSink(sink artifacts.ArtifactSink) bool {
+	if sink == nil {
+		return false
+	}
+	type currentGetter interface {
+		Current() artifacts.ArtifactSink
+	}
+	if cg, ok := sink.(currentGetter); ok {
+		sink = cg.Current()
+		if sink == nil {
+			return false
+		}
+	}
+	type bucketGetter interface {
+		Bucket() string
+	}
+	if _, ok := sink.(bucketGetter); ok {
+		return true
+	}
+	prefix := sink.ArtifactPrefix("dummy")
+	return strings.HasPrefix(prefix, "gs://")
 }
 
 func hasComparisonPrefix(path string) bool {
@@ -2548,17 +2598,34 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 	}
 
 	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
+	inspectErr := err
+	isFallback := false
 	if isTruncated || err != nil {
 		// Fallback to summary.json when the full log exceeded the load cap or could not be parsed.
 		if summarySamples, samplesTruncated, summaryErr := s.loadTaskSamplesFromSummary(ctx, logPath); summaryErr == nil && len(summarySamples) > 0 {
 			samples = summarySamples
 			err = nil
 			isTruncated = false
+			isFallback = true
+
+			prefix := "Showing sample outcomes from summary.json"
 			if samplesTruncated {
-				view.WarningMessage = "This task evaluated more than 10,000 samples. Showing the first 10,000 samples from summary.json."
-			} else {
-				view.WarningMessage = "Showing sample outcomes from summary.json because the evaluation log could not be loaded."
+				prefix = "This task evaluated more than 10,000 samples. Showing the first 10,000 samples from summary.json"
 			}
+
+			var logArtifactHTML string
+			logURL := ""
+			if isGCSSink(s.ArtifactSink()) {
+				logURL = FormatLogURL(logPath)
+			}
+			if logURL != "" {
+				logArtifactHTML = fmt.Sprintf(`<a href="%s" target="_blank" rel="noopener noreferrer">%s</a>`, logURL, html.EscapeString(logPath))
+			} else {
+				logArtifactHTML = html.EscapeString(logPath)
+			}
+
+			mib := loadCapMiB(inspectErr)
+			view.WarningMessage = template.HTML(fmt.Sprintf("%s; transcripts unavailable: the evaluation log exceeds the UI load cap (%d MiB); download it from %s", prefix, mib, logArtifactHTML))
 		}
 	}
 	if isTruncated {
@@ -2635,6 +2702,11 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 			statusClass = "bad"
 		}
 
+		link := ""
+		if !isFallback {
+			link = BuildTaskSampleLink(ns, name, taskID, sRecord.ID)
+		}
+
 		sampleRows = append(sampleRows, TaskSampleRow{
 			ID:                 sRecord.ID,
 			EscapedID:          url.PathEscape(sRecord.ID),
@@ -2649,7 +2721,7 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 			ExplanationPreview: TruncateRunes(sRecord.Explanation, sampleNotePreviewRunes),
 			LatencyStr:         FormatLatency(sRecord.Latency),
 			TokensStr:          FormatTokens(sRecord.TotalTokens),
-			Link:               BuildTaskSampleLink(ns, name, taskID, sRecord.ID),
+			Link:               link,
 		})
 	}
 	view.Samples = sampleRows
@@ -2683,6 +2755,12 @@ func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, 
 	}
 
 	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
+	if isTruncated || err != nil {
+		if summarySamples, _, summaryErr := s.loadTaskSamplesFromSummary(ctx, logPath); summaryErr == nil && len(summarySamples) > 0 {
+			httpError(w, http.StatusNotFound, "transcript unavailable: log exceeds the UI load cap", "", nil)
+			return
+		}
+	}
 	if isTruncated {
 		view.IsTruncatedLog = true
 		view.TruncatedMessage = "The evaluation log exceeded the size limit or was truncated during storage. Transcript details cannot be displayed."

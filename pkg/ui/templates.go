@@ -1235,10 +1235,11 @@ const taskSamplesListTemplate = `
           {{ range .Samples }}
           <tr>
             <td class="mono">
-              <a href="{{ .Link }}" class="sample-link">
+              {{ if .Link }}<a href="{{ .Link }}" class="sample-link">
                 <span class="st {{ if eq .Status "pass" }}p{{ else if eq .Status "fail" }}f{{ end }}"></span>
                 {{ .ID }}
-              </a>
+              </a>{{ else }}<span class="st {{ if eq .Status "pass" }}p{{ else if eq .Status "fail" }}f{{ end }}"></span>
+              {{ .ID }}{{ end }}
             </td>
             <td>
               <span class="chip chip-{{ .StatusClass }}">{{ .Score }}</span>

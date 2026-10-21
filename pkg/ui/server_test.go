@@ -3066,6 +3066,225 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_CorruptLog(t *testing.T) {
 	}
 }
 
+func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *testing.T) {
+	sink := artifacts.NewInMemorySink()
+	commit := "commitoversized1234"
+	taskID := "task/oversized"
+
+	scoreVal := 1.0
+	sampleSummaries := []artifacts.TaskSampleSummary{
+		{
+			ID:     "sample-oversized-1",
+			Score:  &scoreVal,
+			Status: "pass",
+		},
+		{
+			ID:     "sample-oversized-2",
+			Score:  &scoreVal,
+			Status: "fail",
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "oversized-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            taskID,
+		Commit:            commit,
+		Model:             "gemini-2.5-pro",
+		ControllerVersion: "v1.0.0",
+		Scorer:            "choice",
+		Samples:           sampleSummaries,
+		SampleCount:       len(sampleSummaries),
+	}
+
+	// Oversized log exceeding DefaultMaxLoadBytes (10 MiB)
+	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
+
+	logPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "oversized-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "gemini-2.5-pro",
+			Repo:  v1alpha1.RepoSpec{Commit: commit},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: logPath,
+				},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+
+	srv := NewServer(Config{Client: cl, ArtifactSink: sink})
+
+	// 1. Request samples list: returns 200 with no /samples/ hrefs and the extended banner
+	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/task%2Foversized/samples", nil)
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for oversized log sample list, got %d: %s", wList.Code, wList.Body.String())
+	}
+
+	body := wList.Body.String()
+
+	// Samples rendered as plain text
+	if !strings.Contains(body, "sample-oversized-1") || !strings.Contains(body, "sample-oversized-2") {
+		t.Errorf("expected sample IDs in body, got:\n%s", body)
+	}
+
+	// No /samples/ hrefs
+	if strings.Contains(body, "/samples/") {
+		t.Errorf("expected no /samples/ hrefs in fallback mode, got:\n%s", body)
+	}
+
+	// Extended banner with plain text artifact path
+	wantBanner := fmt.Sprintf("transcripts unavailable: the evaluation log exceeds the UI load cap (10 MiB); download it from %s", logPath)
+	if !strings.Contains(body, wantBanner) {
+		t.Errorf("expected extended banner %q in body, got:\n%s", wantBanner, body)
+	}
+	if !strings.Contains(body, "Showing sample outcomes from summary.json") {
+		t.Errorf("expected 'Showing sample outcomes from summary.json' in body, got:\n%s", body)
+	}
+
+	// 2. Direct transcript URL: returns 404 with fixed public error string
+	reqTranscript := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/task%2Foversized/samples/sample-oversized-1", nil)
+	wTranscript := httptest.NewRecorder()
+	srv.ServeHTTP(wTranscript, reqTranscript)
+
+	if wTranscript.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found for direct transcript URL in fallback mode, got %d", wTranscript.Code)
+	}
+	wantError := "transcript unavailable: log exceeds the UI load cap"
+	if !strings.Contains(wTranscript.Body.String(), wantError) {
+		t.Errorf("expected error %q, got:\n%s", wantError, wTranscript.Body.String())
+	}
+	if strings.Contains(wTranscript.Body.String(), "Log Truncated") {
+		t.Errorf("expected no generic Log Truncated page, got:\n%s", wTranscript.Body.String())
+	}
+}
+
+type mockGCSTaskSink struct {
+	artifacts.ArtifactSink
+	bucket string
+}
+
+func (m *mockGCSTaskSink) Bucket() string {
+	return m.bucket
+}
+
+func (m *mockGCSTaskSink) ArtifactPrefix(commit string) string {
+	return fmt.Sprintf("gs://%s/runs/%s/", m.bucket, commit)
+}
+
+func (m *mockGCSTaskSink) Load(ctx context.Context, path string) ([]byte, error) {
+	memPath := "mem://" + strings.TrimPrefix(path, fmt.Sprintf("gs://%s/", m.bucket))
+	return m.ArtifactSink.Load(ctx, memPath)
+}
+
+func TestServer_TaskSamplesFallbackWithSummaryJSON_GCSConsoleLink(t *testing.T) {
+	inMem := artifacts.NewInMemorySink()
+	bucket := "my-eval-bucket"
+	commit := "commitgcs1234"
+	taskID := "task/gcs"
+
+	scoreVal := 1.0
+	sampleSummaries := []artifacts.TaskSampleSummary{
+		{
+			ID:     "sample-gcs-1",
+			Score:  &scoreVal,
+			Status: "pass",
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "gcs-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            taskID,
+		Commit:            commit,
+		Model:             "gemini-2.5-pro",
+		ControllerVersion: "v1.0.0",
+		Scorer:            "choice",
+		Samples:           sampleSummaries,
+		SampleCount:       len(sampleSummaries),
+	}
+
+	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
+	rawPath, err := inMem.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	gcsSink := &mockGCSTaskSink{
+		ArtifactSink: inMem,
+		bucket:       bucket,
+	}
+
+	gcsLogPath := fmt.Sprintf("gs://%s/%s", bucket, strings.TrimPrefix(rawPath, "mem://"))
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gcs-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "gemini-2.5-pro",
+			Repo:  v1alpha1.RepoSpec{Commit: commit},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: gcsLogPath,
+				},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+
+	srv := NewServer(Config{Client: cl, ArtifactSink: gcsSink})
+
+	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/gcs-run/tasks/task%2Fgcs/samples", nil)
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", wList.Code, wList.Body.String())
+	}
+
+	body := wList.Body.String()
+	wantConsoleURL := FormatLogURL(gcsLogPath)
+	wantLink := fmt.Sprintf(`<a href="%s" target="_blank" rel="noopener noreferrer">%s</a>`, wantConsoleURL, gcsLogPath)
+	if !strings.Contains(body, wantLink) {
+		t.Errorf("expected Cloud Storage console link %q in body, got:\n%s", wantLink, body)
+	}
+	wantBanner := "transcripts unavailable: the evaluation log exceeds the UI load cap (10 MiB); download it from " + wantLink
+	if !strings.Contains(body, wantBanner) {
+		t.Errorf("expected extended banner with console link, got:\n%s", body)
+	}
+	if strings.Contains(body, "/samples/") {
+		t.Errorf("expected no /samples/ hrefs, got:\n%s", body)
+	}
+}
+
 func TestServer_TaskSamplesPrimaryPath_PreviewsPopulatedWhenLogValid(t *testing.T) {
 	tempDir := t.TempDir()
 	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
