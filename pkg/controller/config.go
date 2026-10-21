@@ -19,12 +19,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/go-logr/logr"
@@ -735,8 +739,16 @@ func LoadAndResolveClusterConfig(
 		return ClusterConfig{}, err
 	}
 
+	LogEffectiveClusterSettings(logger, resolved)
+
+	return resolved, nil
+}
+
+// LogEffectiveClusterSettings logs the effective cluster settings in a standardized one-line format.
+func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 	logger.Info("effective cluster settings",
 		"artifactBucket", resolved.ArtifactBucket,
+		"artifactDir", resolved.ArtifactDir,
 		"comparisonTTL", resolved.ComparisonTTL,
 		"discoveryDeadline", resolved.DiscoveryDeadline,
 		"executionDeadline", resolved.ExecutionDeadline,
@@ -747,6 +759,126 @@ func LoadAndResolveClusterConfig(
 		"sandboxdImage", resolved.SandboxdImage,
 		"taskGracePeriod", resolved.TaskGracePeriod,
 	)
+}
 
-	return resolved, nil
+// ConfigReloaderOptions configures a ConfigReloader for runtime cluster configuration updates.
+type ConfigReloaderOptions struct {
+	RawFlags       RawFlags
+	Logger         logr.Logger
+	SinkFactory    sinkconfig.SinkFactory
+	ReloadableSink *artifacts.ReloadableSink
+	RunReconciler  *RunReconciler
+	CompReconciler *ComparisonReconciler
+	InitialConfig  *ClusterConfig
+}
+
+// ConfigReloader dynamically applies eval-runner-config updates at runtime.
+type ConfigReloader struct {
+	mu             sync.Mutex
+	rawFlags       RawFlags
+	logger         logr.Logger
+	sinkFactory    sinkconfig.SinkFactory
+	reloadableSink *artifacts.ReloadableSink
+	runReconciler  *RunReconciler
+	compReconciler *ComparisonReconciler
+	lastConfig     *ClusterConfig
+}
+
+// NewConfigReloader constructs a new ConfigReloader.
+func NewConfigReloader(opts ConfigReloaderOptions) *ConfigReloader {
+	sf := opts.SinkFactory
+	if sf == nil {
+		sf = sinkconfig.NewArtifactSink
+	}
+	r := &ConfigReloader{
+		rawFlags:       opts.RawFlags,
+		logger:         opts.Logger,
+		sinkFactory:    sf,
+		reloadableSink: opts.ReloadableSink,
+		runReconciler:  opts.RunReconciler,
+		compReconciler: opts.CompReconciler,
+	}
+	if opts.InitialConfig != nil {
+		copied := *opts.InitialConfig
+		r.lastConfig = &copied
+	}
+	return r
+}
+
+// Reload re-resolves and applies configuration from the provided ConfigMap (or nil on deletion).
+// Swaps the artifact sink (closing the old sink after in-flight uploads finish) and updates reconcilers.
+func (r *ConfigReloader) Reload(ctx context.Context, cm *corev1.ConfigMap) error {
+	return r.reloadInternal(ctx, cm, false)
+}
+
+// ReloadWait performs Reload and synchronously waits for any retired artifact sink to finish closing.
+// This is primarily useful in unit tests.
+func (r *ConfigReloader) ReloadWait(ctx context.Context, cm *corev1.ConfigMap) error {
+	return r.reloadInternal(ctx, cm, true)
+}
+
+func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMap, wait bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if cm != nil {
+		if unknown := UnknownConfigMapKeys(cm); len(unknown) > 0 {
+			r.logger.Info("warning: unrecognised keys in ConfigMap", "unrecognisedKeys", unknown, "namespace", cm.Namespace, "name", cm.Name)
+		}
+	}
+
+	resolved, err := ResolveConfig(cm, r.rawFlags)
+	if err != nil {
+		r.logger.Error(err, "failed to resolve cluster configuration; retaining active settings")
+		return err
+	}
+
+	if r.lastConfig != nil && reflect.DeepEqual(*r.lastConfig, resolved) {
+		return nil
+	}
+
+	sinkChanged := r.lastConfig == nil ||
+		r.lastConfig.ArtifactBucket != resolved.ArtifactBucket ||
+		r.lastConfig.ArtifactDir != resolved.ArtifactDir ||
+		r.lastConfig.ArtifactMaxUploadBytes != resolved.ArtifactMaxUploadBytes
+
+	if sinkChanged && r.reloadableSink != nil {
+		newSink, err := r.sinkFactory(ctx, resolved.ArtifactBucket, resolved.ArtifactDir, resolved.ArtifactMaxUploadBytes)
+		if err != nil {
+			r.logger.Error(err, "unable to configure artifact sink; retaining active sink", "bucket", resolved.ArtifactBucket, "dir", resolved.ArtifactDir)
+			if r.lastConfig != nil {
+				resolved.ArtifactBucket = r.lastConfig.ArtifactBucket
+				resolved.ArtifactDir = r.lastConfig.ArtifactDir
+				resolved.ArtifactMaxUploadBytes = r.lastConfig.ArtifactMaxUploadBytes
+			} else {
+				resolved.ArtifactBucket = ""
+				resolved.ArtifactDir = ""
+				resolved.ArtifactMaxUploadBytes = 0
+			}
+		} else {
+			if newSink == nil {
+				r.logger.Info("neither artifactBucket nor artifactDir configured; using default in-memory sink (non-durable: controller restarts reset Runs to Pending to re-discover)")
+				newSink = artifacts.NewInMemorySink()
+			}
+			if wait {
+				if err := r.reloadableSink.SwapWait(newSink); err != nil {
+					r.logger.Error(err, "error closing retired artifact sink")
+				}
+			} else {
+				r.reloadableSink.Swap(newSink)
+			}
+		}
+	}
+
+	if r.runReconciler != nil {
+		r.runReconciler.UpdateConfig(resolved)
+	}
+	if r.compReconciler != nil {
+		r.compReconciler.UpdateConfig(resolved)
+	}
+
+	r.lastConfig = &resolved
+
+	LogEffectiveClusterSettings(r.logger, resolved)
+	return nil
 }

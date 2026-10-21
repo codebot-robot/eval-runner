@@ -27,16 +27,20 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -1968,5 +1972,235 @@ func TestResolveConfig_AffinityMode(t *testing.T) {
 	}
 	if _, err := ResolveConfig(nil, flagsBad); err == nil {
 		t.Errorf("expected error for invalid --affinity-mode flag, got nil")
+	}
+}
+
+type trackingTestSink struct {
+	artifacts.ArtifactSink
+	bucket        string
+	dir           string
+	closed        atomic.Bool
+	blockUpload   chan struct{}
+	uploadStarted chan struct{}
+}
+
+func (s *trackingTestSink) Close() error {
+	s.closed.Store(true)
+	return nil
+}
+
+func (s *trackingTestSink) Bucket() string {
+	return s.bucket
+}
+
+func (s *trackingTestSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+	if s.uploadStarted != nil {
+		close(s.uploadStarted)
+	}
+	if s.blockUpload != nil {
+		<-s.blockUpload
+	}
+	return "stored", nil
+}
+
+func (s *trackingTestSink) Load(ctx context.Context, path string) ([]byte, error) {
+	return []byte("data"), nil
+}
+
+func (s *trackingTestSink) ArtifactPrefix(commit string) string {
+	if s.bucket != "" {
+		return "gs://" + s.bucket + "/" + commit
+	}
+	return ""
+}
+
+func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	const ns = "eval-runner"
+	const cmName = DefaultConfigMapName
+
+	initialCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            cmName,
+			ResourceVersion: "100",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket:    "initial-bucket",
+			configkeys.ConfigMapKeyDiscoveryDeadline: "5m",
+			configkeys.ConfigMapKeyMaxParallelTasks:  "6",
+		},
+	}
+
+	clientset := k8sfake.NewSimpleClientset(initialCM)
+
+	var factoryCalls []string
+	var createdSinks []*trackingTestSink
+
+	mockFactory := func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+		factoryCalls = append(factoryCalls, bucket)
+		sink := &trackingTestSink{bucket: bucket, dir: dir}
+		createdSinks = append(createdSinks, sink)
+		return sink, nil
+	}
+
+	rawFlags := RawFlags{}
+	initialCfg, err := ResolveConfig(initialCM, rawFlags)
+	if err != nil {
+		t.Fatalf("failed to resolve initial config: %v", err)
+	}
+
+	initialSink, err := mockFactory(ctx, initialCfg.ArtifactBucket, initialCfg.ArtifactDir, initialCfg.ArtifactMaxUploadBytes)
+	if err != nil {
+		t.Fatalf("failed to construct initial sink: %v", err)
+	}
+	reloadableSink := artifacts.NewReloadableSink(initialSink)
+	defer reloadableSink.Close()
+
+	runReconciler := &RunReconciler{
+		ArtifactSink:      reloadableSink,
+		DiscoveryDeadline: initialCfg.DiscoveryDeadline,
+		MaxParallelTasks:  initialCfg.MaxParallelTasks,
+	}
+	compReconciler := &ComparisonReconciler{
+		ArtifactSink: reloadableSink,
+	}
+
+	reloader := NewConfigReloader(ConfigReloaderOptions{
+		RawFlags:       rawFlags,
+		Logger:         logr.Discard(),
+		SinkFactory:    mockFactory,
+		ReloadableSink: reloadableSink,
+		RunReconciler:  runReconciler,
+		CompReconciler: compReconciler,
+		InitialConfig:  &initialCfg,
+	})
+
+	reloadDone := make(chan struct{}, 10)
+	go func() {
+		_ = sinkconfig.WatchConfigMap(ctx, clientset, ns, cmName, func(cm *corev1.ConfigMap) {
+			_ = reloader.Reload(ctx, cm)
+			reloadDone <- struct{}{}
+		})
+	}()
+
+	// Wait for initial watch event
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial watch callback")
+	}
+
+	if len(factoryCalls) != 1 || factoryCalls[0] != "initial-bucket" {
+		t.Fatalf("expected 1 factory call for initial-bucket, got %v", factoryCalls)
+	}
+	if createdSinks[0].closed.Load() {
+		t.Fatal("initial sink should not be closed")
+	}
+
+	// Update ConfigMap to new bucket and new discoveryDeadline
+	updatedCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            cmName,
+			ResourceVersion: "101",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket:    "new-bucket",
+			configkeys.ConfigMapKeyDiscoveryDeadline: "15m",
+			configkeys.ConfigMapKeyMaxParallelTasks:  "8",
+		},
+	}
+	_, err = clientset.CoreV1().ConfigMaps(ns).Update(ctx, updatedCM, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("failed to update ConfigMap: %v", err)
+	}
+
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update reload callback")
+	}
+
+	// Assert factory was called with the new bucket
+	if len(factoryCalls) != 2 || factoryCalls[1] != "new-bucket" {
+		t.Fatalf("expected sink factory called with new-bucket, got %v", factoryCalls)
+	}
+
+	// Assert the old sink is closed
+	deadline := time.Now().Add(2 * time.Second)
+	for !createdSinks[0].closed.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !createdSinks[0].closed.Load() {
+		t.Fatal("expected old sink (createdSinks[0]) to be closed after ConfigMap update")
+	}
+
+	// Assert new sink is not closed
+	if createdSinks[1].closed.Load() {
+		t.Fatal("new sink (createdSinks[1]) should not be closed")
+	}
+
+	// Assert reloadable keys updated on reconcilers
+	if runReconciler.discoveryDeadline() != 15*time.Minute {
+		t.Errorf("expected discoveryDeadline 15m, got %v", runReconciler.discoveryDeadline())
+	}
+	if runReconciler.maxParallelTasks() != 8 {
+		t.Errorf("expected maxParallelTasks 8, got %d", runReconciler.maxParallelTasks())
+	}
+
+	// Verify in-flight safety on next swap:
+	// Start an in-flight upload on createdSinks[1]
+	createdSinks[1].blockUpload = make(chan struct{})
+	createdSinks[1].uploadStarted = make(chan struct{})
+
+	uploadDone := make(chan struct{})
+	go func() {
+		_, _ = reloadableSink.StoreArtifact(ctx, artifacts.RunMetadata{}, "test.json", []byte("in-flight"))
+		close(uploadDone)
+	}()
+
+	<-createdSinks[1].uploadStarted
+	time.Sleep(20 * time.Millisecond)
+
+	// Update ConfigMap again to third-bucket
+	thirdCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            cmName,
+			ResourceVersion: "102",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "third-bucket",
+		},
+	}
+	_, err = clientset.CoreV1().ConfigMaps(ns).Update(ctx, thirdCM, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("failed to update ConfigMap to third-bucket: %v", err)
+	}
+
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for third reload callback")
+	}
+
+	// Assert createdSinks[1] is NOT closed yet while upload is in-flight
+	if createdSinks[1].closed.Load() {
+		t.Fatal("expected createdSinks[1] to NOT be closed while in-flight upload is active")
+	}
+
+	// Unblock in-flight upload
+	close(createdSinks[1].blockUpload)
+	<-uploadDone
+
+	deadline = time.Now().Add(2 * time.Second)
+	for !createdSinks[1].closed.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !createdSinks[1].closed.Load() {
+		t.Fatal("expected createdSinks[1] to be closed after in-flight upload completes")
 	}
 }

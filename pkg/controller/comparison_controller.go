@@ -110,6 +110,8 @@ type ComparisonReconciler struct {
 
 	affinityMu     sync.Mutex
 	cachedAffinity map[string]cachedPRFiles
+
+	cfgMu sync.RWMutex
 }
 
 const maxCachedAffinityEntries = 100
@@ -250,7 +252,71 @@ func (r *ComparisonReconciler) controllerNamespace() string {
 }
 
 func (r *ComparisonReconciler) gitHubTokenSecret() string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
 	return r.GitHubTokenSecret
+}
+
+func (r *ComparisonReconciler) gitHubAppSecret() string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.GitHubAppSecret
+}
+
+func (r *ComparisonReconciler) uiBaseURL() string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.UIBaseURL
+}
+
+func (r *ComparisonReconciler) inconclusivePolicy() string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	if r.InconclusivePolicy != "" {
+		return r.InconclusivePolicy
+	}
+	return DefaultInconclusivePolicy
+}
+
+func (r *ComparisonReconciler) comparisonTTL() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.ComparisonTTL
+}
+
+func (r *ComparisonReconciler) modelPrices() map[string]ModelPrice {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.ModelPrices
+}
+
+func (r *ComparisonReconciler) commandUsers() []string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.CommandUsers
+}
+
+func (r *ComparisonReconciler) affinityMode() string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	if r.AffinityMode != "" {
+		return r.AffinityMode
+	}
+	return configkeys.AffinityModeOrder
+}
+
+// UpdateConfig updates the reloadable settings on ComparisonReconciler in a thread-safe manner.
+func (r *ComparisonReconciler) UpdateConfig(cfg ClusterConfig) {
+	r.cfgMu.Lock()
+	defer r.cfgMu.Unlock()
+	r.GitHubTokenSecret = cfg.GitHubTokenSecret
+	r.GitHubAppSecret = cfg.GitHubAppSecret
+	r.UIBaseURL = cfg.UIBaseURL
+	r.InconclusivePolicy = cfg.InconclusivePolicy
+	r.ComparisonTTL = cfg.ComparisonTTL
+	r.ModelPrices = cfg.ModelPrices
+	r.CommandUsers = cfg.CommandUsers
+	r.AffinityMode = cfg.AffinityMode
 }
 
 func (r *ComparisonReconciler) getOrCreateAppAuth(secret *corev1.Secret, appID, installationID, appSlug string, privKey []byte) (*github.AppTokenProvider, error) {
@@ -285,11 +351,13 @@ func (r *ComparisonReconciler) getOrCreateAppAuth(secret *corev1.Secret, appID, 
 
 func (r *ComparisonReconciler) getGitHubClient(ctx context.Context) (github.Client, error) {
 	secretNames := []string{}
-	if r.GitHubAppSecret != "" {
-		secretNames = append(secretNames, r.GitHubAppSecret)
+	appSec := r.gitHubAppSecret()
+	tokSec := r.gitHubTokenSecret()
+	if appSec != "" {
+		secretNames = append(secretNames, appSec)
 	}
-	if r.gitHubTokenSecret() != "" && r.gitHubTokenSecret() != r.GitHubAppSecret {
-		secretNames = append(secretNames, r.gitHubTokenSecret())
+	if tokSec != "" && tokSec != appSec {
+		secretNames = append(secretNames, tokSec)
 	}
 
 	if len(secretNames) == 0 {
@@ -432,7 +500,7 @@ func (r *ComparisonReconciler) processPendingCommands(ctx context.Context, comp 
 		// Reject bot logins (e.g. renovate[bot], dependabot[bot], etc.)
 		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(cmd.Login)), "[bot]") {
 			terminalOutcome = "denied: bot"
-		} else if IsUserAllowed(cmd.Login, r.CommandUsers) {
+		} else if IsUserAllowed(cmd.Login, r.commandUsers()) {
 			// 1. Check commandUsers allow-list (exact case-insensitive match)
 			authorized = true
 		} else {
@@ -683,8 +751,8 @@ func (r *ComparisonReconciler) reportToGitHub(
 	}
 
 	reporter := github.NewReporter(ghClient, github.ReporterOptions{
-		UIBaseURL:          r.UIBaseURL,
-		InconclusivePolicy: r.InconclusivePolicy,
+		UIBaseURL:          r.uiBaseURL(),
+		InconclusivePolicy: r.inconclusivePolicy(),
 	})
 	repStatus, err := reporter.Report(ctx, comp, baseRun, candRun)
 	if repStatus != nil {
@@ -772,8 +840,8 @@ func (r *ComparisonReconciler) postUnserviceableCommandNote(ctx context.Context,
 		return nil
 	}
 	reporter := github.NewReporter(ghClient, github.ReporterOptions{
-		UIBaseURL:          r.UIBaseURL,
-		InconclusivePolicy: r.InconclusivePolicy,
+		UIBaseURL:          r.uiBaseURL(),
+		InconclusivePolicy: r.inconclusivePolicy(),
 	})
 	return reporter.PostUnserviceableNote(ctx, comp, reason)
 }
@@ -1238,7 +1306,7 @@ func (r *ComparisonReconciler) loadManifest(ctx context.Context, candRun, baseRu
 }
 
 func (r *ComparisonReconciler) effectiveAffinityMode() string {
-	if strings.ToLower(strings.TrimSpace(r.AffinityMode)) == configkeys.AffinityModePrune {
+	if strings.ToLower(strings.TrimSpace(r.affinityMode())) == configkeys.AffinityModePrune {
 		return configkeys.AffinityModePrune
 	}
 	return configkeys.AffinityModeOrder
@@ -1464,9 +1532,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	// Check TTL expiration for completed comparisons
-	if r.ComparisonTTL > 0 && comp.Status.Phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
-		if age, ok := r.comparisonAge(&comp); ok && age >= r.ComparisonTTL {
-			logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
+	ttl := r.comparisonTTL()
+	if ttl > 0 && comp.Status.Phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
+		if age, ok := r.comparisonAge(&comp); ok && age >= ttl {
+			logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", ttl)
 			if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
 			}
@@ -1521,9 +1590,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 
 			var result ctrl.Result
-			if r.ComparisonTTL > 0 {
-				if age, ok := r.comparisonAge(&comp); ok && age < r.ComparisonTTL {
-					result.RequeueAfter = r.ComparisonTTL - age
+			if ttl := r.comparisonTTL(); ttl > 0 {
+				if age, ok := r.comparisonAge(&comp); ok && age < ttl {
+					result.RequeueAfter = ttl - age
 				}
 			}
 			if wait, hasPending := r.earliestPendingCommandWait(&comp); hasPending {
@@ -2205,7 +2274,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			baseLatency = &v1alpha1.TaskLatency{P50: lat.P50, P95: lat.P95}
 		}
 
-		prices := r.ModelPrices
+		prices := r.modelPrices()
 		candPrice, candPriceKnown := prices[candidateRun.Spec.Model]
 		basePrice, basePriceKnown := prices[baselineRun.Spec.Model]
 
@@ -3020,16 +3089,16 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		comp.Status.ExtraSamplesApplied = comp.Spec.ExtraSamples
 	}
 
-	if r.ComparisonTTL > 0 && phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
+	if ttl := r.comparisonTTL(); ttl > 0 && phase == v1alpha1.ComparisonPhaseCompleted && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
 		if age, ok := r.comparisonAge(&comp); ok {
-			if age >= r.ComparisonTTL {
-				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
+			if age >= ttl {
+				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", ttl)
 				if err := r.Delete(ctx, &comp); err != nil && !apierrors.IsNotFound(err) {
 					return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
 				}
 				return ctrl.Result{}, nil
 			}
-			remaining := r.ComparisonTTL - age
+			remaining := ttl - age
 			if result.RequeueAfter == 0 || remaining < result.RequeueAfter {
 				result.RequeueAfter = remaining
 			}
@@ -3102,10 +3171,10 @@ func (r *ComparisonReconciler) recordUnserviceableExtraSamples(
 	}
 
 	var result ctrl.Result
-	if r.ComparisonTTL > 0 {
+	if ttl := r.comparisonTTL(); ttl > 0 {
 		if age, ok := r.comparisonAge(comp); ok {
-			if age < r.ComparisonTTL {
-				result.RequeueAfter = r.ComparisonTTL - age
+			if age < ttl {
+				result.RequeueAfter = ttl - age
 			} else {
 				result.RequeueAfter = time.Second
 			}
@@ -3164,16 +3233,16 @@ func (r *ComparisonReconciler) completeInconclusiveArtifactsUnreadable(
 		return ctrl.Result{}, err
 	}
 
-	if r.ComparisonTTL > 0 && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
+	if ttl := r.comparisonTTL(); ttl > 0 && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
 		if age, ok := r.comparisonAge(comp); ok {
-			if age >= r.ComparisonTTL {
-				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
+			if age >= ttl {
+				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", ttl)
 				if err := r.Delete(ctx, comp); err != nil && !apierrors.IsNotFound(err) {
 					return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
 				}
 				return ctrl.Result{}, nil
 			}
-			remaining := r.ComparisonTTL - age
+			remaining := ttl - age
 			if result.RequeueAfter == 0 || remaining < result.RequeueAfter {
 				result.RequeueAfter = remaining
 			}
