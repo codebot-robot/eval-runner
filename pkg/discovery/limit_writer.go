@@ -36,6 +36,10 @@ const (
 	// MaxPathLength is the maximum character length for a single path glob pattern.
 	MaxPathLength = 1024
 
+	// MaxCohortLength is the maximum character length for a cohort identifier (64 chars).
+	// Note: Kubernetes label values cap at 63 characters; cohorts are bounded to 64 chars per issue #293.
+	MaxCohortLength = 64
+
 	// MaxMessageBytes is the maximum byte length for Run status.message on failure.
 	MaxMessageBytes = 4096
 

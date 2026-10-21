@@ -18,10 +18,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/affinity"
+)
+
+var (
+	validCohortRegex = regexp.MustCompile(`^[a-zA-Z0-9]([-_a-zA-Z0-9.]*[a-zA-Z0-9])?$`)
 )
 
 const (
@@ -113,6 +118,17 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 			}
 			if err := affinity.ValidatePattern(p); err != nil {
 				return fmt.Errorf("task %q has invalid path pattern %q: %w", id, p, err)
+			}
+		}
+
+		if task.Cohort == "" {
+			m.Tasks[i].Cohort = v1alpha1.DefaultCohort
+		} else {
+			if len(task.Cohort) > MaxCohortLength {
+				return fmt.Errorf("task %q cohort %q exceeds maximum length (%d)", id, task.Cohort, MaxCohortLength)
+			}
+			if !validCohortRegex.MatchString(task.Cohort) {
+				return fmt.Errorf("task %q has invalid cohort %q: must be label-safe (alphanumeric, '-', '_', or '.', starting and ending with alphanumeric)", id, task.Cohort)
 			}
 		}
 	}

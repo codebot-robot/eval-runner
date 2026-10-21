@@ -239,6 +239,73 @@ func TestValidateManifest(t *testing.T) {
 			}(),
 			expectError: true,
 		},
+		{
+			name: "valid cohort names and defaulting",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-cohort-default", Spec: "eval.py@task", Cohort: "default"},
+					{ID: "task-cohort-dashes", Spec: "eval.py@task", Cohort: "customer-reported-q4"},
+					{ID: "task-cohort-dots", Spec: "eval.py@task", Cohort: "v1.2"},
+					{ID: "task-cohort-underscores", Spec: "eval.py@task", Cohort: "cohort_alpha"},
+					{ID: "task-cohort-empty", Spec: "eval.py@task", Cohort: ""},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "cohort exceeding 64 chars",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-long-cohort", Spec: "eval.py@task", Cohort: strings.Repeat("a", 65)},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "cohort starting with dash",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-dash-start", Spec: "eval.py@task", Cohort: "-bad"},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "cohort ending with dash",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-dash-end", Spec: "eval.py@task", Cohort: "bad-"},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "cohort with space",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-space", Spec: "eval.py@task", Cohort: "bad cohort"},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "cohort with slash",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-slash", Spec: "eval.py@task", Cohort: "bad/cohort"},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "cohort with special characters",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-special", Spec: "eval.py@task", Cohort: "bad@cohort"},
+				},
+			},
+			expectError: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -249,6 +316,11 @@ func TestValidateManifest(t *testing.T) {
 			}
 			if !tc.expectError && err != nil {
 				t.Errorf("ValidateManifest unexpected error: %v", err)
+			}
+			if tc.name == "valid cohort names and defaulting" && err == nil {
+				if tc.manifest.Tasks[4].Cohort != v1alpha1.DefaultCohort {
+					t.Errorf("Expected empty cohort to default to %q, got %q", v1alpha1.DefaultCohort, tc.manifest.Tasks[4].Cohort)
+				}
 			}
 		})
 	}
