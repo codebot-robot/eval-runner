@@ -375,6 +375,11 @@ func (in *ComparisonTaskStatus) DeepCopyInto(out *ComparisonTaskStatus) {
 		*out = new(DeltaConfidenceInterval)
 		**out = **in
 	}
+	if in.PImprovement != nil {
+		in, out := &in.PImprovement, &out.PImprovement
+		*out = new(float64)
+		**out = **in
+	}
 	out.Dropped = in.Dropped
 	if in.Tokens != nil {
 		in, out := &in.Tokens, &out.Tokens

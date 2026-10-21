@@ -585,6 +585,12 @@ spec:
                       description: Losses is the number of paired samples where the
                         candidate scored lower than baseline.
                       type: integer
+                    pImprovement:
+                      description: PImprovement is the posterior probability that
+                        candidate is better than baseline for this task.
+                      maximum: 1
+                      minimum: 0
+                      type: number
                     pairs:
                       description: Pairs is the number of matched (paired) sample
                         pairs.
