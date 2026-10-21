@@ -120,7 +120,27 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Errorf("expected run name %q in scoped run detail HTML", runName)
 	}
 
-	// 4. Curl /pulls page
+	// 4. Curl repository overview page (repo home)
+	repoHomeURL := baseURL + repoRef.Path()
+	respHome, err := http.Get(repoHomeURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", repoHomeURL, err)
+	}
+	bodyHome, _ := io.ReadAll(respHome.Body)
+	respHome.Body.Close()
+	if respHome.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected repo home status: %d body=%s", respHome.StatusCode, string(bodyHome))
+	}
+	taskIDOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.status.tasks[0].id}")
+	taskID := strings.TrimSpace(taskIDOut)
+	if taskID == "" {
+		t.Fatalf("task id in run %s status is empty", runName)
+	}
+	if !strings.Contains(string(bodyHome), taskID) {
+		t.Errorf("expected task id %q in repo home HTML", taskID)
+	}
+
+	// 5. Curl /pulls page
 	pullsURL := baseURL + "/pulls"
 	respPulls, err := http.Get(pullsURL)
 	if err != nil {
