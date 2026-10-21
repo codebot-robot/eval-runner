@@ -192,3 +192,21 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	partialStatus.LastPostedHash = hash
 	return partialStatus, nil
 }
+
+// PostUnserviceableNote posts a short note to the pull request comment thread explaining that a command cannot be served.
+func (r *Reporter) PostUnserviceableNote(ctx context.Context, comp *v1alpha1.Comparison, reason string) error {
+	if comp == nil || comp.Spec.PullRequest == nil {
+		return nil
+	}
+	parts := strings.Split(comp.Spec.PullRequest.Repository, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return &PermanentError{
+			StatusCode: 400,
+			Message:    fmt.Sprintf("invalid pullRequest.repository %q: expected owner/name", comp.Spec.PullRequest.Repository),
+		}
+	}
+	owner, repo := parts[0], parts[1]
+	body := fmt.Sprintf("Extra samples cannot be run: %s.", reason)
+	_, err := r.Client.CreateIssueComment(ctx, owner, repo, comp.Spec.PullRequest.Number, body)
+	return err
+}
