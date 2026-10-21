@@ -881,19 +881,23 @@ func TestParseInspectSamples(t *testing.T) {
 }
 
 func TestParseInspectLog_RealTestDataFixtures_SampleCountAndSuccessRate(t *testing.T) {
-	fixtureFiles := []string{
-		"binary_20_17.json",
-		"cost_latency_fixture.json",
-		"mockllm_2.json",
-		"model_usage_cache_reasoning.json",
-		"trajectory_messages.json",
+	fixtures := []struct {
+		filename      string
+		wantSamples   int
+		wantSuccesses int
+	}{
+		{filename: "binary_20_17.json", wantSamples: 20, wantSuccesses: 17},
+		{filename: "cost_latency_fixture.json", wantSamples: 2, wantSuccesses: 2},
+		{filename: "mockllm_2.json", wantSamples: 2, wantSuccesses: 0},
+		{filename: "model_usage_cache_reasoning.json", wantSamples: 2, wantSuccesses: 2},
+		{filename: "trajectory_messages.json", wantSamples: 2, wantSuccesses: 1},
 	}
 
-	for _, filename := range fixtureFiles {
-		t.Run(filename, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join("testdata", filename))
+	for _, tc := range fixtures {
+		t.Run(tc.filename, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", tc.filename))
 			if err != nil {
-				t.Fatalf("Failed to read testdata %s: %v", filename, err)
+				t.Fatalf("Failed to read testdata %s: %v", tc.filename, err)
 			}
 
 			// Pre-change / existing scored-sample accounting from ParseInspectLog
@@ -902,16 +906,35 @@ func TestParseInspectLog_RealTestDataFixtures_SampleCountAndSuccessRate(t *testi
 				t.Fatalf("ParseInspectLog failed: %v", err)
 			}
 
+			// Pin scored-sample accounting to pre-change values
+			if agg.Samples != tc.wantSamples {
+				t.Errorf("agg.Samples=%d, want %d", agg.Samples, tc.wantSamples)
+			}
+			if agg.Successes != tc.wantSuccesses {
+				t.Errorf("agg.Successes=%d, want %d", agg.Successes, tc.wantSuccesses)
+			}
+
 			// New per-sample extraction
 			sampleSummaries, primaryScorer, err := ExtractTaskSampleSummaries(data)
 			if err != nil {
 				t.Fatalf("ExtractTaskSampleSummaries failed: %v", err)
 			}
 
-			// Requirement: sampleCount equals pre-change samples value (agg.Samples)
-			sampleCount := agg.Samples
-			if sampleCount <= 0 {
-				t.Fatalf("Expected sampleCount > 0, got %d", sampleCount)
+			// Pin per-sample classification against scored-sample aggregates
+			var scoredCount, passCount int
+			for _, s := range sampleSummaries {
+				if s.Status != "unknown" {
+					scoredCount++
+				}
+				if s.Status == "pass" {
+					passCount++
+				}
+			}
+			if scoredCount != agg.Samples {
+				t.Errorf("count(status != 'unknown')=%d, want agg.Samples=%d", scoredCount, agg.Samples)
+			}
+			if passCount != agg.Successes {
+				t.Errorf("count(status == 'pass')=%d, want agg.Successes=%d", passCount, agg.Successes)
 			}
 
 			// Status tasks point estimate calculation
@@ -934,7 +957,7 @@ func TestParseInspectLog_RealTestDataFixtures_SampleCountAndSuccessRate(t *testi
 			// Verify each sample summary
 			for _, s := range sampleSummaries {
 				if s.ID == "" {
-					t.Errorf("Expected non-empty sample ID in %s", filename)
+					t.Errorf("Expected non-empty sample ID in %s", tc.filename)
 				}
 				if s.Score != nil {
 					if *s.Score < 0.0 || *s.Score > 1.0 {
@@ -959,7 +982,7 @@ func TestParseInspectLog_RealTestDataFixtures_SampleCountAndSuccessRate(t *testi
 				TaskID:      "test/task",
 				Commit:      "testcommit123",
 				Scorer:      primaryScorer,
-				SampleCount: sampleCount,
+				SampleCount: agg.Samples,
 				Samples:     sampleSummaries,
 				SuccessRate: &expectedRate,
 				Successes:   agg.Successes,
@@ -975,8 +998,11 @@ func TestParseInspectLog_RealTestDataFixtures_SampleCountAndSuccessRate(t *testi
 				t.Fatalf("ReadTaskSummary failed: %v", err)
 			}
 
-			if summary.SampleCount != agg.Samples {
-				t.Errorf("summary.SampleCount=%d, want agg.Samples=%d", summary.SampleCount, agg.Samples)
+			if summary.SampleCount != tc.wantSamples {
+				t.Errorf("summary.SampleCount=%d, want %d", summary.SampleCount, tc.wantSamples)
+			}
+			if summary.Successes != tc.wantSuccesses {
+				t.Errorf("summary.Successes=%d, want %d", summary.Successes, tc.wantSuccesses)
 			}
 			if summary.SuccessRate == nil || math.Abs(*summary.SuccessRate-expectedRate) > 1e-6 {
 				t.Errorf("summary.SuccessRate=%v, want %f", summary.SuccessRate, expectedRate)
