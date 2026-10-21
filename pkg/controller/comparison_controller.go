@@ -32,6 +32,9 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/forge"
+	forgegithub "github.com/gke-labs/eval-runner/pkg/forge/github"
+	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
@@ -106,6 +109,7 @@ type ComparisonReconciler struct {
 	ModelPrices            map[string]ModelPrice
 	ModelPriceSources      map[string]v1alpha1.CostSource
 	ModelPricesDisabled    bool
+	ForgeRegistry          *forge.Registry
 
 	cachedAppMu   sync.Mutex
 	cachedAppKey  string
@@ -720,7 +724,14 @@ func (r *ComparisonReconciler) handleTransientReportingError(
 	return nil
 }
 
-// reportToGitHub handles GitHub PR comment and check run reporting.
+func pullRequestRepoRef(repo string) (forge.RepoRef, bool) {
+	if ref, ok := forge.RepoRefFromOwnerName(repo); ok {
+		return ref, true
+	}
+	return forge.ParseRepoURL(repo)
+}
+
+// reportToGitHub handles PR comment and check run reporting via the forge Reporter interface.
 // Errors not matching github.PermanentError (5xx, token endpoint errors, rate limits, transport errors, or secret Get errors)
 // are treated as transient.
 func (r *ComparisonReconciler) reportToGitHub(
@@ -740,22 +751,25 @@ func (r *ComparisonReconciler) reportToGitHub(
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	ghClient, err := r.getGitHubClient(ctx)
-	if err != nil {
-		if github.IsPermanent(err) {
-			if comp.Status.Reporting == nil {
-				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
-			}
-			comp.Status.Reporting.Message = err.Error()
-			comp.Status.Reporting.NextAttemptAt = nil
-			return nil
+	repoRef, ok := pullRequestRepoRef(comp.Spec.PullRequest.Repository)
+	if !ok {
+		permErr := &github.PermanentError{
+			StatusCode: 400,
+			Message:    fmt.Sprintf("invalid pullRequest.repository %q: expected owner/name", comp.Spec.PullRequest.Repository),
 		}
-		if !isTerminalComparisonPhase(comp.Status.Phase) {
-			return err
+		if comp.Status.Reporting == nil {
+			comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
 		}
-		return r.handleTransientReportingError(comp, err)
+		comp.Status.Reporting.Message = permErr.Error()
+		comp.Status.Reporting.NextAttemptAt = nil
+		return nil
 	}
-	if ghClient == nil {
+
+	if r.ForgeRegistry == nil {
+		r.ForgeRegistry = forge.NewDefaultRegistry(forgegithub.New(), gitremote.New())
+	}
+	f := r.ForgeRegistry.ForRepo(repoRef)
+	if f == nil {
 		if comp.Status.Reporting == nil {
 			comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
 		}
@@ -764,29 +778,65 @@ func (r *ComparisonReconciler) reportToGitHub(
 		return nil
 	}
 
-	reporter := github.NewReporter(ghClient, github.ReporterOptions{
-		UIBaseURL:          r.uiBaseURL(),
-		InconclusivePolicy: r.inconclusivePolicy(),
-	})
-	repStatus, err := reporter.Report(ctx, comp, baseRun, candRun)
-	if repStatus != nil {
-		if comp.Status.Reporting == nil {
-			comp.Status.Reporting = repStatus
-		} else {
-			if repStatus.CommentID != 0 {
-				comp.Status.Reporting.CommentID = repStatus.CommentID
+	// If using the github forge, attach the authenticated HTTP client if available
+	if ghForge, ok := f.(*forgegithub.Forge); ok {
+		ghClient, err := r.getGitHubClient(ctx)
+		if err != nil {
+			if github.IsPermanent(err) {
+				if comp.Status.Reporting == nil {
+					comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+				}
+				comp.Status.Reporting.Message = err.Error()
+				comp.Status.Reporting.NextAttemptAt = nil
+				return nil
 			}
-			if repStatus.CheckRunID != 0 {
-				comp.Status.Reporting.CheckRunID = repStatus.CheckRunID
+			if !isTerminalComparisonPhase(comp.Status.Phase) {
+				return err
 			}
-			if repStatus.LastPostedHash != "" {
-				comp.Status.Reporting.LastPostedHash = repStatus.LastPostedHash
+			return r.handleTransientReportingError(comp, err)
+		}
+		if ghClient == nil {
+			if comp.Status.Reporting == nil {
+				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
 			}
-			if repStatus.Message != "" {
-				comp.Status.Reporting.Message = repStatus.Message
-			}
+			comp.Status.Reporting.Message = "disabled"
+			comp.Status.Reporting.NextAttemptAt = nil
+			return nil
+		}
+		if hc, ok := ghClient.(*github.HTTPClient); ok {
+			ghForge.SetClient(hc)
 		}
 	}
+
+	rep, ok := f.(forge.Reporter)
+	if !ok {
+		log.FromContext(ctx).Info("reporting disabled: forge does not implement Reporter", "kind", f.Kind())
+		if comp.Status.Reporting == nil {
+			comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+		}
+		comp.Status.Reporting.Message = "disabled"
+		comp.Status.Reporting.NextAttemptAt = nil
+		return nil
+	}
+
+	markdown := github.RenderComparisonMarkdown(comp, baseRun, candRun, r.uiBaseURL())
+	checkState := github.CheckRunStateForComparison(comp, baseRun, candRun, r.inconclusivePolicy())
+	hash := github.HashContent(markdown, checkState)
+
+	commentID := int64(0)
+	checkRunID := int64(0)
+	if comp.Status.Reporting != nil {
+		commentID = comp.Status.Reporting.CommentID
+		checkRunID = comp.Status.Reporting.CheckRunID
+		if comp.Status.Reporting.LastPostedHash == hash && commentID != 0 {
+			// Idempotent: content has not changed
+			return nil
+		}
+	}
+
+	crID := forge.ChangeRequestID(strconv.Itoa(comp.Spec.PullRequest.Number))
+	markerKey := github.ComparisonMarker(comp.Namespace, comp.Name)
+	newCommentID, err := rep.UpsertComment(ctx, repoRef, crID, markerKey, markdown)
 	if err != nil {
 		if github.IsPermanent(err) {
 			if comp.Status.Reporting == nil {
@@ -801,15 +851,49 @@ func (r *ComparisonReconciler) reportToGitHub(
 		}
 		return r.handleTransientReportingError(comp, err)
 	}
+	commentID = newCommentID
 
-	if comp.Status.Reporting != nil {
-		comp.Status.Reporting.Attempts = 0
-		comp.Status.Reporting.NextAttemptAt = nil
-		if repStatus != nil {
-			comp.Status.Reporting.Message = repStatus.Message
+	if comp.Status.Reporting == nil {
+		comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+	}
+	comp.Status.Reporting.CommentID = commentID
+
+	headSHA := comp.Spec.PullRequest.HeadSHA
+	if headSHA == "" && candRun != nil {
+		headSHA = candRun.Spec.Repo.Commit
+	}
+	if headSHA != "" {
+		st := forge.Status{
+			State:       checkState.Conclusion,
+			Context:     checkState.Name,
+			Description: checkState.Summary,
+			TargetURL:   r.uiBaseURL(),
+			CheckRunID:  checkRunID,
+		}
+		newCheckRunID, err := rep.SetStatus(ctx, repoRef, headSHA, st)
+		if err != nil {
+			if errors.Is(err, forgegithub.ErrCheckRunsUnavailable) {
+				comp.Status.Reporting.Message = "check runs unavailable with token auth; comment posted"
+				comp.Status.Reporting.CheckRunID = 0
+			} else if github.IsPermanent(err) {
+				comp.Status.Reporting.Message = err.Error()
+				comp.Status.Reporting.NextAttemptAt = nil
+				return nil
+			} else {
+				if !isTerminalComparisonPhase(comp.Status.Phase) {
+					return err
+				}
+				return r.handleTransientReportingError(comp, err)
+			}
+		} else {
+			comp.Status.Reporting.CheckRunID = newCheckRunID
+			comp.Status.Reporting.Message = ""
 		}
 	}
 
+	comp.Status.Reporting.LastPostedHash = hash
+	comp.Status.Reporting.Attempts = 0
+	comp.Status.Reporting.NextAttemptAt = nil
 	return nil
 }
 
@@ -846,18 +930,38 @@ func (r *ComparisonReconciler) postUnserviceableCommandNote(ctx context.Context,
 	if comp == nil || comp.Spec.PullRequest == nil {
 		return nil
 	}
-	ghClient, err := r.getGitHubClient(ctx)
-	if err != nil {
-		return err
+	repoRef, ok := pullRequestRepoRef(comp.Spec.PullRequest.Repository)
+	if !ok {
+		return fmt.Errorf("invalid pullRequest.repository: %q", comp.Spec.PullRequest.Repository)
 	}
-	if ghClient == nil {
+	if r.ForgeRegistry == nil {
+		r.ForgeRegistry = forge.NewDefaultRegistry(forgegithub.New(), gitremote.New())
+	}
+	f := r.ForgeRegistry.ForRepo(repoRef)
+	if f == nil {
 		return nil
 	}
-	reporter := github.NewReporter(ghClient, github.ReporterOptions{
-		UIBaseURL:          r.uiBaseURL(),
-		InconclusivePolicy: r.inconclusivePolicy(),
-	})
-	return reporter.PostUnserviceableNote(ctx, comp, reason)
+	if ghForge, ok := f.(*forgegithub.Forge); ok {
+		ghClient, err := r.getGitHubClient(ctx)
+		if err != nil {
+			return err
+		}
+		if ghClient == nil {
+			return nil
+		}
+		if hc, ok := ghClient.(*github.HTTPClient); ok {
+			ghForge.SetClient(hc)
+		}
+	}
+	rep, ok := f.(forge.Reporter)
+	if !ok {
+		log.FromContext(ctx).Info("cannot post unserviceable note: forge does not implement Reporter", "kind", f.Kind())
+		return nil
+	}
+	crID := forge.ChangeRequestID(strconv.Itoa(comp.Spec.PullRequest.Number))
+	body := fmt.Sprintf("Extra samples cannot be run: %s.", reason)
+	_, err := rep.UpsertComment(ctx, repoRef, crID, "", body)
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager and watches Runs.

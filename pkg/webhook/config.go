@@ -22,6 +22,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/forge"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -103,6 +104,12 @@ type Config struct {
 
 	// Client is the Kubernetes client used for reading Secrets/ConfigMaps and managing Runs/Comparisons.
 	Client client.Client
+
+	// Forge optionally provides a direct Forge abstraction for tests and repository queries.
+	Forge forge.Forge
+
+	// ForgeRegistry optionally provides a multi-host forge registry.
+	ForgeRegistry *forge.Registry
 }
 
 // RawWebhookFlags captures explicit flags passed on the command line.

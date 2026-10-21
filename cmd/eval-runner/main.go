@@ -28,6 +28,9 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/forge"
+	forgegithub "github.com/gke-labs/eval-runner/pkg/forge/github"
+	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
@@ -364,6 +367,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	forgeRegistry := forge.NewDefaultRegistry(forgegithub.New(), gitremote.New())
+
 	comparisonReconciler := &controller.ComparisonReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
@@ -379,6 +384,7 @@ func main() {
 		ModelPricesDisabled: clusterConfig.ModelPricesDisabled,
 		CommandUsers:        clusterConfig.CommandUsers,
 		AffinityMode:        clusterConfig.AffinityMode,
+		ForgeRegistry:       forgeRegistry,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {
