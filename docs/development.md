@@ -822,12 +822,37 @@ gcloud storage cat gs://<bucket>/runs/<commit>/<task-id>/summary.json
 The `summary.json` contains:
 ```json
 {
+  "schemaVersion": 1,
   "taskId": "docs/readme_comprehension",
   "model": "google/gemini-3.5-flash-lite",
   "commit": "abcdef123456",
-  "samples": 10,
+  "runName": "run-docs-eval",
+  "runNamespace": "eval-runner",
+  "controllerVersion": "0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7",
+  "scorer": "choice",
+  "sampleCount": 10,
+  "samples": [
+    {
+      "id": "sample-1",
+      "epoch": 1,
+      "score": 1.0,
+      "status": "pass",
+      "latencySeconds": 0.85,
+      "tokens": {
+        "input": 120,
+        "output": 15
+      }
+    }
+  ],
   "successes": 8,
   "meanScore": 0.8,
+  "successRate": 0.8,
+  "successRateCI": {
+    "lower": 0.49,
+    "upper": 0.94,
+    "confidence": 0.95,
+    "method": "wilson"
+  },
   "startedAt": "2026-10-17T14:52:45Z",
   "finishedAt": "2026-10-17T14:52:47Z",
   "capped": false
