@@ -236,6 +236,12 @@ type ComparisonTaskStatus struct {
 	// +optional
 	DeltaCI *DeltaConfidenceInterval `json:"deltaCI,omitempty"`
 
+	// PImprovement is the posterior probability that candidate is better than baseline for this task.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	// +optional
+	PImprovement *float64 `json:"pImprovement,omitempty"`
+
 	// Pairs is the number of matched (paired) sample pairs.
 	// +optional
 	Pairs int `json:"pairs"`

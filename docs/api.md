@@ -326,6 +326,7 @@ spec:
 | `tasks[].candidateRate` | `*float64` | Mean score or success rate on candidate samples. |
 | `tasks[].delta` | `*float64` | Mean paired difference ($\text{candidate} - \text{baseline}$). |
 | `tasks[].deltaCI` | `*DeltaConfidenceInterval` | 95% confidence interval on the delta (`lower`, `upper`). |
+| `tasks[].pImprovement` | `*float64` | Posterior probability that candidate is better than baseline for this task (range `[0, 1]`). |
 | `tasks[].pairs` | `int` | Number of matched sample pairs evaluated. |
 | `tasks[].wins` | `int` | Number of pairs where candidate scored higher than baseline. |
 | `tasks[].losses` | `int` | Number of pairs where candidate scored lower than baseline. |
