@@ -2011,74 +2011,32 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				logger.Error(nil, mismatchMsg, "task", taskID)
 
 				if isTerminalComparisonPhase(comp.Status.Phase) {
-					delta := comp.Spec.ExtraSamples - comp.Status.ExtraSamplesApplied
-					hasPRCommentSource := false
-					for i := range comp.Status.HandledCommands {
-						h := &comp.Status.HandledCommands[i]
-						if isUnservicedHandledCommand(h, comp.Status.CompletionTime) {
-							if h.CommentID != 0 {
-								hasPRCommentSource = true
-							}
-						}
-					}
-
-					conditionMissing := meta.FindStatusCondition(comp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples) == nil
-					if delta > 0 || conditionMissing {
-						condMsg := fmt.Sprintf("extra samples cannot be run: artifact prefix mismatch (%s)", mismatchMsg)
-						if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
-							if status.ExtraSamplesApplied < comp.Spec.ExtraSamples {
-								status.ExtraSamplesApplied = comp.Spec.ExtraSamples
-							}
-							for i := range status.HandledCommands {
-								h := &status.HandledCommands[i]
-								if isUnservicedHandledCommand(h, status.CompletionTime) {
-									h.Outcome = "unserviceable: artifact prefix mismatch"
-								}
-							}
-							meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-								Type:               v1alpha1.ConditionTypeExtraSamples,
-								Status:             metav1.ConditionFalse,
-								Reason:             "ArtifactPrefixMismatch",
-								Message:            condMsg,
-								ObservedGeneration: comp.Generation,
-							})
-						}); statusErr != nil {
-							logger.Error(statusErr, "failed to update terminal comparison status for unserviceable extra samples", "comparison", comp.Name)
-							return ctrl.Result{}, statusErr
-						}
-					}
-
-					if hasPRCommentSource {
-						if postErr := r.postUnserviceableCommandNote(ctx, &comp, "artifact prefix mismatch"); postErr != nil {
-							logger.Info("warning: failed to post unserviceable command note to PR", "pr", comp.Spec.PullRequest.Number, "err", postErr)
-						}
-					}
-
-					var result ctrl.Result
-					if r.ComparisonTTL > 0 {
-						if age, ok := r.comparisonAge(&comp); ok {
-							if age < r.ComparisonTTL {
-								result.RequeueAfter = r.ComparisonTTL - age
-							} else {
-								result.RequeueAfter = time.Second
-							}
-						}
-					}
-					return result, nil
+					return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact prefix mismatch", "ArtifactPrefixMismatch", mismatchMsg)
 				}
-
-				err := fmt.Errorf("%s", mismatchMsg)
-				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
-					status.Message = mismatchMsg
-				}); statusErr != nil {
-					return ctrl.Result{}, errors.Join(err, statusErr)
-				}
-				return ctrl.Result{}, err
+				return r.completeInconclusiveArtifactsUnreadable(ctx, &comp, &baselineRun, &candidateRun, batches, v1alpha1.ConditionReasonPrefixMismatch, mismatchMsg)
 			}
 
 			// Load Inspect log for candidate
 			candData, err := r.artifactSink().Load(ctx, candTask.LogPath)
 			if err != nil {
+				if artifacts.IsNotFound(err) {
+					if batchIdx > 0 {
+						logger.V(1).Info("candidate batch run log not found in artifact sink; treating batch as failed", "run", pair.candRun.Name, "task", taskID, "logPath", candTask.LogPath, "error", err)
+						if !containsTask(failedBatchRuns, pair.candRun.Name) {
+							failedBatchRuns = append(failedBatchRuns, pair.candRun.Name)
+						}
+						pair.candRun.Status.Phase = v1alpha1.RunPhaseFailed
+						batches[batchIdx].Phase = v1alpha1.ComparisonPhaseCompleted
+						taskFailed = true
+						continue
+					}
+					msg := fmt.Sprintf("failed to load candidate log for task %q (%s): %v", taskID, candTask.LogPath, err)
+					logger.Error(err, "failed to load candidate log", "task", taskID, "path", candTask.LogPath)
+					if isTerminalComparisonPhase(comp.Status.Phase) {
+						return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact not found", "ArtifactNotFound", msg)
+					}
+					return r.completeInconclusiveArtifactsUnreadable(ctx, &comp, &baselineRun, &candidateRun, batches, v1alpha1.ConditionReasonNotFound, msg)
+				}
 				msg := fmt.Sprintf("failed to load candidate log for task %q (%s): %v", taskID, candTask.LogPath, err)
 				logger.Error(err, "failed to load candidate log", "task", taskID, "path", candTask.LogPath)
 				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
@@ -2092,6 +2050,24 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			// Load Inspect log for baseline
 			baseData, err := r.artifactSink().Load(ctx, baseTask.LogPath)
 			if err != nil {
+				if artifacts.IsNotFound(err) {
+					if batchIdx > 0 {
+						logger.V(1).Info("baseline batch run log not found in artifact sink; treating batch as failed", "run", pair.baseRun.Name, "task", taskID, "logPath", baseTask.LogPath, "error", err)
+						if !containsTask(failedBatchRuns, pair.baseRun.Name) {
+							failedBatchRuns = append(failedBatchRuns, pair.baseRun.Name)
+						}
+						pair.baseRun.Status.Phase = v1alpha1.RunPhaseFailed
+						batches[batchIdx].Phase = v1alpha1.ComparisonPhaseCompleted
+						taskFailed = true
+						continue
+					}
+					msg := fmt.Sprintf("failed to load baseline log for task %q (%s): %v", taskID, baseTask.LogPath, err)
+					logger.Error(err, "failed to load baseline log", "task", taskID, "path", baseTask.LogPath)
+					if isTerminalComparisonPhase(comp.Status.Phase) {
+						return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact not found", "ArtifactNotFound", msg)
+					}
+					return r.completeInconclusiveArtifactsUnreadable(ctx, &comp, &baselineRun, &candidateRun, batches, v1alpha1.ConditionReasonNotFound, msg)
+				}
 				msg := fmt.Sprintf("failed to load baseline log for task %q (%s): %v", taskID, baseTask.LogPath, err)
 				logger.Error(err, "failed to load baseline log", "task", taskID, "path", baseTask.LogPath)
 				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
@@ -3001,6 +2977,144 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	if wait, hasPending := r.earliestPendingCommandWait(&comp); hasPending {
+		if result.RequeueAfter == 0 || wait < result.RequeueAfter {
+			result.RequeueAfter = wait
+		}
+	}
+
+	return result, nil
+}
+
+func (r *ComparisonReconciler) recordUnserviceableExtraSamples(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	baselineRun, candidateRun *v1alpha1.Run,
+	noteReason, conditionReason, detailMsg string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	delta := comp.Spec.ExtraSamples - comp.Status.ExtraSamplesApplied
+	hasPRCommentSource := false
+	for i := range comp.Status.HandledCommands {
+		h := &comp.Status.HandledCommands[i]
+		if isUnservicedHandledCommand(h, comp.Status.CompletionTime) {
+			if h.CommentID != 0 {
+				hasPRCommentSource = true
+			}
+		}
+	}
+
+	conditionMissing := meta.FindStatusCondition(comp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples) == nil
+	if delta > 0 || conditionMissing {
+		condMsg := fmt.Sprintf("extra samples cannot be run: %s (%s)", noteReason, detailMsg)
+		if _, statusErr := r.updateComparisonStatus(ctx, comp, baselineRun, candidateRun, func(status *v1alpha1.ComparisonStatus) {
+			if status.ExtraSamplesApplied < comp.Spec.ExtraSamples {
+				status.ExtraSamplesApplied = comp.Spec.ExtraSamples
+			}
+			for i := range status.HandledCommands {
+				h := &status.HandledCommands[i]
+				if isUnservicedHandledCommand(h, status.CompletionTime) {
+					h.Outcome = fmt.Sprintf("unserviceable: %s", noteReason)
+				}
+			}
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionTypeExtraSamples,
+				Status:             metav1.ConditionFalse,
+				Reason:             conditionReason,
+				Message:            condMsg,
+				ObservedGeneration: comp.Generation,
+			})
+		}); statusErr != nil {
+			logger.Error(statusErr, "failed to update terminal comparison status for unserviceable extra samples", "comparison", comp.Name)
+			return ctrl.Result{}, statusErr
+		}
+	}
+
+	if hasPRCommentSource {
+		if postErr := r.postUnserviceableCommandNote(ctx, comp, noteReason); postErr != nil {
+			logger.Info("warning: failed to post unserviceable command note to PR", "pr", comp.Spec.PullRequest.Number, "err", postErr)
+		}
+	}
+
+	var result ctrl.Result
+	if r.ComparisonTTL > 0 {
+		if age, ok := r.comparisonAge(comp); ok {
+			if age < r.ComparisonTTL {
+				result.RequeueAfter = r.ComparisonTTL - age
+			} else {
+				result.RequeueAfter = time.Second
+			}
+		}
+	}
+	return result, nil
+}
+
+func (r *ComparisonReconciler) completeInconclusiveArtifactsUnreadable(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	baselineRun, candidateRun *v1alpha1.Run,
+	batches []v1alpha1.ComparisonBatchStatus,
+	reason, message string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("completing comparison as inconclusive due to unreadable artifacts", "comparison", comp.Name, "reason", reason, "message", message)
+
+	var compTime *metav1.Time
+	if comp.Status.CompletionTime != nil {
+		compTime = comp.Status.CompletionTime
+	} else {
+		nowTime := metav1.NewTime(r.now())
+		compTime = &nowTime
+	}
+	comp.Status.CompletionTime = compTime
+	comp.Status.Phase = v1alpha1.ComparisonPhaseCompleted
+	comp.Status.Verdict = v1alpha1.ComparisonVerdictInconclusive
+	if comp.Spec.ExtraSamples > comp.Status.ExtraSamplesApplied {
+		comp.Status.ExtraSamplesApplied = comp.Spec.ExtraSamples
+	}
+
+	result, err := r.updateComparisonStatus(ctx, comp, baselineRun, candidateRun, func(status *v1alpha1.ComparisonStatus) {
+		status.Phase = v1alpha1.ComparisonPhaseCompleted
+		status.CompletionTime = compTime
+		status.Verdict = v1alpha1.ComparisonVerdictInconclusive
+		if comp.Spec.ExtraSamples > status.ExtraSamplesApplied {
+			status.ExtraSamplesApplied = comp.Spec.ExtraSamples
+		}
+		if len(status.Batches) == 0 && len(batches) > 0 {
+			for i := range batches {
+				batches[i].Phase = v1alpha1.ComparisonPhaseCompleted
+			}
+			status.Batches = batches
+		}
+		status.Message = message
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionTypeArtifactsReadable,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: comp.Generation,
+		})
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if r.ComparisonTTL > 0 && comp.Spec.ExtraSamples <= comp.Status.ExtraSamplesApplied && len(comp.Status.PendingCommands) == 0 {
+		if age, ok := r.comparisonAge(comp); ok {
+			if age >= r.ComparisonTTL {
+				logger.Info("deleting completed comparison past TTL", "comparison", comp.Name, "age", age, "ttl", r.ComparisonTTL)
+				if err := r.Delete(ctx, comp); err != nil && !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("failed to delete expired comparison %s: %w", comp.Name, err)
+				}
+				return ctrl.Result{}, nil
+			}
+			remaining := r.ComparisonTTL - age
+			if result.RequeueAfter == 0 || remaining < result.RequeueAfter {
+				result.RequeueAfter = remaining
+			}
+		}
+	}
+
+	if wait, hasPending := r.earliestPendingCommandWait(comp); hasPending {
 		if result.RequeueAfter == 0 || wait < result.RequeueAfter {
 			result.RequeueAfter = wait
 		}

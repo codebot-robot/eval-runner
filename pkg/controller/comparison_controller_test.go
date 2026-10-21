@@ -750,17 +750,1134 @@ func TestComparisonReconciler_CommitPrefixMismatch(t *testing.T) {
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-comp-prefix"}}
-	_, err = reconciler.Reconcile(t.Context(), req)
-	if err == nil || !strings.Contains(err.Error(), "does not match commit prefix") {
-		t.Errorf("Expected error containing 'does not match commit prefix', got %v", err)
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Unexpected reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected RequeueAfter 0 when TTL=0, got %v", res.RequeueAfter)
 	}
 
 	var updated v1alpha1.Comparison
 	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
 		t.Fatalf("Get error: %v", err)
 	}
+	if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("Expected phase Completed, got %s", updated.Status.Phase)
+	}
+	if updated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+		t.Errorf("Expected verdict INCONCLUSIVE, got %s", updated.Status.Verdict)
+	}
 	if !strings.Contains(updated.Status.Message, "does not match commit prefix") {
 		t.Errorf("Expected status message to record prefix mismatch, got %q", updated.Status.Message)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+	if cond == nil {
+		t.Fatalf("Expected ArtifactsReadable condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Expected condition status False, got %s", cond.Status)
+	}
+	if cond.Reason != v1alpha1.ConditionReasonPrefixMismatch {
+		t.Errorf("Expected condition reason PrefixMismatch, got %s", cond.Reason)
+	}
+	if !strings.Contains(cond.Message, "does not match commit prefix") {
+		t.Errorf("Expected condition message to contain prefix mismatch, got %q", cond.Message)
+	}
+}
+
+func TestComparisonReconciler_UnreadableArtifacts_PrefixMismatch_CompletesInconclusive(t *testing.T) {
+	scheme := setupScheme(t)
+
+	server := github.NewFakeGitHubServer()
+	defer server.Close()
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	ttl := 1 * time.Hour
+	taskID := "docs/readme_comprehension"
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:    taskID,
+					Phase: v1alpha1.TaskPhaseCompleted,
+					// Wrong commit prefix (e.g. from local /tmp/artifacts or another commit/sink)
+					LogPath: "gs://test-bucket/runs/other-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-prefix-mismatch", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         4,
+				MaxSamplesPerTask: 16,
+			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     123,
+			},
+		},
+	}
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data:       map[string][]byte{"token": []byte("test-gh-token")},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp, tokenSecret).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ComparisonTTL:       ttl,
+		Now:                 func() time.Time { return now },
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client(creds.Token)
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-prefix-mismatch"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Unexpected reconcile error: %v", err)
+	}
+	if res.RequeueAfter != ttl {
+		t.Errorf("Expected RequeueAfter %v (TTL requeue), got %v", ttl, res.RequeueAfter)
+	}
+
+	var updated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("Expected phase Completed, got %s", updated.Status.Phase)
+	}
+	if updated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+		t.Errorf("Expected verdict INCONCLUSIVE, got %s", updated.Status.Verdict)
+	}
+	if !strings.Contains(updated.Status.Message, "does not match commit prefix") {
+		t.Errorf("Expected status message to record prefix mismatch, got %q", updated.Status.Message)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+	if cond == nil {
+		t.Fatalf("Expected ArtifactsReadable condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Expected condition status False, got %s", cond.Status)
+	}
+	if cond.Reason != v1alpha1.ConditionReasonPrefixMismatch {
+		t.Errorf("Expected condition reason PrefixMismatch, got %s", cond.Reason)
+	}
+	if cond.Message != updated.Status.Message {
+		t.Errorf("Expected condition message %q, got %q", updated.Status.Message, cond.Message)
+	}
+
+	// Verify no orphan batch runs were spawned when seed is unreadable
+	var runList v1alpha1.RunList
+	if err := cl.List(t.Context(), &runList); err != nil {
+		t.Fatalf("failed to list runs: %v", err)
+	}
+	if len(runList.Items) != 2 {
+		t.Errorf("expected only seed runs [cand-run, base-run], found %d runs", len(runList.Items))
+	}
+
+	// GitHub comment check
+	comments := server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("Expected 1 PR comment, got %d", len(comments))
+	}
+	if !strings.Contains(comments[0].Body, "## INCONCLUSIVE") {
+		t.Errorf("Expected PR comment to contain '## INCONCLUSIVE', got:\n%s", comments[0].Body)
+	}
+	if !strings.Contains(comments[0].Body, "does not match commit prefix") {
+		t.Errorf("Expected PR comment to contain prefix mismatch message, got:\n%s", comments[0].Body)
+	}
+
+	// GitHub check run check
+	checkRuns := server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("Expected 1 check run, got %d", len(checkRuns))
+	}
+	if checkRuns[0].Status != "completed" {
+		t.Errorf("Expected check run status 'completed', got %q", checkRuns[0].Status)
+	}
+	if checkRuns[0].Conclusion != "neutral" {
+		t.Errorf("Expected check run conclusion 'neutral', got %q", checkRuns[0].Conclusion)
+	}
+
+	// Second reconcile: steady state makes zero GitHub calls and zero status writes
+	reqCountBefore := len(server.RequestLog())
+	rvBefore := updated.ResourceVersion
+	res2, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("second reconcile error: %v", err)
+	}
+	if res2.RequeueAfter != ttl {
+		t.Errorf("expected RequeueAfter %v, got %v", ttl, res2.RequeueAfter)
+	}
+	if len(server.RequestLog()) != reqCountBefore {
+		t.Errorf("expected 0 new GitHub requests on second reconcile, got %d", len(server.RequestLog())-reqCountBefore)
+	}
+	var updated2 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated2); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if updated2.ResourceVersion != rvBefore {
+		t.Errorf("expected 0 status writes on second reconcile, resourceVersion changed from %s to %s", rvBefore, updated2.ResourceVersion)
+	}
+}
+
+func TestComparisonReconciler_UnreadableArtifacts_NotFound_CompletesInconclusive(t *testing.T) {
+	scheme := setupScheme(t)
+
+	server := github.NewFakeGitHubServer()
+	defer server.Close()
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	ttl := 1 * time.Hour
+	taskID := "docs/readme_comprehension"
+
+	// LogPath matches prefix, but the object is NOT in fakeGCS, returning ErrNotFound
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-not-found", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     124,
+			},
+		},
+	}
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data:       map[string][]byte{"token": []byte("test-gh-token")},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp, tokenSecret).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ComparisonTTL:       ttl,
+		Now:                 func() time.Time { return now },
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client(creds.Token)
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-not-found"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Unexpected reconcile error: %v", err)
+	}
+	if res.RequeueAfter != ttl {
+		t.Errorf("Expected RequeueAfter %v (TTL requeue), got %v", ttl, res.RequeueAfter)
+	}
+
+	var updated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("Expected phase Completed, got %s", updated.Status.Phase)
+	}
+	if updated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+		t.Errorf("Expected verdict INCONCLUSIVE, got %s", updated.Status.Verdict)
+	}
+	if !strings.Contains(updated.Status.Message, "failed to load candidate log") || !strings.Contains(updated.Status.Message, "artifact not found") {
+		t.Errorf("Expected status message to record not found error, got %q", updated.Status.Message)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+	if cond == nil {
+		t.Fatalf("Expected ArtifactsReadable condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Expected condition status False, got %s", cond.Status)
+	}
+	if cond.Reason != v1alpha1.ConditionReasonNotFound {
+		t.Errorf("Expected condition reason NotFound, got %s", cond.Reason)
+	}
+	if cond.Message != updated.Status.Message {
+		t.Errorf("Expected condition message %q, got %q", updated.Status.Message, cond.Message)
+	}
+
+	// GitHub comment check
+	comments := server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("Expected 1 PR comment, got %d", len(comments))
+	}
+	if !strings.Contains(comments[0].Body, "## INCONCLUSIVE") {
+		t.Errorf("Expected PR comment to contain '## INCONCLUSIVE', got:\n%s", comments[0].Body)
+	}
+	if !strings.Contains(comments[0].Body, "artifact not found") {
+		t.Errorf("Expected PR comment to contain not found message, got:\n%s", comments[0].Body)
+	}
+
+	// GitHub check run check
+	checkRuns := server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("Expected 1 check run, got %d", len(checkRuns))
+	}
+	if checkRuns[0].Status != "completed" {
+		t.Errorf("Expected check run status 'completed', got %q", checkRuns[0].Status)
+	}
+	if checkRuns[0].Conclusion != "neutral" {
+		t.Errorf("Expected check run conclusion 'neutral', got %q", checkRuns[0].Conclusion)
+	}
+}
+
+func TestComparisonReconciler_UnreadableArtifacts_TransientSinkError_Retries(t *testing.T) {
+	scheme := setupScheme(t)
+
+	server := github.NewFakeGitHubServer()
+	defer server.Close()
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	taskID := "docs/readme_comprehension"
+	// Inject a transient 503 error
+	fakeGCS.Errors["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = errors.New("503 Service Unavailable")
+
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	ttl := 1 * time.Hour
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-transient-err", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     125,
+			},
+		},
+	}
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data:       map[string][]byte{"token": []byte("test-gh-token")},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp, tokenSecret).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ComparisonTTL:       ttl,
+		Now:                 func() time.Time { return now },
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client(creds.Token)
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-transient-err"}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err == nil {
+		t.Fatalf("Expected error on transient 503 sink error, got nil")
+	}
+	if !strings.Contains(err.Error(), "503 Service Unavailable") {
+		t.Errorf("Expected error to mention 503 Service Unavailable, got %v", err)
+	}
+
+	var updated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if updated.Status.Phase == v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("Expected phase to NOT be Completed on transient error, got %s", updated.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+	if cond != nil {
+		t.Errorf("Expected ArtifactsReadable condition to NOT be set on transient error, got %+v", cond)
+	}
+	if !strings.Contains(updated.Status.Message, "503 Service Unavailable") {
+		t.Errorf("Expected status message to record transient error, got %q", updated.Status.Message)
+	}
+}
+
+func TestComparisonReconciler_UnreadableArtifacts_BaselineVariants(t *testing.T) {
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	ttl := 1 * time.Hour
+
+	t.Run("BaselinePrefixMismatch", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-b", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      taskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json",
+					},
+				},
+			},
+		}
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-b", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      taskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/foreign-prefix/docs/readme_comprehension/log.json",
+					},
+				},
+			},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-base-prefix-mismatch", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-b"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-b"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:        cl,
+			Scheme:        scheme,
+			ArtifactSink:  sink,
+			ComparisonTTL: ttl,
+			Now:           func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-base-prefix-mismatch"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Unexpected reconcile error: %v", err)
+		}
+		if res.RequeueAfter != ttl {
+			t.Errorf("Expected RequeueAfter %v, got %v", ttl, res.RequeueAfter)
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Errorf("Expected phase Completed, got %s", updated.Status.Phase)
+		}
+		if updated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+			t.Errorf("Expected verdict INCONCLUSIVE, got %s", updated.Status.Verdict)
+		}
+		if !strings.Contains(updated.Status.Message, "baseline log path") || !strings.Contains(updated.Status.Message, "does not match commit prefix") {
+			t.Errorf("Expected baseline prefix mismatch message, got %q", updated.Status.Message)
+		}
+		cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+		if cond == nil {
+			t.Fatalf("Expected ArtifactsReadable condition to be set")
+		}
+		if cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ConditionReasonPrefixMismatch {
+			t.Errorf("Expected False/PrefixMismatch, got %s/%s", cond.Status, cond.Reason)
+		}
+	})
+
+	t.Run("BaselineNotFound", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		// Cand object exists, baseline object does not exist
+		fakeGCS.Objects["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = fakes.FakeObject{
+			Data: makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 1.0}}),
+		}
+
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-nf", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      taskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/cand-commit/docs/readme_comprehension/log.json",
+					},
+				},
+			},
+		}
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-nf", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      taskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json",
+					},
+				},
+			},
+		}
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-base-not-found", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-nf"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-nf"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:        cl,
+			Scheme:        scheme,
+			ArtifactSink:  sink,
+			ComparisonTTL: ttl,
+			Now:           func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-base-not-found"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Unexpected reconcile error: %v", err)
+		}
+		if res.RequeueAfter != ttl {
+			t.Errorf("Expected RequeueAfter %v, got %v", ttl, res.RequeueAfter)
+		}
+
+		var updated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Errorf("Expected phase Completed, got %s", updated.Status.Phase)
+		}
+		if updated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+			t.Errorf("Expected verdict INCONCLUSIVE, got %s", updated.Status.Verdict)
+		}
+		if !strings.Contains(updated.Status.Message, "failed to load baseline log") || !strings.Contains(updated.Status.Message, "artifact not found") {
+			t.Errorf("Expected baseline not found message, got %q", updated.Status.Message)
+		}
+		cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+		if cond == nil {
+			t.Fatalf("Expected ArtifactsReadable condition to be set")
+		}
+		if cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ConditionReasonNotFound {
+			t.Errorf("Expected False/NotFound, got %s/%s", cond.Status, cond.Reason)
+		}
+	})
+}
+
+func TestComparisonReconciler_UnreadableArtifacts_InconclusivePolicyFailure(t *testing.T) {
+	scheme := setupScheme(t)
+
+	server := github.NewFakeGitHubServer()
+	defer server.Close()
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	ttl := 1 * time.Hour
+	taskID := "docs/readme_comprehension"
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-policy", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/other-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-policy", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/base-commit/docs/readme_comprehension/log.json",
+				},
+			},
+		},
+	}
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-policy-failure", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-policy"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-policy"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     126,
+			},
+		},
+	}
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data:       map[string][]byte{"token": []byte("test-gh-token")},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp, tokenSecret).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ComparisonTTL:       ttl,
+		InconclusivePolicy:  configkeys.InconclusivePolicyFailure,
+		Now:                 func() time.Time { return now },
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client(creds.Token)
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-policy-failure"}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Unexpected reconcile error: %v", err)
+	}
+
+	checkRuns := server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("Expected 1 check run, got %d", len(checkRuns))
+	}
+	if checkRuns[0].Conclusion != "failure" {
+		t.Errorf("Expected check run conclusion 'failure' with InconclusivePolicy=failure, got %q", checkRuns[0].Conclusion)
+	}
+}
+
+func TestComparisonReconciler_TerminalComparison_NotFound_PreservesVerdict(t *testing.T) {
+	scheme := setupScheme(t)
+
+	server := github.NewFakeGitHubServer()
+	defer server.Close()
+	server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
+
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data:       map[string][]byte{"token": []byte("ghp_test")},
+	}
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	ttl := 1 * time.Hour
+
+	// Both log paths match prefix, but candidate log does not exist in fakeGCS -> NotFound
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-term", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "task1",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/cand-sha/task1/inspect.json",
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-term", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "task1",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://test-bucket/runs/base-sha/task1/inspect.json",
+				},
+			},
+		},
+	}
+
+	compTime := metav1.NewTime(now.Add(-30 * time.Minute))
+	verdictMsg := "Evaluated 1 task(s): 1 improved"
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-term-notfound",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-term"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-term"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     99,
+				HeadSHA:    "cand-sha",
+				BaseSHA:    "base-sha",
+			},
+			ExtraSamples: 0,
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:               v1alpha1.ComparisonPhaseCompleted,
+			Verdict:             v1alpha1.ComparisonVerdictImproved,
+			Message:             verdictMsg,
+			CompletionTime:      &compTime,
+			ExtraSamplesApplied: 0,
+			Reporting: &v1alpha1.ComparisonReportingStatus{
+				CommentID: 7777,
+			},
+			PendingCommands: []v1alpha1.ComparisonPendingCommand{
+				{
+					CommentID:  8888,
+					Login:      "reviewer",
+					Requested:  8,
+					ReceivedAt: metav1.NewTime(now),
+				},
+			},
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:         "task1",
+					Label:      v1alpha1.ComparisonTaskLabelImproved,
+					SamplesRun: 8,
+				},
+			},
+			Batches: []v1alpha1.ComparisonBatchStatus{
+				{
+					Index:        0,
+					Phase:        v1alpha1.ComparisonPhaseCompleted,
+					CandidateRun: "cand-run-term",
+					BaselineRun:  "base-run-term",
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(baseRun, candRun, comp, tokenSecret).
+		WithStatusSubresource(baseRun, candRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ComparisonTTL:       ttl,
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client(creds.Token)
+		},
+		Now: func() time.Time { return now },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-term-notfound"}}
+
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	expectedRequeue := ttl - 30*time.Minute
+	if res.RequeueAfter != expectedRequeue {
+		t.Errorf("expected RequeueAfter %v, got %v", expectedRequeue, res.RequeueAfter)
+	}
+
+	var updated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+
+	// VERDICT MUST BE PRESERVED!
+	if updated.Status.Verdict != v1alpha1.ComparisonVerdictImproved {
+		t.Errorf("expected verdict %s to be preserved, got %s", v1alpha1.ComparisonVerdictImproved, updated.Status.Verdict)
+	}
+	if updated.Status.Message != verdictMsg {
+		t.Errorf("expected message %q to be preserved, got %q", verdictMsg, updated.Status.Message)
+	}
+	if updated.Status.ExtraSamplesApplied != 8 {
+		t.Errorf("expected ExtraSamplesApplied 8, got %d", updated.Status.ExtraSamplesApplied)
+	}
+	if len(updated.Status.HandledCommands) != 1 {
+		t.Fatalf("expected 1 handled command, got %d", len(updated.Status.HandledCommands))
+	}
+	if updated.Status.HandledCommands[0].Outcome != "unserviceable: artifact not found" {
+		t.Errorf("expected outcome 'unserviceable: artifact not found', got %q", updated.Status.HandledCommands[0].Outcome)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeExtraSamples)
+	if cond == nil {
+		t.Fatalf("expected ExtraSamples condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != "ArtifactNotFound" {
+		t.Errorf("expected False/ArtifactNotFound, got %s/%s", cond.Status, cond.Reason)
+	}
+
+	// Verify note was posted to PR
+	var noteComments []string
+	for _, c := range server.Comments() {
+		if strings.Contains(c.Body, "Extra samples cannot be run: artifact not found.") {
+			noteComments = append(noteComments, c.Body)
+		}
+	}
+	if len(noteComments) != 1 {
+		t.Fatalf("expected 1 unserviceable note comment on PR, got %d", len(noteComments))
+	}
+}
+
+func TestComparisonReconciler_BatchRun_NotFound_TreatsBatchAsFailed(t *testing.T) {
+	scheme := setupScheme(t)
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	taskID := "docs/readme_comprehension"
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+
+	// Seed logs exist in fakeGCS
+	candSeedLog := "gs://test-bucket/runs/cand-commit/task/seed.json"
+	baseSeedLog := "gs://test-bucket/runs/base-commit/task/seed.json"
+	fakeGCS.Objects["test-bucket/runs/cand-commit/task/seed.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 1.0}}),
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit/task/seed.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 0.0}}),
+	}
+
+	// Batch 2 candidate log is MISSING from fakeGCS -> NotFound
+	candB2Log := "gs://test-bucket/runs/cand-commit/task/b2.json"
+	baseB2Log := "gs://test-bucket/runs/base-commit/task/b2.json"
+	fakeGCS.Objects["test-bucket/runs/base-commit/task/b2.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "2", Score: 0.0}}),
+	}
+
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	// Seed runs (batchIdx 0)
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-seed", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: candSeedLog,
+				},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-seed", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: baseSeedLog,
+				},
+			},
+		},
+	}
+
+	// Extension batch runs (batchIdx 1)
+	candB2Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-b2", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: candB2Log, // missing from fakeGCS
+				},
+			},
+		},
+	}
+	baseB2Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-b2", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: baseB2Log,
+				},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-batch-notfound", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:     v1alpha1.ComparisonRunRef{Run: "base-run-seed"},
+			Candidate:    v1alpha1.ComparisonRunRef{Run: "cand-run-seed"},
+			ExtraSamples: 1,
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Batches: []v1alpha1.ComparisonBatchStatus{
+				{
+					Index:        1,
+					CandidateRun: "cand-run-seed",
+					BaselineRun:  "base-run-seed",
+					Phase:        v1alpha1.ComparisonPhaseCompleted,
+				},
+				{
+					Index:        2,
+					CandidateRun: "cand-run-b2",
+					BaselineRun:  "base-run-b2",
+					Phase:        v1alpha1.ComparisonPhaseRunning,
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, candB2Run, baseB2Run, comp).
+		WithStatusSubresource(candRun, baseRun, candB2Run, baseB2Run, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       cl,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+		Now:          func() time.Time { return now },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-batch-notfound"}}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var updated v1alpha1.Comparison
+	if err := cl.Get(t.Context(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+
+	// Comparison completes based on seed batch, noting failed batch run
+	if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("expected phase %s, got %s", v1alpha1.ComparisonPhaseCompleted, updated.Status.Phase)
+	}
+	if updated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+		t.Errorf("expected verdict %s, got %s", v1alpha1.ComparisonVerdictInconclusive, updated.Status.Verdict)
+	}
+	if len(updated.Status.Tasks) != 1 || updated.Status.Tasks[0].SamplesRun != 1 {
+		t.Errorf("expected seed batch sample to be preserved (SamplesRun == 1), got %+v", updated.Status.Tasks)
+	}
+	if !strings.Contains(updated.Status.Message, "failed batch run") || !strings.Contains(updated.Status.Message, "cand-run-b2") {
+		t.Errorf("expected status message to note failed batch run cand-run-b2, got %q", updated.Status.Message)
+	}
+	// ArtifactsReadable condition should NOT be False/NotFound (seed was readable!)
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+	if cond != nil {
+		t.Errorf("expected ArtifactsReadable condition to not be set, got %+v", cond)
 	}
 }
 

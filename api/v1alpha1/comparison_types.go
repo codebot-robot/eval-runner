@@ -59,6 +59,17 @@ const (
 	ComparisonVerdictRunning      ComparisonVerdict = "RUNNING"
 )
 
+// ConditionTypeArtifactsReadable is the condition type reporting whether comparison artifacts are readable.
+const ConditionTypeArtifactsReadable = "ArtifactsReadable"
+
+const (
+	// ConditionReasonPrefixMismatch indicates that an artifact log path did not match the expected commit prefix.
+	ConditionReasonPrefixMismatch = "PrefixMismatch"
+
+	// ConditionReasonNotFound indicates that an artifact log was not found in the sink.
+	ConditionReasonNotFound = "NotFound"
+)
+
 // ComparisonRunRef specifies a reference to a Run resource.
 type ComparisonRunRef struct {
 	// Run is the name of the Run resource in the same namespace.
@@ -494,9 +505,11 @@ type ComparisonStatus struct {
 	HandledCommands []ComparisonHandledCommand `json:"handledCommands,omitempty"`
 
 	// Conditions records lifecycle conditions on the Comparison.
-	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
 	// +listType=map
 	// +listMapKey=type
+	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
