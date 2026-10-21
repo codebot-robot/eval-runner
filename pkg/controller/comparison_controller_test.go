@@ -12733,10 +12733,13 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 			t.Errorf("expected message to indicate extra batch with 1 task, got %q", updatedComp.Status.Message)
 		}
 
-		// No unserviceable ExtraSamples condition should be set
+		// ExtraSamples condition should be set to True/Scheduled
 		cond := meta.FindStatusCondition(updatedComp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples)
-		if cond != nil {
-			t.Errorf("expected no ExtraSamples condition on scheduled comparison, got %+v", cond)
+		if cond == nil {
+			t.Fatalf("expected ExtraSamples condition on scheduled comparison")
+		}
+		if cond.Status != metav1.ConditionTrue || cond.Reason != v1alpha1.ConditionReasonExtraSamplesScheduled {
+			t.Errorf("expected ExtraSamples=True/Scheduled, got %s/%s", cond.Status, cond.Reason)
 		}
 
 		// Verify zero unserviceable note comments on PR
@@ -12746,6 +12749,311 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestComparisonReconciler_ExtraSamples_ConditionResetOnServiceableRequest(t *testing.T) {
+	testCases := []struct {
+		name           string
+		initialReason  string
+		initialMessage string
+	}{
+		{
+			name:           "NoEligibleTasks",
+			initialReason:  v1alpha1.ConditionReasonExtraSamplesNoEligibleTasks,
+			initialMessage: "extra samples cannot be run: no eligible tasks (dataset exhausted: task1)",
+		},
+		{
+			name:           "ArtifactPrefixMismatch",
+			initialReason:  v1alpha1.ConditionReasonExtraSamplesArtifactMismatch,
+			initialMessage: "extra samples cannot be run: artifact prefix mismatch (candidate log path \"gs://other-bucket/log.json\" does not match commit prefix \"runs/cand-commit/\")",
+		},
+		{
+			name:           "ArtifactNotFound",
+			initialReason:  v1alpha1.ConditionReasonExtraSamplesArtifactNotFound,
+			initialMessage: "extra samples cannot be run: artifact not found",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			taskID := "task1"
+			now := time.Now().Truncate(time.Second)
+			ttl := 1 * time.Hour
+
+			server := github.NewFakeGitHubServer()
+			defer server.Close()
+			server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
+
+			fakeGCS := fakes.NewFakeStorageClient()
+			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+			if err != nil {
+				t.Fatalf("failed to create GCS sink: %v", err)
+			}
+			scheme := setupScheme(t)
+
+			candCommit := "cand-commit"
+			baseCommit := "base-commit"
+
+			// Seed batch 1 inspect logs (8 samples, dataset 16)
+			var b1CandScores, b1BaseScores []stats.SampleScore
+			for i := 1; i <= 8; i++ {
+				b1CandScores = append(b1CandScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+				b1BaseScores = append(b1BaseScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.0})
+			}
+			fakeGCS.Objects["test-bucket/runs/cand-commit/task1/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLogWithDataset(taskID, b1CandScores, 16)}
+			fakeGCS.Objects["test-bucket/runs/base-commit/task1/b1.json"] = fakes.FakeObject{Data: makeSyntheticInspectLogWithDataset(taskID, b1BaseScores, 16)}
+
+			// Seed batch 2 inspect logs (8 samples 9-16, dataset 16)
+			var b2CandScores, b2BaseScores []stats.SampleScore
+			for i := 9; i <= 16; i++ {
+				b2CandScores = append(b2CandScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+				b2BaseScores = append(b2BaseScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.0})
+			}
+			fakeGCS.Objects["test-bucket/runs/cand-commit/task1/b2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLogWithDataset(taskID, b2CandScores, 16)}
+			fakeGCS.Objects["test-bucket/runs/base-commit/task1/b2.json"] = fakes.FakeObject{Data: makeSyntheticInspectLogWithDataset(taskID, b2BaseScores, 16)}
+
+			tokenSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+				Data:       map[string][]byte{"token": []byte("test-token")},
+			}
+
+			baseRun := &v1alpha1.Run{
+				ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+				Spec: v1alpha1.RunSpec{
+					Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: baseCommit},
+					Model:       "mockllm/model",
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+				},
+				Status: v1alpha1.RunStatus{
+					Phase: v1alpha1.RunPhaseCompleted,
+					Tasks: []v1alpha1.TaskStatus{
+						{
+							ID:          taskID,
+							Phase:       v1alpha1.TaskPhaseCompleted,
+							LogPath:     "gs://test-bucket/runs/base-commit/task1/b1.json",
+							Samples:     8,
+							SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+						},
+					},
+				},
+			}
+
+			candRun := &v1alpha1.Run{
+				ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+				Spec: v1alpha1.RunSpec{
+					Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: candCommit},
+					Model:       "mockllm/model",
+					SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+				},
+				Status: v1alpha1.RunStatus{
+					Phase: v1alpha1.RunPhaseCompleted,
+					Tasks: []v1alpha1.TaskStatus{
+						{
+							ID:          taskID,
+							Phase:       v1alpha1.TaskPhaseCompleted,
+							LogPath:     "gs://test-bucket/runs/cand-commit/task1/b1.json",
+							Samples:     8,
+							SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+						},
+					},
+				},
+			}
+
+			compTime := metav1.NewTime(now.Add(-30 * time.Minute))
+			compName := fmt.Sprintf("comp-reset-%s", strings.ToLower(tc.name))
+			comp := &v1alpha1.Comparison{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              compName,
+					Namespace:         "eval-runner",
+					CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+				},
+				Spec: v1alpha1.ComparisonSpec{
+					Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+					Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+					PullRequest: &v1alpha1.PullRequestSpec{
+						Repository: "gke-labs/eval-runner",
+						Number:     99,
+						HeadSHA:    candCommit,
+						BaseSHA:    baseCommit,
+					},
+					Sampling: &v1alpha1.ComparisonSamplingSpec{
+						BatchSize:         8,
+						MaxSamplesPerTask: 16,
+					},
+					ExtraSamples: 8,
+				},
+				Status: v1alpha1.ComparisonStatus{
+					Phase:               v1alpha1.ComparisonPhaseCompleted,
+					Verdict:             v1alpha1.ComparisonVerdictInconclusive,
+					Message:             "Evaluated 1 task(s)",
+					CompletionTime:      &compTime,
+					ExtraSamplesApplied: 8,
+					Reporting: &v1alpha1.ComparisonReportingStatus{
+						CommentID: 7777,
+					},
+					Conditions: []metav1.Condition{
+						{
+							Type:               v1alpha1.ConditionTypeExtraSamples,
+							Status:             metav1.ConditionFalse,
+							Reason:             tc.initialReason,
+							Message:            tc.initialMessage,
+							LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Minute)),
+						},
+					},
+					PendingCommands: []v1alpha1.ComparisonPendingCommand{
+						{
+							CommentID:  8888,
+							Login:      "reviewer",
+							Requested:  8,
+							ReceivedAt: metav1.NewTime(now),
+						},
+					},
+					Tasks: []v1alpha1.ComparisonTaskStatus{
+						{
+							ID:              taskID,
+							Label:           v1alpha1.ComparisonTaskLabelInconclusive,
+							Decision:        v1alpha1.ComparisonTaskLabelInconclusive,
+							SamplesRun:      8,
+							PossibleSamples: 16,
+						},
+					},
+					Batches: []v1alpha1.ComparisonBatchStatus{
+						{
+							Index:        1,
+							Phase:        v1alpha1.ComparisonPhaseCompleted,
+							CandidateRun: "cand-run",
+							BaselineRun:  "base-run",
+							SampleRange:  &v1alpha1.SampleRange{Start: 1, End: 8},
+						},
+					},
+				},
+			}
+
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(baseRun, candRun, comp, tokenSecret).
+				WithStatusSubresource(baseRun, candRun, comp).
+				Build()
+
+			reconciler := &ComparisonReconciler{
+				Client:              cl,
+				Scheme:              scheme,
+				ArtifactSink:        sink,
+				ComparisonTTL:       ttl,
+				ControllerNamespace: "eval-runner",
+				GitHubTokenSecret:   "github-token",
+				GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+					return server.Client(creds.Token)
+				},
+				Now: func() time.Time { return now },
+			}
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comp.Name}}
+
+			// Reconcile 1: /eval more is authorized, extra batch is scheduled -> condition flips to True/Scheduled
+			_, err = reconciler.Reconcile(t.Context(), req)
+			if err != nil {
+				t.Fatalf("unexpected reconcile error on scheduling extra batch: %v", err)
+			}
+
+			var runningComp v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &runningComp); err != nil {
+				t.Fatalf("failed to get running comparison: %v", err)
+			}
+
+			if runningComp.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+				t.Errorf("expected phase Running, got %s", runningComp.Status.Phase)
+			}
+			if len(runningComp.Status.Batches) != 2 {
+				t.Fatalf("expected 2 batches scheduled, got %d", len(runningComp.Status.Batches))
+			}
+			if runningComp.Status.ExtraSamplesApplied != 16 {
+				t.Errorf("expected ExtraSamplesApplied 16, got %d", runningComp.Status.ExtraSamplesApplied)
+			}
+
+			// Condition must flip to True / Scheduled while the batch runs
+			condRunning := meta.FindStatusCondition(runningComp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples)
+			if condRunning == nil {
+				t.Fatalf("expected ExtraSamples condition on running comparison")
+			}
+			if condRunning.Status != metav1.ConditionTrue {
+				t.Errorf("expected ExtraSamples condition Status True, got %s", condRunning.Status)
+			}
+			if condRunning.Reason != v1alpha1.ConditionReasonExtraSamplesScheduled {
+				t.Errorf("expected ExtraSamples condition Reason %s, got %s", v1alpha1.ConditionReasonExtraSamplesScheduled, condRunning.Reason)
+			}
+
+			// Complete batch 2 runs
+			b2CandRunName := runningComp.Status.Batches[1].CandidateRun
+			b2BaseRunName := runningComp.Status.Batches[1].BaselineRun
+
+			var b2Cand, b2Base v1alpha1.Run
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2CandRunName}, &b2Cand); err != nil {
+				t.Fatalf("failed to get b2 candidate run %s: %v", b2CandRunName, err)
+			}
+			if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: b2BaseRunName}, &b2Base); err != nil {
+				t.Fatalf("failed to get b2 baseline run %s: %v", b2BaseRunName, err)
+			}
+
+			b2Cand.Status.Phase = v1alpha1.RunPhaseCompleted
+			b2Cand.Status.Tasks = []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     "gs://test-bucket/runs/cand-commit/task1/b2.json",
+					Samples:     8,
+					SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+				},
+			}
+			if err := cl.Status().Update(t.Context(), &b2Cand); err != nil {
+				t.Fatalf("failed to update b2 candidate run: %v", err)
+			}
+
+			b2Base.Status.Phase = v1alpha1.RunPhaseCompleted
+			b2Base.Status.Tasks = []v1alpha1.TaskStatus{
+				{
+					ID:          taskID,
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					LogPath:     "gs://test-bucket/runs/base-commit/task1/b2.json",
+					Samples:     8,
+					SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+				},
+			}
+			if err := cl.Status().Update(t.Context(), &b2Base); err != nil {
+				t.Fatalf("failed to update b2 baseline run: %v", err)
+			}
+
+			// Reconcile 2: batch 2 completes, comparison re-completes -> condition stays True/Scheduled
+			_, err = reconciler.Reconcile(t.Context(), req)
+			if err != nil {
+				t.Fatalf("unexpected reconcile error on completing extra batch: %v", err)
+			}
+
+			var completedComp v1alpha1.Comparison
+			if err := cl.Get(t.Context(), req.NamespacedName, &completedComp); err != nil {
+				t.Fatalf("failed to get completed comparison: %v", err)
+			}
+
+			if completedComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+				t.Errorf("expected phase Completed after batch 2 completes, got %s", completedComp.Status.Phase)
+			}
+			if completedComp.Status.ExtraSamplesApplied != 16 {
+				t.Errorf("expected ExtraSamplesApplied 16, got %d", completedComp.Status.ExtraSamplesApplied)
+			}
+
+			// Condition must stay True / Scheduled on completion
+			condCompleted := meta.FindStatusCondition(completedComp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples)
+			if condCompleted == nil {
+				t.Fatalf("expected ExtraSamples condition on completed comparison")
+			}
+			if condCompleted.Status != metav1.ConditionTrue {
+				t.Errorf("expected ExtraSamples condition Status True on completion, got %s", condCompleted.Status)
+			}
+			if condCompleted.Reason != v1alpha1.ConditionReasonExtraSamplesScheduled {
+				t.Errorf("expected ExtraSamples condition Reason %s on completion, got %s", v1alpha1.ConditionReasonExtraSamplesScheduled, condCompleted.Reason)
+			}
+		})
+	}
 }
 
 func TestComparisonReconciler_CompletedComparisonForeignSinkPrefixNoop(t *testing.T) {

@@ -2011,7 +2011,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				logger.Error(nil, mismatchMsg, "task", taskID)
 
 				if isTerminalComparisonPhase(comp.Status.Phase) {
-					return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact prefix mismatch", "ArtifactPrefixMismatch", mismatchMsg)
+					return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact prefix mismatch", v1alpha1.ConditionReasonExtraSamplesArtifactMismatch, mismatchMsg)
 				}
 				return r.completeInconclusiveArtifactsUnreadable(ctx, &comp, &baselineRun, &candidateRun, batches, v1alpha1.ConditionReasonPrefixMismatch, mismatchMsg)
 			}
@@ -2033,7 +2033,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					msg := fmt.Sprintf("failed to load candidate log for task %q (%s): %v", taskID, candTask.LogPath, err)
 					logger.Error(err, "failed to load candidate log", "task", taskID, "path", candTask.LogPath)
 					if isTerminalComparisonPhase(comp.Status.Phase) {
-						return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact not found", "ArtifactNotFound", msg)
+						return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact not found", v1alpha1.ConditionReasonExtraSamplesArtifactNotFound, msg)
 					}
 					return r.completeInconclusiveArtifactsUnreadable(ctx, &comp, &baselineRun, &candidateRun, batches, v1alpha1.ConditionReasonNotFound, msg)
 				}
@@ -2064,7 +2064,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					msg := fmt.Sprintf("failed to load baseline log for task %q (%s): %v", taskID, baseTask.LogPath, err)
 					logger.Error(err, "failed to load baseline log", "task", taskID, "path", baseTask.LogPath)
 					if isTerminalComparisonPhase(comp.Status.Phase) {
-						return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact not found", "ArtifactNotFound", msg)
+						return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "artifact not found", v1alpha1.ConditionReasonExtraSamplesArtifactNotFound, msg)
 					}
 					return r.completeInconclusiveArtifactsUnreadable(ctx, &comp, &baselineRun, &candidateRun, batches, v1alpha1.ConditionReasonNotFound, msg)
 				}
@@ -2636,6 +2636,13 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					status.Summary.AffinityMatched = aff.matchedCount
 				}
 				status.Message = extraMsg
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               v1alpha1.ConditionTypeExtraSamples,
+					Status:             metav1.ConditionTrue,
+					Reason:             v1alpha1.ConditionReasonExtraSamplesScheduled,
+					Message:            extraMsg,
+					ObservedGeneration: comp.Generation,
+				})
 			})
 		}
 
@@ -2663,7 +2670,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		// on a terminal Comparison, record unserviceable extra samples, settle
 		// extraSamplesApplied to spec.extraSamples, and post a PR note.
 		if isTerminalComparisonPhase(comp.Status.Phase) {
-			return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "no eligible tasks", "NoEligibleTasks", noEligibleDetailMsg)
+			return r.recordUnserviceableExtraSamples(ctx, &comp, &baselineRun, &candidateRun, "no eligible tasks", v1alpha1.ConditionReasonExtraSamplesNoEligibleTasks, noEligibleDetailMsg)
 		}
 		noEligibleExtraTasks = true
 	}
@@ -2987,7 +2994,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeExtraSamples,
 				Status:             metav1.ConditionFalse,
-				Reason:             "NoEligibleTasks",
+				Reason:             v1alpha1.ConditionReasonExtraSamplesNoEligibleTasks,
 				Message:            condMsg,
 				ObservedGeneration: comp.Generation,
 			})
