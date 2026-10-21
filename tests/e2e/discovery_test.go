@@ -315,7 +315,7 @@ spec:
 			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
 		})
 
-		runUISmoke(t, harness, runName)
+		runUISmoke(t, harness, runName, false)
 	})
 
 	t.Run("WebhookSmoke", func(t *testing.T) {
