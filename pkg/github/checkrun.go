@@ -203,7 +203,7 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 	}
 
 	var budgetLine string
-	if comp.Status.Budget != nil && comp.Status.Budget.LimitUSD != nil {
+	if comp.Status.Budget != nil && comp.Status.Budget.LimitUSD != nil && *comp.Status.Budget.LimitUSD > 0 {
 		spent := 0.0
 		if comp.Status.Budget.SpentUSD != nil {
 			spent = *comp.Status.Budget.SpentUSD
@@ -211,7 +211,10 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 			spent = *comp.Status.CostUSD
 		}
 		budgetLine = fmt.Sprintf("budget $%.2f / $%.2f", spent, *comp.Status.Budget.LimitUSD)
-	} else if comp.Spec.BudgetUSD != nil {
+		if !comp.Status.Budget.Enforced {
+			budgetLine += " (not enforced)"
+		}
+	} else if comp.Spec.BudgetUSD != nil && *comp.Spec.BudgetUSD > 0 {
 		spent := 0.0
 		if comp.Status.CostUSD != nil {
 			spent = *comp.Status.CostUSD

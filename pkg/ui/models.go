@@ -1735,13 +1735,24 @@ func NewComparisonDetailView(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 
 	var budgetFormatted string
 	var budgetNote string
-	if comp.Status.Budget != nil && comp.Status.Budget.LimitUSD != nil {
-		budgetFormatted = fmt.Sprintf("$%.2f", *comp.Status.Budget.LimitUSD)
-	} else if comp.Spec.BudgetUSD != nil {
-		budgetFormatted = fmt.Sprintf("$%.2f", *comp.Spec.BudgetUSD)
-	}
-	if comp.Status.Budget != nil {
+	if comp.Status.Budget != nil && comp.Status.Budget.LimitUSD != nil && *comp.Status.Budget.LimitUSD > 0 {
+		spent := 0.0
+		if comp.Status.Budget.SpentUSD != nil {
+			spent = *comp.Status.Budget.SpentUSD
+		} else if totalCostUSD > 0 {
+			spent = totalCostUSD
+		}
+		budgetFormatted = fmt.Sprintf("$%.2f / $%.2f", spent, *comp.Status.Budget.LimitUSD)
+		if !comp.Status.Budget.Enforced {
+			budgetFormatted += " (not enforced)"
+		}
 		budgetNote = comp.Status.Budget.Note
+	} else if comp.Spec.BudgetUSD != nil && *comp.Spec.BudgetUSD > 0 {
+		spent := 0.0
+		if totalCostUSD > 0 {
+			spent = totalCostUSD
+		}
+		budgetFormatted = fmt.Sprintf("$%.2f / $%.2f", spent, *comp.Spec.BudgetUSD)
 	}
 
 	var totalTokensFormatted string

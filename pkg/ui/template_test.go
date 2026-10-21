@@ -715,14 +715,16 @@ func TestTemplateRenderingComparisonDetail_BatchesTokensGolden(t *testing.T) {
 func TestTemplateRenderingComparisonDetail_BudgetTile(t *testing.T) {
 	comp, baseRun, candRun := batchesTokensComparisonFixture()
 	budget := 0.50
+	spent := 0.12
 	comp.Spec.BudgetUSD = &budget
 	comp.Status.Budget = &v1alpha1.ComparisonBudgetStatus{
 		LimitUSD: &budget,
+		SpentUSD: &spent,
 		Enforced: true,
 	}
 	view := NewComparisonDetailView(comp, baseRun, candRun)
-	if view.BudgetStr != "$0.50" {
-		t.Errorf("expected BudgetStr $0.50, got %q", view.BudgetStr)
+	if view.BudgetStr != "$0.12 / $0.50" {
+		t.Errorf("expected BudgetStr $0.12 / $0.50, got %q", view.BudgetStr)
 	}
 
 	var buf bytes.Buffer
@@ -733,8 +735,8 @@ func TestTemplateRenderingComparisonDetail_BudgetTile(t *testing.T) {
 	if !strings.Contains(html, `<div class="label">Budget</div>`) {
 		t.Errorf("expected html to contain Budget label")
 	}
-	if !strings.Contains(html, `<div class="value num">$0.50</div>`) {
-		t.Errorf("expected html to contain Budget value $0.50")
+	if !strings.Contains(html, `<div class="value num">$0.12 / $0.50</div>`) {
+		t.Errorf("expected html to contain Budget value $0.12 / $0.50")
 	}
 }
 

@@ -425,11 +425,29 @@ func TestRenderComparisonMarkdown_Golden_BudgetReached(t *testing.T) {
 func TestCheckRunStateForComparison_BudgetSummaryLine(t *testing.T) {
 	comp, baseRun, candRun := budgetComparisonFixture()
 	state := CheckRunStateForComparison(comp, baseRun, candRun, "")
-	if !strings.Contains(state.Summary, "budget $0.52 / $0.50") {
+	bIdx := strings.Index(state.Summary, "budget $0.52 / $0.50")
+	hIdx := strings.Index(state.Summary, "budget reached; comment `/eval more 16` to exceed it")
+	if bIdx == -1 {
 		t.Errorf("expected state.Summary to contain 'budget $0.52 / $0.50', got %q", state.Summary)
 	}
-	if !strings.Contains(state.Summary, "budget reached; comment `/eval more 16` to exceed it") {
+	if hIdx == -1 {
 		t.Errorf("expected state.Summary to contain budget reached hint, got %q", state.Summary)
+	}
+	if bIdx >= hIdx {
+		t.Errorf("expected budget line to appear before hints in check-run summary, got:\n%s", state.Summary)
+	}
+
+	// Test unenforced budget displays "(not enforced)" in check-run and PR footer
+	comp.Status.Budget.Enforced = false
+	comp.Status.Budget.Note = "cost unknown for custom-model; budget not enforced"
+	stateUnenforced := CheckRunStateForComparison(comp, baseRun, candRun, "")
+	if !strings.Contains(stateUnenforced.Summary, "budget $0.52 / $0.50 (not enforced)") {
+		t.Errorf("expected check-run summary to contain 'budget $0.52 / $0.50 (not enforced)', got %q", stateUnenforced.Summary)
+	}
+
+	mdUnenforced := RenderComparisonMarkdown(comp, baseRun, candRun, "")
+	if !strings.Contains(mdUnenforced, "budget $0.52 / $0.50 (not enforced)") {
+		t.Errorf("expected markdown footer to contain 'budget $0.52 / $0.50 (not enforced)', got %q", mdUnenforced)
 	}
 }
 
