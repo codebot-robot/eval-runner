@@ -274,6 +274,7 @@ const repoHeaderPartial = `{{- define "repo_header" }}
         <a href="{{ repoLink .Repo "/runs" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="{{ repoLink .Repo "/pulls" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull requests</a>
         <a href="{{ repoLink .Repo "/comparisons" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
+        <a href="{{ repoLink .Repo "/series" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
       </nav>
       {{- else }}
       <a href="/runs" class="header-logo">eval-runner</a>
@@ -1740,6 +1741,9 @@ const seriesDetailTemplate = `
   <style>` + baseCSS + `</style>
 </head>
 <body>
+{{- if .Repo.Host }}
+{{ template "repo_header" . }}
+{{- else }}
   <header class="header-bar">
     <div class="header-brand">
       <a href="/runs" class="header-logo">eval-runner</a>
@@ -1754,6 +1758,7 @@ const seriesDetailTemplate = `
     <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
     {{- end }}
   </header>
+{{- end }}
 
   <main class="container">
     <div class="card">

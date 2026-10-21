@@ -1448,9 +1448,10 @@ func (it SeriesItem) Estimate() stats.Estimate {
 	return est
 }
 
-// SeriesDetailView is the view model for GET /series/{repohash}/{branch}.
+// SeriesDetailView is the view model for GET /series/{repohash}/{branch} and /{host}/{owner}/{repo}/series/{branch}.
 type SeriesDetailView struct {
 	ActiveTab             NavTab
+	Repo                  RepoRef
 	Namespace             string
 	LinkNamespace         string
 	Repository            string
