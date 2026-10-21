@@ -285,7 +285,7 @@ const repoHeaderPartial = `{{- define "repo_header" }}
       {{- end }}
     </div>
     {{- if .LinkNamespace }}
-    <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
+    <span class="chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
     {{- end }}
   </header>{{- end -}}`
 

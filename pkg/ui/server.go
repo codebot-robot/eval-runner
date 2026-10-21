@@ -621,17 +621,18 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := RunsListView{
-		ActiveTab:    NavTabRuns,
-		Namespace:    ns,
-		Runs:         items,
-		TotalCount:   totalCount,
-		Offset:       start,
-		Limit:        limit,
-		HasMore:      hasMore,
-		NextLink:     nextLink,
-		HasPrev:      hasPrev,
-		PrevLink:     prevLink,
-		ShowingRange: showingRange,
+		ActiveTab:     NavTabRuns,
+		LinkNamespace: s.linkNamespace(ns),
+		Namespace:     ns,
+		Runs:          items,
+		TotalCount:    totalCount,
+		Offset:        start,
+		Limit:         limit,
+		HasMore:       hasMore,
+		NextLink:      nextLink,
+		HasPrev:       hasPrev,
+		PrevLink:      prevLink,
+		ShowingRange:  showingRange,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1236,6 +1237,7 @@ func (s *Server) handleComparisonsList(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	view := ComparisonsListView{
 		ActiveTab:          NavTabComparisons,
+		LinkNamespace:      s.linkNamespace(ns),
 		Namespace:          ns,
 		Comparisons:        items,
 		TotalCount:         totalCount,
