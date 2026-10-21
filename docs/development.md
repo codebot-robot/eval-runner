@@ -327,6 +327,79 @@ kubectl logs -n eval-runner-sandbox discovery-test-run -c agent
 
 Once discovery completes (or fails), the sandbox is automatically deleted.
 
+### NetworkPolicy Enforcement and Debugging
+
+Network isolation for sandboxes is defined in `k8s/sandbox-networkpolicy.yaml` (`eval-runner-sandbox-ingress` and `eval-runner-sandbox-egress`), applying to all pods labeled `evalrunner.gke-labs.dev/sandbox: "true"`.
+
+#### Enforcement Prerequisites
+
+Enforcement requires a cluster CNI with NetworkPolicy support enabled, such as GKE Dataplane V2 (e.g. `gke-labs-corp-dev`) or Calico.
+- **Local `kind` clusters**: kind's default `kindnet` CNI does not enforce NetworkPolicy; manifests apply cleanly and rules are verified by unit tests in `pkg/discovery/networkpolicy_test.go`.
+- **GKE Dev Cluster (`ai-us-central1-b`)**: Uses the legacy datapath with the network policy addon disabled and does not enforce NetworkPolicies.
+
+#### Inspecting Applied Policies
+
+To inspect the applied policies in the sandbox namespace:
+
+```bash
+kubectl -n eval-runner-sandbox describe networkpolicy eval-runner-sandbox-ingress
+kubectl -n eval-runner-sandbox describe networkpolicy eval-runner-sandbox-egress
+```
+
+#### Dataplane V2 Deny Logging
+
+On GKE clusters with Dataplane V2, you can enable policy action logging to observe allowed and denied connections:
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: networking.gke.io/v1alpha1
+kind: NetworkLogging
+metadata:
+  name: default
+spec:
+  cluster:
+    allow:
+      delegate: true
+      log: false
+    deny:
+      delegate: true
+      log: true
+EOF
+```
+
+Denial logs can then be inspected in Cloud Logging (filtering on `resource.type="k8s_node"` and `jsonPayload.disposition="DENY"`) or on node logs at `/var/log/network/policy_action.log`.
+
+#### Manual Verification Probes (GKE Dataplane V2)
+
+To manually verify ingress and egress policy enforcement on an enforcing cluster:
+
+1. **Verify Ingress Enforcement**:
+   - Run a labelled listener in `eval-runner-sandbox` (use images like `busybox:1.36` or `alpine` with `nc` pre-installed, since egress package managers are blocked):
+     ```bash
+     kubectl run -n eval-runner-sandbox listener --image=busybox:1.36 --labels="evalrunner.gke-labs.dev/sandbox=true" -- nc -l -p 8080
+     ```
+   - From another namespace (e.g. `default`), attempt to connect:
+     ```bash
+     kubectl run -n default probe --rm -i --tty --image=busybox:1.36 -- nc -zvw3 listener.eval-runner-sandbox.svc 8080
+     ```
+   - **Expected**: Connection fails / times out (blocked by ingress policy; only controller pods in `eval-runner` can connect).
+
+2. **Verify Egress Enforcement**:
+   - Run a probe pod in `eval-runner-sandbox` with the sandbox label and no ServiceAccount token:
+     ```bash
+     kubectl -n eval-runner-sandbox run np-probe --rm -it --restart=Never --image=busybox:1.36 --labels=evalrunner.gke-labs.dev/sandbox=true --overrides='{"spec":{"automountServiceAccountToken":false}}' -- sh
+     ```
+   - From within the probe pod:
+     - `nslookup github.com`: resolves (DNS egress to kube-system CoreDNS / link-local DNSCache succeeds).
+     - `nc -zvw3 git-server.eval-runner-sandbox.svc.cluster.local 9418`: succeeds (in-cluster git fixture on port 9418).
+     - `wget -qO- --timeout=5 https://api.github.com/zen`: succeeds (external HTTPS 443).
+     - `nc -zvw3 generativelanguage.googleapis.com 443`: succeeds (model API HTTPS 443).
+     - `nc -zvw3 eval-runner-controller.eval-runner.svc.cluster.local 8081`: times out (controller probe endpoint blocked).
+     - `nc -zvw3 eval-runner-ui.eval-runner.svc.cluster.local 80`: times out (controller namespace blocked).
+     - `wget -qO- --timeout=3 http://169.254.169.254/computeMetadata/v1/ --header 'Metadata-Flavor: Google'`: times out (GCE metadata server on :80 blocked).
+     - `nc -zvw3 example.com 8080`: times out (default-deny egress on non-whitelisted ports).
+     - `nc -zvw3 kubernetes.default.svc.cluster.local 443`: times out if control plane is private (`10.x`); if control plane is a public IP, connection succeeds at L4 but requests without credentials return 401/403 (`automountServiceAccountToken: false`).
+
 ### Running Sample Evaluations with a Real Model (e.g. Gemini on GKE)
 
 To execute real evals against a repository, provide `spec.model` on the `Run`. For cloud models (such as Gemini), provider credentials are provided via a Kubernetes Secret in the sandbox namespace:

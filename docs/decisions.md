@@ -287,6 +287,21 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Implements the first step of ROI-driven task selection (Concept §4.3). Prioritizes evals relevant to code changes under test without complex learning or historical tracking, while preserving full backward compatibility for repositories without declared paths.
 
+### ADR-028: Default-Deny Egress NetworkPolicy for eval-runner-sandbox (#33)
+- **Date**: 2026-10-21
+- **Status**: Accepted
+- **Decision**:
+  1. **Dual NetworkPolicy in `k8s/sandbox-networkpolicy.yaml`**: Add a default-deny egress `NetworkPolicy` (`eval-runner-sandbox-egress`) selecting all sandboxes with `evalrunner.gke-labs.dev/sandbox: "true"`, coexisting alongside the existing ingress policy (`eval-runner-sandbox-ingress`).
+  2. **Default-Deny Egress PolicyType**: Configure `policyTypes: [Egress]`, blocking all outbound traffic from sandboxes unless explicitly allowed by egress rules.
+  3. **Cluster DNS Allowance**: Allow UDP and TCP port 53 to CoreDNS/kube-dns/node-local-dns pods in `kube-system` (`k8s-app In [kube-dns, node-local-dns]`) and link-local DNS endpoints (`169.254.20.10/32` NodeLocal DNSCache on Autopilot/Cloud DNS, and `169.254.169.254/32` Cloud DNS data plane on the metadata server).
+  4. **Git Protocol and HTTP/HTTPS Internet Allowance**: Allow TCP ports 80, 443, and 9418 to external IPs via `ipBlock: 0.0.0.0/0` with RFC1918, CGNAT, and link-local CIDR exceptions `[10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]`, permitting git clones from GitHub and external model provider APIs (e.g. `generativelanguage.googleapis.com` over 443).
+  5. **Internal Isolation and Metadata Server Block**: In-cluster pod traffic is restricted to `app: git-server` on port 9418 only; egress to all other namespaces (including controller endpoints in `eval-runner`) is blocked by default deny. Node IPs, private control-plane endpoints, and the GCE metadata server (`169.254.169.254:80`, preventing ADC token acquisition) are blocked by the CIDR exceptions. A public control-plane endpoint on port 443 is not blocked by this static policy since Dataplane V2 applies policy post-DNAT; sandboxes rely on `automountServiceAccountToken: false` and the absence of a kubeconfig. A follow-up for FQDN-based egress (GKE `FQDNNetworkPolicy`) will restrict 443 strictly to `github.com` and `*.googleapis.com`.
+  6. **Intra-Namespace Fixture Allowance**: Allow intra-namespace egress on port 9418 via a dedicated rule selecting `podSelector: matchLabels: {app: git-server}` so sandboxes can clone from the `git-server` fixture in `eval-runner-sandbox`.
+  7. **Enforcement Requirements**: Document that NetworkPolicy enforcement requires a cluster CNI with policy enforcement enabled, such as GKE Dataplane V2 (e.g. `gke-labs-corp-dev`) or Calico. On clusters without policy enforcement (like default kindnet in kind), manifests apply cleanly and rules are validated by unit tests in `pkg/discovery`.
+- **Rationale**:
+  Hardens the untrusted sandbox environment at the network perimeter. In addition to running without Kubernetes ServiceAccount tokens (`automountServiceAccountToken: false`) and dropping all Linux capabilities, sandboxes are prevented from accessing controller endpoints (:8081 health probe, UI, webhook), internal cluster services, GCE metadata credentials, and arbitrary outbound ports.
+
+
 
 
 
