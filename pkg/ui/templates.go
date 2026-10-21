@@ -1691,18 +1691,37 @@ const seriesDetailTemplate = `
         {{- if .OrderedNote }}
         <div style="font-size:13px;color:var(--muted);margin-bottom:12px">{{ .OrderedNote }}</div>
         {{- end }}
-
-        {{- if .Tasks }}
+        {{- if or .CohortsLink .Tasks }}
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+          {{- if .CohortsLink }}
+          <a href="{{ .CohortsLink }}" class="chip {{ if .IsCohortsView }}good{{ else }}neutral{{ end }} mono" style="font-size:12px">Cohorts</a>
+          {{- end }}
+          {{- if .Tasks }}
           <span style="font-size:13px;font-weight:600;color:var(--muted)">Task:</span>
           {{ range .Tasks }}
-          <a href="{{ .Link }}" class="chip {{ if .Active }}good{{ else }}neutral{{ end }} mono" style="font-size:12px">{{ .ID }}</a>
+          <a href="{{ .Link }}" class="chip {{ if and (not $.IsCohortsView) .Active }}good{{ else }}neutral{{ end }} mono" style="font-size:12px">{{ .ID }}</a>
+          {{ end }}
+          {{- end }}
+        </div>
+        {{- end }}
+        {{- if .IsCohortsView }}
+        <div class="mono" style="font-weight:600;font-size:15px;margin-bottom:4px">Cohorts</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:12px">Mean score per cohort over commits · 95% CI shaded · pooled Wilson</div>
+        {{- if .CohortLegend }}
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px;font-size:13px">
+          {{ range .CohortLegend }}
+          <span style="display:inline-flex;align-items:center;gap:6px">
+            <svg width="12" height="12" aria-hidden="true"><rect width="12" height="12" rx="2" fill="{{ .Color }}"/></svg>
+            <span style="font-weight:600">{{ .Name }}</span>
+            <span style="color:var(--muted)">({{ .Count }} {{ if eq .Count 1 }}eval{{ else }}evals{{ end }})</span>
+          </span>
           {{ end }}
         </div>
         {{- end }}
-
+        {{- else }}
         {{- if .SelectedTask }}
         <div class="mono" style="font-weight:600;font-size:15px;margin-bottom:12px">{{ .SelectedTask }}</div>
+        {{- end }}
         {{- end }}
 
         <div style="overflow-x:auto">
@@ -1718,9 +1737,17 @@ const seriesDetailTemplate = `
             <line x1="{{ .SVG.X0 }}" y1="{{ .SVG.Y0 }}" x2="{{ .SVG.X0 }}" y2="{{ .SVG.Y1 }}" stroke="var(--line)" stroke-width="1"/>
 
             <!-- Shaded CI Polygons -->
-            {{ range .SVG.Polygons }}
-            <polygon points="{{ . }}" fill="var(--indigo)" fill-opacity="0.15" stroke="none"/>
+            {{ range $i, $poly := .SVG.Polygons }}
+            <polygon points="{{ $poly }}" fill="{{ if $.SVG.PolygonFills }}{{ index $.SVG.PolygonFills $i }}{{ else }}var(--indigo){{ end }}" fill-opacity="0.15" stroke="none"/>
             {{ end }}
+            {{- if .SVG.Annotations }}
+
+            <!-- Annotations -->
+            {{ range .SVG.Annotations }}
+            <line x1="{{ .X }}" y1="{{ .Y1 }}" x2="{{ .X }}" y2="{{ .Y2 }}" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--teal){{ end }}" stroke-dasharray="4,4" stroke-width="1.5"/>
+            <text x="{{ .TextX }}" y="{{ .TextY }}" fill="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--teal){{ end }}" font-size="10" font-family="var(--sans)" font-weight="600"{{ if .TextAnchor }} text-anchor="{{ .TextAnchor }}"{{ end }}>{{ .Text }}</text>
+            {{ end }}
+            {{- end }}
 
             <!-- Polylines -->
             {{ range .SVG.Polylines }}
@@ -1729,7 +1756,7 @@ const seriesDetailTemplate = `
 
             <!-- Data Points -->
             {{ range .SVG.Circles }}
-            <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="var(--indigo)" stroke="#fff" stroke-width="2"/>
+            <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="{{ if .Fill }}{{ .Fill }}{{ else }}var(--indigo){{ end }}" stroke="#fff" stroke-width="2"/>
             {{ end }}
 
             <!-- X-Axis Ticks & Labels -->
@@ -1739,6 +1766,41 @@ const seriesDetailTemplate = `
             {{ end }}
           </svg>
         </div>
+        {{- if .IsCohortsView }}
+        <div style="overflow-x:auto;margin-top:20px">
+          <table class="ci">
+            <thead>
+              <tr>
+                <th>Cohort</th>
+                <th>Evals</th>
+                <th>First Seen Commit</th>
+                <th>Latest Mean</th>
+                <th>95% CI</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{ range .CohortRows }}
+              <tr>
+                <td>
+                  <span style="display:inline-flex;align-items:center;gap:6px">
+                    <svg width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" fill="{{ .Color }}"/></svg>
+                    <span class="mono" style="font-weight:600">{{ .Cohort }}</span>
+                  </span>
+                </td>
+                <td class="num">{{ .EvalsCount }}</td>
+                <td><span class="mono" style="font-size:13px">{{ .FirstSeenCommit }}</span></td>
+                <td class="num" style="font-size:13px"{{ if .MethodTooltip }} title="{{ .MethodTooltip }}"{{ end }}>{{ .LatestMean }}</td>
+                <td class="num" style="font-size:13px">{{ .CIStr }}</td>
+              </tr>
+              {{ else }}
+              <tr>
+                <td colspan="5" class="empty-state">No cohort data available.</td>
+              </tr>
+              {{ end }}
+            </tbody>
+          </table>
+        </div>
+        {{- else }}
 
         <div style="overflow-x:auto;margin-top:20px">
           <table class="ci">
@@ -1778,6 +1840,7 @@ const seriesDetailTemplate = `
             </tbody>
           </table>
         </div>
+        {{- end }}
       </div>
       <div class="card-footer">
         <span><b>Repository:</b> {{ .Repository }}</span>

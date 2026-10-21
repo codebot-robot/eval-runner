@@ -1649,71 +1649,255 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	isCohortsView := r.URL.Query().Get("view") == "cohorts"
+
+	cParams := url.Values{}
+	cParams.Set("view", "cohorts")
+	if n != 50 {
+		cParams.Set("n", strconv.Itoa(n))
+	}
+	if ns != s.cfg.DefaultNamespace {
+		cParams.Set("namespace", ns)
+	}
+	if cohortFilter != "" {
+		cParams.Set("cohort", cohortFilter)
+	}
+	cohortsLink := fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), cParams.Encode())
+
+	var svg SeriesSVG
 	var items []SeriesItem
-	for _, m := range matched {
-		run := m.run
-		commit := run.Spec.Repo.Commit
-		if commit == "" {
-			commit = run.Labels["evalrunner.gke-labs.dev/head-sha"]
-		}
+	var cohortLegend []CohortLegendItem
+	var cohortRows []CohortSummaryRow
 
-		commitTimeStr := "—"
-		if !m.commitTime.IsZero() {
-			commitTimeStr = m.commitTime.UTC().Format(time.RFC3339)
-		}
+	if isCohortsView {
+		cohortSet := make(map[string]bool)
+		tasksByCohort := make(map[string]map[string]bool)
+		allTasksSet := make(map[string]bool)
+		firstSeenCommit := make(map[string]int)
+		firstSeenCommitSHA := make(map[string]string)
 
-		var matchedTask *v1alpha1.TaskStatus
-		for idx := range run.Status.Tasks {
-			if run.Status.Tasks[idx].ID == selectedTask {
-				matchedTask = &run.Status.Tasks[idx]
-				break
+		for idx, m := range matched {
+			commit := m.run.Spec.Repo.Commit
+			if commit == "" {
+				commit = m.run.Labels["evalrunner.gke-labs.dev/head-sha"]
+			}
+			for _, t := range m.run.Status.Tasks {
+				if t.ID == "" {
+					continue
+				}
+				c := t.Cohort
+				if c == "" {
+					c = v1alpha1.DefaultCohort
+				}
+				cohortSet[c] = true
+				if tasksByCohort[c] == nil {
+					tasksByCohort[c] = make(map[string]bool)
+				}
+				tasksByCohort[c][t.ID] = true
+				allTasksSet[t.ID] = true
+
+				if t.Samples > 0 || t.Phase == v1alpha1.TaskPhaseCompleted {
+					if _, seen := firstSeenCommit[c]; !seen {
+						firstSeenCommit[c] = idx
+						firstSeenCommitSHA[c] = ShortCommit(commit)
+					}
+				}
 			}
 		}
 
-		item := SeriesItem{
-			CommitSHA:      commit,
-			CommitSHAShort: ShortCommit(commit),
-			CommitTime:     m.commitTime,
-			CommitTimeStr:  commitTimeStr,
-			RunName:        run.Name,
-			Namespace:      run.Namespace,
-			Samples:        "—",
-			RateStr:        "—",
-			CIStr:          "—",
-			DeltaPrevStr:   "—",
-			TokensStr:      "—",
-			CostStr:        "—",
-			RunLink:        fmt.Sprintf("/runs/%s/%s", run.Namespace, run.Name),
+		var cohortNames []string
+		if cohortSet[v1alpha1.DefaultCohort] {
+			cohortNames = append(cohortNames, v1alpha1.DefaultCohort)
+		}
+		var otherCohorts []string
+		for c := range cohortSet {
+			if c != v1alpha1.DefaultCohort {
+				otherCohorts = append(otherCohorts, c)
+			}
+		}
+		sort.Strings(otherCohorts)
+		cohortNames = append(cohortNames, otherCohorts...)
+		if len(cohortNames) == 0 {
+			cohortNames = []string{v1alpha1.DefaultCohort}
 		}
 
-		if matchedTask != nil && matchedTask.Phase == v1alpha1.TaskPhaseCompleted && matchedTask.SuccessRate != nil {
-			item.HasPoint = true
-			item.SuccessRate = matchedTask.SuccessRate
-			item.CI = matchedTask.SuccessRateCI
-			item.SD = matchedTask.SuccessRateSD
-			item.SamplesCount = matchedTask.Samples
-			item.Phase = matchedTask.Phase
-			item.PhaseChip = "good"
-			item.Samples = strconv.Itoa(matchedTask.Samples)
-			item.RateStr = fmt.Sprintf("%.2f", *matchedTask.SuccessRate)
-			if matchedTask.SuccessRateCI != nil {
-				item.CIStr = fmt.Sprintf("[%.2f, %.2f]", matchedTask.SuccessRateCI.Lower, matchedTask.SuccessRateCI.Upper)
+		cohortColorsList := []string{"var(--indigo)", "var(--teal)", "#d97706", "#7c3aed", "#dc2626"}
+		cohortColors := make(map[string]string)
+		for idx, c := range cohortNames {
+			cohortColors[c] = cohortColorsList[idx%len(cohortColorsList)]
+		}
+
+		var commitSHAs []string
+		for _, m := range matched {
+			commit := m.run.Spec.Repo.Commit
+			if commit == "" {
+				commit = m.run.Labels["evalrunner.gke-labs.dev/head-sha"]
 			}
-			if matchedTask.Tokens != nil {
-				item.TokensStr = FormatTokens(matchedTask.Tokens.Total)
+			commitSHAs = append(commitSHAs, commit)
+		}
+
+		latestEstimate := make(map[string]*stats.Estimate)
+
+		var cohortLines []CohortSeriesLine
+		for _, c := range cohortNames {
+			line := CohortSeriesLine{
+				Name:            c,
+				Color:           cohortColors[c],
+				Points:          make([]CohortPoint, len(matched)),
+				FirstSeenCommit: firstSeenCommit[c],
+				EvalsCount:      len(tasksByCohort[c]),
+				IsAll:           false,
 			}
-			if matchedTask.CostUSD != nil {
-				item.CostStr = fmt.Sprintf("$%.2f", *matchedTask.CostUSD)
-				item.CostSource = matchedTask.CostSource
-				item.CostTooltip = FormatCostTooltip(matchedTask.CostSource)
+
+			for idx, m := range matched {
+				var cTasks []stats.TaskCounts
+				for _, t := range m.run.Status.Tasks {
+					tc := t.Cohort
+					if tc == "" {
+						tc = v1alpha1.DefaultCohort
+					}
+					if tc == c && t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
+						succ := t.Successes
+						if succ == 0 && t.SuccessRate != nil && *t.SuccessRate > 0 {
+							succ = int(math.Round(*t.SuccessRate * float64(t.Samples)))
+						}
+						cTasks = append(cTasks, stats.TaskCounts{Successes: succ, Samples: t.Samples})
+					}
+				}
+				if len(cTasks) > 0 {
+					est := stats.PooledWilson(cTasks, 0.95)
+					p := est.Point
+					ci := est.CI
+					line.Points[idx] = CohortPoint{
+						HasPoint: true,
+						Rate:     &p,
+						CI:       &ci,
+					}
+					latestEstimate[c] = &est
+				} else {
+					line.Points[idx] = CohortPoint{HasPoint: false}
+				}
 			}
-		} else {
-			item.HasPoint = false
-			if matchedTask != nil && matchedTask.Phase != "" {
+			cohortLines = append(cohortLines, line)
+		}
+
+		if len(cohortNames) > 1 {
+			allLine := CohortSeriesLine{
+				Name:       "all",
+				Color:      "var(--muted)",
+				Points:     make([]CohortPoint, len(matched)),
+				EvalsCount: len(allTasksSet),
+				IsAll:      true,
+			}
+			for idx, m := range matched {
+				var allTasks []stats.TaskCounts
+				for _, t := range m.run.Status.Tasks {
+					if t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
+						succ := t.Successes
+						if succ == 0 && t.SuccessRate != nil && *t.SuccessRate > 0 {
+							succ = int(math.Round(*t.SuccessRate * float64(t.Samples)))
+						}
+						allTasks = append(allTasks, stats.TaskCounts{Successes: succ, Samples: t.Samples})
+					}
+				}
+				if len(allTasks) > 0 {
+					est := stats.PooledWilson(allTasks, 0.95)
+					p := est.Point
+					ci := est.CI
+					allLine.Points[idx] = CohortPoint{
+						HasPoint: true,
+						Rate:     &p,
+						CI:       &ci,
+					}
+					latestEstimate["all"] = &est
+				} else {
+					allLine.Points[idx] = CohortPoint{HasPoint: false}
+				}
+			}
+			cohortLines = append(cohortLines, allLine)
+		}
+
+		svg = BuildCohortSeriesSVG(commitSHAs, cohortLines)
+
+		for _, line := range cohortLines {
+			cohortLegend = append(cohortLegend, CohortLegendItem{
+				Name:  line.Name,
+				Color: line.Color,
+				Count: line.EvalsCount,
+			})
+
+			latestMean := "—"
+			ciStr := "—"
+			if est, ok := latestEstimate[line.Name]; ok && est != nil {
+				latestMean = fmt.Sprintf("%.2f", est.Point)
+				ciStr = fmt.Sprintf("[%.2f, %.2f]", est.CI.Lower, est.CI.Upper)
+			}
+			firstSeen := "—"
+			if !line.IsAll {
+				if sha, ok := firstSeenCommitSHA[line.Name]; ok {
+					firstSeen = sha
+				}
+			}
+			cohortRows = append(cohortRows, CohortSummaryRow{
+				Cohort:          line.Name,
+				Color:           line.Color,
+				EvalsCount:      line.EvalsCount,
+				FirstSeenCommit: firstSeen,
+				LatestMean:      latestMean,
+				CIStr:           ciStr,
+				Method:          "pooled-wilson",
+				MethodTooltip:   FormatMethodTooltip("pooled-wilson"),
+			})
+		}
+	} else {
+		for _, m := range matched {
+			run := m.run
+			commit := run.Spec.Repo.Commit
+			if commit == "" {
+				commit = run.Labels["evalrunner.gke-labs.dev/head-sha"]
+			}
+
+			commitTimeStr := "—"
+			if !m.commitTime.IsZero() {
+				commitTimeStr = m.commitTime.UTC().Format(time.RFC3339)
+			}
+
+			var matchedTask *v1alpha1.TaskStatus
+			for idx := range run.Status.Tasks {
+				if run.Status.Tasks[idx].ID == selectedTask {
+					matchedTask = &run.Status.Tasks[idx]
+					break
+				}
+			}
+
+			item := SeriesItem{
+				CommitSHA:      commit,
+				CommitSHAShort: ShortCommit(commit),
+				CommitTime:     m.commitTime,
+				CommitTimeStr:  commitTimeStr,
+				RunName:        run.Name,
+				Namespace:      run.Namespace,
+				Samples:        "—",
+				RateStr:        "—",
+				CIStr:          "—",
+				DeltaPrevStr:   "—",
+				TokensStr:      "—",
+				CostStr:        "—",
+				RunLink:        fmt.Sprintf("/runs/%s/%s", run.Namespace, run.Name),
+			}
+
+			if matchedTask != nil && matchedTask.Phase == v1alpha1.TaskPhaseCompleted && matchedTask.SuccessRate != nil {
+				item.HasPoint = true
+				item.SuccessRate = matchedTask.SuccessRate
+				item.CI = matchedTask.SuccessRateCI
+				item.SD = matchedTask.SuccessRateSD
+				item.SamplesCount = matchedTask.Samples
 				item.Phase = matchedTask.Phase
-				item.PhaseChip = taskPhaseChipClass(matchedTask.Phase)
-				if matchedTask.Samples > 0 {
-					item.Samples = strconv.Itoa(matchedTask.Samples)
+				item.PhaseChip = "good"
+				item.Samples = strconv.Itoa(matchedTask.Samples)
+				item.RateStr = fmt.Sprintf("%.2f", *matchedTask.SuccessRate)
+				if matchedTask.SuccessRateCI != nil {
+					item.CIStr = fmt.Sprintf("[%.2f, %.2f]", matchedTask.SuccessRateCI.Lower, matchedTask.SuccessRateCI.Upper)
 				}
 				if matchedTask.Tokens != nil {
 					item.TokensStr = FormatTokens(matchedTask.Tokens.Total)
@@ -1724,36 +1908,53 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 					item.CostTooltip = FormatCostTooltip(matchedTask.CostSource)
 				}
 			} else {
-				item.Phase = v1alpha1.TaskPhase(run.Status.Phase)
-				item.PhaseChip = phaseChipClass(run.Status.Phase)
+				item.HasPoint = false
+				if matchedTask != nil && matchedTask.Phase != "" {
+					item.Phase = matchedTask.Phase
+					item.PhaseChip = taskPhaseChipClass(matchedTask.Phase)
+					if matchedTask.Samples > 0 {
+						item.Samples = strconv.Itoa(matchedTask.Samples)
+					}
+					if matchedTask.Tokens != nil {
+						item.TokensStr = FormatTokens(matchedTask.Tokens.Total)
+					}
+					if matchedTask.CostUSD != nil {
+						item.CostStr = fmt.Sprintf("$%.2f", *matchedTask.CostUSD)
+						item.CostSource = matchedTask.CostSource
+						item.CostTooltip = FormatCostTooltip(matchedTask.CostSource)
+					}
+				} else {
+					item.Phase = v1alpha1.TaskPhase(run.Status.Phase)
+					item.PhaseChip = phaseChipClass(run.Status.Phase)
+				}
 			}
+
+			items = append(items, item)
 		}
 
-		items = append(items, item)
+		var prevPointItem *SeriesItem
+		for i := range items {
+			it := &items[i]
+			if !it.HasPoint || it.SuccessRate == nil {
+				it.DeltaPrevStr = "—"
+				continue
+			}
+			if prevPointItem != nil {
+				estCur := it.Estimate()
+				estPrev := prevPointItem.Estimate()
+				delta := stats.DifferenceUnpaired(estCur, estPrev, 0.95)
+				it.DeltaPrev = &delta
+				it.DeltaPrevMethod = FormatMethodTooltip(delta.Method)
+				it.DeltaPrevChip = DeltaChipClass(delta.CI)
+				it.DeltaPrevStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
+			} else {
+				it.DeltaPrevStr = "—"
+			}
+			prevPointItem = it
+		}
+
+		svg = BuildSeriesSVG(items)
 	}
-
-	var prevPointItem *SeriesItem
-	for i := range items {
-		it := &items[i]
-		if !it.HasPoint || it.SuccessRate == nil {
-			it.DeltaPrevStr = "—"
-			continue
-		}
-		if prevPointItem != nil {
-			estCur := it.Estimate()
-			estPrev := prevPointItem.Estimate()
-			delta := stats.DifferenceUnpaired(estCur, estPrev, 0.95)
-			it.DeltaPrev = &delta
-			it.DeltaPrevMethod = FormatMethodTooltip(delta.Method)
-			it.DeltaPrevChip = DeltaChipClass(delta.CI)
-			it.DeltaPrevStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
-		} else {
-			it.DeltaPrevStr = "—"
-		}
-		prevPointItem = it
-	}
-
-	svg := BuildSeriesSVG(items)
 
 	backLink := "/series"
 	bParams := url.Values{}
@@ -1783,6 +1984,10 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		Items:                 items,
 		TotalRuns:             totalRuns,
 		BackLink:              backLink,
+		IsCohortsView:         isCohortsView,
+		CohortsLink:           cohortsLink,
+		CohortLegend:          cohortLegend,
+		CohortRows:            cohortRows,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
