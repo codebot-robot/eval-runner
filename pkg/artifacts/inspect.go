@@ -602,6 +602,101 @@ func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 	return sampleScores, nil
 }
 
+// ExtractTaskSampleSummaries parses raw Inspect JSON log bytes and returns sample summaries
+// along with the primary scorer name used.
+func ExtractTaskSampleSummaries(data []byte) ([]TaskSampleSummary, string, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, "", fmt.Errorf("empty log data")
+	}
+
+	var log InspectLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		return nil, "", fmt.Errorf("failed to unmarshal inspect log: %w", err)
+	}
+
+	primaryScorer := ""
+	if len(log.Eval.Scorers) > 0 {
+		primaryScorer = log.Eval.Scorers[0].Name
+	} else if log.Results != nil && len(log.Results.Scores) > 0 {
+		primaryScorer = log.Results.Scores[0].Name
+	}
+	if primaryScorer == "" {
+		for _, s := range log.Samples {
+			if len(s.Scores) > 0 {
+				keys := make([]string, 0, len(s.Scores))
+				for k := range s.Scores {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				primaryScorer = keys[0]
+				break
+			}
+		}
+	}
+
+	if len(log.Samples) == 0 {
+		return nil, primaryScorer, nil
+	}
+
+	summaries := make([]TaskSampleSummary, 0, len(log.Samples))
+	for _, s := range log.Samples {
+		idStr := FormatSampleID(s.ID, s.Epoch)
+		if idStr == "" {
+			continue
+		}
+
+		var score *float64
+		status := "unknown"
+		if targetScore, found := selectPrimaryScore(s.Scores, primaryScorer); found {
+			if scoreVal, valid := ScoreToFloat(targetScore.Value); valid {
+				score = &scoreVal
+				if scoreVal >= 1.0 {
+					status = "pass"
+				} else {
+					status = "fail"
+				}
+			}
+		}
+
+		var latencySec *float64
+		start, okStart := parseSampleTime(s.StartedAt)
+		end, okEnd := parseSampleTime(s.CompletedAt)
+		if okStart && okEnd && !end.Before(start) {
+			dur := end.Sub(start).Seconds()
+			latencySec = &dur
+		} else if s.TotalTime > 0 {
+			dur := s.TotalTime
+			latencySec = &dur
+		}
+
+		var tokens *TaskSampleTokens
+		if s.ModelUsage != nil {
+			var totalIn, totalOut int
+			for _, usage := range s.ModelUsage {
+				totalIn += usage.InputTokens
+				totalOut += usage.OutputTokens
+			}
+			if totalIn > 0 || totalOut > 0 {
+				tokens = &TaskSampleTokens{
+					Input:  totalIn,
+					Output: totalOut,
+				}
+			}
+		}
+
+		summaries = append(summaries, TaskSampleSummary{
+			ID:             idStr,
+			Epoch:          s.Epoch,
+			Score:          score,
+			Status:         status,
+			LatencySeconds: latencySec,
+			Tokens:         tokens,
+		})
+	}
+
+	return summaries, primaryScorer, nil
+}
+
 // ParseInspectSamples parses raw Inspect JSON log bytes and returns detailed sample records,
 // reusing the primary scorer selection from ParseInspectLog and latency parsing from parseSampleTime.
 func ParseInspectSamples(data []byte) ([]ParsedInspectSample, error) {

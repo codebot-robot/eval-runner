@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gke-labs/eval-runner/pkg/stats"
 )
 
 func TestParseInspectLog_Binary20_17(t *testing.T) {
@@ -876,4 +878,112 @@ func TestParseInspectSamples(t *testing.T) {
 			t.Errorf("expected 0 samples, got %d", len(empty))
 		}
 	})
+}
+
+func TestParseInspectLog_RealTestDataFixtures_SampleCountAndSuccessRate(t *testing.T) {
+	fixtureFiles := []string{
+		"binary_20_17.json",
+		"cost_latency_fixture.json",
+		"mockllm_2.json",
+		"model_usage_cache_reasoning.json",
+		"trajectory_messages.json",
+	}
+
+	for _, filename := range fixtureFiles {
+		t.Run(filename, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", filename))
+			if err != nil {
+				t.Fatalf("Failed to read testdata %s: %v", filename, err)
+			}
+
+			// Pre-change / existing scored-sample accounting from ParseInspectLog
+			agg, err := ParseInspectLog(data)
+			if err != nil {
+				t.Fatalf("ParseInspectLog failed: %v", err)
+			}
+
+			// New per-sample extraction
+			sampleSummaries, primaryScorer, err := ExtractTaskSampleSummaries(data)
+			if err != nil {
+				t.Fatalf("ExtractTaskSampleSummaries failed: %v", err)
+			}
+
+			// Requirement: sampleCount equals pre-change samples value (agg.Samples)
+			sampleCount := agg.Samples
+			if sampleCount <= 0 {
+				t.Fatalf("Expected sampleCount > 0, got %d", sampleCount)
+			}
+
+			// Status tasks point estimate calculation
+			var expectedRate float64
+			if agg.IsBinary() {
+				est := stats.Proportion(agg.Successes, agg.Samples, 0.95)
+				expectedRate = est.Point
+			} else {
+				est := stats.Mean(agg.Scores, 0.95)
+				expectedRate = est.Point
+			}
+
+			if agg.MeanScore == nil {
+				t.Fatalf("Expected non-nil MeanScore")
+			}
+			if math.Abs(expectedRate-*agg.MeanScore) > 1e-6 {
+				t.Errorf("Expected successRate %f to match MeanScore %f", expectedRate, *agg.MeanScore)
+			}
+
+			// Verify each sample summary
+			for _, s := range sampleSummaries {
+				if s.ID == "" {
+					t.Errorf("Expected non-empty sample ID in %s", filename)
+				}
+				if s.Score != nil {
+					if *s.Score < 0.0 || *s.Score > 1.0 {
+						t.Errorf("Sample %s score %f out of range [0, 1]", s.ID, *s.Score)
+					}
+					if *s.Score >= 1.0 && s.Status != "pass" {
+						t.Errorf("Sample %s score %f expected status 'pass', got %q", s.ID, *s.Score, s.Status)
+					}
+					if *s.Score < 1.0 && s.Status != "fail" {
+						t.Errorf("Sample %s score %f expected status 'fail', got %q", s.ID, *s.Score, s.Status)
+					}
+				} else {
+					if s.Status != "unknown" {
+						t.Errorf("Sample %s with nil score expected status 'unknown', got %q", s.ID, s.Status)
+					}
+				}
+			}
+
+			// Also verify storing into TaskSummary and round-tripping
+			sink := NewInMemorySink()
+			meta := RunMetadata{
+				TaskID:      "test/task",
+				Commit:      "testcommit123",
+				Scorer:      primaryScorer,
+				SampleCount: sampleCount,
+				Samples:     sampleSummaries,
+				SuccessRate: &expectedRate,
+				Successes:   agg.Successes,
+				MeanScore:   agg.MeanScore,
+			}
+			uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", data)
+			if err != nil {
+				t.Fatalf("StoreArtifact failed: %v", err)
+			}
+
+			summary, err := ReadTaskSummary(t.Context(), sink, uri)
+			if err != nil {
+				t.Fatalf("ReadTaskSummary failed: %v", err)
+			}
+
+			if summary.SampleCount != agg.Samples {
+				t.Errorf("summary.SampleCount=%d, want agg.Samples=%d", summary.SampleCount, agg.Samples)
+			}
+			if summary.SuccessRate == nil || math.Abs(*summary.SuccessRate-expectedRate) > 1e-6 {
+				t.Errorf("summary.SuccessRate=%v, want %f", summary.SuccessRate, expectedRate)
+			}
+			if summary.Scorer != primaryScorer {
+				t.Errorf("summary.Scorer=%q, want %q", summary.Scorer, primaryScorer)
+			}
+		})
+	}
 }
