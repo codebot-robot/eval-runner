@@ -60,6 +60,18 @@ const (
 	TaskPhaseFailed TaskPhase = "Failed"
 )
 
+// CostSource represents the provenance of model prices used to compute costUSD.
+// +kubebuilder:validation:Enum=configmap;default
+type CostSource string
+
+const (
+	// CostSourceConfigMap indicates evaluation cost was computed from ConfigMap model prices.
+	CostSourceConfigMap CostSource = "configmap"
+
+	// CostSourceDefault indicates evaluation cost was computed from built-in default model prices.
+	CostSourceDefault CostSource = "default"
+)
+
 // ConfidenceInterval represents a statistical confidence interval for a metric.
 type ConfidenceInterval struct {
 	// Lower is the lower confidence bound.
@@ -140,6 +152,10 @@ type TaskStatus struct {
 	// CostUSD is the estimated task evaluation cost in USD from model prices.
 	// +optional
 	CostUSD *float64 `json:"costUSD,omitempty"`
+
+	// CostSource is the provenance of model prices used to compute costUSD (configmap or default).
+	// +optional
+	CostSource CostSource `json:"costSource,omitempty"`
 
 	// PossibleSamples is the total dataset size (possible samples) when known from the Inspect log.
 	// +optional

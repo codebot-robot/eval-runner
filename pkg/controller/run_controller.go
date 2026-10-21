@@ -208,6 +208,12 @@ type RunReconciler struct {
 	// ModelPrices maps model identifier to token pricing in USD per 1M tokens.
 	ModelPrices map[string]ModelPrice
 
+	// ModelPriceSources maps model or prefix key to pricing provenance ("configmap" or "default").
+	ModelPriceSources map[string]v1alpha1.CostSource
+
+	// ModelPricesDisabled reports whether pricing has been explicitly disabled via ConfigMap sentinel.
+	ModelPricesDisabled bool
+
 	pkiMu sync.Mutex
 
 	manifestCacheLock sync.RWMutex
@@ -520,10 +526,19 @@ func (r *RunReconciler) modelSecret() string {
 	return r.ModelSecret
 }
 
-func (r *RunReconciler) modelPrices() map[string]ModelPrice {
+func (r *RunReconciler) lookupModelPrice(model string) (ModelPrice, v1alpha1.CostSource, bool) {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.ModelPrices
+	if r.ModelPricesDisabled {
+		return ModelPrice{}, "", false
+	}
+	prices := r.ModelPrices
+	sources := r.ModelPriceSources
+	if prices == nil {
+		prices = DefaultModelPrices()
+		sources = DefaultModelPriceSources()
+	}
+	return LookupModelPrice(model, prices, sources)
 }
 
 // UpdateConfig updates the reloadable settings on RunReconciler in a thread-safe manner.
@@ -538,6 +553,8 @@ func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.PollProgressInterval = cfg.PollProgressInterval
 	r.ModelSecret = cfg.ModelSecret
 	r.ModelPrices = cfg.ModelPrices
+	r.ModelPriceSources = cfg.ModelPriceSources
+	r.ModelPricesDisabled = cfg.ModelPricesDisabled
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
@@ -1958,6 +1975,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].Tokens = res.tokens
 				status.Tasks[i].Latency = res.latency
 				status.Tasks[i].CostUSD = res.costUSD
+				status.Tasks[i].CostSource = res.costSource
 				status.Tasks[i].PossibleSamples = res.possibleSamples
 				finalSamplesDone := res.samples
 				if res.phase != v1alpha1.TaskPhaseCompleted && status.Tasks[i].SamplesDone > finalSamplesDone {
@@ -2024,6 +2042,7 @@ type taskExecutionResult struct {
 	tokens          *v1alpha1.TaskTokens
 	latency         *v1alpha1.TaskLatency
 	costUSD         *float64
+	costSource      v1alpha1.CostSource
 	possibleSamples int
 	samplesDone     int
 	samplesPlanned  int
@@ -2360,11 +2379,12 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 
 	var costUSD *float64
+	var costSource v1alpha1.CostSource
 	if tokens != nil {
-		prices := r.modelPrices()
-		if price, ok := prices[run.Spec.Model]; ok {
+		if price, src, ok := r.lookupModelPrice(run.Spec.Model); ok {
 			cost := (float64(tokens.Input)*price.InputPer1M + float64(tokens.Output)*price.OutputPer1M) / 1_000_000.0
 			costUSD = &cost
+			costSource = src
 		}
 	}
 
@@ -2388,6 +2408,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		Tokens:          tokens,
 		Latency:         latency,
 		CostUSD:         costUSD,
+		CostSource:      costSource,
 		PossibleSamples: datasetSamples,
 	}
 	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
@@ -2476,6 +2497,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		tokens:          v1Tokens,
 		latency:         v1Latency,
 		costUSD:         costUSD,
+		costSource:      costSource,
 		possibleSamples: datasetSamples,
 		samplesDone:     agg.Samples,
 		samplesPlanned:  planned,

@@ -50,6 +50,7 @@ type RunMetadata struct {
 	Tokens          *TaskTokens
 	Latency         *TaskLatency
 	CostUSD         *float64
+	CostSource      v1alpha1.CostSource
 	PossibleSamples int
 }
 
@@ -78,21 +79,22 @@ type SampleRange struct {
 
 // TaskSummary records per-task aggregates and execution metadata written alongside the Inspect log.
 type TaskSummary struct {
-	TaskID          string       `json:"taskId"`
-	Model           string       `json:"model"`
-	Commit          string       `json:"commit"`
-	Samples         int          `json:"samples"`
-	Successes       int          `json:"successes"`
-	MeanScore       *float64     `json:"meanScore"`
-	StartedAt       *time.Time   `json:"startedAt,omitempty"`
-	FinishedAt      *time.Time   `json:"finishedAt,omitempty"`
-	Capped          bool         `json:"capped"`
-	CapBytes        int64        `json:"capBytes,omitempty"`
-	SampleRange     *SampleRange `json:"sampleRange,omitempty"`
-	Tokens          *TaskTokens  `json:"tokens,omitempty"`
-	Latency         *TaskLatency `json:"latency,omitempty"`
-	CostUSD         *float64     `json:"costUSD,omitempty"`
-	PossibleSamples int          `json:"possibleSamples,omitempty"`
+	TaskID          string              `json:"taskId"`
+	Model           string              `json:"model"`
+	Commit          string              `json:"commit"`
+	Samples         int                 `json:"samples"`
+	Successes       int                 `json:"successes"`
+	MeanScore       *float64            `json:"meanScore"`
+	StartedAt       *time.Time          `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time          `json:"finishedAt,omitempty"`
+	Capped          bool                `json:"capped"`
+	CapBytes        int64               `json:"capBytes,omitempty"`
+	SampleRange     *SampleRange        `json:"sampleRange,omitempty"`
+	Tokens          *TaskTokens         `json:"tokens,omitempty"`
+	Latency         *TaskLatency        `json:"latency,omitempty"`
+	CostUSD         *float64            `json:"costUSD,omitempty"`
+	CostSource      v1alpha1.CostSource `json:"costSource,omitempty"`
+	PossibleSamples int                 `json:"possibleSamples,omitempty"`
 }
 
 // ComparisonTaskArtifact records paired comparison details for a single task in the artifact JSON.
@@ -119,6 +121,7 @@ type ComparisonTaskArtifact struct {
 	CandidateLatency *v1alpha1.TaskLatency            `json:"candidateLatency,omitempty"`
 	BaseLatency      *v1alpha1.TaskLatency            `json:"baseLatency,omitempty"`
 	CostUSD          *float64                         `json:"costUSD,omitempty"`
+	CostSource       v1alpha1.CostSource              `json:"costSource,omitempty"`
 	CandidateCostUSD *float64                         `json:"candidateCostUSD,omitempty"`
 	BaseCostUSD      *float64                         `json:"baseCostUSD,omitempty"`
 	PossibleSamples  int                              `json:"possibleSamples,omitempty"`

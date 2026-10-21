@@ -8767,6 +8767,9 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 		if task.CostUSD == nil || math.Abs(*task.CostUSD-expectedCost) > 1e-9 {
 			t.Errorf("Expected task.CostUSD=%f, got %v", expectedCost, task.CostUSD)
 		}
+		if task.CostSource != v1alpha1.CostSourceConfigMap {
+			t.Errorf("Expected task.CostSource=%q, got %q", v1alpha1.CostSourceConfigMap, task.CostSource)
+		}
 		if compFinal.Status.CostUSD == nil || math.Abs(*compFinal.Status.CostUSD-expectedCost) > 1e-9 {
 			t.Errorf("Expected compFinal.Status.CostUSD=%f, got %v", expectedCost, compFinal.Status.CostUSD)
 		}
@@ -8798,6 +8801,9 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 		if artTask.CostUSD == nil || math.Abs(*artTask.CostUSD-expectedCost) > 1e-9 {
 			t.Errorf("Expected artTask.CostUSD=%f, got %v", expectedCost, artTask.CostUSD)
 		}
+		if artTask.CostSource != v1alpha1.CostSourceConfigMap {
+			t.Errorf("Expected artTask.CostSource=%q, got %q", v1alpha1.CostSourceConfigMap, artTask.CostSource)
+		}
 		if artTask.CandidateCostUSD == nil || math.Abs(*artTask.CandidateCostUSD-0.14) > 1e-9 {
 			t.Errorf("Expected artTask.CandidateCostUSD=0.14, got %v", artTask.CandidateCostUSD)
 		}
@@ -8821,6 +8827,112 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 		}
 		if art.PossibleSamples != 21 {
 			t.Errorf("Expected art.PossibleSamples=21, got %d", art.PossibleSamples)
+		}
+	})
+
+	t.Run("DefaultModel_NoConfigMap_CostAndProvenanceDefault", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		fakeGCS.Objects["test-bucket/runs/cand-commit/log.json"] = fakes.FakeObject{Data: fixtureBytes}
+		fakeGCS.Objects["test-bucket/runs/base-commit/log.json"] = fakes.FakeObject{Data: fixtureBytes}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-default-cost", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model:       "google/gemini-3.5-flash-lite",
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 2},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/log.json", Samples: 2, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 2}},
+				},
+			},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-default-cost", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model:       "google/gemini-3.5-flash-lite",
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 2},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/log.json", Samples: 2, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 2}},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-default-cost", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-default-cost"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-default-cost"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+			// ModelPrices: nil simulating no ConfigMap configured
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-default-cost"}}
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile failed: %v", err)
+		}
+
+		var compFinal v1alpha1.Comparison
+		_ = cl.Get(t.Context(), req.NamespacedName, &compFinal)
+
+		if len(compFinal.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task in comparison status, got %d", len(compFinal.Status.Tasks))
+		}
+		task := compFinal.Status.Tasks[0]
+
+		// 100k input ($0.30/1M), 20k output ($2.50/1M) -> 0.08 cand + 0.08 base = 0.16
+		expectedCost := 0.16
+		if task.CostUSD == nil || math.Abs(*task.CostUSD-expectedCost) > 1e-9 {
+			t.Errorf("Expected task.CostUSD=%f, got %v", expectedCost, task.CostUSD)
+		}
+		if task.CostSource != v1alpha1.CostSourceDefault {
+			t.Errorf("Expected task.CostSource=%q, got %q", v1alpha1.CostSourceDefault, task.CostSource)
+		}
+		if compFinal.Status.CostUSD == nil || math.Abs(*compFinal.Status.CostUSD-expectedCost) > 1e-9 {
+			t.Errorf("Expected compFinal.Status.CostUSD=%f, got %v", expectedCost, compFinal.Status.CostUSD)
+		}
+
+		// Check artifact
+		artData, ok := fakeGCS.Objects["test-bucket/comparisons/comp-default-cost.json"]
+		if !ok {
+			t.Fatalf("Expected comparison artifact in sink")
+		}
+		var art ComparisonArtifact
+		if err := json.Unmarshal(artData.Data, &art); err != nil {
+			t.Fatalf("Failed to unmarshal artifact: %v", err)
+		}
+		artTask := art.Tasks[0]
+
+		if artTask.CostUSD == nil || math.Abs(*artTask.CostUSD-expectedCost) > 1e-9 {
+			t.Errorf("Expected artTask.CostUSD=%f, got %v", expectedCost, artTask.CostUSD)
+		}
+		if artTask.CostSource != v1alpha1.CostSourceDefault {
+			t.Errorf("Expected artTask.CostSource=%q, got %q", v1alpha1.CostSourceDefault, artTask.CostSource)
 		}
 	})
 

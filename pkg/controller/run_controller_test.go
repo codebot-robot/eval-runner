@@ -5032,8 +5032,151 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 		if summary.Latency == nil || math.Abs(summary.Latency.P50-2.0) > 1e-9 || math.Abs(summary.Latency.P95-2.9) > 1e-9 {
 			t.Errorf("Expected summary.Latency P50=2.0, P95=2.9, got %+v", summary.Latency)
 		}
+		if task.CostSource != v1alpha1.CostSourceConfigMap {
+			t.Errorf("Expected task.CostSource=%q, got %q", v1alpha1.CostSourceConfigMap, task.CostSource)
+		}
+		if summary.CostSource != v1alpha1.CostSourceConfigMap {
+			t.Errorf("Expected summary.CostSource=%q, got %q", v1alpha1.CostSourceConfigMap, summary.CostSource)
+		}
 		if summary.PossibleSamples != 21 {
 			t.Errorf("Expected summary.PossibleSamples=21, got %d", summary.PossibleSamples)
+		}
+	})
+
+	t.Run("DefaultModel_NoConfigMap_CostAndProvenanceDefault", func(t *testing.T) {
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-cost-default",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "git://git-server/repo.git",
+					Commit: "abcdef123456",
+				},
+				Model: "google/gemini-3.5-flash-lite",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		executor := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "ls" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "log.json\n"}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				return fixtureData, nil
+			},
+		}
+
+		fakeGCSClient := fakes.NewFakeStorageClient()
+		gcsSink, err := gcs.New(t.Context(), "gs://justinbs-knotai-dev-eval-runner", gcs.WithStorageClient(fakeGCSClient))
+		if err != nil {
+			t.Fatalf("Failed to create GCSSink: %v", err)
+		}
+
+		modelSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "model-credentials",
+				Namespace: "eval-runner-sandbox",
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run, modelSecret).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxClient:    executor,
+			ArtifactSink:     gcsSink,
+			SandboxNamespace: "eval-runner-sandbox",
+			ModelSecret:      "model-credentials",
+			// ModelPrices is nil simulating no ConfigMap configured
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-cost-default"}}
+
+		// Turn 1: Creates pod
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile turn 1 error: %v", err)
+		}
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      discovery.TaskSandboxNameForRun("test-run-cost-default", "docs/readme_comprehension"),
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.50",
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+		}
+		if err := cl.Create(t.Context(), pod); err != nil {
+			t.Fatalf("Failed to create pod: %v", err)
+		}
+
+		// Turn 2: Executes task and writes artifacts
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile turn 2 error: %v", err)
+		}
+
+		// Turn 3: Run completed
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile turn 3 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+
+		task := updatedRun.Status.Tasks[0]
+		if task.CostUSD == nil {
+			t.Fatalf("Expected non-nil task.CostUSD for default model")
+		}
+		// Input=100k (at $0.30/1M), Output=20k (at $2.50/1M) -> (100000*0.30 + 20000*2.50)/1e6 = 0.08
+		expectedCost := 0.08
+		if math.Abs(*task.CostUSD-expectedCost) > 1e-9 {
+			t.Errorf("Expected task.CostUSD=%f, got %f", expectedCost, *task.CostUSD)
+		}
+		if task.CostSource != v1alpha1.CostSourceDefault {
+			t.Errorf("Expected task.CostSource=%q, got %q", v1alpha1.CostSourceDefault, task.CostSource)
+		}
+		if updatedRun.Status.CostUSD == nil || math.Abs(*updatedRun.Status.CostUSD-expectedCost) > 1e-9 {
+			t.Errorf("Expected Run.Status.CostUSD=%f, got %v", expectedCost, updatedRun.Status.CostUSD)
+		}
+
+		summaryObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/summary.json")
+		if !exists {
+			t.Fatalf("summary.json was not uploaded to GCS")
+		}
+		var summary artifacts.TaskSummary
+		if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
+			t.Fatalf("Failed to parse summary.json: %v", err)
+		}
+		if summary.CostUSD == nil || math.Abs(*summary.CostUSD-expectedCost) > 1e-9 {
+			t.Errorf("Expected summary.CostUSD=%f, got %v", expectedCost, summary.CostUSD)
+		}
+		if summary.CostSource != v1alpha1.CostSourceDefault {
+			t.Errorf("Expected summary.CostSource=%q, got %q", v1alpha1.CostSourceDefault, summary.CostSource)
 		}
 	})
 

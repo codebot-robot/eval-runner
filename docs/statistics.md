@@ -438,17 +438,19 @@ Per-task sample counts (`samplesRun`), model token usage, and costs are tracked 
 - **Token Extraction & Invariant**: When Inspect logs contain `stats.model_usage` or sample-level `model_usage` (`input_tokens`, `output_tokens`, `total_tokens`), token usage is extracted via `ExtractInspectTokens` as a structured `{input, output, total, reasoning, cacheRead, cacheWrite}` object. Inspect AI logs may include provider-specific token fields in `stats.model_usage` (such as `input_tokens_cache_read`, `input_tokens_cache_write`, `reasoning_tokens`, or provider-specific `total_tokens` calculations that include cached or unexposed fields). Eval-runner enforces the strict token accounting invariant:
   $$\text{total} = \text{input} + \text{output}$$
   Inspect's reported `total_tokens` is dropped in favor of this invariant, ensuring `total` is always reproducible from the parts. Reasoning tokens (`reasoning`) and cache counts (`cacheRead`, `cacheWrite`) are recorded as separate optional fields rather than folded into `total` because billing models differ across providers.
-- **Model Pricing Table (`modelPrices`)**: ConfigMap key `modelPrices` in `eval-runner-config` specifies a JSON pricing map from model identifier to pricing rates in USD per 1M tokens:
+- **Model Pricing Table (`modelPrices`) & Built-in Defaults**: Eval-runner ships with built-in default pricing for models documented or supported by the project (`google/gemini-3.5-flash-lite`, `google/gemini-2.5-flash`, `google/gemini-2.5-pro`, and `mockllm/model = 0`):
   ```json
   {
-    "google/gemini-3.5-flash-lite": { "inputPer1M": 0.15, "outputPer1M": 0.60 },
-    "mockllm/model": { "inputPer1M": 1.00, "outputPer1M": 2.00 }
+    "google/gemini-3.5-flash-lite": { "inputPer1M": 0.30, "outputPer1M": 2.50 },
+    "google/gemini-2.5-flash": { "inputPer1M": 0.30, "outputPer1M": 2.50 },
+    "google/gemini-2.5-pro": { "inputPer1M": 1.25, "outputPer1M": 10.00 },
+    "mockllm/model": { "inputPer1M": 0.00, "outputPer1M": 0.00 }
   }
   ```
-  The pricing map key is an exact, case-sensitive string match on `Run.spec.model`. Unknown JSON fields are rejected at startup.
-- **Cost Calculation**: When pricing is configured for a model, eval-runner computes per-task evaluation cost:
+  ConfigMap key `modelPrices` in `eval-runner-config` extends or overrides these defaults (merge, not replace). The sentinel `"none"` disables defaults entirely. Pricing rules support exact, case-sensitive string matching on `Run.spec.model`, as well as explicit `"prefix:<model-prefix>"` keys (e.g. `"prefix:google/gemini-"`) for family-wide prices. ConfigMap entries (exact first, then longest `prefix:`) take precedence over built-in defaults; within a source, exact beats prefix. Unknown JSON fields and negative prices are rejected at startup and config reload.
+- **Cost Calculation & Provenance**: When pricing is configured or resolved from defaults for a model, eval-runner computes per-task evaluation cost:
   $$\text{costUSD} = \frac{\text{inputTokens} \times \text{inputPer1M} + \text{outputTokens} \times \text{outputPer1M}}{1{,}000{,}000}$$
-  Cost is omitted when no price is known for the model rather than reporting zero. Under this pricing model, `reasoning` tokens are not priced separately because Inspect's reported `output_tokens` already includes reasoning tokens for the major providers (e.g. Gemini and Anthropic), so the output price covers them. Prompt cache counts (`cacheRead`, `cacheWrite`) are tracked for operational visibility but not priced.
+  Cost provenance is tracked as `costSource` (`configmap` or `default`), recorded on `Run.status.tasks[].costSource`, `Comparison.status.tasks[].costSource`, and in `summary.json`. Provenance is surfaced as a tooltip on UI cost cells and as `(default prices)` in the PR comment footer so readers know how trustworthy the dollar figure is. Cost is omitted when no price is known for the model rather than reporting zero. Under this pricing model, `reasoning` tokens are not priced separately because Inspect's reported `output_tokens` already includes reasoning tokens for the major providers (e.g. Gemini and Anthropic), so the output price covers them. Prompt cache counts (`cacheRead`, `cacheWrite`) are tracked for operational visibility but not priced.
 - **Aggregation**: Evaluated token counts and costs are accumulated across candidate and baseline runs for each task, recorded in `Run.status.tasks[]` (`tokens`, `costUSD`), `Comparison.status.tasks[]` (`tokens`, `costUSD`), and written to `summary.json` alongside task execution metadata. For Comparisons, task costs are summed into `Comparison.status.costUSD` and the comparison artifact when all tasks with tokens have known prices.
 
 ### 5.7 Latency Percentiles & Footer Reporting

@@ -470,6 +470,7 @@ func batchesTokensComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1a
 						P95: 0.50,
 					},
 					CostUSD:         ptr(0.01),
+					CostSource:      v1alpha1.CostSourceDefault,
 					PossibleSamples: 50,
 				},
 				{

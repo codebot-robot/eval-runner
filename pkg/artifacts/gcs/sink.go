@@ -346,6 +346,7 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 		Tokens:          meta.Tokens,
 		Latency:         meta.Latency,
 		CostUSD:         meta.CostUSD,
+		CostSource:      meta.CostSource,
 		PossibleSamples: meta.PossibleSamples,
 	}
 	if capped {

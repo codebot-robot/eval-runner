@@ -98,6 +98,8 @@ type RunTaskRow struct {
 	ReasoningStr         string // e.g. "133"
 	CacheReadStr         string // e.g. "0"
 	CostStr              string // e.g. "$0.0013"
+	CostSource           v1alpha1.CostSource
+	CostTooltip          string // "default prices" or "configmap prices"
 	ArtifactsUnavailable bool
 }
 
@@ -382,6 +384,8 @@ type ComparisonTaskRow struct {
 	Affinity      string // always, matched, unmatched
 	LatencyStr    string
 	CostStr       string
+	CostSource    v1alpha1.CostSource
+	CostTooltip   string
 
 	// Multi-metric comparison fields
 	BaseLatencyStr  string // e.g. "8.50s / 12.00s"
@@ -393,10 +397,24 @@ type ComparisonTaskRow struct {
 	DeltaTokensStr string // e.g. "+1199"
 
 	BaseCostStr     string // e.g. "$0.0010"
+	BaseCostTooltip string
 	CandCostStr     string // e.g. "$0.0013"
+	CandCostTooltip string
 	DeltaCostStr    string // e.g. "+$0.0003"
 	BaseSamplesLink string // link to baseline task samples list
 	CandSamplesLink string // link to candidate task samples list
+}
+
+// FormatCostTooltip returns a human-readable tooltip describing the cost provenance.
+func FormatCostTooltip(source v1alpha1.CostSource) string {
+	switch source {
+	case v1alpha1.CostSourceDefault:
+		return "default prices"
+	case v1alpha1.CostSourceConfigMap:
+		return "configmap prices"
+	default:
+		return ""
+	}
 }
 
 // ComparisonRows maps a Comparison resource into a slice of ComparisonTaskRow
@@ -513,23 +531,41 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 
 		// Cost resolution
 		costUSD := task.CostUSD
-		if costUSD == nil {
-			if ct, ok := candTasks[task.ID]; ok && ct.CostUSD != nil {
+		costSource := task.CostSource
+		var candCostSource v1alpha1.CostSource
+		if ct, ok := candTasks[task.ID]; ok {
+			if costUSD == nil && ct.CostUSD != nil {
 				costUSD = ct.CostUSD
 			}
+			candCostSource = ct.CostSource
 		}
+		if candCostSource == "" {
+			candCostSource = costSource
+		}
+		if costSource == "" {
+			costSource = candCostSource
+		}
+
 		var baseCostUSD *float64
-		if bt, ok := baseTasks[task.ID]; ok && bt.CostUSD != nil {
-			baseCostUSD = bt.CostUSD
+		var baseCostSource v1alpha1.CostSource
+		if bt, ok := baseTasks[task.ID]; ok {
+			if bt.CostUSD != nil {
+				baseCostUSD = bt.CostUSD
+			}
+			baseCostSource = bt.CostSource
 		}
 
 		var costStr, baseCostStr, candCostStr, deltaCostStr string
+		var costTooltip, baseCostTooltip, candCostTooltip string
 		if costUSD != nil {
 			candCostStr = fmt.Sprintf("$%.4f", *costUSD)
 			costStr = candCostStr
+			costTooltip = FormatCostTooltip(costSource)
+			candCostTooltip = FormatCostTooltip(candCostSource)
 		}
 		if baseCostUSD != nil {
 			baseCostStr = fmt.Sprintf("$%.4f", *baseCostUSD)
+			baseCostTooltip = FormatCostTooltip(baseCostSource)
 		}
 		if costUSD != nil && baseCostUSD != nil {
 			diff := *costUSD - *baseCostUSD
@@ -564,6 +600,8 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 			Affinity:        affinity,
 			LatencyStr:      latStr,
 			CostStr:         costStr,
+			CostSource:      costSource,
+			CostTooltip:     costTooltip,
 			BaseLatencyStr:  baseLatStr,
 			CandLatencyStr:  candLatStr,
 			DeltaLatencyStr: deltaLatStr,
@@ -571,7 +609,9 @@ func ComparisonRowsWithRuns(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha
 			CandTokensStr:   candTokStr,
 			DeltaTokensStr:  deltaTokStr,
 			BaseCostStr:     baseCostStr,
+			BaseCostTooltip: baseCostTooltip,
 			CandCostStr:     candCostStr,
+			CandCostTooltip: candCostTooltip,
 			DeltaCostStr:    deltaCostStr,
 			BaseSamplesLink: baseLink,
 			CandSamplesLink: candLink,
@@ -694,7 +734,11 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 
 	var spentStr string
 	if costUSD != nil {
-		spentStr = fmt.Sprintf("$%.2f spent", *costUSD)
+		if anyDefaultCostSource(comp, candRun, baseRun) {
+			spentStr = fmt.Sprintf("$%.2f spent (default prices)", *costUSD)
+		} else {
+			spentStr = fmt.Sprintf("$%.2f spent", *costUSD)
+		}
 	}
 
 	samplesRunTotal := 0
@@ -783,6 +827,29 @@ func ComparisonSummary(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run
 		AffinityMatched:  affinityMatched,
 		HasAffinity:      hasAffinity,
 	}
+}
+
+func anyDefaultCostSource(comp *v1alpha1.Comparison, candRun, baseRun *v1alpha1.Run) bool {
+	for _, task := range comp.Status.Tasks {
+		if task.CostSource == v1alpha1.CostSourceDefault {
+			return true
+		}
+	}
+	if candRun != nil {
+		for _, task := range candRun.Status.Tasks {
+			if task.CostSource == v1alpha1.CostSourceDefault {
+				return true
+			}
+		}
+	}
+	if baseRun != nil {
+		for _, task := range baseRun.Status.Tasks {
+			if task.CostSource == v1alpha1.CostSourceDefault {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ComparisonBatchRow represents a single batch execution row in the comparison detail view.
@@ -1135,6 +1202,8 @@ type SeriesItem struct {
 	CIStr          string
 	TokensStr      string
 	CostStr        string
+	CostSource     v1alpha1.CostSource
+	CostTooltip    string
 	RunLink        string
 
 	HasPoint    bool

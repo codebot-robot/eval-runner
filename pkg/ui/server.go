@@ -624,10 +624,12 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var costStr string = "—"
+		var costTooltip string
 		if task.CostUSD != nil {
 			hasCost = true
 			totalCostUSD += *task.CostUSD
 			costStr = fmt.Sprintf("$%.4f", *task.CostUSD)
+			costTooltip = FormatCostTooltip(task.CostSource)
 		}
 
 		taskRows = append(taskRows, RunTaskRow{
@@ -658,6 +660,8 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			ReasoningStr:         reasoningStr,
 			CacheReadStr:         cacheReadStr,
 			CostStr:              costStr,
+			CostSource:           task.CostSource,
+			CostTooltip:          costTooltip,
 			ArtifactsUnavailable: artifactsUnavailable,
 		})
 	}
@@ -1617,6 +1621,8 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			if matchedTask.CostUSD != nil {
 				item.CostStr = fmt.Sprintf("$%.2f", *matchedTask.CostUSD)
+				item.CostSource = matchedTask.CostSource
+				item.CostTooltip = FormatCostTooltip(matchedTask.CostSource)
 			}
 		} else {
 			item.HasPoint = false
@@ -1631,6 +1637,8 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 				}
 				if matchedTask.CostUSD != nil {
 					item.CostStr = fmt.Sprintf("$%.2f", *matchedTask.CostUSD)
+					item.CostSource = matchedTask.CostSource
+					item.CostTooltip = FormatCostTooltip(matchedTask.CostSource)
 				}
 			} else {
 				item.Phase = v1alpha1.TaskPhase(run.Status.Phase)

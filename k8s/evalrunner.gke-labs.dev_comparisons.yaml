@@ -493,6 +493,13 @@ spec:
                       maximum: 1
                       minimum: 0
                       type: number
+                    costSource:
+                      description: CostSource is the provenance of model prices used
+                        to compute costUSD (configmap or default).
+                      enum:
+                      - configmap
+                      - default
+                      type: string
                     costUSD:
                       description: CostUSD is the estimated task evaluation cost in
                         USD from model prices across candidate and baseline.
