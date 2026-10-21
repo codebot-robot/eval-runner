@@ -534,16 +534,20 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	commandUsers := fs.String("command-users", "", "command users")
 	pollInterval := fs.Duration("poll-progress-interval", 10*time.Second, "poll progress interval")
 	affinityMode := fs.String("affinity-mode", configkeys.AffinityModeOrder, "affinity mode")
+	sandboxEgressHosts := fs.String("sandbox-egress-hosts", "", "sandbox egress hosts")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
+	}
+	if !rawFlags.IsExplicit("sandbox-egress-hosts") {
+		t.Errorf("expected sandbox-egress-hosts to be explicit")
 	}
 	if !rawFlags.IsExplicit("inconclusive-policy") {
 		t.Errorf("expected inconclusive-policy to be explicit")
@@ -1028,6 +1032,7 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 			configkeys.ConfigMapKeyDefaultBatchSize:         "8",
 			configkeys.ConfigMapKeyDefaultMaxSamplesPerTask: "64",
 			configkeys.ConfigMapKeyCommandUsers:             "user1,user2",
+			ConfigMapKeySandboxEgressHosts:                  "*.googleapis.com,github.com",
 		},
 	}
 	if unknown := UnknownConfigMapKeys(cmRecognized); unknown != nil {
@@ -1975,6 +1980,88 @@ func TestResolveConfig_AffinityMode(t *testing.T) {
 	}
 	if _, err := ResolveConfig(nil, flagsBad); err == nil {
 		t.Errorf("expected error for invalid --affinity-mode flag, got nil")
+	}
+}
+
+func TestResolveConfig_SandboxEgressHosts(t *testing.T) {
+	// 1. Built-in default when nil or key omitted
+	cfgDef, err := ResolveConfig(nil, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error for nil ConfigMap: %v", err)
+	}
+	if !reflect.DeepEqual(cfgDef.SandboxEgressHosts, discovery.DefaultSandboxEgressHosts) {
+		t.Errorf("expected default SandboxEgressHosts %v, got %v", discovery.DefaultSandboxEgressHosts, cfgDef.SandboxEgressHosts)
+	}
+
+	// 2. ConfigMap specifies comma-separated hosts
+	cmHosts := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
+		Data:       map[string]string{ConfigMapKeySandboxEgressHosts: "github.com, *.googleapis.com, api.openai.com, github.com"},
+	}
+	cfgHosts, err := ResolveConfig(cmHosts, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expectedHosts := []string{"github.com", "*.googleapis.com", "api.openai.com"}
+	if !reflect.DeepEqual(cfgHosts.SandboxEgressHosts, expectedHosts) {
+		t.Errorf("expected SandboxEgressHosts %v, got %v", expectedHosts, cfgHosts.SandboxEgressHosts)
+	}
+
+	// 3. ConfigMap specifies "none" (sentinel disables hosts)
+	cmNone := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
+		Data:       map[string]string{ConfigMapKeySandboxEgressHosts: "  None  "},
+	}
+	cfgNone, err := ResolveConfig(cmNone, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error for none sentinel: %v", err)
+	}
+	if cfgNone.SandboxEgressHosts != nil {
+		t.Errorf("expected nil SandboxEgressHosts for none sentinel, got %v", cfgNone.SandboxEgressHosts)
+	}
+
+	// 4. Empty string in ConfigMap retains built-in defaults
+	cmEmpty := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
+		Data:       map[string]string{ConfigMapKeySandboxEgressHosts: "   "},
+	}
+	cfgEmpty, err := ResolveConfig(cmEmpty, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error for empty string: %v", err)
+	}
+	if !reflect.DeepEqual(cfgEmpty.SandboxEgressHosts, discovery.DefaultSandboxEgressHosts) {
+		t.Errorf("expected default SandboxEgressHosts for empty string, got %v", cfgEmpty.SandboxEgressHosts)
+	}
+
+	// 5. Flag override
+	flagsOverride := RawFlags{
+		SandboxEgressHosts: "api.anthropic.com, *.openai.com",
+		Explicit: map[string]bool{
+			"sandbox-egress-hosts": true,
+		},
+	}
+	cfgFlag, err := ResolveConfig(cmHosts, flagsOverride)
+	if err != nil {
+		t.Fatalf("unexpected error with flag override: %v", err)
+	}
+	expectedFlagHosts := []string{"api.anthropic.com", "*.openai.com"}
+	if !reflect.DeepEqual(cfgFlag.SandboxEgressHosts, expectedFlagHosts) {
+		t.Errorf("expected flag override %v, got %v", expectedFlagHosts, cfgFlag.SandboxEgressHosts)
+	}
+
+	// 6. Flag override with "none"
+	flagsNone := RawFlags{
+		SandboxEgressHosts: "none",
+		Explicit: map[string]bool{
+			"sandbox-egress-hosts": true,
+		},
+	}
+	cfgFlagNone, err := ResolveConfig(cmHosts, flagsNone)
+	if err != nil {
+		t.Fatalf("unexpected error with flag override none: %v", err)
+	}
+	if cfgFlagNone.SandboxEgressHosts != nil {
+		t.Errorf("expected nil SandboxEgressHosts with flag none, got %v", cfgFlagNone.SandboxEgressHosts)
 	}
 }
 

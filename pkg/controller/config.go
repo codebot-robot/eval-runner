@@ -83,6 +83,8 @@ const (
 	ConfigMapKeyCommandUsers = configkeys.ConfigMapKeyCommandUsers
 	// ConfigMapKeyAffinityMode is the ConfigMap key for changed-file task affinity mode ("order" or "prune").
 	ConfigMapKeyAffinityMode = configkeys.ConfigMapKeyAffinityMode
+	// ConfigMapKeySandboxEgressHosts is the ConfigMap key for comma-separated allowed FQDN egress hostnames for sandboxes.
+	ConfigMapKeySandboxEgressHosts = configkeys.ConfigMapKeySandboxEgressHosts
 )
 
 const (
@@ -125,6 +127,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyDefaultCohort:            {},
 	configkeys.ConfigMapKeyCommandUsers:             {},
 	configkeys.ConfigMapKeyAffinityMode:             {},
+	configkeys.ConfigMapKeySandboxEgressHosts:       {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -173,6 +176,7 @@ type ClusterConfig struct {
 	ComparisonTTL          time.Duration
 	CommandUsers           []string
 	AffinityMode           string
+	SandboxEgressHosts     []string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -194,6 +198,7 @@ type RawFlags struct {
 	ComparisonTTL          time.Duration
 	CommandUsers           string
 	AffinityMode           string
+	SandboxEgressHosts     string
 	StrictConfig           bool
 	Explicit               map[string]bool
 }
@@ -226,6 +231,7 @@ func DefaultClusterConfig() ClusterConfig {
 		ComparisonTTL:          0,
 		CommandUsers:           nil,
 		AffinityMode:           configkeys.AffinityModeOrder,
+		SandboxEgressHosts:     discovery.CloneSandboxEgressHosts(discovery.DefaultSandboxEgressHosts),
 	}
 }
 
@@ -242,6 +248,7 @@ func FlagsFromFlagSet(
 	commandUsers string,
 	pollProgressInterval time.Duration,
 	affinityMode string,
+	sandboxEgressHosts string,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -265,6 +272,7 @@ func FlagsFromFlagSet(
 		ComparisonTTL:          comparisonTTL,
 		CommandUsers:           commandUsers,
 		AffinityMode:           affinityMode,
+		SandboxEgressHosts:     sandboxEgressHosts,
 		StrictConfig:           strictConfig,
 		Explicit:               explicit,
 	}
@@ -552,6 +560,18 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.AffinityMode = lower
 			}
 		}
+
+		// 16. sandboxEgressHosts
+		if val, ok := cm.Data[ConfigMapKeySandboxEgressHosts]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.SandboxEgressHosts = nil
+				} else {
+					cfg.SandboxEgressHosts = discovery.ParseHostList(val)
+				}
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -563,6 +583,14 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				flags.AffinityMode, configkeys.AffinityModeOrder, configkeys.AffinityModePrune)
 		}
 		cfg.AffinityMode = lower
+	}
+	if flags.IsExplicit("sandbox-egress-hosts") {
+		trimmed := strings.TrimSpace(flags.SandboxEgressHosts)
+		if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+			cfg.SandboxEgressHosts = nil
+		} else {
+			cfg.SandboxEgressHosts = discovery.ParseHostList(flags.SandboxEgressHosts)
+		}
 	}
 	if flags.IsExplicit("artifact-bucket") {
 		if strings.EqualFold(flags.ArtifactBucket, ConfigSentinelDisabled) {
@@ -758,6 +786,7 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"pollProgressInterval", resolved.PollProgressInterval,
 		"sandboxdImage", resolved.SandboxdImage,
 		"taskGracePeriod", resolved.TaskGracePeriod,
+		"sandboxEgressHosts", strings.Join(resolved.SandboxEgressHosts, ","),
 	)
 }
 
@@ -770,6 +799,7 @@ type ConfigReloaderOptions struct {
 	RunReconciler  *RunReconciler
 	CompReconciler *ComparisonReconciler
 	InitialConfig  *ClusterConfig
+	FQDNSyncFunc   func(ctx context.Context, hosts []string) error
 }
 
 // ConfigReloader dynamically applies eval-runner-config updates at runtime.
@@ -781,6 +811,7 @@ type ConfigReloader struct {
 	reloadableSink *artifacts.ReloadableSink
 	runReconciler  *RunReconciler
 	compReconciler *ComparisonReconciler
+	fqdnSyncFunc   func(ctx context.Context, hosts []string) error
 	lastConfig     *ClusterConfig
 }
 
@@ -797,6 +828,7 @@ func NewConfigReloader(opts ConfigReloaderOptions) *ConfigReloader {
 		reloadableSink: opts.ReloadableSink,
 		runReconciler:  opts.RunReconciler,
 		compReconciler: opts.CompReconciler,
+		fqdnSyncFunc:   opts.FQDNSyncFunc,
 	}
 	if opts.InitialConfig != nil {
 		copied := *opts.InitialConfig
@@ -875,6 +907,13 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 	}
 	if r.compReconciler != nil {
 		r.compReconciler.UpdateConfig(resolved)
+	}
+
+	fqdnChanged := r.lastConfig == nil || !reflect.DeepEqual(r.lastConfig.SandboxEgressHosts, resolved.SandboxEgressHosts)
+	if fqdnChanged && r.fqdnSyncFunc != nil {
+		if fqdnErr := r.fqdnSyncFunc(ctx, resolved.SandboxEgressHosts); fqdnErr != nil {
+			r.logger.Error(fqdnErr, "error updating sandbox FQDN network policy")
+		}
 	}
 
 	r.lastConfig = &resolved

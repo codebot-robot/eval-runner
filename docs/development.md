@@ -331,6 +331,32 @@ Once discovery completes (or fails), the sandbox is automatically deleted.
 
 Network isolation for sandboxes is defined in `k8s/sandbox-networkpolicy.yaml` (`eval-runner-sandbox-ingress` and `eval-runner-sandbox-egress`), applying to all pods labeled `evalrunner.gke-labs.dev/sandbox: "true"`.
 
+#### FQDN Narrowing on GKE Dataplane V2 (`FQDNNetworkPolicy`)
+
+Standard Kubernetes `NetworkPolicy` operates at L3/L4 (IP blocks and CIDRs) and cannot express domain names, meaning baseline egress policies must allow port 443 to `0.0.0.0/0` (external IPs) so sandboxes can reach git hosts and model APIs.
+
+On GKE Dataplane V2 clusters, the controller dynamically renders and reconciles an `FQDNNetworkPolicy` (`networking.gke.io/v1alpha1`, ADR-029) named `eval-runner-sandbox-fqdn-egress` in `eval-runner-sandbox` that selects `evalrunner.gke-labs.dev/sandbox: "true"` and narrows TCP 443 egress strictly to declared hostnames:
+
+- **GKE-only narrowing**: FQDN narrowing requires GKE Dataplane V2. Clusters without Dataplane V2 (e.g. local `kind` clusters running `kindnet`) retain the baseline plain `NetworkPolicy` from `k8s/sandbox-networkpolicy.yaml` without breaking or degrading.
+- **ConfigMap Key (`sandboxEgressHosts`)**: The allow-list of hostnames is driven by the ConfigMap key `sandboxEgressHosts` in `eval-runner-config` (or CLI flag `--sandbox-egress-hosts`).
+- **Built-in Defaults**: If `sandboxEgressHosts` is omitted, the controller defaults to:
+  - Model APIs: `*.googleapis.com` (covers `generativelanguage.googleapis.com`, etc.)
+  - Git hosts: `github.com`, `*.github.com`, `*.githubusercontent.com`
+  - Package repositories: `pypi.org`, `*.pypi.org`, `files.pythonhosted.org`, `*.pythonhosted.org`
+- **Extending the List**: Operators can extend the allow-list without code changes by setting `sandboxEgressHosts` in `eval-runner-config`:
+  ```yaml
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: eval-runner-config
+    namespace: eval-runner
+  data:
+    sandboxEgressHosts: "*.googleapis.com, github.com, *.github.com, *.githubusercontent.com, pypi.org, *.pypi.org, files.pythonhosted.org, *.pythonhosted.org, api.openai.com, *.anthropic.com"
+  ```
+  Wildcard domains (containing `*`) are rendered as `pattern` matchers, while exact domains are rendered as `name` matchers.
+- **Disabling FQDN Egress**: Setting `sandboxEgressHosts: "none"` disables the FQDN policy and removes the `FQDNNetworkPolicy` object.
+- **Hot-Reloading**: Changes to `sandboxEgressHosts` in `eval-runner-config` are reloaded at runtime by `ConfigReloader` without restarting the controller pod.
+
 #### Enforcement Prerequisites
 
 Enforcement requires a cluster CNI with NetworkPolicy support enabled, such as GKE Dataplane V2 (e.g. `gke-labs-corp-dev`) or Calico.
@@ -344,6 +370,8 @@ To inspect the applied policies in the sandbox namespace:
 ```bash
 kubectl -n eval-runner-sandbox describe networkpolicy eval-runner-sandbox-ingress
 kubectl -n eval-runner-sandbox describe networkpolicy eval-runner-sandbox-egress
+# On GKE Dataplane V2 clusters:
+kubectl -n eval-runner-sandbox describe fqdnnetworkpolicy eval-runner-sandbox-fqdn-egress
 ```
 
 #### Dataplane V2 Deny Logging
@@ -367,7 +395,17 @@ spec:
 EOF
 ```
 
-Denial logs can then be inspected in Cloud Logging (filtering on `resource.type="k8s_node"` and `jsonPayload.disposition="DENY"`) or on node logs at `/var/log/network/policy_action.log`.
+##### Debugging a Blocked Host
+
+When an Inspect task or git clone fails with connection timeouts or `Connection refused`:
+1. Check Cloud Logging for dropped egress traffic:
+   ```
+   resource.type="k8s_node"
+   jsonPayload.disposition="DENY"
+   jsonPayload.dest_port=443
+   ```
+2. Or inspect the node's local log at `/var/log/network/policy_action.log`.
+3. If an evaluation task requires an external API or package index not in the default allow-list, add the required hostname(s) to `sandboxEgressHosts` in `eval-runner-config`.
 
 #### Manual Verification Probes (GKE Dataplane V2)
 
@@ -392,8 +430,9 @@ To manually verify ingress and egress policy enforcement on an enforcing cluster
    - From within the probe pod:
      - `nslookup github.com`: resolves (DNS egress to kube-system CoreDNS / link-local DNSCache succeeds).
      - `nc -zvw3 git-server.eval-runner-sandbox.svc.cluster.local 9418`: succeeds (in-cluster git fixture on port 9418).
-     - `wget -qO- --timeout=5 https://api.github.com/zen`: succeeds (external HTTPS 443).
-     - `nc -zvw3 generativelanguage.googleapis.com 443`: succeeds (model API HTTPS 443).
+     - `wget -qO- --timeout=5 https://api.github.com/zen`: succeeds (external HTTPS 443 to allowed host).
+     - `nc -zvw3 generativelanguage.googleapis.com 443`: succeeds (model API HTTPS 443 to allowed host).
+     - `wget --timeout=5 https://example.com`: times out (blocked by FQDN policy because `example.com` is not in `sandboxEgressHosts`).
      - `nc -zvw3 eval-runner-controller.eval-runner.svc.cluster.local 8081`: times out (controller probe endpoint blocked).
      - `nc -zvw3 eval-runner-ui.eval-runner.svc.cluster.local 80`: times out (controller namespace blocked).
      - `wget -qO- --timeout=3 http://169.254.169.254/computeMetadata/v1/ --header 'Metadata-Flavor: Google'`: times out (GCE metadata server on :80 blocked).

@@ -118,6 +118,18 @@ rules:
   - watch
   - delete
 - apiGroups:
+  - networking.gke.io
+  resources:
+  - fqdnnetworkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+- apiGroups:
   - ""
   resources:
   - pods
