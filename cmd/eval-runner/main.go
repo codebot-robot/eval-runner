@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
@@ -305,8 +306,9 @@ func main() {
 		setupLog.Info("neither artifactBucket nor artifactDir configured; using default in-memory sink (non-durable: controller restarts reset Runs to Pending to re-discover)")
 		sink = artifacts.NewInMemorySink()
 	}
+	reloadableSink := artifacts.NewReloadableSink(sink)
 	defer func() {
-		if err := sink.Close(); err != nil {
+		if err := reloadableSink.Close(); err != nil {
 			setupLog.Error(err, "error closing artifact sink on shutdown")
 		}
 	}()
@@ -330,7 +332,7 @@ func main() {
 		ModelSecret:          clusterConfig.ModelSecret,
 		ModelPrices:          clusterConfig.ModelPrices,
 		SampleRunnerImage:    sampleRunnerImage,
-		ArtifactSink:         sink,
+		ArtifactSink:         reloadableSink,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {
@@ -341,7 +343,7 @@ func main() {
 	comparisonReconciler := &controller.ComparisonReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
-		ArtifactSink:        sink,
+		ArtifactSink:        reloadableSink,
 		ControllerNamespace: evalRunnerNamespace,
 		GitHubTokenSecret:   clusterConfig.GitHubTokenSecret,
 		GitHubAppSecret:     clusterConfig.GitHubAppSecret,
@@ -355,6 +357,30 @@ func main() {
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Comparison")
+		os.Exit(1)
+	}
+
+	reloader := controller.NewConfigReloader(controller.ConfigReloaderOptions{
+		RawFlags:       rawFlags,
+		Logger:         setupLog,
+		ReloadableSink: reloadableSink,
+		RunReconciler:  reconciler,
+		CompReconciler: comparisonReconciler,
+		InitialConfig:  &clusterConfig,
+	})
+
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		err := sinkconfig.WatchConfigMap(ctx, kubeClient, evalRunnerNamespace, controller.DefaultConfigMapName, func(cm *corev1.ConfigMap) {
+			if reloadErr := reloader.Reload(ctx, cm); reloadErr != nil {
+				setupLog.Error(reloadErr, "error reloading cluster configuration")
+			}
+		})
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	})); err != nil {
+		setupLog.Error(err, "unable to add configmap watch runnable")
 		os.Exit(1)
 	}
 

@@ -22,15 +22,20 @@ package sinkconfig
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -41,6 +46,9 @@ const (
 	// DefaultNamespace is the default namespace where eval-runner components and configuration reside.
 	DefaultNamespace = "eval-runner"
 )
+
+// SinkFactory is a constructor function for ArtifactSink instances.
+type SinkFactory func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error)
 
 // Config holds the artifact storage settings extracted from the cluster ConfigMap.
 type Config struct {
@@ -125,4 +133,120 @@ func NewArtifactSink(ctx context.Context, bucket, dir string, maxUploadBytes int
 		return &artifacts.LocalDirSink{BaseDir: dir}, nil
 	}
 	return nil, nil
+}
+
+// WatchConfigMap watches a single ConfigMap by name in namespace using the Kubernetes API.
+// It uses only get and watch operations scoped to the specified ConfigMap name.
+// When the ConfigMap is added or modified, onChange is called with the ConfigMap.
+// When the ConfigMap is deleted, onChange is called with nil.
+func WatchConfigMap(ctx context.Context, client kubernetes.Interface, namespace, name string, onChange func(cm *corev1.ConfigMap)) error {
+	if client == nil {
+		return errors.New("kubernetes client is nil")
+	}
+	if name == "" {
+		name = DefaultConfigMapName
+	}
+
+	fieldSelector := "metadata.name=" + name
+
+	// Initial Get
+	var rv string
+	cm, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		rv = cm.ResourceVersion
+		onChange(cm)
+	} else if apierrors.IsNotFound(err) {
+		rv = ""
+		onChange(nil)
+	} else if ctx.Err() != nil {
+		return ctx.Err()
+	} else {
+		return fmt.Errorf("failed to get initial configmap %s/%s: %w", namespace, name, err)
+	}
+
+	backoff := 1 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		watcher, err := client.CoreV1().ConfigMaps(namespace).Watch(ctx, metav1.ListOptions{
+			FieldSelector:   fieldSelector,
+			ResourceVersion: rv,
+		})
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			if backoff < 15*time.Second {
+				backoff *= 2
+			}
+			cm, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err == nil {
+				rv = cm.ResourceVersion
+				onChange(cm)
+			} else if apierrors.IsNotFound(err) {
+				rv = ""
+				onChange(nil)
+			}
+			continue
+		}
+
+		backoff = 1 * time.Second
+
+		stopped := false
+		for !stopped {
+			select {
+			case <-ctx.Done():
+				watcher.Stop()
+				return ctx.Err()
+			case event, ok := <-watcher.ResultChan():
+				if !ok {
+					stopped = true
+					break
+				}
+				switch event.Type {
+				case watch.Added, watch.Modified:
+					if updatedCM, ok := event.Object.(*corev1.ConfigMap); ok {
+						if updatedCM.ResourceVersion != "" && updatedCM.ResourceVersion == rv {
+							continue
+						}
+						rv = updatedCM.ResourceVersion
+						onChange(updatedCM)
+					}
+				case watch.Deleted:
+					rv = ""
+					onChange(nil)
+				case watch.Bookmark:
+					if meta, ok := event.Object.(metav1.Object); ok {
+						rv = meta.GetResourceVersion()
+					}
+				case watch.Error:
+					stopped = true
+					break
+				}
+			}
+		}
+		watcher.Stop()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+
+		cm, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			rv = cm.ResourceVersion
+			onChange(cm)
+		} else if apierrors.IsNotFound(err) {
+			rv = ""
+			onChange(nil)
+		}
+	}
 }

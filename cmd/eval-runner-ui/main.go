@@ -31,8 +31,10 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/ui"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -153,21 +155,35 @@ func main() {
 		log.Printf("no artifact storage configured; sample trajectories will show configuration guidance")
 	}
 
-	if sink != nil {
-		defer func() {
-			if err := sink.Close(); err != nil {
-				log.Printf("error closing artifact sink on shutdown: %v", err)
-			}
-		}()
-	}
-
 	server := ui.NewServer(ui.Config{
 		Client:           k8sClient,
 		Cache:            informerCache,
 		CacheSyncChecker: cacheSynced.Load,
 		DefaultNamespace: namespace,
 		ArtifactSink:     sink,
+		InitialBucket:    bucket,
+		InitialDir:       dir,
 	})
+	defer func() {
+		if err := server.ArtifactSink().Close(); err != nil {
+			log.Printf("error closing artifact sink on shutdown: %v", err)
+		}
+	}()
+
+	kubeClient, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		log.Printf("warning: unable to create kubernetes client for configmap watch: %v", err)
+	} else {
+		go func() {
+			if watchErr := sinkconfig.WatchConfigMap(ctx, kubeClient, namespace, sinkconfig.DefaultConfigMapName, func(cm *corev1.ConfigMap) {
+				if reloadErr := server.ReloadConfigMap(ctx, cm, artifactBucket, artifactDir, nil); reloadErr != nil {
+					log.Printf("warning: error reloading configmap: %v", reloadErr)
+				}
+			}); watchErr != nil && !errors.Is(watchErr, context.Canceled) {
+				log.Printf("warning: configmap watcher exited: %v", watchErr)
+			}
+		}()
+	}
 
 	httpServer := &http.Server{
 		Addr:              listenAddr,

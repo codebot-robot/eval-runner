@@ -27,11 +27,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/stats"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -125,14 +130,22 @@ type Config struct {
 	CacheSyncChecker func() bool
 	DefaultNamespace string
 	ArtifactSink     artifacts.ArtifactSink
+	InitialBucket    string
+	InitialDir       string
 }
 
 // Server serves read-only web views of Runs and Comparisons.
 type Server struct {
-	cfg       Config
-	mux       *http.ServeMux
-	cache     *logLRUCache
-	compCache *comparisonLRUCache
+	cfg              Config
+	mux              *http.ServeMux
+	cache            *logLRUCache
+	compCache        *comparisonLRUCache
+	reloadableSink   *artifacts.ReloadableSink
+	configGeneration atomic.Int64
+	sinkMu           sync.RWMutex
+	lastBucket       string
+	lastDir          string
+	configuredOnce   bool
 }
 
 // readerFor returns the cache reader for the default namespace when available,
@@ -154,15 +167,111 @@ func NewServer(cfg Config) *Server {
 		cfg.DefaultNamespace = "eval-runner"
 	}
 
-	s := &Server{
-		cfg:       cfg,
-		mux:       http.NewServeMux(),
-		cache:     newLogLRUCache(64*1024*1024, 1*time.Hour),
-		compCache: newComparisonLRUCache(32*1024*1024, 1*time.Hour),
+	var relSink *artifacts.ReloadableSink
+	if rs, ok := cfg.ArtifactSink.(*artifacts.ReloadableSink); ok {
+		relSink = rs
+	} else if cfg.ArtifactSink != nil {
+		relSink = artifacts.NewReloadableSink(cfg.ArtifactSink)
+	} else {
+		relSink = artifacts.NewReloadableSink(nil)
 	}
+
+	s := &Server{
+		cfg:            cfg,
+		mux:            http.NewServeMux(),
+		cache:          newLogLRUCache(64*1024*1024, 1*time.Hour),
+		compCache:      newComparisonLRUCache(32*1024*1024, 1*time.Hour),
+		reloadableSink: relSink,
+		lastBucket:     cfg.InitialBucket,
+		lastDir:        cfg.InitialDir,
+		configuredOnce: cfg.InitialBucket != "" || cfg.InitialDir != "" || cfg.ArtifactSink != nil,
+	}
+	s.configGeneration.Store(1)
 
 	s.routes()
 	return s
+}
+
+// ArtifactSink returns the ReloadableSink wrapping the active artifact storage.
+func (s *Server) ArtifactSink() artifacts.ArtifactSink {
+	return s.reloadableSink
+}
+
+// hasArtifactStorage reports whether a persistent or local artifact sink is currently configured.
+func (s *Server) hasArtifactStorage() bool {
+	return s.reloadableSink.Current() != nil
+}
+
+// SetArtifactSink updates the underlying artifact sink on Server.
+// It swaps the sink so in-flight reads complete safely.
+func (s *Server) SetArtifactSink(sink artifacts.ArtifactSink) {
+	s.reloadableSink.Swap(sink)
+}
+
+// ConfigGeneration returns the current configuration generation counter.
+func (s *Server) ConfigGeneration() int64 {
+	return s.configGeneration.Load()
+}
+
+// BumpConfigGeneration increments and returns the configuration generation counter.
+func (s *Server) BumpConfigGeneration() int64 {
+	return s.configGeneration.Add(1)
+}
+
+// ReloadConfigMap updates the server's artifact sink and bumps config_generation
+// based on changes to the eval-runner-config ConfigMap.
+func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flagBucket, flagDir string, sinkFactory sinkconfig.SinkFactory) error {
+	if sinkFactory == nil {
+		sinkFactory = sinkconfig.NewArtifactSink
+	}
+	effBucket := flagBucket
+	effDir := flagDir
+	if cm != nil && cm.Data != nil {
+		if effBucket == "" {
+			effBucket = cm.Data[configkeys.ConfigMapKeyArtifactBucket]
+		}
+		if effDir == "" {
+			effDir = cm.Data[configkeys.ConfigMapKeyArtifactDir]
+		}
+	}
+	effBucket = strings.TrimSpace(effBucket)
+	if strings.EqualFold(effBucket, configkeys.ConfigSentinelDisabled) {
+		effBucket = ""
+	}
+	effDir = strings.TrimSpace(effDir)
+	if strings.EqualFold(effDir, configkeys.ConfigSentinelDisabled) {
+		effDir = ""
+	}
+
+	s.sinkMu.Lock()
+	if effBucket == s.lastBucket && effDir == s.lastDir && s.configuredOnce {
+		s.sinkMu.Unlock()
+		return nil
+	}
+	s.sinkMu.Unlock()
+
+	var newSink artifacts.ArtifactSink
+	if effBucket != "" || effDir != "" {
+		s, err := sinkFactory(ctx, effBucket, effDir, 0)
+		if err != nil {
+			return fmt.Errorf("unable to configure artifact sink (bucket=%q, dir=%q): %w", effBucket, effDir, err)
+		}
+		newSink = s
+		log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", effBucket, effDir)
+	} else {
+		log.Printf("no artifact storage configured; sample trajectories will show configuration guidance")
+	}
+
+	s.SetArtifactSink(newSink)
+	s.BumpConfigGeneration()
+
+	s.sinkMu.Lock()
+	s.lastBucket = effBucket
+	s.lastDir = effDir
+	s.configuredOnce = true
+	s.sinkMu.Unlock()
+
+	return nil
 }
 
 // ServeHTTP delegates to the internal mux.
@@ -449,8 +558,9 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var samplesLink string
-		artifactsUnavailable := s.cfg.ArtifactSink == nil && task.LogPath != ""
-		if task.LogPath != "" && s.cfg.ArtifactSink != nil {
+		hasStorage := s.hasArtifactStorage()
+		artifactsUnavailable := !hasStorage && task.LogPath != ""
+		if task.LogPath != "" && hasStorage {
 			samplesLink = BuildTaskSamplesListLink(ns, name, task.ID)
 		}
 
@@ -554,8 +664,8 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 
 	if len(run.Status.Tasks) == 0 && run.Status.Discovery != nil {
 		taskIDs := run.Status.Discovery.TaskIDs
-		if s.cfg.ArtifactSink != nil && run.Status.Discovery.TaskCount > len(run.Status.Discovery.TaskIDs) && run.Status.Discovery.ManifestPath != "" {
-			manifestBytes, loadErr := s.cfg.ArtifactSink.Load(r.Context(), run.Status.Discovery.ManifestPath)
+		if s.hasArtifactStorage() && run.Status.Discovery.TaskCount > len(run.Status.Discovery.TaskIDs) && run.Status.Discovery.ManifestPath != "" {
+			manifestBytes, loadErr := s.reloadableSink.Load(r.Context(), run.Status.Discovery.ManifestPath)
 			if loadErr != nil {
 				// Fall back to capped taskIDs
 			} else {
@@ -653,7 +763,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		Model:            run.Spec.Model,
 		Age:              FormatAge(run.CreationTimestamp),
 		ArtifactsPrefix:  run.Status.Artifacts,
-		ArtifactFooter:   FormatArtifactFooter(s.cfg.ArtifactSink),
+		ArtifactFooter:   FormatArtifactFooter(s.ArtifactSink()),
 		Message:          run.Status.Message,
 		Metric:           metricFilter,
 		TotalCost:        totalCostFormatted,
@@ -1579,7 +1689,7 @@ func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]arti
 		}
 	}
 
-	data, err := s.cfg.ArtifactSink.Load(ctx, logPath)
+	data, err := s.reloadableSink.Load(ctx, logPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "exceeds maximum") {
 			return nil, true, err
@@ -1626,7 +1736,7 @@ func (s *Server) loadComparisonArtifact(ctx context.Context, summaryPath string,
 		}
 	}
 
-	data, err := s.cfg.ArtifactSink.Load(ctx, summaryPath)
+	data, err := s.reloadableSink.Load(ctx, summaryPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "exceeds maximum") {
 			if isCompleted && s.compCache != nil {
@@ -1730,7 +1840,7 @@ func subsampleBoundaries(in []int, maxPoints int) []int {
 }
 
 func (s *Server) populateComparisonHistories(ctx context.Context, comp *v1alpha1.Comparison, view *ComparisonDetailView) {
-	if s.cfg.ArtifactSink == nil {
+	if !s.hasArtifactStorage() {
 		view.HistoryNote = "artifact storage unavailable"
 		return
 	}
@@ -1830,6 +1940,15 @@ func (s *Server) populateComparisonHistories(ctx context.Context, comp *v1alpha1
 func FormatArtifactFooter(sink artifacts.ArtifactSink) string {
 	if sink == nil {
 		return "artifacts: none"
+	}
+	type currentGetter interface {
+		Current() artifacts.ArtifactSink
+	}
+	if cg, ok := sink.(currentGetter); ok {
+		sink = cg.Current()
+		if sink == nil {
+			return "artifacts: none"
+		}
 	}
 	type bucketGetter interface {
 		Bucket() string
@@ -1961,15 +2080,13 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	commit := run.Spec.Repo.Commit
-	if s.cfg.ArtifactSink != nil {
-		expectedPrefix := s.cfg.ArtifactSink.ArtifactPrefix(commit)
-		if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
-			httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
-			return
-		}
+	expectedPrefix := s.reloadableSink.ArtifactPrefix(commit)
+	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
+		httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
+		return
 	}
 
-	if s.cfg.ArtifactSink == nil {
+	if !s.hasArtifactStorage() {
 		log.Printf("artifact storage not configured for UI (namespace=%s, run=%s, task=%s)", ns, name, taskID)
 		if sampleID == "" {
 			view := TaskSamplesListView{
@@ -1982,7 +2099,7 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 				Model:          run.Spec.Model,
 				LogPath:        matchedTask.LogPath,
 				StorageMessage: "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config",
-				ArtifactFooter: FormatArtifactFooter(s.cfg.ArtifactSink),
+				ArtifactFooter: FormatArtifactFooter(s.ArtifactSink()),
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			if err := tmplTaskSamplesList.Execute(w, view); err != nil {
@@ -2000,7 +2117,7 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 			EscapedSampleID: url.PathEscape(sampleID),
 			LogPath:         matchedTask.LogPath,
 			StorageMessage:  "artifact storage is not configured for the UI; set artifactBucket or artifactDir in eval-runner-config",
-			ArtifactFooter:  FormatArtifactFooter(s.cfg.ArtifactSink),
+			ArtifactFooter:  FormatArtifactFooter(s.ArtifactSink()),
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmplSampleTranscript.Execute(w, view); err != nil {
@@ -2033,7 +2150,7 @@ func (s *Server) renderTaskSamplesList(w http.ResponseWriter, r *http.Request, n
 		Commit:         ShortCommit(commit),
 		Model:          model,
 		LogPath:        logPath,
-		ArtifactFooter: FormatArtifactFooter(s.cfg.ArtifactSink),
+		ArtifactFooter: FormatArtifactFooter(s.ArtifactSink()),
 	}
 
 	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)
@@ -2154,7 +2271,7 @@ func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, 
 		SampleID:        sampleID,
 		EscapedSampleID: url.PathEscape(sampleID),
 		LogPath:         logPath,
-		ArtifactFooter:  FormatArtifactFooter(s.cfg.ArtifactSink),
+		ArtifactFooter:  FormatArtifactFooter(s.ArtifactSink()),
 	}
 
 	samples, isTruncated, err := s.loadInspectSamples(ctx, logPath)

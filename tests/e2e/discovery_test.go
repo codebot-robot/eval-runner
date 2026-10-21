@@ -318,6 +318,38 @@ spec:
 		runUISmoke(t, harness, runName)
 	})
 
+	t.Run("ConfigMapReload", func(t *testing.T) {
+		t.Cleanup(func() {
+			restoreJSON := fmt.Sprintf(`{"data":{"artifactDir":%q}}`, "/tmp/artifacts")
+			harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", restoreJSON)
+		})
+
+		restartsBefore := harness.runCmd("kubectl", "get", "pods", "-n", "eval-runner", "-l", "app=eval-runner-controller", "-o", "jsonpath={.items[0].status.containerStatuses[0].restartCount}")
+
+		newDir := "/tmp/artifacts-reloaded-e2e"
+		patchJSON := fmt.Sprintf(`{"data":{"artifactDir":%q}}`, newDir)
+		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", patchJSON)
+
+		deadline := time.Now().Add(30 * time.Second)
+		var found bool
+		for time.Now().Before(deadline) {
+			logs := harness.runCmd("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", "--since=60s")
+			if strings.Contains(logs, "effective cluster settings") && strings.Contains(logs, newDir) {
+				found = true
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		if !found {
+			t.Fatalf("expected controller logs to show effective cluster settings with artifactDir=%q within 30s", newDir)
+		}
+
+		restartsAfter := harness.runCmd("kubectl", "get", "pods", "-n", "eval-runner", "-l", "app=eval-runner-controller", "-o", "jsonpath={.items[0].status.containerStatuses[0].restartCount}")
+		if restartsBefore != restartsAfter {
+			t.Fatalf("expected 0 pod restarts, restartCount changed from %s to %s", restartsBefore, restartsAfter)
+		}
+	})
+
 	t.Run("WebhookSmoke", func(t *testing.T) {
 		runWebhookSmoke(t, harness)
 	})

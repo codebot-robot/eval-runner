@@ -215,6 +215,8 @@ type RunReconciler struct {
 
 	mu     sync.RWMutex
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
+
+	cfgMu sync.RWMutex
 }
 
 func (r *RunReconciler) controllerNamespace() string {
@@ -225,6 +227,8 @@ func (r *RunReconciler) controllerNamespace() string {
 }
 
 func (r *RunReconciler) sandboxdImage() string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
 	if r.SandboxdImage != "" {
 		return r.SandboxdImage
 	}
@@ -459,6 +463,8 @@ func (r *RunReconciler) now() time.Time {
 }
 
 func (r *RunReconciler) discoveryDeadline() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
 	if r.DiscoveryDeadline > 0 {
 		return r.DiscoveryDeadline
 	}
@@ -466,6 +472,8 @@ func (r *RunReconciler) discoveryDeadline() time.Duration {
 }
 
 func (r *RunReconciler) executionDeadline() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
 	if r.ExecutionDeadline > 0 {
 		return r.ExecutionDeadline
 	}
@@ -473,6 +481,8 @@ func (r *RunReconciler) executionDeadline() time.Duration {
 }
 
 func (r *RunReconciler) taskGracePeriod() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
 	if r.TaskGracePeriod > 0 {
 		return r.TaskGracePeriod
 	}
@@ -480,6 +490,8 @@ func (r *RunReconciler) taskGracePeriod() time.Duration {
 }
 
 func (r *RunReconciler) maxParallelTasks() int {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
 	if r.MaxParallelTasks > 0 {
 		return r.MaxParallelTasks
 	}
@@ -487,6 +499,8 @@ func (r *RunReconciler) maxParallelTasks() int {
 }
 
 func (r *RunReconciler) pollProgressInterval() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
 	if r.PollProgressInterval > 0 {
 		return r.PollProgressInterval
 	}
@@ -498,6 +512,32 @@ func (r *RunReconciler) minProgressWriteInterval() time.Duration {
 		return r.MinProgressWriteInterval
 	}
 	return r.pollProgressInterval()
+}
+
+func (r *RunReconciler) modelSecret() string {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.ModelSecret
+}
+
+func (r *RunReconciler) modelPrices() map[string]ModelPrice {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.ModelPrices
+}
+
+// UpdateConfig updates the reloadable settings on RunReconciler in a thread-safe manner.
+func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
+	r.cfgMu.Lock()
+	defer r.cfgMu.Unlock()
+	r.SandboxdImage = cfg.SandboxdImage
+	r.DiscoveryDeadline = cfg.DiscoveryDeadline
+	r.ExecutionDeadline = cfg.ExecutionDeadline
+	r.TaskGracePeriod = cfg.TaskGracePeriod
+	r.MaxParallelTasks = cfg.MaxParallelTasks
+	r.PollProgressInterval = cfg.PollProgressInterval
+	r.ModelSecret = cfg.ModelSecret
+	r.ModelPrices = cfg.ModelPrices
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
@@ -1635,9 +1675,10 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			if r.APIReader != nil {
 				reader = r.APIReader
 			}
-			secretExists, err := CheckModelSecretExists(ctx, reader, r.sandboxNamespace(), r.ModelSecret)
+			effModelSecret := r.modelSecret()
+			secretExists, err := CheckModelSecretExists(ctx, reader, r.sandboxNamespace(), effModelSecret)
 			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to check model secret %s/%s: %w", r.sandboxNamespace(), r.ModelSecret, err)
+				return ctrl.Result{}, fmt.Errorf("failed to check model secret %s/%s: %w", r.sandboxNamespace(), effModelSecret, err)
 			}
 
 			var started []string
@@ -1645,9 +1686,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			for _, taskID := range tasksToStart {
 				effectiveModelSecret := ""
 				if secretExists {
-					effectiveModelSecret = r.ModelSecret
+					effectiveModelSecret = effModelSecret
 				} else if !IsMockModel(run.Spec.Model) {
-					msg := ModelCredentialsMissingMessage(r.sandboxNamespace(), r.ModelSecret)
+					msg := ModelCredentialsMissingMessage(r.sandboxNamespace(), effModelSecret)
 					logger.Info("Rejecting task launch due to missing model credentials", "task", taskID, "model", run.Spec.Model, "message", msg)
 					failedTasks[taskID] = msg
 					continue
@@ -2320,7 +2361,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	var costUSD *float64
 	if tokens != nil {
-		prices := r.ModelPrices
+		prices := r.modelPrices()
 		if price, ok := prices[run.Spec.Model]; ok {
 			cost := (float64(tokens.Input)*price.InputPer1M + float64(tokens.Output)*price.OutputPer1M) / 1_000_000.0
 			costUSD = &cost
