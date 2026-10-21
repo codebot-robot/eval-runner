@@ -33,9 +33,17 @@ type FakeClient struct {
 	CloseCalls int
 
 	// Step-based convenience defaults
+	EvalsListAbsent bool
+
 	ListStdout string
 	ListStderr string
 	ListErr    error
+
+	ScanErr      error
+	ScanExit     int
+	ScanStdout   string
+	ScanStderr   string
+	ScanTarBytes []byte
 
 	CloneErr    error
 	CloneExit   int
@@ -99,6 +107,7 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 	fn := f.ReadFileFn
 	inspectLog := f.InspectLog
 	manifestBytes := f.ManifestBytes
+	scanTarBytes := f.ScanTarBytes
 	listStdout := f.ListStdout
 	readFileLimit := f.ReadFileLimit
 	f.mu.Unlock()
@@ -121,6 +130,17 @@ func (f *FakeClient) ReadFile(ctx context.Context, path string) ([]byte, error) 
 				}
 			}
 			return data, nil
+		}
+	}
+	if strings.HasSuffix(path, "scan.tar") {
+		if scanTarBytes != nil {
+			if readFileLimit > 0 && int64(len(scanTarBytes)) > readFileLimit {
+				return nil, &discovery.LimitError{
+					Stream: "file",
+					Limit:  readFileLimit,
+				}
+			}
+			return scanTarBytes, nil
 		}
 	}
 	if inspectLog != nil {
@@ -205,6 +225,27 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 			return nil, f.CheckoutErr
 		}
 		return &ExecuteResult{ExitCode: f.CheckoutExit, Stderr: f.CheckoutStderr}, nil
+	}
+
+	if (cmd0 == "test" && len(cfg.Command) >= 3 && cfg.Command[1] == "-f" && cfg.Command[2] == ".evals/list") ||
+		(len(cfg.Command) >= 3 && cfg.Command[0] == "sh" && strings.Contains(cfg.Command[2], "test -f .evals/list")) {
+		if f.EvalsListAbsent {
+			return &ExecuteResult{ExitCode: 1}, nil
+		}
+		return &ExecuteResult{ExitCode: 0}, nil
+	}
+
+	if len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "scan.tar") {
+		if f.ScanErr != nil {
+			if isResourceExhausted(f.ScanErr) {
+				return nil, &discovery.LimitError{
+					Stream: "stdout",
+					Limit:  stdoutLimit,
+				}
+			}
+			return nil, f.ScanErr
+		}
+		return &ExecuteResult{ExitCode: f.ScanExit, Stdout: f.ScanStdout, Stderr: f.ScanStderr}, nil
 	}
 
 	if cmd0 == "./.evals/list" || (len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "./.evals/list")) {
