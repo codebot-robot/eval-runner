@@ -2341,6 +2341,8 @@ type TaskSamplesListView struct {
 	IsTruncatedLog   bool
 	TruncatedMessage string
 	WarningMessage   string
+	WarningLogPath   string
+	WarningLogURL    string
 	StorageMessage   string
 	ArtifactFooter   string
 	Version          string

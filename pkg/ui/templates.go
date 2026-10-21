@@ -1216,7 +1216,7 @@ const taskSamplesListTemplate = `
       </div>
       {{ else }}{{ with .WarningMessage }}
       <div class="msg-alert" style="margin-bottom:16px">
-        {{ . }}
+        {{ . }}{{ if $.WarningLogPath }}; download it from {{ if $.WarningLogURL }}<a href="{{ $.WarningLogURL }}" target="_blank" rel="noopener noreferrer">{{ $.WarningLogPath }}</a>{{ else }}{{ $.WarningLogPath }}{{ end }}{{ end }}
       </div>{{ end }}
       <table class="table" style="margin-top:16px">
         <thead>
@@ -1235,10 +1235,11 @@ const taskSamplesListTemplate = `
           {{ range .Samples }}
           <tr>
             <td class="mono">
-              <a href="{{ .Link }}" class="sample-link">
+              {{ if .Link }}<a href="{{ .Link }}" class="sample-link">
                 <span class="st {{ if eq .Status "pass" }}p{{ else if eq .Status "fail" }}f{{ end }}"></span>
                 {{ .ID }}
-              </a>
+              </a>{{ else }}<span class="st {{ if eq .Status "pass" }}p{{ else if eq .Status "fail" }}f{{ end }}"></span>
+              {{ .ID }}{{ end }}
             </td>
             <td>
               <span class="chip chip-{{ .StatusClass }}">{{ .Score }}</span>

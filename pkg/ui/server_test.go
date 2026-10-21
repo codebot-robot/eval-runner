@@ -3006,9 +3006,33 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_CorruptLog(t *testing.T) {
 		t.Errorf("expected sample-corrupt-1 in sample list HTML")
 	}
 
+	bodyList := wList.Body.String()
 	// Verify visible fallback banner is present
-	if !strings.Contains(wList.Body.String(), "msg-alert") || !strings.Contains(wList.Body.String(), "summary.json") {
-		t.Errorf("expected visible fallback banner in body:\n%s", wList.Body.String())
+	if !strings.Contains(bodyList, "msg-alert") || !strings.Contains(bodyList, "summary.json") {
+		t.Errorf("expected visible fallback banner in body:\n%s", bodyList)
+	}
+	if !strings.Contains(bodyList, "could not be parsed") {
+		t.Errorf("expected 'could not be parsed' in fallback banner, got:\n%s", bodyList)
+	}
+	if strings.Contains(bodyList, "load cap") {
+		t.Errorf("expected banner NOT to contain 'load cap' for corrupt log, got:\n%s", bodyList)
+	}
+	if strings.Contains(bodyList, "/samples/") {
+		t.Errorf("expected no /samples/ hrefs in fallback mode, got:\n%s", bodyList)
+	}
+
+	// Verify direct transcript URL returns 404 with unparsable message, NOT load cap
+	reqTrans := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/corrupt-run/tasks/task%2Fcorrupt/samples/sample-corrupt-1", nil)
+	wTrans := httptest.NewRecorder()
+	srv.ServeHTTP(wTrans, reqTrans)
+	if wTrans.Code != http.StatusNotFound {
+		t.Errorf("expected 404 Not Found for direct transcript URL, got %d", wTrans.Code)
+	}
+	if !strings.Contains(wTrans.Body.String(), "transcript unavailable: log could not be parsed") {
+		t.Errorf("expected 'transcript unavailable: log could not be parsed' in transcript error body, got:\n%s", wTrans.Body.String())
+	}
+	if strings.Contains(wTrans.Body.String(), "load cap") {
+		t.Errorf("expected transcript error body NOT to contain 'load cap', got:\n%s", wTrans.Body.String())
 	}
 
 	// Verify the cache key used is the summary URI, never the logPath
@@ -3063,6 +3087,322 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_CorruptLog(t *testing.T) {
 	}
 	if !strings.Contains(wTrunc2.Body.String(), "10,000") {
 		t.Errorf("expected 10,000 truncation message in banner on cache hit, got:\n%s", wTrunc2.Body.String())
+	}
+}
+
+func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *testing.T) {
+	sink := artifacts.NewInMemorySink()
+	commit := "commitoversized1234"
+	taskID := "task/oversized"
+
+	scoreVal := 1.0
+	sampleSummaries := []artifacts.TaskSampleSummary{
+		{
+			ID:     "sample-oversized-1",
+			Score:  &scoreVal,
+			Status: "pass",
+		},
+		{
+			ID:     "sample-oversized-2",
+			Score:  &scoreVal,
+			Status: "fail",
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "oversized-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            taskID,
+		Commit:            commit,
+		Model:             "gemini-2.5-pro",
+		ControllerVersion: "v1.0.0",
+		Scorer:            "choice",
+		Samples:           sampleSummaries,
+		SampleCount:       len(sampleSummaries),
+	}
+
+	// Oversized log exceeding DefaultMaxLoadBytes (10 MiB)
+	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
+
+	logPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "oversized-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "gemini-2.5-pro",
+			Repo:  v1alpha1.RepoSpec{Commit: commit},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: logPath,
+				},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+
+	srv := NewServer(Config{Client: cl, ArtifactSink: sink})
+
+	// 1. Request samples list: returns 200 with no /samples/ hrefs and the extended banner
+	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/task%2Foversized/samples", nil)
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for oversized log sample list, got %d: %s", wList.Code, wList.Body.String())
+	}
+
+	body := wList.Body.String()
+
+	// Samples rendered as plain text
+	if !strings.Contains(body, "sample-oversized-1") || !strings.Contains(body, "sample-oversized-2") {
+		t.Errorf("expected sample IDs in body, got:\n%s", body)
+	}
+
+	// No /samples/ hrefs
+	if strings.Contains(body, "/samples/") {
+		t.Errorf("expected no /samples/ hrefs in fallback mode, got:\n%s", body)
+	}
+
+	// Extended banner with plain text artifact path
+	wantBanner := fmt.Sprintf("transcripts unavailable: the evaluation log exceeds the UI load cap (10 MiB); download it from %s", logPath)
+	if !strings.Contains(body, wantBanner) {
+		t.Errorf("expected extended banner %q in body, got:\n%s", wantBanner, body)
+	}
+	if !strings.Contains(body, "Showing sample outcomes from summary.json") {
+		t.Errorf("expected 'Showing sample outcomes from summary.json' in body, got:\n%s", body)
+	}
+
+	// 2. Direct transcript URL: returns 404 with fixed public error string
+	reqTranscript := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/task%2Foversized/samples/sample-oversized-1", nil)
+	wTranscript := httptest.NewRecorder()
+	srv.ServeHTTP(wTranscript, reqTranscript)
+
+	if wTranscript.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found for direct transcript URL in fallback mode, got %d", wTranscript.Code)
+	}
+	wantError := "transcript unavailable: log exceeds the UI load cap"
+	if !strings.Contains(wTranscript.Body.String(), wantError) {
+		t.Errorf("expected error %q, got:\n%s", wantError, wTranscript.Body.String())
+	}
+	if strings.Contains(wTranscript.Body.String(), "Log Truncated") {
+		t.Errorf("expected no generic Log Truncated page, got:\n%s", wTranscript.Body.String())
+	}
+}
+
+type mockGCSTaskSink struct {
+	artifacts.ArtifactSink
+	bucket string
+}
+
+func (m *mockGCSTaskSink) ArtifactPrefix(commit string) string {
+	return fmt.Sprintf("gs://%s/runs/%s/", m.bucket, commit)
+}
+
+func (m *mockGCSTaskSink) Load(ctx context.Context, path string) ([]byte, error) {
+	memPath := "mem://" + strings.TrimPrefix(path, fmt.Sprintf("gs://%s/", m.bucket))
+	return m.ArtifactSink.Load(ctx, memPath)
+}
+
+func TestServer_TaskSamplesFallbackWithSummaryJSON_GCSConsoleLink(t *testing.T) {
+	inMem := artifacts.NewInMemorySink()
+	bucket := "my-eval-bucket"
+	commit := "commitgcs1234"
+	taskID := "task/gcs"
+
+	scoreVal := 1.0
+	sampleSummaries := []artifacts.TaskSampleSummary{
+		{
+			ID:     "sample-gcs-1",
+			Score:  &scoreVal,
+			Status: "pass",
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "gcs-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            taskID,
+		Commit:            commit,
+		Model:             "gemini-2.5-pro",
+		ControllerVersion: "v1.0.0",
+		Scorer:            "choice",
+		Samples:           sampleSummaries,
+		SampleCount:       len(sampleSummaries),
+	}
+
+	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
+	rawPath, err := inMem.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	gcsSink := &mockGCSTaskSink{
+		ArtifactSink: inMem,
+		bucket:       bucket,
+	}
+
+	gcsLogPath := fmt.Sprintf("gs://%s/%s", bucket, strings.TrimPrefix(rawPath, "mem://"))
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gcs-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "gemini-2.5-pro",
+			Repo:  v1alpha1.RepoSpec{Commit: commit},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: gcsLogPath,
+				},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+
+	srv := NewServer(Config{Client: cl, ArtifactSink: gcsSink})
+
+	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/gcs-run/tasks/task%2Fgcs/samples", nil)
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", wList.Code, wList.Body.String())
+	}
+
+	body := wList.Body.String()
+	wantConsoleURL := FormatLogURL(gcsLogPath)
+	if !strings.Contains(body, wantConsoleURL) {
+		t.Errorf("expected Cloud Storage console URL %q in body, got:\n%s", wantConsoleURL, body)
+	}
+	if !strings.Contains(body, gcsLogPath) {
+		t.Errorf("expected GCS log path %q in body, got:\n%s", gcsLogPath, body)
+	}
+	wantBanner := "transcripts unavailable: the evaluation log exceeds the UI load cap (10 MiB)"
+	if !strings.Contains(body, wantBanner) {
+		t.Errorf("expected extended banner in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "download it from") {
+		t.Errorf("expected 'download it from' in body, got:\n%s", body)
+	}
+	if strings.Contains(body, "/samples/") {
+		t.Errorf("expected no /samples/ hrefs, got:\n%s", body)
+	}
+}
+
+func TestServer_TaskSamplesFallbackWithSummaryJSON_MissingLog(t *testing.T) {
+	sink := artifacts.NewInMemorySink()
+	commit := "commitmissing1234"
+	taskID := "task/missing"
+
+	scoreVal := 1.0
+	sampleSummaries := []artifacts.TaskSampleSummary{
+		{
+			ID:     "sample-missing-1",
+			Score:  &scoreVal,
+			Status: "pass",
+		},
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:           "missing-run",
+		RunNamespace:      "eval-runner",
+		TaskID:            taskID,
+		Commit:            commit,
+		Model:             "gemini-2.5-pro",
+		ControllerVersion: "v1.0.0",
+		Scorer:            "choice",
+		Samples:           sampleSummaries,
+		SampleCount:       len(sampleSummaries),
+	}
+
+	// Store summary.json by storing an inspect log first
+	storedLogPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	// Deliberately point to a non-existent inspect log, while summary.json remains where StoreArtifact wrote it
+	missingLogPath := strings.Replace(storedLogPath, "inspect.json", "missing_inspect.json", 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "missing-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "gemini-2.5-pro",
+			Repo:  v1alpha1.RepoSpec{Commit: commit},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      taskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: missingLogPath,
+				},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+
+	srv := NewServer(Config{Client: cl, ArtifactSink: sink})
+
+	// 1. Samples list returns 200 with "could not be loaded" and NO "load cap"
+	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/missing-run/tasks/task%2Fmissing/samples", nil)
+	wList := httptest.NewRecorder()
+	srv.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for missing log sample list, got %d: %s", wList.Code, wList.Body.String())
+	}
+
+	body := wList.Body.String()
+	if !strings.Contains(body, "could not be loaded") {
+		t.Errorf("expected 'could not be loaded' in banner, got:\n%s", body)
+	}
+	if strings.Contains(body, "load cap") {
+		t.Errorf("expected banner NOT to contain 'load cap' for missing log, got:\n%s", body)
+	}
+	if strings.Contains(body, "/samples/") {
+		t.Errorf("expected no /samples/ hrefs, got:\n%s", body)
+	}
+
+	// 2. Direct transcript URL returns 404 with "could not be loaded" and NO "load cap"
+	reqTrans := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/missing-run/tasks/task%2Fmissing/samples/sample-missing-1", nil)
+	wTrans := httptest.NewRecorder()
+	srv.ServeHTTP(wTrans, reqTrans)
+	if wTrans.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found, got %d", wTrans.Code)
+	}
+	if !strings.Contains(wTrans.Body.String(), "transcript unavailable: log could not be loaded") {
+		t.Errorf("expected 'transcript unavailable: log could not be loaded' in body, got:\n%s", wTrans.Body.String())
+	}
+	if strings.Contains(wTrans.Body.String(), "load cap") {
+		t.Errorf("expected transcript error body NOT to contain 'load cap', got:\n%s", wTrans.Body.String())
 	}
 }
 
