@@ -132,7 +132,19 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 		t.Fatalf("unexpected pulls page status: %d body=%s", respPulls.StatusCode, string(bodyPulls))
 	}
 
-	// 5. Follow the first samples href from the run page, then the first sample href.
+	// 5. Curl repository-scoped /pulls page derived from spec.repo.url
+	scopedPullsURL := fmt.Sprintf("%s%s/pulls", baseURL, repoRef.Path())
+	respScopedPulls, err := http.Get(scopedPullsURL)
+	if err != nil {
+		t.Fatalf("failed to GET %s: %v", scopedPullsURL, err)
+	}
+	bodyScopedPulls, _ := io.ReadAll(respScopedPulls.Body)
+	respScopedPulls.Body.Close()
+	if respScopedPulls.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected scoped pulls page status: %d body=%s", respScopedPulls.StatusCode, string(bodyScopedPulls))
+	}
+
+	// 6. Follow the first samples href from the run page, then the first sample href.
 	followUISampleHops(t, baseURL, string(bodyRun), runURL, requireSamples)
 }
 
