@@ -495,10 +495,6 @@ const runDetailTemplate = `
         <div class="msg-alert"><b>Message:</b> {{ .Message }}</div>
         {{ end }}
 
-        {{- if eq .ManifestSource "inspect-scan" }}
-        <div style="font-size:13px;color:var(--muted);margin-top:14px">Tasks discovered via Inspect scan fallback (.evals/list absent)</div>
-        {{- end }}
-
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:24px 0 12px;gap:12px">
           <h2 style="font-size:17px;font-weight:600;margin:0">Eval Tasks</h2>
           <div class="metric-filter-bar" style="margin:0">

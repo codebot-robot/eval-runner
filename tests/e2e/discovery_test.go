@@ -243,8 +243,8 @@ spec:
 		if run.Status.DiscoveryDeadline == nil {
 			t.Errorf("Expected status.discoveryDeadline to be populated")
 		}
-		if !strings.Contains(run.Status.Message, "no Inspect tasks found") {
-			t.Errorf("Expected failure message to report no Inspect tasks found, got: %s", run.Status.Message)
+		if !strings.Contains(run.Status.Message, ".evals/list not found or not executable; see docs/concept/functionality.md §2.3") {
+			t.Errorf("Expected failure message to report .evals/list not found or not executable, got: %s", run.Status.Message)
 		}
 		if strings.Contains(run.Status.Message, "attempts") {
 			t.Errorf("Expected missing .evals/list to fail promptly without retries, got: %s", run.Status.Message)
@@ -270,7 +270,7 @@ spec:
 		docsNoManifestCommit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-no-manifest.git")
 		t.Logf("Fixture repository docs-no-manifest commit: %s", docsNoManifestCommit)
 
-		runName := "docs-no-manifest-scan"
+		runName := "docs-no-manifest-fails"
 		manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
@@ -289,43 +289,16 @@ spec:
 		sandboxName := discovery.SandboxNameForRun(runName)
 		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
-		run := harness.WaitForRunPhase("eval-runner", runName, "Discovered", 90*time.Second)
+		run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 60*time.Second)
 
 		if run.Status.DiscoveryDeadline == nil {
 			t.Errorf("Expected status.discoveryDeadline to be populated")
 		}
-
-		if run.Status.Discovery == nil {
-			t.Fatalf("Expected status.discovery to be populated")
+		if !strings.Contains(run.Status.Message, ".evals/list not found or not executable; see docs/concept/functionality.md §2.3") {
+			t.Errorf("Expected failure message to report .evals/list not found or not executable, got: %s", run.Status.Message)
 		}
-		if run.Status.Discovery.TaskCount != 2 {
-			t.Fatalf("Expected 2 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
-		}
-		if run.Status.Discovery.EligibleTaskCount != 2 {
-			t.Fatalf("Expected 2 eligible tasks, got %d", run.Status.Discovery.EligibleTaskCount)
-		}
-		if len(run.Status.Discovery.TaskIDs) != 2 {
-			t.Fatalf("Expected 2 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
-		}
-		if run.Status.ManifestSource != v1alpha1.ManifestSourceInspectScan {
-			t.Errorf("Expected manifestSource inspect-scan, got %q", run.Status.ManifestSource)
-		}
-
-		expectedTasks := map[string]bool{
-			"evals/readme_comprehension":       false,
-			"evals/readme_comprehension_blind": false,
-		}
-		for _, id := range run.Status.Discovery.TaskIDs {
-			if _, ok := expectedTasks[id]; !ok {
-				t.Errorf("Unexpected task id: %s", id)
-			} else {
-				expectedTasks[id] = true
-			}
-		}
-		for taskID, found := range expectedTasks {
-			if !found {
-				t.Errorf("Expected task %q was not discovered", taskID)
-			}
+		if strings.Contains(run.Status.Message, "attempts") {
+			t.Errorf("Expected missing .evals/list to fail promptly without retries, got: %s", run.Status.Message)
 		}
 
 		// Delete Run and assert cleanup

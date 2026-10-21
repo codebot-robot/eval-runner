@@ -527,7 +527,7 @@ The following table maps sections of the target product concept ([docs/concept/f
 | Concept Section | Topic | Status | Related Issue / PR |
 |---|---|---|---|
 | **§2.1–§2.2** | Eval discovery via `.evals/list` | **Done** | Implemented in [#7](https://github.com/gke-labs/eval-runner/issues/7), [#9](https://github.com/gke-labs/eval-runner/pull/9), [#107](https://github.com/gke-labs/eval-runner/pull/107) (ADR-001, ADR-022). Manifest fields `version`, `cohort`, `dataset-size` remain open; image builds not started |
-| **§2.3** | Inspect fallback when `.evals/list` absent | **Done** | Implemented in [#313](https://github.com/gke-labs/eval-runner/issues/313) (ADR-031) |
+| **§2.3** | Inspect fallback when `.evals/list` absent | requires `.evals/list` | — |
 | **§3.1, §3.3** | Discovery sandbox & zero privilege | **Done** | Implemented in [#7](https://github.com/gke-labs/eval-runner/issues/7), [#14](https://github.com/gke-labs/eval-runner/issues/14), [#88](https://github.com/gke-labs/eval-runner/issues/88) (ADR-004, ADR-013, ADR-014, ADR-020). PSA-restricted containers + mTLS; gVisor/micro-VM is future |
 | **§3.1, §3.4** | Sample execution in sandboxes | **Done** | Implemented in [#26](https://github.com/gke-labs/eval-runner/issues/26), [#44](https://github.com/gke-labs/eval-runner/pull/44), [#53](https://github.com/gke-labs/eval-runner/issues/53), [#125](https://github.com/gke-labs/eval-runner/issues/125) (ADR-016, ADR-025, ADR-026). Executed as one sandbox per task running `inspect eval --limit a-b` (sample window), not one pod per sample |
 | **§3.2** | Empty resources (`[]` = zero privilege) | **Done** | Implemented in `pkg/discovery/sandbox.go` (ADR-013) |

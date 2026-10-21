@@ -342,7 +342,7 @@ Future pull requests that introduce an architectural decision should append an e
 ---
 
 ### ADR-031: Inspect Task Discovery Fallback via Hybrid Archive Scan (#313)
-- **Status**: Decided
+- **Status**: Superseded (reverted; `.evals/list` is required; a Python list run via uv is the planned path)
 - **Context**:
   Concept §2.3 and architecture §2.3 specified fallback task discovery when a repository lacks a `.evals/list` executable, allowing repositories using the Inspect AI framework to be evaluated with zero manifest configuration.
 - **Decision**:

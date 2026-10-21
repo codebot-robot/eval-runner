@@ -187,7 +187,6 @@ type RunDetailView struct {
 	ArtifactFooter  string
 	Version         string
 	Message         string
-	ManifestSource  v1alpha1.ManifestSource
 	Metric          MetricFilter
 	TotalCost       string
 	LatencySummary  string
