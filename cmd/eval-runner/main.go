@@ -383,7 +383,7 @@ func main() {
 			return controller.ReconcileFQDNNetworkPolicy(ctx, mgr.GetClient(), fqdnVersion, sandboxNamespace, hosts, setupLog)
 		}
 	} else {
-		setupLog.Info("FQDNNetworkPolicy CRD not found in cluster; sandbox FQDN egress narrowing disabled (GKE Dataplane V2 only)")
+		setupLog.Info("FQDNNetworkPolicy CRD not found in cluster; sandbox FQDN egress narrowing disabled until restart (requires GKE Dataplane V2 with --enable-fqdn-network-policy)")
 	}
 
 	reloader := controller.NewConfigReloader(controller.ConfigReloaderOptions{

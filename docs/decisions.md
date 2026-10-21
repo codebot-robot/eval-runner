@@ -303,9 +303,9 @@ Future pull requests that introduce an architectural decision should append an e
 
 ### ADR-029: GKE Dataplane V2 FQDNNetworkPolicy for Narrowed Sandbox HTTPS Egress (#283)
 - **Date**: 2026-10-21
-- **Status**: Accepted
+- **Status**: Accepted, pending the baseline change
 - **Decision**:
-  1. **Dynamic GKE FQDNNetworkPolicy**: On clusters running GKE Dataplane V2 (`networking.gke.io/v1alpha1`), the controller dynamically renders and manages an `FQDNNetworkPolicy` (`eval-runner-sandbox-fqdn-egress`) selecting `evalrunner.gke-labs.dev/sandbox: "true"` in `eval-runner-sandbox`, restricting TCP 443 egress exclusively to permitted FQDN hostnames.
+  1. **Dynamic GKE FQDNNetworkPolicy**: On clusters running GKE Dataplane V2 (`networking.gke.io/v1alpha1`), the controller dynamically renders and manages an `FQDNNetworkPolicy` (`eval-runner-sandbox-fqdn-egress`) selecting `evalrunner.gke-labs.dev/sandbox: "true"` in `eval-runner-sandbox`, specifying the allowed FQDN hostnames for HTTPS traffic on port 443.
   2. **Configurable Host List with Sane Defaults**: Allowed egress hosts are driven by ConfigMap key `sandboxEgressHosts` in `eval-runner-config` (or CLI flag `--sandbox-egress-hosts`). When unset, it defaults to:
      - Model APIs: `*.googleapis.com`
      - Git hosts: `github.com`, `*.github.com`, `*.githubusercontent.com`
@@ -314,8 +314,9 @@ Future pull requests that introduce an architectural decision should append an e
   3. **Runtime ConfigMap Hot-Reloading**: When `sandboxEgressHosts` is updated in `eval-runner-config`, `ConfigReloader` reconciles the policy without requiring a controller restart.
   4. **Baseline Plain NetworkPolicy Kept for Portability**: The static plain `NetworkPolicy` from ADR-028 in `k8s/sandbox-networkpolicy.yaml` remains the baseline, ensuring clusters without Dataplane V2 (e.g. local `kind` clusters in CI/e2e) are no worse off and continue functioning.
   5. **Graceful Degradation on Non-GKE Clusters**: If the `FQDNNetworkPolicy` CRD is not present on the cluster (detected via discovery and NoMatch handling), the controller logs an informational message and skips policy management without failing startup or reconciliation.
+  6. **Allow-Union Semantics**: On GKE Dataplane V2, when both a standard `NetworkPolicy` and an `FQDNNetworkPolicy` select the same Pod, egress traffic is permitted if it matches either policy (allow-union). Because the baseline `NetworkPolicy` currently allows TCP 443 (and 80) to all external IPs (`0.0.0.0/0`), the FQDN policy is inert and adds no egress narrowing until the baseline rule is removed in a follow-up issue that transfers ownership of sandbox egress policies to the controller.
 - **Rationale**:
-  Addresses the remaining gap from ADR-028 where standard Kubernetes NetworkPolicy could not express hostnames and had to allow port 443 to all external IPs (`0.0.0.0/0`). FQDNNetworkPolicy eliminates arbitrary HTTPS exfiltration and blocks access to public control-plane endpoints, narrowing traffic strictly to necessary API, git, and package endpoints.
+  Lays the groundwork for eliminating arbitrary HTTPS exfiltration and blocking reachability to public control-plane endpoints. Establishing the FQDN policy rendering, ConfigMap key, hot-reloading mechanism, and discovery checks allows operators to configure their domain lists before the baseline rule is dropped in the subsequent controller-managed egress follow-up.
 
 
 

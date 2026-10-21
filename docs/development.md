@@ -335,14 +335,28 @@ Network isolation for sandboxes is defined in `k8s/sandbox-networkpolicy.yaml` (
 
 Standard Kubernetes `NetworkPolicy` operates at L3/L4 (IP blocks and CIDRs) and cannot express domain names, meaning baseline egress policies must allow port 443 to `0.0.0.0/0` (external IPs) so sandboxes can reach git hosts and model APIs.
 
-On GKE Dataplane V2 clusters, the controller dynamically renders and reconciles an `FQDNNetworkPolicy` (`networking.gke.io/v1alpha1`, ADR-029) named `eval-runner-sandbox-fqdn-egress` in `eval-runner-sandbox` that selects `evalrunner.gke-labs.dev/sandbox: "true"` and narrows TCP 443 egress strictly to declared hostnames:
+On GKE Dataplane V2 clusters, the controller dynamically renders and reconciles an `FQDNNetworkPolicy` (`networking.gke.io/v1alpha1`, ADR-029) named `eval-runner-sandbox-fqdn-egress` in `eval-runner-sandbox` that selects `evalrunner.gke-labs.dev/sandbox: "true"` and specifies the allowed hostnames for HTTPS egress on port 443.
 
-- **GKE-only narrowing**: FQDN narrowing requires GKE Dataplane V2. Clusters without Dataplane V2 (e.g. local `kind` clusters running `kindnet`) retain the baseline plain `NetworkPolicy` from `k8s/sandbox-networkpolicy.yaml` without breaking or degrading.
+**Allow-Union Semantics**: On GKE Dataplane V2, an `FQDNNetworkPolicy` combines with standard `NetworkPolicy` resources selecting the same Pod as an **allow-union** (traffic is allowed if either policy matches). Because the baseline `NetworkPolicy` (`k8s/sandbox-networkpolicy.yaml`) currently allows TCP 443 (and 80) to all external IPs (`0.0.0.0/0`), the `FQDNNetworkPolicy` is **inert** and adds no egress narrowing until the baseline rule is removed in a follow-up enhancement that gives the controller ownership of sandbox egress policies. The plumbing, ConfigMap key, hot-reloading, and object management are established now so operators can configure domain allow-lists in preparation for that baseline change.
+
+- **GKE-only feature**: FQDN policies require GKE Dataplane V2 with FQDN network policy enabled. Clusters without Dataplane V2 (e.g. local `kind` clusters running `kindnet`) retain the baseline plain `NetworkPolicy` from `k8s/sandbox-networkpolicy.yaml` without breaking or degrading.
+- **Enabling FQDN Network Policy on GKE**: The cluster must be running GKE Dataplane V2 (GKE >= 1.26.4-gke.500 / 1.27.1-gke.400) with FQDN network policy enabled. The CRD is installed by this feature flag, not by Dataplane V2 alone:
+  ```bash
+  gcloud container clusters update CLUSTER --enable-fqdn-network-policy
+  ```
+  Verify that the CRD is available in the cluster:
+  ```bash
+  kubectl api-resources --api-group=networking.gke.io
+  ```
+  The controller checks for this CRD at startup and logs whether FQDN policy management is enabled or disabled until restart.
 - **ConfigMap Key (`sandboxEgressHosts`)**: The allow-list of hostnames is driven by the ConfigMap key `sandboxEgressHosts` in `eval-runner-config` (or CLI flag `--sandbox-egress-hosts`).
 - **Built-in Defaults**: If `sandboxEgressHosts` is omitted, the controller defaults to:
   - Model APIs: `*.googleapis.com` (covers `generativelanguage.googleapis.com`, etc.)
   - Git hosts: `github.com`, `*.github.com`, `*.githubusercontent.com`
   - Package repositories: `pypi.org`, `*.pypi.org`, `files.pythonhosted.org`, `*.pythonhosted.org`
+- **GKE FQDN Constraints**:
+  - `pattern: *.googleapis.com` matches exactly one DNS label (e.g. `generativelanguage.googleapis.com` matches, but multi-label subdomains like `a.b.googleapis.com` do not).
+  - A single `FQDNNetworkPolicy` resolves at most 50 IP addresses; the default set of `*.googleapis.com` plus GitHub and PyPI endpoints may approach that under load.
 - **Extending the List**: Operators can extend the allow-list without code changes by setting `sandboxEgressHosts` in `eval-runner-config`:
   ```yaml
   apiVersion: v1
@@ -370,7 +384,7 @@ To inspect the applied policies in the sandbox namespace:
 ```bash
 kubectl -n eval-runner-sandbox describe networkpolicy eval-runner-sandbox-ingress
 kubectl -n eval-runner-sandbox describe networkpolicy eval-runner-sandbox-egress
-# On GKE Dataplane V2 clusters:
+# On GKE Dataplane V2 clusters with FQDN policy enabled:
 kubectl -n eval-runner-sandbox describe fqdnnetworkpolicy eval-runner-sandbox-fqdn-egress
 ```
 
@@ -432,7 +446,6 @@ To manually verify ingress and egress policy enforcement on an enforcing cluster
      - `nc -zvw3 git-server.eval-runner-sandbox.svc.cluster.local 9418`: succeeds (in-cluster git fixture on port 9418).
      - `wget -qO- --timeout=5 https://api.github.com/zen`: succeeds (external HTTPS 443 to allowed host).
      - `nc -zvw3 generativelanguage.googleapis.com 443`: succeeds (model API HTTPS 443 to allowed host).
-     - `wget --timeout=5 https://example.com`: times out (blocked by FQDN policy because `example.com` is not in `sandboxEgressHosts`).
      - `nc -zvw3 eval-runner-controller.eval-runner.svc.cluster.local 8081`: times out (controller probe endpoint blocked).
      - `nc -zvw3 eval-runner-ui.eval-runner.svc.cluster.local 80`: times out (controller namespace blocked).
      - `wget -qO- --timeout=3 http://169.254.169.254/computeMetadata/v1/ --header 'Metadata-Flavor: Google'`: times out (GCE metadata server on :80 blocked).

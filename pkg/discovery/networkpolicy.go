@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	discoveryk8s "k8s.io/client-go/discovery"
@@ -28,10 +29,11 @@ const (
 	// DefaultFQDNNetworkPolicyName is the default name for the sandbox FQDNNetworkPolicy.
 	DefaultFQDNNetworkPolicyName = "eval-runner-sandbox-fqdn-egress"
 
-	// FQDNNetworkPolicyAPIVersion is the standard GKE Dataplane V2 API version for FQDNNetworkPolicy.
+	// FQDNNetworkPolicyAPIVersion is the built-in GKE Dataplane V2 API version for FQDNNetworkPolicy (using matches[].name|pattern).
 	FQDNNetworkPolicyAPIVersion = "networking.gke.io/v1alpha1"
 
-	// FQDNNetworkPolicyAPIVersionV1Alpha3 is the legacy API version for FQDNNetworkPolicy.
+	// FQDNNetworkPolicyAPIVersionV1Alpha3 is the API version used by the open-source gke-fqdnnetworkpolicies-golang operator
+	// (using to[].fqdns), rather than the built-in GKE Dataplane V2 feature.
 	FQDNNetworkPolicyAPIVersionV1Alpha3 = "networking.gke.io/v1alpha3"
 
 	// FQDNNetworkPolicyKind is the resource kind for FQDNNetworkPolicy.
@@ -209,8 +211,11 @@ func DetectFQDNNetworkPolicyAPIVersion(discoveryClient discoveryk8s.DiscoveryInt
 	for _, gv := range candidateVersions {
 		resources, err := discoveryClient.ServerResourcesForGroupVersion(gv)
 		if err != nil {
-			// Group or version not found is normal on non-GKE clusters
-			continue
+			if apierrors.IsNotFound(err) || discoveryk8s.IsGroupDiscoveryFailedError(err) {
+				// Group or version not found is expected on clusters without FQDN support
+				continue
+			}
+			return "", false, fmt.Errorf("failed to query discovery for %s: %w", gv, err)
 		}
 		for _, r := range resources.APIResources {
 			if r.Kind == FQDNNetworkPolicyKind {
