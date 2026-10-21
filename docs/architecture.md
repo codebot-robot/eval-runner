@@ -31,7 +31,7 @@ Where [docs/concept/functionality.md](concept/functionality.md) describes the ta
 - Zero-trust artifact persistence (`ArtifactSink`: GCS, local directory, or in-memory) for manifests, Inspect logs, summaries, and comparison tables
 - Series and Cohorts UI (§9.2) tracking mean scores over commits with unpaired differences and pooled Wilson multi-cohort series
 
-Future target functionality not yet started includes trajectory mining (§7), live streaming trajectory viewer (§6), fine-tune training loops (§8), and declared resources/image builds (§2.2/§3).
+Future target functionality not yet started includes trajectory mining (§7), live streaming trajectory viewer (§6), fine-tune training loops (§8), and declared resources/image builds (§2.2/§3). For the concept proposal establishing observations (not runs) as the central product and navigation unit, see [docs/concept/observations.md](concept/observations.md) (ADR-032).
 
 ---
 
