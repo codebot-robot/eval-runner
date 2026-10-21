@@ -822,17 +822,44 @@ gcloud storage cat gs://<bucket>/runs/<commit>/<task-id>/summary.json
 The `summary.json` contains:
 ```json
 {
+  "schemaVersion": 1,
   "taskId": "docs/readme_comprehension",
   "model": "google/gemini-3.5-flash-lite",
   "commit": "abcdef123456",
-  "samples": 10,
+  "runName": "eval-run-abcdef",
+  "runNamespace": "eval-runner",
+  "controllerVersion": "v1.0.0",
+  "scorer": "choice",
+  "sampleCount": 10,
+  "samples": [
+    {
+      "id": "1",
+      "epoch": 1,
+      "score": 1.0,
+      "status": "pass",
+      "latencySeconds": 1.25,
+      "tokens": {
+        "input": 120,
+        "output": 15
+      }
+    }
+  ],
   "successes": 8,
   "meanScore": 0.8,
+  "successRate": 0.8,
+  "successRateCI": {
+    "lower": 0.49,
+    "upper": 0.94,
+    "confidence": 0.95,
+    "method": "wilson"
+  },
   "startedAt": "2026-10-17T14:52:45Z",
   "finishedAt": "2026-10-17T14:52:47Z",
   "capped": false
 }
 ```
+
+`controllerVersion` records the controller build version, injected at image build time via the `VERSION` or `IMAGE_TAG` build arguments in `images/eval-runner/Dockerfile` (falling back to Go runtime build info or `"devel"`).
 
 Upload sizes are bounded to 10 MiB; if a log exceeds this limit, the log is uploaded in full up to the cap, and `"capped": true` along with `"capBytes"` are recorded in `summary.json`.
 
