@@ -589,6 +589,64 @@ func TestTemplateRenderingComparisonDetailGolden(t *testing.T) {
 	assertGolden(t, "comparison_detail.golden.html", buf.String())
 }
 
+func sampleRepoIndexView() RepoIndexView {
+	return RepoIndexView{
+		Namespace: "eval-runner",
+		Repositories: []RepoListItem{
+			{
+				Host:             "github.com",
+				Owner:            "gke-labs",
+				Name:             "eval-runner",
+				Repository:       "github.com/gke-labs/eval-runner",
+				RunsCount:        42,
+				ComparisonsCount: 12,
+				Link:             "/github.com/gke-labs/eval-runner",
+			},
+		},
+		TotalCount: 1,
+	}
+}
+
+func TestTemplateRenderingRepoIndexGolden(t *testing.T) {
+	view := sampleRepoIndexView()
+
+	var buf bytes.Buffer
+	if err := RenderRepoIndex(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo index template: %v", err)
+	}
+
+	assertGolden(t, "repo_index.golden.html", buf.String())
+}
+
+func TestTemplateRenderingRepoRunsGolden(t *testing.T) {
+	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	view := sampleRunsListView()
+	view.Repo = ref
+	for i := range view.Runs {
+		view.Runs[i].Link = "/github.com/gke-labs/eval-runner/runs/" + view.Runs[i].Name
+	}
+
+	var buf bytes.Buffer
+	if err := tmplRunsList.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo runs template: %v", err)
+	}
+
+	assertGolden(t, "repo_runs.golden.html", buf.String())
+}
+
+func TestTemplateRenderingRepoComparisonDetailGolden(t *testing.T) {
+	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	baseRun, candRun, comp := sampleFixtures()
+	view := NewComparisonDetailView(comp, baseRun, candRun, ref, "")
+
+	var buf bytes.Buffer
+	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo comparison detail template: %v", err)
+	}
+
+	assertGolden(t, "repo_comparison_detail.golden.html", buf.String())
+}
+
 func batchesTokensComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha1.Run) {
 	rateImprovedBase := 0.60
 	rateImprovedCand := 0.90
@@ -728,7 +786,7 @@ func batchesTokensComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1a
 
 func TestTemplateRenderingComparisonDetail_BatchesTokensGolden(t *testing.T) {
 	comp, baseRun, candRun := batchesTokensComparisonFixture()
-	view := NewComparisonDetailView(comp, baseRun, candRun)
+	view := NewComparisonDetailView(comp, baseRun, candRun, RepoRef{}, "")
 
 	var buf bytes.Buffer
 	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
@@ -748,7 +806,7 @@ func TestTemplateRenderingComparisonDetail_BudgetTile(t *testing.T) {
 		SpentUSD: &spent,
 		Enforced: true,
 	}
-	view := NewComparisonDetailView(comp, baseRun, candRun)
+	view := NewComparisonDetailView(comp, baseRun, candRun, RepoRef{}, "")
 	if view.BudgetStr != "$0.12 / $0.50" {
 		t.Errorf("expected BudgetStr $0.12 / $0.50, got %q", view.BudgetStr)
 	}
@@ -964,7 +1022,7 @@ func regressedComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alpha
 
 func TestTemplateRenderingComparisonDetail_RegressedGolden(t *testing.T) {
 	comp, baseRun, candRun := regressedComparisonFixture()
-	view := NewComparisonDetailView(comp, baseRun, candRun)
+	view := NewComparisonDetailView(comp, baseRun, candRun, RepoRef{}, "")
 
 	var buf bytes.Buffer
 	if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
@@ -1354,7 +1412,7 @@ func TestEscapingHostileFixtures(t *testing.T) {
 		comp, baseRun, candRun := regressedComparisonFixture()
 		comp.Status.Message = "reason " + hostileScript + hostileIframe
 		comp.Status.Tasks[1].ID = "task/" + hostileImg
-		view := NewComparisonDetailView(comp, baseRun, candRun)
+		view := NewComparisonDetailView(comp, baseRun, candRun, RepoRef{}, "")
 
 		var buf bytes.Buffer
 		if err := tmplComparisonDetail.Execute(&buf, view); err != nil {
