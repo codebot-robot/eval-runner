@@ -316,6 +316,11 @@ spec:
                   description: TaskStatus records the execution status and scores
                     for a single eval task.
                   properties:
+                    cohort:
+                      description: Cohort is the cohort identifier of the task (defaults
+                        to "default").
+                      maxLength: 64
+                      type: string
                     costSource:
                       description: CostSource is the provenance of model prices used
                         to compute costUSD (configmap or default).
