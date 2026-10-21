@@ -2363,13 +2363,16 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 	}
 
+	budgetLimit := 0.0
+	if comp.Spec.BudgetUSD != nil && *comp.Spec.BudgetUSD > 0 {
+		budgetLimit = *comp.Spec.BudgetUSD
+	}
+
 	budgetEnforced := true
 	budgetNote := ""
-	if comp.Spec.BudgetUSD != nil {
-		candPrice, _, candPriceKnown := r.lookupModelPrice(candidateRun.Spec.Model)
-		basePrice, _, basePriceKnown := r.lookupModelPrice(baselineRun.Spec.Model)
-		_ = candPrice
-		_ = basePrice
+	if budgetLimit > 0 {
+		_, _, candPriceKnown := r.lookupModelPrice(candidateRun.Spec.Model)
+		_, _, basePriceKnown := r.lookupModelPrice(baselineRun.Spec.Model)
 		if candidateRun.Spec.Model != "" && !candPriceKnown {
 			budgetEnforced = false
 			budgetNote = fmt.Sprintf("cost unknown for %s; budget not enforced", candidateRun.Spec.Model)
@@ -2381,8 +2384,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	budgetVal := 0.0
 	spentVal := 0.0
-	if budgetEnforced && comp.Spec.BudgetUSD != nil {
-		budgetVal = *comp.Spec.BudgetUSD
+	if budgetEnforced && budgetLimit > 0 {
+		budgetVal = budgetLimit
 		spentVal = spentSoFar
 	}
 
@@ -2461,8 +2464,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			batchSize = maxRemaining
 		}
 
-		if budgetEnforced && comp.Spec.BudgetUSD != nil {
-			budget := *comp.Spec.BudgetUSD
+		stopReason := fmt.Sprintf("sample cap (%d) reached without resolving", maxSamples)
+		if budgetEnforced && budgetLimit > 0 {
 			totalSamplesRun := 0
 			for _, te := range taskEvals {
 				totalSamplesRun += len(te.candScores) + len(te.baseScores)
@@ -2471,8 +2474,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				avgCostPerSample := spentSoFar / float64(totalSamplesRun)
 				costPerPair := avgCostPerSample * 2.0
 				projected := spentSoFar + float64(batchSize)*costPerPair
-				if projected > budget {
-					remaining := budget - spentSoFar
+				if projected > budgetLimit {
+					remaining := budgetLimit - spentSoFar
 					fit := 0
 					if costPerPair > 0 && remaining > 0 {
 						fit = int(math.Floor(remaining/costPerPair + 1e-9))
@@ -2482,14 +2485,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 							batchSize = fit
 						}
 					} else {
-						// Stop!
-						for i := range taskEvals {
-							if taskEvals[i].dec.Label == stats.TaskLabelContinue {
-								taskEvals[i].dec.Label = stats.TaskLabelInconclusive
-								taskEvals[i].dec.Stop = true
-								taskEvals[i].dec.Reason = fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", budget, spentSoFar)
-							}
-						}
+						// Stop! Zero batchSize so the guard below fires and doesn't spawn an unfiltered batch
+						batchSize = 0
+						stopReason = fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", budgetLimit, spentSoFar)
 						continueTasks = nil
 					}
 				}
@@ -2510,7 +2508,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				if taskEvals[i].dec.Label == stats.TaskLabelContinue {
 					taskEvals[i].dec.Label = stats.TaskLabelInconclusive
 					taskEvals[i].dec.Stop = true
-					taskEvals[i].dec.Reason = fmt.Sprintf("sample cap (%d) reached without resolving", maxSamples)
+					taskEvals[i].dec.Reason = stopReason
 				}
 			}
 			continueTasks = nil
@@ -2640,7 +2638,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					status.Summary.AffinityMatched = aff.matchedCount
 				}
 				status.Message = batchMsg
-				if comp.Spec.BudgetUSD != nil {
+				if budgetLimit > 0 {
 					var spentUSD *float64
 					if budgetEnforced {
 						spentUSD = &spentSoFar
@@ -2826,7 +2824,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					status.Summary.AffinityMatched = aff.matchedCount
 				}
 				status.Message = extraMsg
-				if comp.Spec.BudgetUSD != nil {
+				if budgetLimit > 0 {
 					var spentUSD *float64
 					if budgetEnforced {
 						spentUSD = &spentSoFar
@@ -3125,8 +3123,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	budgetReached := false
-	if budgetEnforced && comp.Spec.BudgetUSD != nil {
-		if spentSoFar >= *comp.Spec.BudgetUSD {
+	if budgetEnforced && budgetLimit > 0 {
+		if spentSoFar >= budgetLimit {
 			budgetReached = true
 		}
 		for _, te := range taskEvals {
@@ -3137,8 +3135,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 	}
 
-	if budgetReached && comp.Spec.BudgetUSD != nil {
-		budgetReason := fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", *comp.Spec.BudgetUSD, spentSoFar)
+	if budgetReached && budgetLimit > 0 {
+		budgetReason := fmt.Sprintf("budget ($%.2f) reached (spent $%.2f)", budgetLimit, spentSoFar)
 		if strings.Contains(message, "more samples recommended") {
 			message = strings.Replace(message, "more samples recommended", budgetReason, 1)
 		} else if runVerdict.Verdict == stats.VerdictInconclusive {
@@ -3151,7 +3149,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	var compBudget *v1alpha1.ComparisonBudgetStatus
-	if comp.Spec.BudgetUSD != nil {
+	if budgetLimit > 0 {
 		var spentUSD *float64
 		if budgetEnforced {
 			spentUSD = &spentSoFar

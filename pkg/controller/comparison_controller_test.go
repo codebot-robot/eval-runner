@@ -16634,6 +16634,201 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 		}
 	})
 
+	t.Run("ShrinkToFit_StopWhenOnePairExceeds", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		// Batch 1: 4 samples with noisy scores.
+		// 300,000 input tokens each -> 300,000 * 0.50 / 1M = $0.15 cand, $0.15 base = $0.30 total spent.
+		// Total samples = 8 (4 pairs). Avg cost per sample = $0.30 / 8 = $0.0375.
+		// Cost per pair = $0.075.
+		// Budget is $0.35. Remaining = $0.05 < $0.075 per pair -> fit = 0.
+		b1CandScores := []stats.SampleScore{{ID: "1", Score: 1.0}, {ID: "2", Score: 0.0}, {ID: "3", Score: 1.0}, {ID: "4", Score: 0.0}}
+		b1BaseScores := []stats.SampleScore{{ID: "1", Score: 0.0}, {ID: "2", Score: 1.0}, {ID: "3", Score: 0.0}, {ID: "4", Score: 1.0}}
+		fakeGCS.Objects["test-bucket/runs/cand-commit/b1.json"] = fakes.FakeObject{Data: makeInspectLogWithTokens(taskID, b1CandScores, 300_000, 0)}
+		fakeGCS.Objects["test-bucket/runs/base-commit/b1.json"] = fakes.FakeObject{Data: makeInspectLogWithTokens(taskID, b1BaseScores, 300_000, 0)}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-stop", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model:       modelName,
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b1.json", Samples: 4, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+				},
+			},
+		}
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-stop", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model:       modelName,
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/b1.json", Samples: 4, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+				},
+			},
+		}
+
+		budgetUSD := 0.35
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-stop", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-stop"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-stop"},
+				BudgetUSD: &budgetUSD,
+				Sampling: &v1alpha1.ComparisonSamplingSpec{
+					BatchSize:         4,
+					MaxSamplesPerTask: 32,
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+			ModelPrices:  prices,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-stop"}}
+
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile failed: %v", err)
+		}
+
+		var compUpdated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &compUpdated); err != nil {
+			t.Fatalf("Get comp failed: %v", err)
+		}
+
+		if compUpdated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+			t.Errorf("Expected Phase Completed, got %s", compUpdated.Status.Phase)
+		}
+		if compUpdated.Status.Verdict != v1alpha1.ComparisonVerdictInconclusive {
+			t.Errorf("Expected Verdict INCONCLUSIVE, got %s", compUpdated.Status.Verdict)
+		}
+		if len(compUpdated.Status.Batches) != 1 {
+			t.Errorf("Expected exactly 1 batch, got %d", len(compUpdated.Status.Batches))
+		}
+		if !strings.Contains(compUpdated.Status.Message, "budget ($0.35) reached (spent $0.30)") {
+			t.Errorf("Expected status.Message to contain budget reason, got %q", compUpdated.Status.Message)
+		}
+
+		// Ensure no batch 2 runs were created
+		var b2Cand v1alpha1.Run
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-stop-b2-cand"}, &b2Cand); err == nil {
+			t.Errorf("Expected batch 2 candidate Run to not exist, but found one")
+		}
+		var b2Base v1alpha1.Run
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "comp-stop-b2-base"}, &b2Base); err == nil {
+			t.Errorf("Expected batch 2 baseline Run to not exist, but found one")
+		}
+	})
+
+	t.Run("BudgetUSD_ZeroIsUnset", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		b1Scores := []stats.SampleScore{{ID: "1", Score: 1.0}, {ID: "2", Score: 0.0}, {ID: "3", Score: 1.0}, {ID: "4", Score: 0.0}}
+		fakeGCS.Objects["test-bucket/runs/cand-commit/b1.json"] = fakes.FakeObject{Data: makeInspectLogWithTokens(taskID, b1Scores, 200_000, 0)}
+		fakeGCS.Objects["test-bucket/runs/base-commit/b1.json"] = fakes.FakeObject{Data: makeInspectLogWithTokens(taskID, b1Scores, 200_000, 0)}
+
+		zeroBudget := 0.0
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-zero", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model:       modelName,
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/cand-commit/b1.json", Samples: 4, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+				},
+			},
+		}
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-zero", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model:       modelName,
+				SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://test-bucket/runs/base-commit/b1.json", Samples: 4, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 4}},
+				},
+			},
+		}
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-zero", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-zero"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-zero"},
+				BudgetUSD: &zeroBudget,
+				Sampling: &v1alpha1.ComparisonSamplingSpec{
+					BatchSize:         4,
+					MaxSamplesPerTask: 32,
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRun, baseRun, comp).
+			WithStatusSubresource(candRun, baseRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:       cl,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+			ModelPrices:  prices,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-zero"}}
+
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile failed: %v", err)
+		}
+
+		var compUpdated v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &compUpdated); err != nil {
+			t.Fatalf("Get comp failed: %v", err)
+		}
+
+		// budgetUSD: 0 must not stop the comparison after batch 1; batch 2 should be scheduled
+		if len(compUpdated.Status.Batches) != 2 {
+			t.Errorf("Expected 2 batches scheduled for budgetUSD: 0, got %d", len(compUpdated.Status.Batches))
+		}
+		if compUpdated.Status.Budget != nil {
+			t.Errorf("Expected status.Budget to be nil when budgetUSD is 0, got %+v", compUpdated.Status.Budget)
+		}
+	})
+
 	t.Run("ExtraSamples_Bypass", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
 		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
