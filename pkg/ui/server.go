@@ -318,10 +318,27 @@ func (s *Server) routes() {
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls", s.handleRepoPullsList)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls/{$}", s.handleRepoPullsList)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pulls/{number}", s.handleRepoPullDetail)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/pull/{number}", s.handleRepoPullAlias)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series", s.handleRepoSeries)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{$}", s.handleRepoSeries)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{branch...}", s.handleRepoSeries)
 }
 
 func (s *Server) handleRepoScoped(w http.ResponseWriter, r *http.Request) {
 	s.repoMux.ServeHTTP(w, r)
+}
+
+func (s *Server) redirectURLWithQuery(basePath string, r *http.Request, objNamespace string) string {
+	q := r.URL.Query()
+	if objNamespace != "" && objNamespace != s.cfg.DefaultNamespace {
+		q.Set("namespace", objNamespace)
+	} else {
+		q.Del("namespace")
+	}
+	if len(q) > 0 {
+		return basePath + "?" + q.Encode()
+	}
+	return basePath
 }
 
 func (s *Server) linkNamespace(ns string) string {
@@ -832,6 +849,12 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, http.StatusInternalServerError, "failed to get run", fmt.Sprintf("failed to get run %s/%s", ns, name), err)
+		return
+	}
+
+	if ref, ok := runRepoRef(&run); ok && !ref.IsZero() {
+		target := s.redirectURLWithQuery(ref.Path()+"/runs/"+name, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
 		return
 	}
 
@@ -1472,6 +1495,12 @@ func (s *Server) handleComparisonDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if ref, ok := comparisonRepoRef(ctx, &comp, s.readerFor(ns)); ok && !ref.IsZero() {
+		target := s.redirectURLWithQuery(ref.Path()+"/comparisons/"+name, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
+
 	s.renderComparisonDetail(w, r, &comp, ns, RepoRef{})
 }
 
@@ -1956,7 +1985,7 @@ func (s *Server) handleRepoPullDetail(w http.ResponseWriter, r *http.Request) {
 	numberStr := r.PathValue("number")
 	num, err := strconv.Atoi(numberStr)
 	if err != nil || num <= 0 {
-		httpError(w, http.StatusBadRequest, "invalid route params", fmt.Sprintf("invalid pr number: %q", numberStr), nil)
+		httpError(w, http.StatusNotFound, "not found", fmt.Sprintf("invalid pr number: %q", numberStr), nil)
 		return
 	}
 	ns, err := s.namespaceFor(r)
@@ -1966,6 +1995,27 @@ func (s *Server) handleRepoPullDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderPullHistory(w, r, ns, &ref, ref.Owner+"/"+ref.Name, num)
+}
+
+func (s *Server) handleRepoPullAlias(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	numberStr := r.PathValue("number")
+	num, err := strconv.Atoi(numberStr)
+	if err != nil || num <= 0 {
+		httpError(w, http.StatusNotFound, "not found", fmt.Sprintf("invalid pr number: %q", numberStr), nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	target := s.redirectURLWithQuery(ref.Path()+fmt.Sprintf("/pulls/%d", num), r, ns)
+	http.Redirect(w, r, target, http.StatusPermanentRedirect)
 }
 
 func (s *Server) renderPullHistory(w http.ResponseWriter, r *http.Request, ns string, filter *RepoRef, repoOrHash string, num int) {
@@ -2340,6 +2390,50 @@ func (s *Server) handleSeriesList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// repoRefToHash returns the 7-character hexadecimal hash for a RepoRef.
+// Note: this assumes github.com ("owner/repo") normalization, which matches
+// legacy CleanRepo(url) behavior for github.com. For non-github URLs, legacy
+// CleanRepo left the URL untouched; repoRefToHash is only relied on for the
+// no-runs 404 path when no runs are present in the namespace to resolve from.
+func repoRefToHash(ref RepoRef) string {
+	if ref.Owner == "-" {
+		return RepoHash(ref.Name)
+	}
+	return RepoHash(ref.Owner + "/" + ref.Name)
+}
+
+func resolveRepoHash(ref RepoRef, runs []v1alpha1.Run) string {
+	for i := range runs {
+		run := &runs[i]
+		if rRef, ok := runRepoRef(run); ok && rRef.Equal(ref) {
+			repo := runRepository(run)
+			if repo != "" {
+				return RepoHash(repo)
+			}
+		}
+	}
+	return repoRefToHash(ref)
+}
+
+func (s *Server) handleRepoSeries(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	branch := r.PathValue("branch")
+	branch = strings.TrimSuffix(branch, "/")
+	if branch == "" {
+		branch = "main"
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	s.renderSeriesDetail(w, r, ns, ref, "", branch)
+}
+
 func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
@@ -2360,6 +2454,59 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var runList v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+
+	var matchingRefs []RepoRef
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		repo := runRepository(run)
+		h := RepoHash(repo)
+		if strings.EqualFold(h, repoOrHash) || strings.EqualFold(repo, repoOrHash) {
+			if rRef, ok := runRepoRef(run); ok && !rRef.IsZero() {
+				found := false
+				for _, existing := range matchingRefs {
+					if existing.Equal(rRef) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					matchingRefs = append(matchingRefs, rRef)
+				}
+			}
+		}
+	}
+	if len(matchingRefs) == 1 {
+		escapedPath := r.URL.EscapedPath()
+		legacyPrefix := fmt.Sprintf("/series/%s/", url.PathEscape(repoOrHash))
+		escapedBranch := strings.TrimPrefix(escapedPath, legacyPrefix)
+		if escapedBranch == "" || escapedBranch == escapedPath {
+			escapedBranch = branch
+		}
+		target := s.redirectURLWithQuery(matchingRefs[0].Path()+"/series/"+escapedBranch, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
+
+	s.renderSeriesDetailWithList(w, r, ns, RepoRef{}, repoOrHash, branch, &runList)
+}
+
+func (s *Server) renderSeriesDetail(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, repoOrHash, branch string) {
+	ctx := r.Context()
+	var runList v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+	s.renderSeriesDetailWithList(w, r, ns, ref, repoOrHash, branch, &runList)
+}
+
+func (s *Server) renderSeriesDetailWithList(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, repoOrHash, branch string, runList *v1alpha1.RunList) {
+	linkNS := s.linkNamespace(ns)
 	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
 
 	n := 50
@@ -2374,12 +2521,6 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 
 	taskFilter := strings.TrimSpace(r.URL.Query().Get("task"))
 
-	var runList v1alpha1.RunList
-	if err := s.readerFor(ns).List(ctx, &runList, client.InNamespace(ns)); err != nil {
-		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
-		return
-	}
-
 	type runWithTime struct {
 		run        *v1alpha1.Run
 		commitTime time.Time
@@ -2389,6 +2530,11 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	var matched []runWithTime
 	var repoDisplay string
 	matchedRepoHash := repoOrHash
+	var targetRepoHash string
+	if !ref.IsZero() {
+		targetRepoHash = resolveRepoHash(ref, runList.Items)
+		matchedRepoHash = targetRepoHash
+	}
 
 	for i := range runList.Items {
 		run := &runList.Items[i]
@@ -2408,8 +2554,14 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 
 		repo := runRepository(run)
 		h := RepoHash(repo)
-		if !strings.EqualFold(h, repoOrHash) && !strings.EqualFold(repo, repoOrHash) {
-			continue
+		if !ref.IsZero() {
+			if !strings.EqualFold(h, targetRepoHash) {
+				continue
+			}
+		} else {
+			if !strings.EqualFold(h, repoOrHash) && !strings.EqualFold(repo, repoOrHash) {
+				continue
+			}
 		}
 		if repoDisplay == "" {
 			repoDisplay = repo
@@ -2425,8 +2577,22 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(matched) == 0 {
-		httpError(w, http.StatusNotFound, "series not found", fmt.Sprintf("no runs for repo %s branch %s in namespace %s", repoOrHash, branch, ns), nil)
+		var logMsg string
+		if !ref.IsZero() {
+			logMsg = fmt.Sprintf("no runs for repo %s branch %s in namespace %s", ref.String(), branch, ns)
+		} else {
+			logMsg = fmt.Sprintf("no runs for repo %s branch %s in namespace %s", repoOrHash, branch, ns)
+		}
+		httpError(w, http.StatusNotFound, "series not found", logMsg, nil)
 		return
+	}
+
+	if repoDisplay == "" && !ref.IsZero() {
+		if ref.Owner == "-" {
+			repoDisplay = ref.Name
+		} else {
+			repoDisplay = fmt.Sprintf("%s/%s", ref.Owner, ref.Name)
+		}
 	}
 
 	sort.Slice(matched, func(i, j int) bool {
@@ -2486,13 +2652,18 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		if n != 50 {
 			tParams.Set("n", strconv.Itoa(n))
 		}
-		if ns != s.cfg.DefaultNamespace {
-			tParams.Set("namespace", ns)
-		}
 		if cohortFilter != "" {
 			tParams.Set("cohort", cohortFilter)
 		}
-		link := fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), tParams.Encode())
+		var link string
+		if ref.Host != "" {
+			link = repoLink(ref, "/series/"+branch+"?"+tParams.Encode(), linkNS)
+		} else {
+			if ns != s.cfg.DefaultNamespace {
+				tParams.Set("namespace", ns)
+			}
+			link = fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), tParams.Encode())
+		}
 		taskLinks = append(taskLinks, SeriesTaskLink{
 			ID:     tid,
 			Link:   link,
@@ -2507,13 +2678,18 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	if n != 50 {
 		cParams.Set("n", strconv.Itoa(n))
 	}
-	if ns != s.cfg.DefaultNamespace {
-		cParams.Set("namespace", ns)
-	}
 	if cohortFilter != "" {
 		cParams.Set("cohort", cohortFilter)
 	}
-	cohortsLink := fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), cParams.Encode())
+	var cohortsLink string
+	if ref.Host != "" {
+		cohortsLink = repoLink(ref, "/series/"+branch+"?"+cParams.Encode(), linkNS)
+	} else {
+		if ns != s.cfg.DefaultNamespace {
+			cParams.Set("namespace", ns)
+		}
+		cohortsLink = fmt.Sprintf("/series/%s/%s?%s", url.PathEscape(matchedRepoHash), url.PathEscape(branch), cParams.Encode())
+	}
 
 	var svg SeriesSVG
 	var items []SeriesItem
@@ -2734,7 +2910,7 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 				DeltaPrevStr:   "—",
 				TokensStr:      "—",
 				CostStr:        "—",
-				RunLink:        fmt.Sprintf("/runs/%s/%s", run.Namespace, run.Name),
+				RunLink:        runLink(ref, run.Name, linkNS, run.Namespace),
 			}
 
 			if matchedTask != nil && matchedTask.Phase == v1alpha1.TaskPhaseCompleted && matchedTask.SuccessRate != nil {
@@ -2807,22 +2983,32 @@ func (s *Server) handleSeriesDetail(w http.ResponseWriter, r *http.Request) {
 		svg = BuildSeriesSVG(items)
 	}
 
-	backLink := "/series"
-	bParams := url.Values{}
-	if ns != s.cfg.DefaultNamespace {
-		bParams.Set("namespace", ns)
-	}
-	if cohortFilter != "" {
-		bParams.Set("cohort", cohortFilter)
-	}
-	if len(bParams) > 0 {
-		backLink += "?" + bParams.Encode()
+	var backLink string
+	if ref.Host != "" {
+		bSuffix := "/series"
+		if cohortFilter != "" {
+			bSuffix += "?cohort=" + url.QueryEscape(cohortFilter)
+		}
+		backLink = repoLink(ref, bSuffix, linkNS)
+	} else {
+		backLink = "/series"
+		bParams := url.Values{}
+		if ns != s.cfg.DefaultNamespace {
+			bParams.Set("namespace", ns)
+		}
+		if cohortFilter != "" {
+			bParams.Set("cohort", cohortFilter)
+		}
+		if len(bParams) > 0 {
+			backLink += "?" + bParams.Encode()
+		}
 	}
 
 	view := SeriesDetailView{
 		ActiveTab:             NavTabSeries,
+		Repo:                  ref,
 		Namespace:             ns,
-		LinkNamespace:         s.linkNamespace(ns),
+		LinkNamespace:         linkNS,
 		Repository:            repoDisplay,
 		RepoHash:              matchedRepoHash,
 		Branch:                branch,
@@ -3303,12 +3489,6 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	taskID, sampleID, ok := parseRunTaskRest(rest, r.URL.Query(), r.URL.Fragment, r.URL.RawFragment)
-	if !ok || taskID == "" {
-		httpError(w, http.StatusNotFound, "not found", "", nil)
-		return
-	}
-
 	ctx := r.Context()
 	var run v1alpha1.Run
 	if err := s.readerFor(ns).Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &run); err != nil {
@@ -3317,6 +3497,27 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, http.StatusInternalServerError, "error loading run", fmt.Sprintf("error loading run %s/%s", ns, name), err)
+		return
+	}
+
+	if ref, ok := runRepoRef(&run); ok && !ref.IsZero() {
+		escapedPath := r.URL.EscapedPath()
+		legacyPrefix := fmt.Sprintf("/runs/%s/%s", url.PathEscape(ns), url.PathEscape(name))
+		suffix := strings.TrimPrefix(escapedPath, legacyPrefix)
+		if !strings.HasPrefix(suffix, "/tasks") {
+			suffix = "/tasks"
+			if rest != "" {
+				suffix += "/" + rest
+			}
+		}
+		target := s.redirectURLWithQuery(ref.Path()+"/runs/"+name+suffix, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
+
+	taskID, sampleID, ok := parseRunTaskRest(rest, r.URL.Query(), r.URL.Fragment, r.URL.RawFragment)
+	if !ok || taskID == "" {
+		httpError(w, http.StatusNotFound, "not found", "", nil)
 		return
 	}
 
