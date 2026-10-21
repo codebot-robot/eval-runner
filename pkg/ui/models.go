@@ -1719,6 +1719,78 @@ func TruncateMessageBytes(s string, maxBytes int) string {
 	return s[:maxBytes] + "\n... [content truncated]"
 }
 
+// TruncateFieldBytes truncates string s to maxBytes on a valid UTF-8 rune boundary,
+// avoiding partial HTML entities, and appending a note showing total bytes if truncated.
+func TruncateFieldBytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	totalBytes := len(s)
+	if maxBytes <= 0 {
+		return fmt.Sprintf("... [truncated, %d bytes total]", totalBytes)
+	}
+
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+
+	cut = trimPartialHTMLEntity(s, cut)
+
+	prefix := strings.TrimRight(s[:cut], "\r\n")
+	if prefix == "" {
+		return fmt.Sprintf("... [truncated, %d bytes total]", totalBytes)
+	}
+	return prefix + fmt.Sprintf("\n... [truncated, %d bytes total]", totalBytes)
+}
+
+func trimPartialHTMLEntity(s string, cut int) int {
+	if cut <= 0 {
+		return cut
+	}
+	if s[cut-1] == '&' {
+		return cut - 1
+	}
+
+	start := cut - 35
+	if start < 0 {
+		start = 0
+	}
+	window := s[start:cut]
+	ampOffset := strings.LastIndexByte(window, '&')
+	if ampOffset == -1 {
+		return cut
+	}
+	ampIdx := start + ampOffset
+	if strings.IndexByte(s[ampIdx:cut], ';') != -1 {
+		return cut
+	}
+
+	maxEntityLen := 35
+	end := ampIdx + maxEntityLen
+	if end > len(s) {
+		end = len(s)
+	}
+	afterAmp := s[ampIdx:end]
+	semiIdx := strings.IndexByte(afterAmp, ';')
+	if semiIdx == -1 {
+		return cut
+	}
+
+	entityBody := afterAmp[1:semiIdx]
+	if len(entityBody) == 0 {
+		return cut
+	}
+	for i := 0; i < len(entityBody); i++ {
+		c := entityBody[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || (c == '#' && i == 0)) {
+			return cut
+		}
+	}
+
+	return ampIdx
+}
+
 // FormatTokens formats an integer token count with commas, e.g. 41200 -> "41,200", or "—" if <= 0.
 func FormatTokens(tokens int) string {
 	if tokens <= 0 {
