@@ -29,8 +29,9 @@ Where [docs/concept/functionality.md](concept/functionality.md) describes the ta
 - Web dashboard UI (`eval-runner-ui`) serving Runs and Comparisons
 - Read-only trajectory viewer UI (§6) serving per-task sample lists and sample transcripts from the artifact sink
 - Zero-trust artifact persistence (`ArtifactSink`: GCS, local directory, or in-memory) for manifests, Inspect logs, summaries, and comparison tables
+- Series and Cohorts UI (§9.2) tracking mean scores over commits with unpaired differences and pooled Wilson multi-cohort series
 
-Future target functionality not yet started includes trajectory mining (§7), live streaming trajectory viewer (§6), fine-tune training loops (§8), cohorts (§9.2), and declared resources/image builds (§2.2/§3).
+Future target functionality not yet started includes trajectory mining (§7), live streaming trajectory viewer (§6), fine-tune training loops (§8), and declared resources/image builds (§2.2/§3).
 
 ---
 
@@ -537,10 +538,10 @@ The following table maps sections of the target product concept ([docs/concept/f
 | **§7** | Trajectory mining (automated skill fix generation) | **Not started** | — |
 | **§8** | Fine-tunes (OpenRL training loop, continuum measurement, activation PRs) | **Not started** | — |
 | **§9.1** | Evals from the wild (anonymised eval submission) | **Not started** | — |
-| **§9.2** | Cohorts (tracking suite expansion over time) | **Not started** | — |
+| **§9.2** | Cohorts (tracking suite expansion over time) | **Done** | Implemented in [#293](https://github.com/gke-labs/eval-runner/issues/293) (ADR-030; manifest `tasks[].cohort`, `Run.status.tasks[].cohort`, per-commit `/series?view=cohorts`, pooled Wilson; weekly bucketing from mockup not implemented) |
 | **§10** | Continuum view (Pareto frontier scatter plot) | **Not started** | — |
 | **§11** | Web application surfaces: Runs and Comparisons dashboard UI | **Done** | Implemented in [#78](https://github.com/gke-labs/eval-runner/issues/78), [#92](https://github.com/gke-labs/eval-runner/pull/92), [#94](https://github.com/gke-labs/eval-runner/issues/94), [#99](https://github.com/gke-labs/eval-runner/pull/99) (`cmd/eval-runner-ui`) |
-| **§11** | PR surface in web UI, Budget/sampling detail chart, Cohorts, and Fine-tunes surfaces | **Not started** | Mockups exist under `docs/concept/ui/` |
+| **§11** | PR surface in web UI, Budget/sampling detail chart, and Fine-tunes surfaces | **Not started** | Mockups exist under `docs/concept/ui/` |
 
 ### Controller Enhancements in Flight
 

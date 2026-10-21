@@ -2548,6 +2548,143 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 	}
 }
 
+func TestRunControllerWritesTaskCohort(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-orig", Spec: "eval.py@task_orig", Workdir: "evals"},
+			{ID: "task-cohort", Spec: "eval.py@task_cohort", Cohort: "customer-reported", Workdir: "evals"},
+		},
+	}
+
+	r := &RunReconciler{}
+	initTasks := r.initializeTasks(v1alpha1.RunSpec{}, manifest)
+	if len(initTasks) != 2 {
+		t.Fatalf("Expected 2 initialized tasks, got %d", len(initTasks))
+	}
+	if initTasks[0].Cohort != "default" {
+		t.Errorf("Expected initTasks[0].Cohort 'default', got %q", initTasks[0].Cohort)
+	}
+	if initTasks[1].Cohort != "customer-reported" {
+		t.Errorf("Expected initTasks[1].Cohort 'customer-reported', got %q", initTasks[1].Cohort)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-cohorts",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         2,
+				EligibleTaskCount: 2,
+				TaskIDs:           []string{"task-orig", "task-cohort"},
+			},
+			Tasks: initTasks,
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "task", "scorers": [{"name": "choice"}]},
+		"samples": [
+			{"id": 1, "scores": {"choice": {"value": 1.0}}}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-cohorts"}}
+
+	// Turn 1: create sandboxes for pending tasks
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	var sbList sandboxv1beta1.SandboxList
+	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+	if len(sbList.Items) == 0 {
+		t.Fatalf("Expected sandboxes created, got none")
+	}
+
+	for _, sb := range sbList.Items {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sb.Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.12",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+	}
+
+	// Turn 2: execute tasks
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+
+	if len(updatedRun.Status.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks in status, got %d", len(updatedRun.Status.Tasks))
+	}
+	taskMap := make(map[string]v1alpha1.TaskStatus)
+	for _, tStat := range updatedRun.Status.Tasks {
+		taskMap[tStat.ID] = tStat
+	}
+
+	tOrig := taskMap["task-orig"]
+	if tOrig.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Errorf("Expected task-orig Completed, got %s", tOrig.Phase)
+	}
+	if tOrig.Cohort != "default" {
+		t.Errorf("Expected task-orig Cohort 'default', got %q", tOrig.Cohort)
+	}
+
+	tCohort := taskMap["task-cohort"]
+	if tCohort.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Errorf("Expected task-cohort Completed, got %s", tCohort.Phase)
+	}
+	if tCohort.Cohort != "customer-reported" {
+		t.Errorf("Expected task-cohort Cohort 'customer-reported', got %q", tCohort.Cohort)
+	}
+}
+
 func TestReconcileDiscoveryToRunningWhenModelSet(t *testing.T) {
 	scheme := setupScheme(t)
 

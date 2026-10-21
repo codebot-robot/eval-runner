@@ -1165,9 +1165,10 @@ type ComparisonHistorySVG struct {
 
 // SVGCircle represents a data point circle on the SVG chart.
 type SVGCircle struct {
-	CX float64
-	CY float64
-	R  float64
+	CX   float64
+	CY   float64
+	R    float64
+	Fill string
 }
 
 // SVGFinalLabel represents the label positioned at the final point.
@@ -1406,6 +1407,41 @@ type SeriesDetailView struct {
 	Items                 []SeriesItem
 	TotalRuns             int
 	BackLink              string
+	IsCohortsView         bool
+	CohortsLink           string
+	CohortLegend          []CohortLegendItem
+	CohortRows            []CohortSummaryRow
+}
+
+// CohortLegendItem represents a single entry in the cohorts chart legend.
+type CohortLegendItem struct {
+	Name  string
+	Color string
+	Count int
+}
+
+// CohortSummaryRow represents a row in the cohort summary table on the series detail page.
+type CohortSummaryRow struct {
+	Cohort          string
+	Color           string
+	EvalsCount      int
+	FirstSeenCommit string
+	LatestMean      string
+	CIStr           string
+	Method          string
+	MethodTooltip   string
+}
+
+// SVGAnnotation represents a vertical annotation line with a text label on the SVG chart.
+type SVGAnnotation struct {
+	X          float64
+	Y1         float64
+	Y2         float64
+	TextX      float64
+	TextY      float64
+	Text       string
+	Stroke     string
+	TextAnchor string
 }
 
 // SVGPolyline represents a connected line of points with a stroke color.
@@ -1416,16 +1452,52 @@ type SVGPolyline struct {
 
 // SeriesSVG holds precomputed numeric coordinates for inline SVG rendering of a task series.
 type SeriesSVG struct {
-	ViewBox    string
-	X0         float64
-	Y0         float64
-	X1         float64
-	Y1         float64
-	Polylines  []SVGPolyline // list of polyline segments with stroke styling
-	Polygons   []string      // list of "x0,yu0 ... xk,yuk xk,ylk ... x0,yl0" for shaded CI band
-	Circles    []SVGCircle   // data points
-	XAxisTicks []SVGTick     // ticks for commits along X-axis
-	YAxisTicks []SVGTick     // ticks for success rate along Y-axis
+	ViewBox      string
+	X0           float64
+	Y0           float64
+	X1           float64
+	Y1           float64
+	Polylines    []SVGPolyline   // list of polyline segments with stroke styling
+	Polygons     []string        // list of "x0,yu0 ... xk,yuk xk,ylk ... x0,yl0" for shaded CI band
+	PolygonFills []string        // parallel fill colors for Polygons (defaults to "var(--indigo)" when empty)
+	Circles      []SVGCircle     // data points
+	Annotations  []SVGAnnotation // vertical annotation lines with text
+	XAxisTicks   []SVGTick       // ticks for commits along X-axis
+	YAxisTicks   []SVGTick       // ticks for success rate along Y-axis
+}
+
+// seriesXTicks generates SVGTick entries for commit SHAs along the X-axis.
+func seriesXTicks(commitSHAs []string) []SVGTick {
+	const (
+		x0 = 60.0
+		x1 = 580.0
+		y1 = 175.0
+	)
+	N := len(commitSHAs)
+	if N == 0 {
+		return nil
+	}
+	var xTicks []SVGTick
+	if N <= 8 {
+		for i, sha := range commitSHAs {
+			cx := x0
+			if N > 1 {
+				cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
+			} else {
+				cx = (x0 + x1) / 2.0
+			}
+			cx = math.Round(cx*10.0) / 10.0
+			xTicks = append(xTicks, SVGTick{X: cx, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: ShortCommit(sha)})
+		}
+	} else {
+		cx0 := math.Round(x0*10.0) / 10.0
+		cxMid := math.Round((x0+(float64(N/2)/float64(N-1))*(x1-x0))*10.0) / 10.0
+		cxLast := math.Round(x1*10.0) / 10.0
+		xTicks = append(xTicks, SVGTick{X: cx0, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: ShortCommit(commitSHAs[0])})
+		xTicks = append(xTicks, SVGTick{X: cxMid, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: ShortCommit(commitSHAs[N/2])})
+		xTicks = append(xTicks, SVGTick{X: cxLast, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: ShortCommit(commitSHAs[N-1])})
+	}
+	return xTicks
 }
 
 // BuildSeriesSVG generates server-side numeric SVG coordinates for success rate vs commit series.
@@ -1455,27 +1527,13 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 		}
 	}
 
-	N := len(items)
-	var xTicks []SVGTick
-	if N <= 8 {
-		for i, it := range items {
-			cx := x0
-			if N > 1 {
-				cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
-			} else {
-				cx = (x0 + x1) / 2.0
-			}
-			xTicks = append(xTicks, SVGTick{X: cx, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: it.CommitSHAShort})
-		}
-	} else {
-		cx0 := x0
-		cxMid := x0 + (float64(N/2)/float64(N-1))*(x1-x0)
-		cxLast := x1
-		xTicks = append(xTicks, SVGTick{X: cx0, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: items[0].CommitSHAShort})
-		xTicks = append(xTicks, SVGTick{X: cxMid, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: items[N/2].CommitSHAShort})
-		xTicks = append(xTicks, SVGTick{X: cxLast, Y1: y1, Y2: y1 + 4.0, TextY: y1 + 18.0, Text: items[N-1].CommitSHAShort})
+	commitSHAs := make([]string, len(items))
+	for i, it := range items {
+		commitSHAs[i] = it.CommitSHA
 	}
+	xTicks := seriesXTicks(commitSHAs)
 
+	N := len(items)
 	var polylines []SVGPolyline
 	var polygons []string
 	var circles []SVGCircle
@@ -1642,9 +1700,241 @@ func FormatMethodTooltip(method string) string {
 		return "Newcombe hybrid Wilson interval (unpaired; different sample windows)"
 	case "welch":
 		return "Welch t interval from (mean, sd, n) (unpaired)"
+	case "pooled-wilson", "pooled_wilson":
+		return "Pooled Wilson score interval over summed successes and samples across cohort tasks"
 	default:
 		return method
 	}
+}
+
+// CohortPoint represents a data point for a cohort at a specific commit.
+type CohortPoint struct {
+	HasPoint bool
+	Rate     *float64
+	CI       *stats.Interval
+}
+
+// CohortSeriesLine represents a line in the cohorts series chart.
+type CohortSeriesLine struct {
+	Name            string
+	Color           string
+	Points          []CohortPoint // one per commit
+	FirstSeenCommit int           // index of commit where this cohort first appears (if added mid-series)
+	EvalsCount      int
+	IsAll           bool
+}
+
+// BuildCohortSeriesSVG generates SVG coordinates for multi-cohort series charts.
+func BuildCohortSeriesSVG(commitSHAs []string, lines []CohortSeriesLine) SeriesSVG {
+	const (
+		viewBox = "0 0 640 220"
+		x0      = 60.0
+		x1      = 580.0
+		y0      = 25.0
+		y1      = 175.0
+	)
+
+	yTicks := []SVGTick{
+		{X: x0 - 8.0, Y: y1 + 4.0, Y1: y1, Text: "0.00"},
+		{X: x0 - 8.0, Y: (y0+y1)/2.0 + 4.0, Y1: (y0 + y1) / 2.0, Text: "0.50"},
+		{X: x0 - 8.0, Y: y0 + 4.0, Y1: y0, Text: "1.00"},
+	}
+
+	N := len(commitSHAs)
+	if N == 0 {
+		return SeriesSVG{
+			ViewBox:    viewBox,
+			X0:         x0,
+			Y0:         y0,
+			X1:         x1,
+			Y1:         y1,
+			YAxisTicks: yTicks,
+		}
+	}
+
+	xTicks := seriesXTicks(commitSHAs)
+
+	var polylines []SVGPolyline
+	var polygons []string
+	var polygonFills []string
+	var circles []SVGCircle
+	var annotations []SVGAnnotation
+
+	type pt2D struct {
+		x float64
+		y float64
+	}
+	type ci2D struct {
+		x      float64
+		yUpper float64
+		yLower float64
+	}
+
+	for _, line := range lines {
+		var curLine []pt2D
+		var curCI []ci2D
+
+		flushLine := func() {
+			if len(curLine) >= 2 {
+				var sb strings.Builder
+				for j, p := range curLine {
+					if j > 0 {
+						sb.WriteByte(' ')
+					}
+					sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.y))
+				}
+				polylines = append(polylines, SVGPolyline{
+					Points: sb.String(),
+					Stroke: line.Color,
+				})
+			}
+			curLine = nil
+
+			if len(curCI) >= 2 {
+				var sb strings.Builder
+				for j, p := range curCI {
+					if j > 0 {
+						sb.WriteByte(' ')
+					}
+					sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.yUpper))
+				}
+				for j := len(curCI) - 1; j >= 0; j-- {
+					sb.WriteByte(' ')
+					sb.WriteString(fmt.Sprintf("%.1f,%.1f", curCI[j].x, curCI[j].yLower))
+				}
+				polygons = append(polygons, sb.String())
+				polygonFills = append(polygonFills, line.Color)
+			} else if len(curCI) == 1 {
+				p := curCI[0]
+				poly := fmt.Sprintf("%.1f,%.1f %.1f,%.1f %.1f,%.1f %.1f,%.1f",
+					p.x-2.0, p.yUpper,
+					p.x+2.0, p.yUpper,
+					p.x+2.0, p.yLower,
+					p.x-2.0, p.yLower,
+				)
+				polygons = append(polygons, poly)
+				polygonFills = append(polygonFills, line.Color)
+			}
+			curCI = nil
+		}
+
+		for i, pt := range line.Points {
+			if i >= N {
+				break
+			}
+			if !pt.HasPoint || pt.Rate == nil {
+				flushLine()
+				continue
+			}
+
+			cx := x0
+			if N > 1 {
+				cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
+			} else {
+				cx = (x0 + x1) / 2.0
+			}
+
+			rate := *pt.Rate
+			if rate < 0.0 {
+				rate = 0.0
+			} else if rate > 1.0 {
+				rate = 1.0
+			}
+			cy := y1 - rate*(y1-y0)
+			cx = math.Round(cx*10.0) / 10.0
+			cy = math.Round(cy*10.0) / 10.0
+
+			circles = append(circles, SVGCircle{
+				CX:   cx,
+				CY:   cy,
+				R:    4.0,
+				Fill: line.Color,
+			})
+
+			curLine = append(curLine, pt2D{x: cx, y: cy})
+
+			if pt.CI != nil {
+				lo := pt.CI.Lower
+				if lo < 0.0 {
+					lo = 0.0
+				}
+				hi := pt.CI.Upper
+				if hi > 1.0 {
+					hi = 1.0
+				}
+				yUpper := y1 - hi*(y1-y0)
+				yLower := y1 - lo*(y1-y0)
+				yUpper = math.Round(yUpper*10.0) / 10.0
+				yLower = math.Round(yLower*10.0) / 10.0
+				curCI = append(curCI, ci2D{
+					x:      cx,
+					yUpper: yUpper,
+					yLower: yLower,
+				})
+			} else {
+				curCI = append(curCI, ci2D{
+					x:      cx,
+					yUpper: cy,
+					yLower: cy,
+				})
+			}
+		}
+		flushLine()
+
+		// If this is a cohort added mid-series (not "default" and not "all"), place a vertical annotation.
+		if !line.IsAll && line.Name != v1alpha1.DefaultCohort && line.FirstSeenCommit > 0 && line.FirstSeenCommit < N {
+			i := line.FirstSeenCommit
+			cx := x0
+			if N > 1 {
+				cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
+			} else {
+				cx = (x0 + x1) / 2.0
+			}
+			cx = math.Round(cx*10.0) / 10.0
+			text := formatEvalsAdded(line.EvalsCount)
+			textAnchor := "start"
+			textX := cx + 6.0
+			if cx > x1-80.0 {
+				textAnchor = "end"
+				textX = cx - 6.0
+			}
+			textX = math.Round(textX*10.0) / 10.0
+			textY := y0 + 12.0 + 11.0*float64(len(annotations))
+			textY = math.Round(textY*10.0) / 10.0
+			annotations = append(annotations, SVGAnnotation{
+				X:          cx,
+				Y1:         y0,
+				Y2:         y1,
+				TextX:      textX,
+				TextY:      textY,
+				Text:       text,
+				Stroke:     line.Color,
+				TextAnchor: textAnchor,
+			})
+		}
+	}
+
+	return SeriesSVG{
+		ViewBox:      viewBox,
+		X0:           x0,
+		Y0:           y0,
+		X1:           x1,
+		Y1:           y1,
+		Polylines:    polylines,
+		Polygons:     polygons,
+		PolygonFills: polygonFills,
+		Circles:      circles,
+		Annotations:  annotations,
+		XAxisTicks:   xTicks,
+		YAxisTicks:   yTicks,
+	}
+}
+
+func formatEvalsAdded(count int) string {
+	if count == 1 {
+		return "1 eval added"
+	}
+	return fmt.Sprintf("%d evals added", count)
 }
 
 // estimateFromTaskStatus converts a completed TaskStatus into a stats.Estimate.

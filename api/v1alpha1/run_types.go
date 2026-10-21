@@ -176,6 +176,11 @@ type TaskStatus struct {
 	// LastProgressAt is the timestamp when samplesDone was last updated.
 	// +optional
 	LastProgressAt *metav1.Time `json:"lastProgressAt,omitempty"`
+
+	// Cohort is the cohort identifier of the task (defaults to "default").
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	Cohort string `json:"cohort,omitempty"`
 }
 
 // TaskLatency records latency percentiles (in seconds) aggregated across evaluated samples.
@@ -320,7 +325,18 @@ type ManifestTask struct {
 	// When evaluating pull requests, changed files are matched against these globs.
 	// +optional
 	Paths []string `json:"paths,omitempty"`
+
+	// Cohort is an optional cohort identifier grouping tasks (e.g. default, customer-reported).
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([-_a-zA-Z0-9.]*[a-zA-Z0-9])?$`
+	// +optional
+	Cohort string `json:"cohort,omitempty"`
 }
+
+const (
+	// DefaultCohort is the fallback cohort assigned to tasks that do not declare one.
+	DefaultCohort = "default"
+)
 
 // Manifest is the parsed output of .evals/list.
 type Manifest struct {

@@ -4370,6 +4370,428 @@ func TestServerSeries_ThreeRunGoldenWithSignificantMoveAndGap(t *testing.T) {
 	})
 }
 
+func TestServerSeries_CohortsView(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	t.Run("TwoCohortsSecondAppearsMidSeries_Golden", func(t *testing.T) {
+		repoURL := "https://github.com/gke-labs/eval-runner"
+		repoHash := "2cc24c2"
+		branch := "main"
+		t0 := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+
+		rate100 := 1.00
+		ci100 := &v1alpha1.ConfidenceInterval{Lower: 0.72, Upper: 1.00, Confidence: 0.95, Method: "wilson"}
+
+		rate020 := 0.20
+		ci020 := &v1alpha1.ConfidenceInterval{Lower: 0.06, Upper: 0.52, Confidence: 0.95, Method: "wilson"}
+
+		rate040 := 0.40
+		ci040 := &v1alpha1.ConfidenceInterval{Lower: 0.17, Upper: 0.69, Confidence: 0.95, Method: "wilson"}
+
+		rate060 := 0.60
+		ci060 := &v1alpha1.ConfidenceInterval{Lower: 0.31, Upper: 0.83, Confidence: 0.95, Method: "wilson"}
+
+		// Commit 1: only default cohort (2 tasks, 100% success)
+		run1 := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-1111111",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch":   branch,
+					"evalrunner.gke-labs.dev/head-sha": "1111111",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": t0.Format(time.RFC3339),
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    repoURL,
+					Commit: "1111111",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:            "triage/runbook_lookup",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+					{
+						ID:            "triage/escalation_policy",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+				},
+			},
+		}
+
+		// Commit 2: new cohort customer-reported appears mid-series (2 tasks, 20% success)
+		// default stays at 100%, customer-reported is 20%, combined dips to 60%!
+		run2 := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-2222222",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch":   branch,
+					"evalrunner.gke-labs.dev/head-sha": "2222222",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": t0.Add(1 * time.Hour).Format(time.RFC3339),
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    repoURL,
+					Commit: "2222222",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:            "triage/runbook_lookup",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+					{
+						ID:            "triage/escalation_policy",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+					{
+						ID:            "triage/summary_quality",
+						Cohort:        "customer-reported",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     2,
+						SuccessRate:   &rate020,
+						SuccessRateCI: ci020,
+					},
+					{
+						ID:            "triage/edge_case",
+						Cohort:        "customer-reported",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     2,
+						SuccessRate:   &rate020,
+						SuccessRateCI: ci020,
+					},
+				},
+			},
+		}
+
+		// Commit 3: customer-reported improves to 40%, default remains 100%, combined recovers to 70%!
+		run3 := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-3333333",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch":   branch,
+					"evalrunner.gke-labs.dev/head-sha": "3333333",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": t0.Add(2 * time.Hour).Format(time.RFC3339),
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    repoURL,
+					Commit: "3333333",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:            "triage/runbook_lookup",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+					{
+						ID:            "triage/escalation_policy",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+					{
+						ID:            "triage/summary_quality",
+						Cohort:        "customer-reported",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     4,
+						SuccessRate:   &rate040,
+						SuccessRateCI: ci040,
+					},
+					{
+						ID:            "triage/edge_case",
+						Cohort:        "customer-reported",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     4,
+						SuccessRate:   &rate040,
+						SuccessRateCI: ci040,
+					},
+				},
+			},
+		}
+
+		// Commit 4: customer-reported reaches 60%, default stays 100%, combined reaches 80%!
+		run4 := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-4444444",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch":   branch,
+					"evalrunner.gke-labs.dev/head-sha": "4444444",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": t0.Add(3 * time.Hour).Format(time.RFC3339),
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    repoURL,
+					Commit: "4444444",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:            "triage/runbook_lookup",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+					{
+						ID:            "triage/escalation_policy",
+						Cohort:        "default",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     10,
+						SuccessRate:   &rate100,
+						SuccessRateCI: ci100,
+					},
+					{
+						ID:            "triage/summary_quality",
+						Cohort:        "customer-reported",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     6,
+						SuccessRate:   &rate060,
+						SuccessRateCI: ci060,
+					},
+					{
+						ID:            "triage/edge_case",
+						Cohort:        "customer-reported",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     6,
+						SuccessRate:   &rate060,
+						SuccessRateCI: ci060,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run1, run2, run3, run4).Build()
+		server := NewServer(Config{Client: fakeClient})
+
+		req := httptest.NewRequest(http.MethodGet, "/series/"+repoHash+"/"+branch+"?view=cohorts", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+
+		// Verify 3 lines drawn in SVG: default, customer-reported, and all
+		if !strings.Contains(body, `stroke="var(--indigo)"`) {
+			t.Errorf("expected default cohort polyline stroke var(--indigo)")
+		}
+		if !strings.Contains(body, `stroke="var(--teal)"`) {
+			t.Errorf("expected customer-reported polyline stroke var(--teal)")
+		}
+		if !strings.Contains(body, `stroke="var(--muted)"`) {
+			t.Errorf("expected all polyline stroke var(--muted)")
+		}
+
+		// Vertical annotation placed at commit 2 where customer-reported appears
+		if !strings.Contains(body, `2 evals added`) {
+			t.Errorf("expected '2 evals added' vertical annotation text in body")
+		}
+		if !strings.Contains(body, `stroke="var(--teal)" stroke-dasharray="4,4"`) {
+			t.Errorf("expected vertical annotation dashed line in body")
+		}
+
+		// Shaded CI band polygons
+		if !strings.Contains(body, `<polygon points="`) {
+			t.Errorf("expected shaded CI band polygon in body")
+		}
+
+		// Legend contains all 3 series with counts
+		if !strings.Contains(body, `default`) || !strings.Contains(body, `(2 evals)`) {
+			t.Errorf("expected default (2 evals) in legend")
+		}
+		if !strings.Contains(body, `customer-reported`) {
+			t.Errorf("expected customer-reported in legend")
+		}
+		if !strings.Contains(body, `all`) || !strings.Contains(body, `(4 evals)`) {
+			t.Errorf("expected all (4 evals) in legend")
+		}
+
+		// Table contains cohorts and method tooltip
+		expectedTooltip := FormatMethodTooltip("pooled-wilson")
+		if !strings.Contains(body, expectedTooltip) {
+			t.Errorf("expected pooled-wilson tooltip in cohort table")
+		}
+		if !strings.Contains(body, "2222222") {
+			t.Errorf("expected first seen commit 2222222 for customer-reported in table")
+		}
+
+		assertGolden(t, "series_detail_cohorts.golden.html", body)
+	})
+
+	t.Run("NoCohortsRendersSingleDefaultLine", func(t *testing.T) {
+		repoURL := "https://github.com/gke-labs/eval-runner"
+		repoHash := "2cc24c2"
+		branch := "main"
+		t0 := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+
+		rate := 0.80
+		ci := &v1alpha1.ConfidenceInterval{Lower: 0.60, Upper: 0.95, Confidence: 0.95, Method: "wilson"}
+
+		// 2 runs where no cohort is declared on tasks (empty, defaults to "default")
+		runA := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-aaaaaaa",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch":   branch,
+					"evalrunner.gke-labs.dev/head-sha": "aaaaaaa",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": t0.Format(time.RFC3339),
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    repoURL,
+					Commit: "aaaaaaa",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:            "triage/runbook_lookup",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     8,
+						SuccessRate:   &rate,
+						SuccessRateCI: ci,
+					},
+				},
+			},
+		}
+
+		runB := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "base-bbbbbbb",
+				Namespace: "eval-runner",
+				Labels: map[string]string{
+					"evalrunner.gke-labs.dev/branch":   branch,
+					"evalrunner.gke-labs.dev/head-sha": "bbbbbbb",
+				},
+				Annotations: map[string]string{
+					"evalrunner.gke-labs.dev/commit-time": t0.Add(1 * time.Hour).Format(time.RFC3339),
+				},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    repoURL,
+					Commit: "bbbbbbb",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:            "triage/runbook_lookup",
+						Phase:         v1alpha1.TaskPhaseCompleted,
+						Samples:       10,
+						Successes:     8,
+						SuccessRate:   &rate,
+						SuccessRateCI: ci,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runA, runB).Build()
+		server := NewServer(Config{Client: fakeClient})
+
+		req := httptest.NewRequest(http.MethodGet, "/series/"+repoHash+"/"+branch+"?view=cohorts", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+
+		// Acceptance criterion: "?view=cohorts with no cohorts renders the single default line."
+		// Exactly one polyline rendered with var(--indigo)
+		indigoCount := strings.Count(body, `stroke="var(--indigo)"`)
+		if indigoCount != 1 {
+			t.Errorf("expected exactly 1 var(--indigo) polyline, got %d", indigoCount)
+		}
+		// No 'all' line rendered
+		if strings.Contains(body, `stroke="var(--muted)"`) {
+			t.Errorf("did not expect 'all' polyline stroke var(--muted)")
+		}
+		// No vertical annotations rendered
+		if strings.Contains(body, `evals added`) || strings.Contains(body, `eval added`) {
+			t.Errorf("did not expect vertical annotation in single-cohort series")
+		}
+		// Table only has default row
+		if strings.Contains(body, `<td>all</td>`) {
+			t.Errorf("did not expect 'all' row in single-cohort table")
+		}
+	})
+}
+
 func TestServerRunDetail_MetricFilter(t *testing.T) {
 	scheme := newTestScheme(t)
 	baseRun, candRun, comp := sampleFixtures()

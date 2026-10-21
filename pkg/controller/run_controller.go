@@ -1467,9 +1467,14 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 	if len(spec.Tasks) > 0 {
 		for _, taskID := range spec.Tasks {
 			task, exists := manifestMap[taskID]
+			cohort := task.Cohort
+			if cohort == "" {
+				cohort = v1alpha1.DefaultCohort
+			}
 			if !exists {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             taskID,
+					Cohort:         cohort,
 					Phase:          v1alpha1.TaskPhaseFailed,
 					Message:        "task not found in manifest",
 					SampleRange:    effRange,
@@ -1481,6 +1486,7 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             taskID,
+					Cohort:         cohort,
 					Phase:          v1alpha1.TaskPhaseFailed,
 					Message:        "resources not supported yet",
 					SampleRange:    effRange,
@@ -1491,6 +1497,7 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
 				ID:             taskID,
+				Cohort:         cohort,
 				Phase:          v1alpha1.TaskPhasePending,
 				SampleRange:    effRange,
 				SamplesPlanned: planned,
@@ -1498,9 +1505,14 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 		}
 	} else if manifest != nil {
 		for _, task := range manifest.Tasks {
+			cohort := task.Cohort
+			if cohort == "" {
+				cohort = v1alpha1.DefaultCohort
+			}
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             task.ID,
+					Cohort:         cohort,
 					Phase:          v1alpha1.TaskPhaseFailed,
 					Message:        "resources not supported yet",
 					SampleRange:    effRange,
@@ -1511,6 +1523,7 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
 				ID:             task.ID,
+				Cohort:         cohort,
 				Phase:          v1alpha1.TaskPhasePending,
 				SampleRange:    effRange,
 				SamplesPlanned: planned,
@@ -1965,6 +1978,11 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		for i := range status.Tasks {
 			if res, ok := taskResults[status.Tasks[i].ID]; ok {
 				status.Tasks[i].Phase = res.phase
+				if res.cohort != "" {
+					status.Tasks[i].Cohort = res.cohort
+				} else if status.Tasks[i].Cohort == "" {
+					status.Tasks[i].Cohort = v1alpha1.DefaultCohort
+				}
 				status.Tasks[i].Samples = res.samples
 				status.Tasks[i].Successes = res.successes
 				status.Tasks[i].MeanScore = res.meanScore
@@ -2034,6 +2052,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 type taskExecutionResult struct {
 	taskID          string
+	cohort          string
 	phase           v1alpha1.TaskPhase
 	samples         int
 	successes       int
@@ -2053,10 +2072,18 @@ type taskExecutionResult struct {
 	sampleRange     *v1alpha1.SampleRange
 }
 
-func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) taskExecutionResult {
+func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) (res taskExecutionResult) {
 	startTime := r.now()
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 	effRange := EffectiveSampleRange(run.Spec)
+
+	cohort := v1alpha1.DefaultCohort
+	// Ensure every return (including early error returns) carries the task cohort to status.tasks[].cohort.
+	defer func() {
+		if res.cohort == "" {
+			res.cohort = cohort
+		}
+	}()
 
 	var targetTask *v1alpha1.ManifestTask
 	manifest, manifestErr := r.getOrLoadManifest(ctx, run)
@@ -2066,6 +2093,9 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		for i := range manifest.Tasks {
 			if manifest.Tasks[i].ID == taskID {
 				targetTask = &manifest.Tasks[i]
+				if targetTask.Cohort != "" {
+					cohort = targetTask.Cohort
+				}
 				break
 			}
 		}
