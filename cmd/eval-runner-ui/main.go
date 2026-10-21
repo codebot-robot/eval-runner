@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
@@ -61,6 +63,9 @@ func main() {
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Optional local filesystem directory for reading artifacts")
 	flag.Parse()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	restCfg, err := config.GetConfig()
 	if err != nil {
 		log.Fatalf("unable to get kubeconfig: %v", err)
@@ -71,9 +76,57 @@ func main() {
 		log.Fatalf("unable to create kubernetes client: %v", err)
 	}
 
+	// Namespaced informer cache for Runs and Comparisons in the default namespace.
+	// Sandboxes and Pods are explicitly excluded to bound memory usage.
+	cacheOptions := cache.Options{
+		Scheme:                      scheme,
+		ReaderFailOnMissingInformer: true,
+		ByObject: map[client.Object]cache.ByObject{
+			&v1alpha1.Run{}: {
+				Namespaces: map[string]cache.Config{
+					namespace: {},
+				},
+			},
+			&v1alpha1.Comparison{}: {
+				Namespaces: map[string]cache.Config{
+					namespace: {},
+				},
+			},
+		},
+	}
+
+	// cache.New performs REST-mapper discovery to verify object namespacing.
+	// This requires Run and Comparison CRDs to already be installed in the cluster;
+	// on a fresh install, ensure CRDs are applied before the UI deployment rolls out.
+	informerCache, err := cache.New(restCfg, cacheOptions)
+	if err != nil {
+		log.Fatalf("unable to create cache: %v", err)
+	}
+
+	if _, err := informerCache.GetInformer(ctx, &v1alpha1.Run{}, cache.BlockUntilSynced(false)); err != nil {
+		log.Fatalf("unable to initialize run informer: %v", err)
+	}
+	if _, err := informerCache.GetInformer(ctx, &v1alpha1.Comparison{}, cache.BlockUntilSynced(false)); err != nil {
+		log.Fatalf("unable to initialize comparison informer: %v", err)
+	}
+
+	go func() {
+		if err := informerCache.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Fatalf("informer cache failed: %v", err)
+		}
+	}()
+
+	var cacheSynced atomic.Bool
+	go func() {
+		if informerCache.WaitForCacheSync(ctx) {
+			cacheSynced.Store(true)
+			log.Printf("informer cache synced for namespace %s", namespace)
+		}
+	}()
+
 	bucket := artifactBucket
 	dir := artifactDir
-	artCfg, err := sinkconfig.LoadArtifactConfig(context.Background(), k8sClient, namespace, sinkconfig.DefaultConfigMapName)
+	artCfg, err := sinkconfig.LoadArtifactConfig(ctx, k8sClient, namespace, sinkconfig.DefaultConfigMapName)
 	if err != nil {
 		log.Printf("warning: unable to read cluster configmap %s/%s: %v", namespace, sinkconfig.DefaultConfigMapName, err)
 	} else {
@@ -87,7 +140,7 @@ func main() {
 
 	var sink artifacts.ArtifactSink
 	if bucket != "" || dir != "" {
-		s, err := sinkconfig.NewArtifactSink(context.Background(), bucket, dir, 0)
+		s, err := sinkconfig.NewArtifactSink(ctx, bucket, dir, 0)
 		if err != nil {
 			log.Printf("warning: unable to configure artifact sink (bucket=%q, dir=%q): %v", bucket, dir, err)
 		} else {
@@ -110,6 +163,8 @@ func main() {
 
 	server := ui.NewServer(ui.Config{
 		Client:           k8sClient,
+		Cache:            informerCache,
+		CacheSyncChecker: cacheSynced.Load,
 		DefaultNamespace: namespace,
 		ArtifactSink:     sink,
 	})
@@ -122,9 +177,6 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		log.Printf("eval-runner-ui listening on %s (default namespace: %s)", listenAddr, namespace)
