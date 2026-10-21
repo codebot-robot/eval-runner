@@ -489,11 +489,146 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 				if artifact.Tasks[0].Ties != tt.expectedTies {
 					t.Errorf("Artifact task Ties: got %d, want %d", artifact.Tasks[0].Ties, tt.expectedTies)
 				}
+				if taskRes.PImprovement == nil {
+					t.Errorf("Task PImprovement: got nil, want non-nil")
+				} else if artifact.Tasks[0].PImprovement != *taskRes.PImprovement {
+					t.Errorf("Artifact task PImprovement: got %v, want %v", artifact.Tasks[0].PImprovement, *taskRes.PImprovement)
+				}
 				if tt.expectedPairs > 0 && len(artifact.Tasks[0].PairsTable) != tt.expectedPairs {
 					t.Errorf("Artifact pairsTable length: got %d, want %d", len(artifact.Tasks[0].PairsTable), tt.expectedPairs)
 				}
 			}
 		})
+	}
+}
+
+func TestComparisonReconciler_TaskPImprovementSetAndRoundTrips(t *testing.T) {
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	var candScores []stats.SampleScore
+	var baseScores []stats.SampleScore
+	for i := 1; i <= 20; i++ {
+		candScores = append(candScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		baseScores = append(baseScores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.0})
+	}
+
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("Failed to create GCS sink: %v", err)
+	}
+
+	candLogPath := "gs://test-bucket/runs/cand-commit-pimp/docs/readme_comprehension/log.json"
+	baseLogPath := "gs://test-bucket/runs/base-commit-pimp/docs/readme_comprehension/log.json"
+	fakeGCS.Objects["test-bucket/runs/cand-commit-pimp/docs/readme_comprehension/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(taskID, candScores),
+	}
+	fakeGCS.Objects["test-bucket/runs/base-commit-pimp/docs/readme_comprehension/log.json"] = fakes.FakeObject{
+		Data: makeSyntheticInspectLog(taskID, baseScores),
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-pimp", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "cand-commit-pimp"}, Model: "mockllm/model"},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: candLogPath},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run-pimp", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "base-commit-pimp"}, Model: "mockllm/model"},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: baseLogPath},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-comp-pimp-roundtrip", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-pimp"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-pimp"},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(candRun, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:       client,
+		Scheme:       scheme,
+		ArtifactSink: sink,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: comp.Name, Namespace: comp.Namespace},
+	}
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile 1 error: %v", err)
+	}
+
+	var updatedComp v1alpha1.Comparison
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+		t.Fatalf("Failed to get updated comparison: %v", err)
+	}
+
+	if updatedComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Fatalf("Expected phase Completed, got %s", updatedComp.Status.Phase)
+	}
+	if len(updatedComp.Status.Tasks) != 1 {
+		t.Fatalf("Expected 1 task, got %d", len(updatedComp.Status.Tasks))
+	}
+
+	task := updatedComp.Status.Tasks[0]
+	if task.PImprovement == nil {
+		t.Fatalf("Expected tasks[0].pImprovement to be non-nil")
+	}
+	if *task.PImprovement < 0.99 {
+		t.Errorf("Expected tasks[0].pImprovement >= 0.99 for strict improvement, got %v", *task.PImprovement)
+	}
+
+	// 1. Verify JSON serialization round-trip
+	data, err := json.Marshal(updatedComp)
+	if err != nil {
+		t.Fatalf("Failed to marshal Comparison with tasks[].pImprovement: %v", err)
+	}
+	var roundtripped v1alpha1.Comparison
+	if err := json.Unmarshal(data, &roundtripped); err != nil {
+		t.Fatalf("Failed to unmarshal Comparison with tasks[].pImprovement: %v", err)
+	}
+	if roundtripped.Status.Tasks[0].PImprovement == nil {
+		t.Fatalf("Expected tasks[0].pImprovement to survive JSON round-trip")
+	}
+	if *roundtripped.Status.Tasks[0].PImprovement != *task.PImprovement {
+		t.Errorf("PImprovement mismatch after JSON round-trip: got %v, want %v",
+			*roundtripped.Status.Tasks[0].PImprovement, *task.PImprovement)
+	}
+
+	// 2. Verify stored comparison artifact matches
+	artObj, exists := fakeGCS.GetObject("test-bucket", "comparisons/test-comp-pimp-roundtrip.json")
+	if !exists {
+		t.Fatalf("Expected comparison artifact to be stored in GCS")
+	}
+	var artifact ComparisonArtifact
+	if err := json.Unmarshal(artObj.Data, &artifact); err != nil {
+		t.Fatalf("Failed to parse stored comparison artifact: %v", err)
+	}
+	if len(artifact.Tasks) != 1 {
+		t.Fatalf("Expected 1 task in artifact, got %d", len(artifact.Tasks))
+	}
+	if artifact.Tasks[0].PImprovement != *task.PImprovement {
+		t.Errorf("Artifact task PImprovement %v does not match task status %v",
+			artifact.Tasks[0].PImprovement, *task.PImprovement)
 	}
 }
 
