@@ -402,7 +402,7 @@ For each evaluated task, sampling stops as soon as any of the following conditio
    - `CI.Upper < 0` $\implies$ `regressed`
    - `CI.Lower >= -margin && CI.Upper <= margin` $\implies$ `unchanged`
 2. **Cap Reached**: `samplesRun >= maxSamplesPerTask` without resolving the interval $\implies$ `inconclusive`.
-3. **Dataset Exhaustion**: A batch returns fewer samples than its requested window ($N_{\text{returned}} < \text{end} - \text{start} + 1$). The dataset has no more samples; the task is decided with what exists (`inconclusive` if still `continue`). The controller never issues a window entirely past the last observed sample.
+3. **Dataset Exhaustion**: A batch returns fewer samples than its requested window ($N_{\text{returned}} < \text{end} - \text{start} + 1$), or evaluated samples reach the total dataset size (`samplesRun >= possibleSamples`, cross-referenced from `status.tasks[].possibleSamples` which records the full `eval.dataset.samples` count from the Inspect log even under `--limit a-b`). The dataset has no more samples; the task is decided with what exists (`inconclusive` if still `continue`). The controller never issues a window entirely past the last observed sample.
 
 ### 5.4 Extra Samples (`spec.extraSamples`)
 

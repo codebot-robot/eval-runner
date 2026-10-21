@@ -33,6 +33,20 @@ const (
 // ConditionTypeExtraSamples reports whether extra samples requested for the Comparison can be serviced.
 const ConditionTypeExtraSamples = "ExtraSamples"
 
+const (
+	// ConditionReasonExtraSamplesScheduled indicates that an extra-sample batch has been scheduled.
+	ConditionReasonExtraSamplesScheduled = "Scheduled"
+
+	// ConditionReasonExtraSamplesNoEligibleTasks indicates that no tasks are eligible for extra sampling.
+	ConditionReasonExtraSamplesNoEligibleTasks = "NoEligibleTasks"
+
+	// ConditionReasonExtraSamplesArtifactMismatch indicates that an artifact sink prefix mismatch prevents running extra samples.
+	ConditionReasonExtraSamplesArtifactMismatch = "ArtifactPrefixMismatch"
+
+	// ConditionReasonExtraSamplesArtifactNotFound indicates that an artifact sink not found error prevents running extra samples.
+	ConditionReasonExtraSamplesArtifactNotFound = "ArtifactNotFound"
+)
+
 // ComparisonTaskLabel represents the statistical decision label for a single task.
 // +kubebuilder:validation:Enum=improved;regressed;unchanged;inconclusive;running;continue;skipped
 type ComparisonTaskLabel string
