@@ -432,14 +432,17 @@ The components use strictly namespaced RBAC with **no ClusterRole**:
    - `evalrunner.gke-labs.dev/runs/status` and `comparisons/status`: `get`, `list`, `watch`, `update`, `patch`.
    - Core `secrets`: `get`, `create`, `delete` (used for controller CA keypair, dynamic per-Run bearer tokens, and GitHub credentials). *Design note on scoping*: `secrets get` remains unscoped in the controller namespace because the controller creates and reads per-Run Secrets with dynamic names (`discovery-auth-<run>`, `task-auth-<run>-<task>`, `sb-tls-<name>`), and Kubernetes RBAC `resourceNames` cannot express prefixes or wildcards; scoping `secrets get` with `resourceNames` would break dynamic secret retrieval. To reduce blast radius in the future, long-lived credentials (e.g. `github-token`/GitHub App private key, `github-webhook`) can be moved into a dedicated credentials namespace or behind a dedicated ServiceAccount.
    - Core `pods`: `get` (used for image derivation).
-   - Core `configmaps`: `get` (scoped to `eval-runner-config`).
+   - Core `configmaps`: `get`, `watch` (scoped to `eval-runner-config`).
    - *OwnerReferencesPermissionEnforcement admission note*: Mutating `ownerReferences` on an existing Run (used when reusing a completed baseline batch Run to append a non-controller owner reference) requires `delete` permissions on `runs` under the `OwnerReferencesPermissionEnforcement` admission plugin, and setting `blockOwnerDeletion: true` requires `update` on `comparisons/finalizers`. Neither admission plugin check is enabled by default on standard GKE or kind clusters. If enabled in hardened environments, the controller's Role would require `delete` on `runs` and `update` on `comparisons/finalizers`.
 2. **In namespace `eval-runner-sandbox` (Role `eval-runner-controller-sandbox`)**:
    - `agents.x-k8s.io/sandboxes`: `create`, `get`, `list`, `watch`, `delete`.
    - Core `pods`: `get`, `list`, `watch` (used to look up sandbox pod IP addresses; `pods/exec` is dropped).
    - Core `configmaps`: `get`, `create`, `update` (used to publish public CA certificate `sandbox-ca`).
    - Core `secrets`: `get`, `create`, `delete` (used for per-sandbox server cert Secrets and reading optional `model-credentials`).
-3. **In namespace `eval-runner` (Role `eval-runner-webhook`)**:
+3. **In namespace `eval-runner` (Role `eval-runner-ui`)**:
+   - `evalrunner.gke-labs.dev/runs` and `comparisons`: `get`, `list`, `watch`.
+   - Core `configmaps`: `get`, `watch` (scoped to `eval-runner-config`).
+4. **In namespace `eval-runner` (Role `eval-runner-webhook`)**:
    - `evalrunner.gke-labs.dev/runs` and `comparisons`: `get`, `list`, `create`, `update`, `delete` (`create`/`update` allow creating Runs and Comparisons on PR open/sync; `delete` allows cleaning up Comparisons and seed candidate Runs when a pull request closes, while baseline Runs are preserved; owned batch Runs cascade via owner references).
    - `evalrunner.gke-labs.dev/comparisons/status`: `get`, `update`, `patch` (allows appending `pendingCommands` on review comment commands).
    - Core `secrets`: `get` scoped to `github-webhook` (for HMAC verification).

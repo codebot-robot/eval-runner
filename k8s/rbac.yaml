@@ -82,6 +82,7 @@ rules:
   - eval-runner-config
   verbs:
   - get
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -192,6 +193,7 @@ rules:
   - eval-runner-config
   verbs:
   - get
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
