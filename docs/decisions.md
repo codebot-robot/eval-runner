@@ -287,6 +287,21 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Implements the first step of ROI-driven task selection (Concept §4.3). Prioritizes evals relevant to code changes under test without complex learning or historical tracking, while preserving full backward compatibility for repositories without declared paths.
 
+### ADR-028: Default-Deny Egress NetworkPolicy for eval-runner-sandbox (#33)
+- **Date**: 2026-10-21
+- **Status**: Accepted
+- **Decision**:
+  1. **Dual NetworkPolicy in `k8s/sandbox-networkpolicy.yaml`**: Add a default-deny egress `NetworkPolicy` (`eval-runner-sandbox-egress`) selecting all sandboxes with `evalrunner.gke-labs.dev/sandbox: "true"`, coexisting alongside the existing ingress policy (`eval-runner-sandbox-ingress`).
+  2. **Default-Deny Egress PolicyType**: Configure `policyTypes: [Egress]`, blocking all outbound traffic from sandboxes unless explicitly allowed by egress rules.
+  3. **Cluster DNS Allowance**: Allow UDP and TCP port 53 to CoreDNS/kube-dns pods (`k8s-app: kube-dns`) in namespace `kube-system`.
+  4. **Git Protocol and HTTP/HTTPS Allowance**: Allow TCP ports 80, 443, and 9418 to any external IP (`ipBlock: 0.0.0.0/0` with RFC1918 CIDR exceptions `[10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]`), permitting git clones from GitHub, external model provider APIs (e.g. `generativelanguage.googleapis.com`), and in-cluster git fixtures.
+  5. **Internal Isolation**: Deny traffic to the controller namespace `eval-runner` via `namespaceSelector` exclusion (`NotIn: [eval-runner]`). Deny traffic to internal cluster IPs / Kubernetes API server ClusterIP via RFC1918 CIDR exceptions on external IPBlocks.
+  6. **Intra-Namespace Fixture Allowance**: Allow intra-namespace egress on port 9418 via `podSelector: {}` so sandboxes can clone from the `git-server` fixture in `eval-runner-sandbox`.
+  7. **Enforcement Requirements**: Document that NetworkPolicy enforcement requires a cluster CNI with policy enforcement enabled, such as GKE Dataplane V2 (e.g. `gke-labs-corp-dev`) or Calico. On clusters without policy enforcement (like default kindnet in kind), manifests apply cleanly and rules are validated by unit tests in `pkg/discovery`.
+- **Rationale**:
+  Hardens the untrusted sandbox environment at the network perimeter. In addition to running without Kubernetes ServiceAccount tokens (`automountServiceAccountToken: false`) and dropping all Linux capabilities, sandboxes are prevented from accessing controller endpoints (:8081 health probe, UI, webhook), internal cluster services, and arbitrary outbound ports.
+
+
 
 
 
