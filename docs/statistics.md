@@ -93,6 +93,20 @@ Unlike pull-request comparisons where samples are paired on identical sample IDs
 - **SVG Colouring**: In the series graph, polyline segments between consecutive commits are colored green (`var(--good)`) or red (`var(--bad)`) when the 95% CI excludes zero, and purple (`var(--indigo)`) when neutral. Missing evaluation points (gaps) break the polyline and skip the delta.
 - **Index Row**: The `/series` index table displays the "Last Move" between the last two completed evaluation points of the alphabetically-first task in the repository series, with a tooltip indicating the selected task and estimation method.
 
+### 1.4 Cohort Multi-Task Pooling: Pooled Wilson Score Interval
+
+On the series cohorts view (`/series/{repohash}/{branch}?view=cohorts`), eval-runner tracks mean score per cohort over main-branch commits to separate suite expansion from regressions. Because each cohort (and the combined suite `all`) comprises multiple evaluation tasks, scores must be aggregated across tasks for each commit.
+
+#### Statistical Choice: Pooled Wilson over Summed Counts
+
+`stats.PooledWilson(tasks []TaskCounts, confidence float64) Estimate` sums successes and sample counts across all tasks in the cohort:
+$$S = \sum_{k=1}^K s_k, \quad N = \sum_{k=1}^K n_k, \quad p = \frac{S}{N}$$
+and computes the Wilson score interval over $(S, N)$.
+
+- **Rationale**: Within an evaluation suite or cohort, tasks share a common Bernoulli outcome model per sample trial. Summing successes and samples across cohort tasks treats each sample evaluation as an exchangeable Bernoulli trial within that cohort. This naturally weights tasks proportionally to their evaluated sample count and avoids distortion from high-variance small-sample tasks.
+- **Boundary Preservation**: The Wilson score interval inverts the binomial score test on the pooled proportion. It naturally respects the $[0, 1]$ parameter boundary and maintains nominal 95% coverage even when cohort success rates approach 0.0 or 1.0.
+- **Method Identifier**: `Method: "pooled-wilson"` with tooltip *"Pooled Wilson score interval over summed successes and samples across cohort tasks"*.
+
 ---
 
 ## 2. Paired Baseline Comparison (PR vs Base)

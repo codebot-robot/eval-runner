@@ -91,7 +91,7 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 | `tasks[].resources[]` | Declarative resource needs (see §3.2). Empty list means zero privilege. |
 | `tasks[].images[]` | Which built images the task needs available (e.g. pre-loaded into a kind cluster). |
 
-**[open]** Fields not shown in the original concept mockup: manifest `version`, `cohort` / `tags` (§8), and per-task `dataset-size` (for planned "N of M possible samples" progress display up front) remain explicitly open. Sample pairing does not require sample IDs or dataset sizes to be declared in the manifest because pairing is performed dynamically by Inspect sample id (`sample.id`) from Inspect evaluation logs (#131, ADR-018), and sample windows are specified via `spec.sampleRange` (ADR-025). Explicit dataset size remains open for calculating total dataset size up front before execution.
+**[open]** Fields not shown in the original concept mockup: manifest `version`, `tags` (§8), and per-task `dataset-size` (for planned "N of M possible samples" progress display up front) remain explicitly open. Task cohorts (`tasks[].cohort`, default `"default"`) are decided and implemented in ADR-030. Sample pairing does not require sample IDs or dataset sizes to be declared in the manifest because pairing is performed dynamically by Inspect sample id (`sample.id`) from Inspect evaluation logs (#131, ADR-018), and sample windows are specified via `spec.sampleRange` (ADR-025). Explicit dataset size remains open for calculating total dataset size up front before execution.
 
 ### 2.3 Fallback when `.evals/list` is absent
 
@@ -407,11 +407,12 @@ Real-world evals make the suite harder, so the combined average drops, and a dro
 exactly like a regression. eval-runner tracks **cohorts** so suite expansion and real regression are
 separate numbers:
 
-- Each eval belongs to a cohort (default: the original suite). **[open]** Declared in the manifest
-  or by path convention remains explicitly open. (Cohorts tracking is not started yet).
-- The **Cohorts** view charts, for the main branch, **mean score per cohort over time** (weekly,
-  95% CI shaded): original suite, each added cohort, and all evals combined, with an annotation at
-  the point a cohort was added ("11 customer-reported evals added").
+- Each eval belongs to a cohort (default: `"default"`). **Decided in ADR-030**: Declared in the manifest
+  (`tasks[].cohort: string`, $\le 64$ chars, label-safe). Path convention was rejected.
+- The **Cohorts** view charts, for the main branch, **mean score per cohort over time** (per-commit,
+  `/series/{repohash}/{branch}?view=cohorts`, 95% CI shaded, pooled Wilson interval across cohort tasks, ADR-030):
+  original suite, each added cohort, and all evals combined, with a vertical annotation at
+  the point a cohort was added ("N evals added").
 - Reading: "original suite 0.86 · no regression", "new cohort 0.68 · improving", "combined 0.81".
 - This implies eval-runner also runs evals on the **main branch after merges** (not only PRs) to
   produce the time series.

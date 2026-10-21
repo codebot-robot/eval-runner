@@ -318,6 +318,28 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Lays the groundwork for eliminating arbitrary HTTPS exfiltration and blocking reachability to public control-plane endpoints. Establishing the FQDN policy rendering, ConfigMap key, hot-reloading mechanism, and discovery checks allows operators to configure their domain lists before the baseline rule is dropped in the subsequent controller-managed egress follow-up.
 
+---
+
+### ADR-030: Manifest-Declared Per-Task Cohorts and Pooled Wilson Tracking (#293)
+- **Status**: Decided
+- **Context**:
+  Concept §9.2 and §2.2 left the cohort declaration mechanism open ("Declared in the manifest or by path convention remains explicitly open"). As agent benchmark suites expand over time with new, harder evals (such as customer-reported failures), the overall suite average drops, mimicking a regression even when agent behavior on the original benchmark suite remains unchanged or improves.
+- **Decision**:
+  1. **Manifest-Declared Cohorts (`tasks[].cohort`)**:
+     Tasks declare their cohort explicitly in the `.evals/list` output (`tasks[].cohort: string`, e.g. `"customer-reported"`). When omitted or empty, the cohort defaults to `"default"`.
+  2. **Path Convention Rejected**:
+     Inferring cohorts from file or directory paths was rejected: repository layout reflects code domain (e.g. `evals/triage/`) rather than evaluation provenance or expansion era (e.g. `customer-reported-q4`). Manifest declaration allows tasks anywhere in the repository to belong to any cohort without brittle filesystem pattern matching.
+  3. **Validation**:
+     Cohort identifiers are optional strings bounded to $\le 64$ characters (`MaxCohortLength = 64` per issue #293; note that Kubernetes label values cap at 63 characters, so 63 is the practical bound if ever written as a Kubernetes label value) and validated to be label-safe (`^[a-zA-Z0-9]([-_a-zA-Z0-9.]*[a-zA-Z0-9])?$`).
+  4. **Run Status Persistence**:
+     Discovery persists the manifest in artifact storage. The run controller writes `Run.status.tasks[].cohort` when initializing tasks and recording execution results. This decouples the web UI series view from artifact storage, enabling server-side rendering directly from Kubernetes Run status without loading manifests for every commit.
+  5. **Series Cohorts View (`?view=cohorts`) and Pooled Wilson**:
+     `/series/{repohash}/{branch}?view=cohorts` tracks mean score per cohort over commits. Within each commit and cohort, successes and samples are pooled across tasks and scored via `stats.PooledWilson` (Wilson score interval over summed counts; method `"pooled-wilson"`). When multiple cohorts exist, lines are rendered for each cohort plus `all` (combined suite), with vertical dashed annotations at the commit where each cohort first appears ("N evals added"). When only `default` exists, a single `default` line is rendered.
+  6. **Dual Cohort Semantics**:
+     `Run.spec.cohort` continues to function as a run-level identifier and filter (`/series?cohort=`), while `tasks[].cohort` / `status.tasks[].cohort` operates as a task-level grouping within Runs.
+- **Rationale**:
+  Declarative manifests provide unambiguous provenance, avoid brittle directory structure assumptions, and allow teams to clearly separate suite expansion from regressions.
+
 
 
 

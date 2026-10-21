@@ -18,7 +18,7 @@ cat <<'EOF'
   "tasks": [
     { "id": "triage/runbook_lookup",     "workdir": "evals", "spec": "runbook_lookup.py@runbook_lookup", "resources": [] },
     { "id": "triage/escalation_policy",  "workdir": "evals", "spec": "escalation.py@escalation_policy",   "resources": [] },
-    { "id": "triage/summary_quality",    "workdir": "evals", "spec": "summary.py@summary_quality",        "resources": [] }
+    { "id": "triage/summary_quality",    "workdir": "evals", "spec": "summary.py@summary_quality", "cohort": "customer-reported", "resources": [] }
   ]
 }
 EOF
