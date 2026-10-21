@@ -401,6 +401,29 @@ func TestServer_FooterExposesVersion(t *testing.T) {
 	}
 }
 
+func TestServerRunDetail_ManifestSourceNote(t *testing.T) {
+	scheme := newTestScheme(t)
+	baseRun, _, _ := sampleFixtures()
+	baseRun.Name = "scan-run"
+	baseRun.Status.ManifestSource = v1alpha1.ManifestSourceInspectScan
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/scan-run", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	body := w.Body.String()
+	expectedNote := "Discovered by scanning repository for Inspect @task decorators (.evals/list absent)."
+	if !strings.Contains(body, expectedNote) {
+		t.Errorf("expected body to contain %q, got:\n%s", expectedNote, body)
+	}
+}
+
 type mockFooterSink struct {
 	artifacts.ArtifactSink
 	bucket string

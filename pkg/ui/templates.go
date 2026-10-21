@@ -427,6 +427,9 @@ const runDetailTemplate = `
         {{ if .Message }}
         <div class="msg-alert"><b>Message:</b> {{ .Message }}</div>
         {{ end }}
+        {{- if .ManifestSourceNote }}
+        <div style="margin-top:14px;font-size:13px;color:var(--muted)">{{ .ManifestSourceNote }}</div>
+        {{- end }}
 
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:24px 0 12px;gap:12px">
           <h2 style="font-size:17px;font-weight:600;margin:0">Eval Tasks</h2>

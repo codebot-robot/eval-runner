@@ -552,6 +552,22 @@ func TestTemplateRenderingRunDetailGolden(t *testing.T) {
 	assertGolden(t, "run_detail.golden.html", buf.String())
 }
 
+func TestTemplateRenderingRunDetail_ManifestSourceNote(t *testing.T) {
+	view := sampleRunDetailView()
+	view.ManifestSource = "inspect-scan"
+	view.ManifestSourceNote = "Discovered by scanning repository for Inspect @task decorators (.evals/list absent)."
+
+	var buf bytes.Buffer
+	if err := tmplRunDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute run detail template: %v", err)
+	}
+
+	html := buf.String()
+	if !strings.Contains(html, "Discovered by scanning repository for Inspect @task decorators (.evals/list absent).") {
+		t.Errorf("Expected manifest source note in rendered HTML, got:\n%s", html)
+	}
+}
+
 func TestTemplateRenderingComparisonDetailGolden(t *testing.T) {
 	view := sampleComparisonDetailView()
 

@@ -168,6 +168,11 @@ type RunDetailView struct {
 	LatencySummary  string
 	TokensSummary   string
 
+	// ManifestSource is "list" or "inspect-scan"
+	ManifestSource string
+	// ManifestSourceNote is a one-line provenance note displayed when .evals/list is absent
+	ManifestSourceNote string
+
 	// Summary
 	TasksSummary     string
 	TasksCompleted   int
