@@ -300,7 +300,7 @@ func comparisonLink(comp *v1alpha1.Comparison) string {
 	return fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name)
 }
 
-func runLink(namespace, name string) string {
+func legacyRunLink(namespace, name string) string {
 	return fmt.Sprintf("/runs/%s/%s", namespace, name)
 }
 
@@ -498,7 +498,7 @@ func newComparisonCell(comps []*v1alpha1.Comparison, runs map[string]*v1alpha1.R
 		Deltas:       ComputeRunDeltas(comp, baseRun, candRun),
 	}
 	if comp.Spec.Baseline.Run != "" {
-		cell.BaselineLink = runLink(comp.Namespace, comp.Spec.Baseline.Run)
+		cell.BaselineLink = legacyRunLink(comp.Namespace, comp.Spec.Baseline.Run)
 	}
 	for _, older := range comps[1:] {
 		cell.Older = append(cell.Older, ComparisonRef{Name: older.Name, Link: comparisonLink(older)})
@@ -514,7 +514,7 @@ func (r comparisonListRow) groupRow(runs map[string]*v1alpha1.Run) ComparisonGro
 	}
 	return ComparisonGroupRow{
 		CandidateRun:  r.candidate,
-		CandidateLink: runLink(r.namespace, r.candidate),
+		CandidateLink: legacyRunLink(r.namespace, r.candidate),
 		Created:       created,
 		VsBaseline:    newComparisonCell(r.baseline, runs),
 		VsPrevious:    newComparisonCell(r.previous, runs),
