@@ -37,12 +37,19 @@ build/
 		t.Fatalf("failed to write .gitignore: %v", err)
 	}
 
-	// Task file 1: evals/runbook.py (2 tasks)
+	// Task file 1: evals/runbook.py (3 tasks: runbook_lookup, escalation_policy, multiline_task; ignores docstring and class method)
 	evalsDir := filepath.Join(tmpDir, "evals")
 	if err := os.MkdirAll(evalsDir, 0755); err != nil {
 		t.Fatalf("failed to mkdir evals: %v", err)
 	}
 	task1Content := `
+"""
+Example in docstring:
+@task
+def in_docstring():
+    pass
+"""
+
 from inspect_ai import task, Task
 
 @task
@@ -52,6 +59,17 @@ def runbook_lookup() -> Task:
 @task()
 def escalation_policy():
     pass
+
+@task(
+    name="multiline_task",
+)
+def multiline_task():
+    pass
+
+class HelperSuite:
+    @task
+    def class_method(self):
+        pass
 `
 	if err := os.WriteFile(filepath.Join(evalsDir, "runbook.py"), []byte(task1Content), 0644); err != nil {
 		t.Fatalf("failed to write runbook.py: %v", err)
@@ -131,8 +149,8 @@ def ignored_task():
 		t.Errorf("Expected source %q, got %q", "inspect-scan", res.Manifest.Source)
 	}
 
-	if len(res.Manifest.Tasks) != 3 {
-		t.Fatalf("Expected 3 tasks, got %d: %+v", len(res.Manifest.Tasks), res.Manifest.Tasks)
+	if len(res.Manifest.Tasks) != 4 {
+		t.Fatalf("Expected 4 tasks, got %d: %+v", len(res.Manifest.Tasks), res.Manifest.Tasks)
 	}
 
 	// Check task 0: bench/bench_eval
@@ -159,18 +177,85 @@ def ignored_task():
 		t.Errorf("Unexpected task 1 paths: %v", t1.Paths)
 	}
 
-	// Check task 2: evals/runbook_lookup
+	// Check task 2: evals/multiline_task
 	t2 := res.Manifest.Tasks[2]
-	if t2.ID != "evals/runbook_lookup" || t2.Workdir != "evals" || t2.Spec != "runbook.py@runbook_lookup" {
+	if t2.ID != "evals/multiline_task" || t2.Workdir != "evals" || t2.Spec != "runbook.py@multiline_task" {
 		t.Errorf("Unexpected task 2: %+v", t2)
 	}
 	if len(t2.Paths) != 1 || t2.Paths[0] != "evals/**" {
 		t.Errorf("Unexpected task 2 paths: %v", t2.Paths)
 	}
 
+	// Check task 3: evals/runbook_lookup
+	t3 := res.Manifest.Tasks[3]
+	if t3.ID != "evals/runbook_lookup" || t3.Workdir != "evals" || t3.Spec != "runbook.py@runbook_lookup" {
+		t.Errorf("Unexpected task 3: %+v", t3)
+	}
+	if len(t3.Paths) != 1 || t3.Paths[0] != "evals/**" {
+		t.Errorf("Unexpected task 3 paths: %v", t3.Paths)
+	}
+
 	// Validate synthesized manifest passes ValidateManifest
 	if err := ValidateManifest(res.Manifest); err != nil {
 		t.Fatalf("Synthesized manifest failed ValidateManifest: %v", err)
+	}
+}
+
+func TestScanInspectTasks_CollidingIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	evalsDir := filepath.Join(tmpDir, "evals")
+	if err := os.MkdirAll(evalsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	// Two different files in the same directory defining the same function name 'common_eval'
+	fileAContent := `
+from inspect_ai import task
+
+@task
+def common_eval():
+    pass
+`
+	fileBContent := `
+from inspect_ai import task
+
+@task
+def common_eval():
+    pass
+`
+	if err := os.WriteFile(filepath.Join(evalsDir, "a.py"), []byte(fileAContent), 0644); err != nil {
+		t.Fatalf("WriteFile a.py failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(evalsDir, "b.py"), []byte(fileBContent), 0644); err != nil {
+		t.Fatalf("WriteFile b.py failed: %v", err)
+	}
+
+	res, err := ScanInspectTasks(tmpDir)
+	if err != nil {
+		t.Fatalf("ScanInspectTasks failed: %v", err)
+	}
+
+	if len(res.Manifest.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks, got %d", len(res.Manifest.Tasks))
+	}
+
+	// Verify both colliding tasks were disambiguated with their file stems
+	if res.Manifest.Tasks[0].ID != "evals/a/common_eval" {
+		t.Errorf("Expected ID 'evals/a/common_eval', got %q", res.Manifest.Tasks[0].ID)
+	}
+	if res.Manifest.Tasks[1].ID != "evals/b/common_eval" {
+		t.Errorf("Expected ID 'evals/b/common_eval', got %q", res.Manifest.Tasks[1].ID)
+	}
+
+	if res.DisambiguatedCollisions != 2 {
+		t.Errorf("Expected 2 disambiguated collisions, got %d", res.DisambiguatedCollisions)
+	}
+	if !strings.Contains(res.CapMessage(), "disambiguated 2 colliding task IDs with file stem") {
+		t.Errorf("Expected disambiguation note in CapMessage, got %q", res.CapMessage())
+	}
+
+	if err := ValidateManifest(res.Manifest); err != nil {
+		t.Fatalf("ValidateManifest failed: %v", err)
 	}
 }
 
@@ -297,5 +382,9 @@ def root_task():
 	}
 	if len(t0.Paths) != 1 || t0.Paths[0] != "**" {
 		t.Errorf("Expected Paths ['**'], got %v", t0.Paths)
+	}
+
+	if err := ValidateManifest(res.Manifest); err != nil {
+		t.Fatalf("Synthesized root manifest failed ValidateManifest: %v", err)
 	}
 }

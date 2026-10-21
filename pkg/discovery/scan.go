@@ -46,7 +46,7 @@ var (
 	inspectImportRegex = regexp.MustCompile(`(?m)^\s*(?:import\s+inspect_ai\b|from\s+inspect_ai(?:\.|\b))`)
 
 	// taskDecoratorRegex matches @task or @inspect_ai.task decorator.
-	taskDecoratorRegex = regexp.MustCompile(`^@(?:\binspect_ai\.)?task(?:\s*\(.*)?$`)
+	taskDecoratorRegex = regexp.MustCompile(`^@(?:inspect_ai\.)?task(?:\s*\(.*)?$`)
 
 	// funcDefRegex matches standard or async Python function definitions.
 	funcDefRegex = regexp.MustCompile(`^(?:async\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(`)
@@ -54,25 +54,30 @@ var (
 
 // ScanResult holds the outcome of an Inspect task fallback scan.
 type ScanResult struct {
-	Manifest   *v1alpha1.Manifest
-	FilesCount int
-	TasksCount int
-	FileCapHit bool
-	TaskCapHit bool
+	Manifest                *v1alpha1.Manifest
+	FilesCount              int
+	TasksCount              int
+	FileCapHit              bool
+	TaskCapHit              bool
+	DisambiguatedCollisions int
 }
 
-// CapMessage returns a human-readable note if a scan cap was reached.
+// CapMessage returns a human-readable note if a scan cap was reached or task IDs were disambiguated.
 func (r *ScanResult) CapMessage() string {
+	var parts []string
 	if r.TaskCapHit && r.FileCapHit {
-		return fmt.Sprintf("scan capped at %d tasks and %d files", MaxScanTasks, MaxScanFiles)
+		parts = append(parts, fmt.Sprintf("scan capped at %d tasks and %d files", MaxScanTasks, MaxScanFiles))
+	} else if r.TaskCapHit {
+		parts = append(parts, fmt.Sprintf("task scan capped at %d tasks", MaxScanTasks))
+	} else if r.FileCapHit {
+		parts = append(parts, fmt.Sprintf("file scan capped at %d files", MaxScanFiles))
 	}
-	if r.TaskCapHit {
-		return fmt.Sprintf("task scan capped at %d tasks", MaxScanTasks)
+
+	if r.DisambiguatedCollisions > 0 {
+		parts = append(parts, fmt.Sprintf("disambiguated %d colliding task IDs with file stem", r.DisambiguatedCollisions))
 	}
-	if r.FileCapHit {
-		return fmt.Sprintf("file scan capped at %d files", MaxScanFiles)
-	}
-	return ""
+
+	return strings.Join(parts, "; ")
 }
 
 // gitignoreMatcher checks if paths match gitignore patterns.
@@ -171,7 +176,7 @@ func ScanInspectTasks(root string) (*ScanResult, error) {
 		return nil, fmt.Errorf("failed to read .gitignore: %w", err)
 	}
 
-	tasksMap := make(map[string]v1alpha1.ManifestTask)
+	var allTasks []v1alpha1.ManifestTask
 
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -220,15 +225,15 @@ func ScanInspectTasks(root string) (*ScanResult, error) {
 		tasks, parseErr := parsePythonInspectTasks(path, relPathSlash)
 		if parseErr == nil && len(tasks) > 0 {
 			for _, t := range tasks {
-				if len(tasksMap) >= MaxScanTasks {
+				if len(allTasks) >= MaxScanTasks {
 					result.TaskCapHit = true
 					break
 				}
-				tasksMap[t.ID] = t
+				allTasks = append(allTasks, t)
 			}
 		}
 
-		if len(tasksMap) >= MaxScanTasks {
+		if len(allTasks) >= MaxScanTasks {
 			result.TaskCapHit = true
 			return fs.SkipAll
 		}
@@ -242,17 +247,35 @@ func ScanInspectTasks(root string) (*ScanResult, error) {
 		return nil, fmt.Errorf("error scanning directory %s: %w", root, walkErr)
 	}
 
-	// Sort tasks deterministically by task ID
-	var sortedTasks []v1alpha1.ManifestTask
-	for _, t := range tasksMap {
-		sortedTasks = append(sortedTasks, t)
+	// Disambiguate colliding task IDs
+	idCounts := make(map[string]int, len(allTasks))
+	for _, t := range allTasks {
+		idCounts[t.ID]++
 	}
-	sort.Slice(sortedTasks, func(i, j int) bool {
-		return sortedTasks[i].ID < sortedTasks[j].ID
+
+	for i := range allTasks {
+		t := &allTasks[i]
+		if idCounts[t.ID] > 1 {
+			specParts := strings.SplitN(t.Spec, "@", 2)
+			fileStem := strings.TrimSuffix(specParts[0], ".py")
+			funcName := specParts[1]
+
+			if t.Workdir == "." || t.Workdir == "" {
+				t.ID = fileStem + "/" + funcName
+			} else {
+				t.ID = t.Workdir + "/" + fileStem + "/" + funcName
+			}
+			result.DisambiguatedCollisions++
+		}
+	}
+
+	// Sort tasks deterministically by task ID
+	sort.Slice(allTasks, func(i, j int) bool {
+		return allTasks[i].ID < allTasks[j].ID
 	})
 
-	result.Manifest.Tasks = sortedTasks
-	result.TasksCount = len(sortedTasks)
+	result.Manifest.Tasks = allTasks
+	result.TasksCount = len(allTasks)
 	return result, nil
 }
 
@@ -285,21 +308,77 @@ func parsePythonInspectTasks(filePath, relPathSlash string) ([]v1alpha1.Manifest
 	var tasks []v1alpha1.ManifestTask
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	hasTaskDecorator := false
+	inDecoratorParens := 0
+	inTripleQuote := ""
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		rawLine := scanner.Text()
+		trimmedLine := strings.TrimSpace(rawLine)
+		if trimmedLine == "" {
 			continue
 		}
 
-		if strings.HasPrefix(line, "@") {
-			if taskDecoratorRegex.MatchString(line) {
-				hasTaskDecorator = true
+		// Handle multiline docstrings / multiline strings
+		if inTripleQuote != "" {
+			if strings.Contains(trimmedLine, inTripleQuote) {
+				inTripleQuote = ""
 			}
 			continue
 		}
 
-		if matches := funcDefRegex.FindStringSubmatch(line); len(matches) == 2 {
+		// Check if a triple-quote string opens on this line
+		if strings.HasPrefix(trimmedLine, `"""`) {
+			if strings.Count(trimmedLine, `"""`)%2 != 0 {
+				inTripleQuote = `"""`
+				continue
+			}
+		} else if strings.HasPrefix(trimmedLine, `'''`) {
+			if strings.Count(trimmedLine, `'''`)%2 != 0 {
+				inTripleQuote = `'''`
+				continue
+			}
+		}
+
+		// Comments do not break decorator attachment, but are otherwise skipped
+		if strings.HasPrefix(trimmedLine, "#") {
+			continue
+		}
+
+		// Track arguments across multiline decorators, e.g.:
+		// @task(
+		//     name="x",
+		// )
+		if inDecoratorParens > 0 {
+			inDecoratorParens += strings.Count(trimmedLine, "(") - strings.Count(trimmedLine, ")")
+			if inDecoratorParens < 0 {
+				inDecoratorParens = 0
+			}
+			continue
+		}
+
+		// Top-level decorators and function definitions must start at column 0.
+		// Indented code (such as class methods) is not a standalone Inspect task.
+		isColumnZero := !strings.HasPrefix(rawLine, " ") && !strings.HasPrefix(rawLine, "\t")
+		if !isColumnZero {
+			hasTaskDecorator = false
+			continue
+		}
+
+		// Column 0 decorator
+		if strings.HasPrefix(trimmedLine, "@") {
+			if taskDecoratorRegex.MatchString(trimmedLine) {
+				hasTaskDecorator = true
+				openParens := strings.Count(trimmedLine, "(") - strings.Count(trimmedLine, ")")
+				if openParens > 0 {
+					inDecoratorParens = openParens
+				}
+			}
+			// If it is another decorator (e.g. @solver), keep hasTaskDecorator set
+			continue
+		}
+
+		// Column 0 function definition
+		if matches := funcDefRegex.FindStringSubmatch(trimmedLine); len(matches) == 2 {
 			if hasTaskDecorator {
 				funcName := matches[1]
 
@@ -328,7 +407,7 @@ func parsePythonInspectTasks(filePath, relPathSlash string) ([]v1alpha1.Manifest
 			continue
 		}
 
-		// Any other code resets decorator
+		// Any other column-0 statement resets pending decorator
 		hasTaskDecorator = false
 	}
 

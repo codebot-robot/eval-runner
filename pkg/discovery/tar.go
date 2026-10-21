@@ -66,14 +66,14 @@ func ExtractTar(tarBytes []byte, destDir string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
+			if err := os.MkdirAll(target, 0700); err != nil {
 				return fmt.Errorf("failed to create directory %q: %w", target, err)
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 				return fmt.Errorf("failed to create parent directory for %q: %w", target, err)
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, header.FileInfo().Mode())
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
 			if err != nil {
 				return fmt.Errorf("failed to open file %q: %w", target, err)
 			}

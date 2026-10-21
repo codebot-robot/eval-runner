@@ -56,8 +56,8 @@ const (
 	// DiscoveryScanArchiveReadPath is the relative path from sandboxd's root-dir (/workspace) used to read scan.tar.
 	DiscoveryScanArchiveReadPath = "/out/scan.tar"
 
-	// ScanArchiveCommand is the shell command used to package python files and .gitignore for inspection fallback.
-	ScanArchiveCommand = "mkdir -p /workspace/out && (find . -type f \\( -name \"*.py\" -o -name \".gitignore\" \\) ! -path \"*/.venv/*\" ! -path \"*/node_modules/*\" ! -path \"*/vendor/*\" ! -path \"*/.git/*\" | tar -cf /workspace/out/scan.tar -T -) || tar --exclude=.git --exclude=.venv --exclude=node_modules --exclude=vendor -cf /workspace/out/scan.tar ."
+	// ScanArchiveCommand is the shell command used to package candidate python files and .gitignore for inspection fallback.
+	ScanArchiveCommand = "mkdir -p /workspace/out && (git ls-files -z -- '*.py' .gitignore 2>/dev/null | tar -cf /workspace/out/scan.tar --null -T -) || (find . -type f \\( -name \"*.py\" -o -name \".gitignore\" \\) ! -path \"*/.venv/*\" ! -path \"*/node_modules/*\" ! -path \"*/vendor/*\" ! -path \"*/.git/*\" | head -n 5000 | tar -cf /workspace/out/scan.tar -T -)"
 )
 
 // ParseManifest unmarshals raw JSON bytes into a Manifest.
