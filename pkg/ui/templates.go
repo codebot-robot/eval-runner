@@ -284,7 +284,9 @@ const repoHeaderPartial = `{{- define "repo_header" }}
       </nav>
       {{- end }}
     </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+    {{- if .LinkNamespace }}
+    <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
+    {{- end }}
   </header>{{- end -}}`
 
 const repoIndexTemplate = `
@@ -301,7 +303,9 @@ const repoIndexTemplate = `
     <div class="header-brand">
       <a href="{{ repoIndexLink .LinkNamespace }}" class="header-logo">eval-runner</a>
     </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+    {{- if .LinkNamespace }}
+    <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
+    {{- end }}
   </header>
 
   <main class="container">
@@ -330,7 +334,7 @@ const repoIndexTemplate = `
             </tr>
             {{ else }}
             <tr>
-              <td colspan="4" class="empty-state">No repositories found in namespace {{ .Namespace }}.</td>
+              <td colspan="4" class="empty-state">No repositories found.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -364,7 +368,6 @@ const runsListTemplate = `
           <thead>
             <tr>
               <th>Run</th>
-              <th>Namespace</th>
               <th>Phase</th>
               <th>Tasks</th>
               <th>Samples</th>
@@ -377,7 +380,6 @@ const runsListTemplate = `
             {{ range .Runs }}
             <tr>
               <td><a href="{{ .Link }}" class="mono" style="font-weight:600">{{ .Name }}</a></td>
-              <td><span class="mono" style="font-size:13px">{{ .Namespace }}</span></td>
               <td><span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span></td>
               <td class="num">{{ .Tasks }}</td>
               <td class="num">{{ if .SampleRange }}{{ .SampleRange }}{{ else }}{{ .Samples }}{{ end }}</td>
@@ -387,7 +389,7 @@ const runsListTemplate = `
             </tr>
             {{ else }}
             <tr>
-              <td colspan="8" class="empty-state">No Runs found in namespace {{ .Namespace }}.</td>
+              <td colspan="7" class="empty-state">No Runs found.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -696,7 +698,7 @@ const comparisonsListTemplate = `
             </tr>
             {{- else }}
             <tr>
-              <td colspan="4" class="empty-state">No Comparisons with label {{ $.KindLabelKey }}=true in namespace {{ $.Namespace }}.</td>
+              <td colspan="4" class="empty-state">No Comparisons with label {{ $.KindLabelKey }}=true.</td>
             </tr>
             {{- end }}
           </tbody>
@@ -712,7 +714,6 @@ const comparisonsListTemplate = `
           <thead>
             <tr>
               <th>Comparison</th>
-              <th>Namespace</th>
               <th>Verdict</th>
               <th>P(imp)</th>
               <th>Run deltas</th>
@@ -727,7 +728,6 @@ const comparisonsListTemplate = `
             {{ range .Comparisons }}
             <tr>
               <td><a href="{{ .Link }}" class="mono" style="font-weight:600">{{ .Name }}</a></td>
-              <td><span class="mono" style="font-size:13px">{{ .Namespace }}</span></td>
               <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span>{{ if .Reason }}<div class="reason-line" title="{{ .ReasonFull }}">{{ .Reason }}</div>{{ end }}</td>
               <td class="num">{{ .PImprovement }}</td>
               <td class="delta-cell">{{ template "delta_strip" .Deltas }}</td>
@@ -739,7 +739,7 @@ const comparisonsListTemplate = `
             </tr>
             {{ else }}
             <tr>
-              <td colspan="10" class="empty-state">No Comparisons found in namespace {{ .Namespace }}.</td>
+              <td colspan="9" class="empty-state">No Comparisons found.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -1350,7 +1350,7 @@ const sampleTranscriptTemplate = `
           <span class="mono">{{ .SampleID }}</span> · <span class="chip chip-{{ .StatusClass }}">{{ .StatusUpper }}</span> · {{ .LatencyStr }} · {{ .TokensStr }} tokens
         </h2>
         <div class="meta mono" style="font-size:12px;color:var(--muted)">
-          <span class="log-path mono" title="{{ .LogPath }}">{{ .LogPath }}</span> · inspect log format
+          <span class="log-path mono" title="{{ .LogPath }}">{{ .LogPath }}</span>
         </div>
       </div>
 
@@ -1396,10 +1396,6 @@ const sampleTranscriptTemplate = `
           {{ .EventsTruncatedMessage }}
         </div>
         {{ end }}
-      </div>
-
-      <div class="foot" style="margin-top:24px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);text-align:right">
-        open format · any agent can read it
       </div>
       {{ end }}
 
@@ -1518,7 +1514,7 @@ const pullsListTemplate = `
             </tr>
             {{ else }}
             <tr>
-              <td colspan="9" class="empty-state">No pull requests found in namespace {{ .Namespace }}.</td>
+              <td colspan="9" class="empty-state">No pull requests found.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -1689,7 +1685,9 @@ const seriesListTemplate = `
         <a href="/series" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
       </nav>
     </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+    {{- if .LinkNamespace }}
+    <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
+    {{- end }}
   </header>
 
   <main class="container">
@@ -1720,7 +1718,7 @@ const seriesListTemplate = `
             </tr>
             {{ else }}
             <tr>
-              <td colspan="5" class="empty-state">No series found in namespace {{ .Namespace }}.</td>
+              <td colspan="5" class="empty-state">No series found.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -1752,7 +1750,9 @@ const seriesDetailTemplate = `
         <a href="/series" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
       </nav>
     </div>
-    <div style="font-size:13px;color:var(--muted)">namespace: <span class="mono">{{ .Namespace }}</span></div>
+    {{- if .LinkNamespace }}
+    <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
+    {{- end }}
   </header>
 
   <main class="container">
