@@ -5587,6 +5587,9 @@ func TestReconcileSampleExecution_BinaryScorer(t *testing.T) {
 	if math.Abs(t1.SuccessRateCI.Upper-expectedEst.CI.Upper) > 1e-6 {
 		t.Errorf("Expected CI upper %f, got %f", expectedEst.CI.Upper, t1.SuccessRateCI.Upper)
 	}
+	if t1.SuccessRateSD != nil {
+		t.Errorf("Expected nil SuccessRateSD for binary task, got %v", t1.SuccessRateSD)
+	}
 
 	// Verify status.summary
 	if updatedRun.Status.Summary == nil {
@@ -5742,6 +5745,12 @@ func TestReconcileSampleExecution_PartialCreditScorer(t *testing.T) {
 	}
 	if math.Abs(t1.SuccessRateCI.Upper-expectedEst.CI.Upper) > 1e-6 {
 		t.Errorf("Expected CI upper %f, got %f", expectedEst.CI.Upper, t1.SuccessRateCI.Upper)
+	}
+	if t1.SuccessRateSD == nil {
+		t.Fatalf("Expected non-nil successRateSD")
+	}
+	if expectedEst.SD == nil || math.Abs(*t1.SuccessRateSD-*expectedEst.SD) > 1e-6 {
+		t.Errorf("Expected SD %v, got %v", expectedEst.SD, t1.SuccessRateSD)
 	}
 }
 

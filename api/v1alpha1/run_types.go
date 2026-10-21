@@ -117,6 +117,10 @@ type TaskStatus struct {
 	// +optional
 	SuccessRateCI *ConfidenceInterval `json:"successRateCI,omitempty"`
 
+	// SuccessRateSD is the sample standard deviation of scores (for non-binary scorers).
+	// +optional
+	SuccessRateSD *float64 `json:"successRateSD,omitempty"`
+
 	// Message contains failure detail or bounded error information.
 	// +optional
 	Message string `json:"message,omitempty"`
