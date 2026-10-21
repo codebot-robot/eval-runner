@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
@@ -169,6 +170,8 @@ type ClusterConfig struct {
 	MaxParallelTasks       int
 	ModelSecret            string
 	ModelPrices            map[string]ModelPrice
+	ModelPriceSources      map[string]v1alpha1.CostSource
+	ModelPricesDisabled    bool
 	PollProgressInterval   time.Duration
 	SandboxdImage          string
 	TaskGracePeriod        time.Duration
@@ -224,6 +227,8 @@ func DefaultClusterConfig() ClusterConfig {
 		InconclusivePolicy:     DefaultInconclusivePolicy,
 		MaxParallelTasks:       DefaultMaxParallelTasks,
 		ModelSecret:            DefaultModelSecret,
+		ModelPrices:            DefaultModelPrices(),
+		ModelPriceSources:      DefaultModelPriceSources(),
 		PollProgressInterval:   DefaultPollProgressInterval,
 		SandboxdImage:          discovery.SandboxdImage,
 		TaskGracePeriod:        DefaultTaskGracePeriod,
@@ -506,6 +511,8 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			if trimmed != "" {
 				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
 					cfg.ModelPrices = nil
+					cfg.ModelPriceSources = nil
+					cfg.ModelPricesDisabled = true
 				} else {
 					var prices map[string]ModelPrice
 					dec := json.NewDecoder(strings.NewReader(trimmed))
@@ -517,8 +524,19 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 						if p.InputPer1M < 0 || p.OutputPer1M < 0 {
 							return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: price for %q cannot be negative", ConfigMapKeyModelPrices, ns, name, model)
 						}
+						if strings.HasPrefix(model, "prefix:") && strings.TrimPrefix(model, "prefix:") == "" {
+							return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: prefix for %q cannot be empty", ConfigMapKeyModelPrices, ns, name, model)
+						}
 					}
-					cfg.ModelPrices = prices
+					if cfg.ModelPrices == nil {
+						cfg.ModelPrices = DefaultModelPrices()
+						cfg.ModelPriceSources = DefaultModelPriceSources()
+					}
+					for model, p := range prices {
+						cfg.ModelPrices[model] = p
+						cfg.ModelPriceSources[model] = v1alpha1.CostSourceConfigMap
+					}
+					cfg.ModelPricesDisabled = false
 				}
 			}
 		}

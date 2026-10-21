@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
@@ -1677,27 +1678,148 @@ func TestKnownConfigMapKeys_AllConstantsRegistered(t *testing.T) {
 }
 
 func TestResolveConfig_ModelPrices(t *testing.T) {
-	t.Run("valid modelPrices json", func(t *testing.T) {
+	t.Run("defaults present when key is absent", func(t *testing.T) {
+		// When cm is nil
+		cfgNil, err := ResolveConfig(nil, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error with nil ConfigMap: %v", err)
+		}
+		if len(cfgNil.ModelPrices) != 4 {
+			t.Fatalf("expected 4 default model prices, got %d", len(cfgNil.ModelPrices))
+		}
+		defaults := DefaultModelPrices()
+		for m, wantPrice := range defaults {
+			gotPrice, ok := cfgNil.ModelPrices[m]
+			if !ok {
+				t.Errorf("missing default model %q", m)
+			} else if gotPrice != wantPrice {
+				t.Errorf("model %q: got price %+v, want %+v", m, gotPrice, wantPrice)
+			}
+			if cfgNil.ModelPriceSources[m] != v1alpha1.CostSourceDefault {
+				t.Errorf("model %q: got source %q, want %q", m, cfgNil.ModelPriceSources[m], v1alpha1.CostSourceDefault)
+			}
+		}
+
+		// When ConfigMap exists but modelPrices key is absent
+		cmEmpty := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data:       map[string]string{},
+		}
+		cfgEmpty, err := ResolveConfig(cmEmpty, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error with empty ConfigMap: %v", err)
+		}
+		if len(cfgEmpty.ModelPrices) != 4 {
+			t.Fatalf("expected 4 default model prices, got %d", len(cfgEmpty.ModelPrices))
+		}
+	})
+
+	t.Run("merge and override with configmap", func(t *testing.T) {
 		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
 			Data: map[string]string{
-				ConfigMapKeyModelPrices: `{"google/gemini-3.5-flash-lite":{"inputPer1M":0.15,"outputPer1M":0.60},"mockllm/model":{"inputPer1M":1.0,"outputPer1M":2.0}}`,
+				ConfigMapKeyModelPrices: `{"google/gemini-3.5-flash-lite":{"inputPer1M":0.20,"outputPer1M":0.80},"mockllm/model":{"inputPer1M":1.0,"outputPer1M":2.0},"custom/model":{"inputPer1M":5.0,"outputPer1M":10.0}}`,
 			},
 		}
 		cfg, err := ResolveConfig(cm, RawFlags{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(cfg.ModelPrices) != 2 {
-			t.Fatalf("expected 2 model prices, got %d", len(cfg.ModelPrices))
+		// 4 defaults - 2 overridden + 1 new = 5 total
+		if len(cfg.ModelPrices) != 5 {
+			t.Fatalf("expected 5 model prices after merge, got %d", len(cfg.ModelPrices))
 		}
+
+		// Overridden gemini
 		p1, ok := cfg.ModelPrices["google/gemini-3.5-flash-lite"]
-		if !ok || p1.InputPer1M != 0.15 || p1.OutputPer1M != 0.60 {
-			t.Errorf("unexpected price for gemini: %+v", p1)
+		if !ok || p1.InputPer1M != 0.20 || p1.OutputPer1M != 0.80 {
+			t.Errorf("unexpected price for overridden gemini: %+v", p1)
 		}
+		if cfg.ModelPriceSources["google/gemini-3.5-flash-lite"] != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected source configmap for overridden gemini, got %q", cfg.ModelPriceSources["google/gemini-3.5-flash-lite"])
+		}
+
+		// Overridden mockllm
 		p2, ok := cfg.ModelPrices["mockllm/model"]
 		if !ok || p2.InputPer1M != 1.0 || p2.OutputPer1M != 2.0 {
 			t.Errorf("unexpected price for mockllm: %+v", p2)
+		}
+		if cfg.ModelPriceSources["mockllm/model"] != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected source configmap for overridden mockllm, got %q", cfg.ModelPriceSources["mockllm/model"])
+		}
+
+		// New custom model
+		p3, ok := cfg.ModelPrices["custom/model"]
+		if !ok || p3.InputPer1M != 5.0 || p3.OutputPer1M != 10.0 {
+			t.Errorf("unexpected price for custom/model: %+v", p3)
+		}
+		if cfg.ModelPriceSources["custom/model"] != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected source configmap for custom/model, got %q", cfg.ModelPriceSources["custom/model"])
+		}
+
+		// Non-overridden default retained
+		pFlash, ok := cfg.ModelPrices["google/gemini-2.5-flash"]
+		if !ok || pFlash.InputPer1M != 0.30 || pFlash.OutputPer1M != 2.50 {
+			t.Errorf("unexpected price for non-overridden gemini-2.5-flash: %+v", pFlash)
+		}
+		if cfg.ModelPriceSources["google/gemini-2.5-flash"] != v1alpha1.CostSourceDefault {
+			t.Errorf("expected source default for non-overridden gemini-2.5-flash, got %q", cfg.ModelPriceSources["google/gemini-2.5-flash"])
+		}
+	})
+
+	t.Run("prefix keys and lookup resolution", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				ConfigMapKeyModelPrices: `{"prefix:google/gemini-2.5-":{"inputPer1M":0.25,"outputPer1M":1.50},"prefix:openrouter/":{"inputPer1M":2.00,"outputPer1M":4.00},"openrouter/special":{"inputPer1M":1.00,"outputPer1M":2.00}}`,
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Prefix match overrides defaults for gemini-2.5 models
+		p, src, ok := LookupModelPrice("google/gemini-2.5-flash", cfg.ModelPrices, cfg.ModelPriceSources)
+		if !ok || p.InputPer1M != 0.25 || p.OutputPer1M != 1.50 || src != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected prefix match for gemini-2.5-flash, got price=%+v, src=%q, ok=%v", p, src, ok)
+		}
+
+		// Default exact match for gemini-3.5-flash-lite untouched by gemini-2.5- prefix
+		p35, src35, ok35 := LookupModelPrice("google/gemini-3.5-flash-lite", cfg.ModelPrices, cfg.ModelPriceSources)
+		if !ok35 || p35.InputPer1M != 0.30 || p35.OutputPer1M != 2.50 || src35 != v1alpha1.CostSourceDefault {
+			t.Errorf("expected default price for gemini-3.5-flash-lite, got price=%+v, src=%q, ok=%v", p35, src35, ok35)
+		}
+
+		// Exact match in configmap takes precedence over prefix match in configmap
+		pSpecial, srcSpecial, okSpecial := LookupModelPrice("openrouter/special", cfg.ModelPrices, cfg.ModelPriceSources)
+		if !okSpecial || pSpecial.InputPer1M != 1.00 || pSpecial.OutputPer1M != 2.00 || srcSpecial != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected exact match for openrouter/special, got price=%+v, src=%q, ok=%v", pSpecial, srcSpecial, okSpecial)
+		}
+
+		// Other openrouter models match prefix
+		pOther, srcOther, okOther := LookupModelPrice("openrouter/meta-llama/llama-3", cfg.ModelPrices, cfg.ModelPriceSources)
+		if !okOther || pOther.InputPer1M != 2.00 || pOther.OutputPer1M != 4.00 || srcOther != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected prefix match for openrouter model, got price=%+v, src=%q, ok=%v", pOther, srcOther, okOther)
+		}
+
+		// Unknown model has no price
+		_, _, okUnknown := LookupModelPrice("anthropic/claude-3-opus", cfg.ModelPrices, cfg.ModelPriceSources)
+		if okUnknown {
+			t.Errorf("expected false for unknown model price")
+		}
+	})
+
+	t.Run("empty prefix returns error", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				ConfigMapKeyModelPrices: `{"prefix:":{"inputPer1M":0.15,"outputPer1M":0.60}}`,
+			},
+		}
+		_, err := ResolveConfig(cm, RawFlags{})
+		if err == nil {
+			t.Fatalf("expected error for empty prefix:, got nil")
 		}
 	})
 
@@ -1753,6 +1875,9 @@ func TestResolveConfig_ModelPrices(t *testing.T) {
 		}
 		if cfg.ModelPrices != nil {
 			t.Errorf("expected nil ModelPrices with sentinel none, got %+v", cfg.ModelPrices)
+		}
+		if !cfg.ModelPricesDisabled {
+			t.Errorf("expected ModelPricesDisabled to be true")
 		}
 	})
 }
@@ -2306,5 +2431,178 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 	}
 	if !createdSinks[1].closed.Load() {
 		t.Fatal("expected createdSinks[1] to be closed after in-flight upload completes")
+	}
+}
+
+func TestConfigReloader_UpdatesModelPrices_LookupAndDisabledFlipsDynamically(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	const ns = "eval-runner"
+	const cmName = DefaultConfigMapName
+
+	// Initial ConfigMap without modelPrices (defaults apply)
+	initialCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            cmName,
+			ResourceVersion: "100",
+		},
+		Data: map[string]string{},
+	}
+
+	clientset := k8sfake.NewSimpleClientset(initialCM)
+
+	watchReady := make(chan struct{})
+	var watchOnce sync.Once
+	clientset.PrependWatchReactor("configmaps", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		w, err := clientset.Tracker().Watch(action.GetResource(), action.GetNamespace())
+		watchOnce.Do(func() { close(watchReady) })
+		return true, w, err
+	})
+
+	rawFlags := RawFlags{}
+	initialCfg, err := ResolveConfig(initialCM, rawFlags)
+	if err != nil {
+		t.Fatalf("failed to resolve initial config: %v", err)
+	}
+
+	runReconciler := &RunReconciler{
+		ModelPrices:         initialCfg.ModelPrices,
+		ModelPriceSources:   initialCfg.ModelPriceSources,
+		ModelPricesDisabled: initialCfg.ModelPricesDisabled,
+	}
+	compReconciler := &ComparisonReconciler{
+		ModelPrices:         initialCfg.ModelPrices,
+		ModelPriceSources:   initialCfg.ModelPriceSources,
+		ModelPricesDisabled: initialCfg.ModelPricesDisabled,
+	}
+
+	reloader := NewConfigReloader(ConfigReloaderOptions{
+		RawFlags:       rawFlags,
+		Logger:         logr.Discard(),
+		RunReconciler:  runReconciler,
+		CompReconciler: compReconciler,
+		InitialConfig:  &initialCfg,
+	})
+
+	reloadDone := make(chan struct{}, 10)
+	go func() {
+		_ = sinkconfig.WatchConfigMap(ctx, clientset, ns, cmName, func(cm *corev1.ConfigMap) {
+			_ = reloader.Reload(ctx, cm)
+			reloadDone <- struct{}{}
+		})
+	}()
+
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial watch callback")
+	}
+
+	select {
+	case <-watchReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for watch registration")
+	}
+
+	// Initial lookup returns default pricing
+	p, src, ok := runReconciler.lookupModelPrice("google/gemini-3.5-flash-lite")
+	if !ok || p.InputPer1M != 0.30 || p.OutputPer1M != 2.50 || src != v1alpha1.CostSourceDefault {
+		t.Fatalf("expected initial default price for gemini-3.5-flash-lite, got price=%+v, src=%q, ok=%v", p, src, ok)
+	}
+	cp, csrc, cok := compReconciler.lookupModelPrice("google/gemini-3.5-flash-lite")
+	if !cok || cp.InputPer1M != 0.30 || cp.OutputPer1M != 2.50 || csrc != v1alpha1.CostSourceDefault {
+		t.Fatalf("expected compReconciler initial default price, got price=%+v, src=%q, ok=%v", cp, csrc, cok)
+	}
+
+	// 1. Update ConfigMap to override gemini-3.5-flash-lite and add prefix:custom/
+	updatedCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            cmName,
+			ResourceVersion: "101",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyModelPrices: `{"google/gemini-3.5-flash-lite":{"inputPer1M":0.50,"outputPer1M":3.00},"prefix:custom/":{"inputPer1M":1.0,"outputPer1M":2.0}}`,
+		},
+	}
+	if _, err := clientset.CoreV1().ConfigMaps(ns).Update(ctx, updatedCM, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("failed to update ConfigMap: %v", err)
+	}
+
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update reload callback")
+	}
+
+	pOverridden, srcOverridden, okOverridden := runReconciler.lookupModelPrice("google/gemini-3.5-flash-lite")
+	if !okOverridden || pOverridden.InputPer1M != 0.50 || pOverridden.OutputPer1M != 3.00 || srcOverridden != v1alpha1.CostSourceConfigMap {
+		t.Fatalf("expected overridden price from configmap, got price=%+v, src=%q, ok=%v", pOverridden, srcOverridden, okOverridden)
+	}
+
+	pPrefix, srcPrefix, okPrefix := compReconciler.lookupModelPrice("custom/model-x")
+	if !okPrefix || pPrefix.InputPer1M != 1.0 || pPrefix.OutputPer1M != 2.0 || srcPrefix != v1alpha1.CostSourceConfigMap {
+		t.Fatalf("expected prefix price from configmap, got price=%+v, src=%q, ok=%v", pPrefix, srcPrefix, okPrefix)
+	}
+
+	// Non-overridden default remains active
+	pDef, srcDef, okDef := runReconciler.lookupModelPrice("google/gemini-2.5-pro")
+	if !okDef || pDef.InputPer1M != 1.25 || pDef.OutputPer1M != 10.00 || srcDef != v1alpha1.CostSourceDefault {
+		t.Fatalf("expected non-overridden default price, got price=%+v, src=%q, ok=%v", pDef, srcDef, okDef)
+	}
+
+	// 2. Update ConfigMap to sentinel "none" (disables model prices entirely)
+	disabledCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            cmName,
+			ResourceVersion: "102",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyModelPrices: "none",
+		},
+	}
+	if _, err := clientset.CoreV1().ConfigMaps(ns).Update(ctx, disabledCM, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("failed to update ConfigMap to none: %v", err)
+	}
+
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for disable reload callback")
+	}
+
+	_, _, okDisabled := runReconciler.lookupModelPrice("google/gemini-3.5-flash-lite")
+	if okDisabled {
+		t.Fatalf("expected lookup to return false when pricing disabled via none")
+	}
+
+	// 3. Invalid JSON update: reload fails and retains previous configuration
+	invalidCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            cmName,
+			ResourceVersion: "103",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyModelPrices: "not-valid-json",
+		},
+	}
+	if _, err := clientset.CoreV1().ConfigMaps(ns).Update(ctx, invalidCM, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("failed to update ConfigMap with invalid json: %v", err)
+	}
+
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for invalid reload callback")
+	}
+
+	// Should still be disabled (previous state retained)
+	_, _, okStillDisabled := runReconciler.lookupModelPrice("google/gemini-3.5-flash-lite")
+	if okStillDisabled {
+		t.Fatalf("expected lookup to still return false after invalid json reload failure")
 	}
 }

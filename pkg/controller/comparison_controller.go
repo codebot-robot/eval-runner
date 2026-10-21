@@ -103,6 +103,8 @@ type ComparisonReconciler struct {
 	AffinityMode           string
 	Now                    func() time.Time
 	ModelPrices            map[string]ModelPrice
+	ModelPriceSources      map[string]v1alpha1.CostSource
+	ModelPricesDisabled    bool
 
 	cachedAppMu   sync.Mutex
 	cachedAppKey  string
@@ -284,10 +286,19 @@ func (r *ComparisonReconciler) comparisonTTL() time.Duration {
 	return r.ComparisonTTL
 }
 
-func (r *ComparisonReconciler) modelPrices() map[string]ModelPrice {
+func (r *ComparisonReconciler) lookupModelPrice(model string) (ModelPrice, v1alpha1.CostSource, bool) {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.ModelPrices
+	if r.ModelPricesDisabled {
+		return ModelPrice{}, "", false
+	}
+	prices := r.ModelPrices
+	sources := r.ModelPriceSources
+	if prices == nil {
+		prices = DefaultModelPrices()
+		sources = DefaultModelPriceSources()
+	}
+	return LookupModelPrice(model, prices, sources)
 }
 
 func (r *ComparisonReconciler) commandUsers() []string {
@@ -315,6 +326,8 @@ func (r *ComparisonReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.InconclusivePolicy = cfg.InconclusivePolicy
 	r.ComparisonTTL = cfg.ComparisonTTL
 	r.ModelPrices = cfg.ModelPrices
+	r.ModelPriceSources = cfg.ModelPriceSources
+	r.ModelPricesDisabled = cfg.ModelPricesDisabled
 	r.CommandUsers = cfg.CommandUsers
 	r.AffinityMode = cfg.AffinityMode
 }
@@ -1977,6 +1990,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		candLatency     *v1alpha1.TaskLatency
 		baseLatency     *v1alpha1.TaskLatency
 		costUSD         *float64
+		costSource      v1alpha1.CostSource
 		candCostUSD     *float64
 		baseCostUSD     *float64
 		possibleSamples int
@@ -2274,9 +2288,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			baseLatency = &v1alpha1.TaskLatency{P50: lat.P50, P95: lat.P95}
 		}
 
-		prices := r.modelPrices()
-		candPrice, candPriceKnown := prices[candidateRun.Spec.Model]
-		basePrice, basePriceKnown := prices[baselineRun.Spec.Model]
+		candPrice, candSrc, candPriceKnown := r.lookupModelPrice(candidateRun.Spec.Model)
+		basePrice, baseSrc, basePriceKnown := r.lookupModelPrice(baselineRun.Spec.Model)
 
 		var candCost *float64
 		if hasCandTokens && candPriceKnown {
@@ -2289,6 +2302,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			baseCost = &b
 		}
 		var taskCost *float64
+		var costSource v1alpha1.CostSource
 		if (hasCandTokens || hasBaseTokens) &&
 			(!hasCandTokens || candCost != nil) &&
 			(!hasBaseTokens || baseCost != nil) {
@@ -2300,6 +2314,17 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				tot += *baseCost
 			}
 			taskCost = &tot
+			if candCost != nil && baseCost != nil {
+				if candSrc == v1alpha1.CostSourceDefault || baseSrc == v1alpha1.CostSourceDefault {
+					costSource = v1alpha1.CostSourceDefault
+				} else {
+					costSource = v1alpha1.CostSourceConfigMap
+				}
+			} else if candCost != nil {
+				costSource = candSrc
+			} else if baseCost != nil {
+				costSource = baseSrc
+			}
 		}
 
 		est := stats.ComparePaired(allCandScores, allBaseScores, 0.95)
@@ -2365,6 +2390,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			candLatency:     candLatency,
 			baseLatency:     baseLatency,
 			costUSD:         taskCost,
+			costSource:      costSource,
 			candCostUSD:     candCost,
 			baseCostUSD:     baseCost,
 			possibleSamples: taskPossibleSamples,
@@ -2471,6 +2497,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					Tokens:          te.tokens,
 					Latency:         te.latency,
 					CostUSD:         te.costUSD,
+					CostSource:      te.costSource,
 					PossibleSamples: te.possibleSamples,
 				}
 				if aff.active {
@@ -2637,6 +2664,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					Tokens:          te.tokens,
 					Latency:         te.latency,
 					CostUSD:         te.costUSD,
+					CostSource:      te.costSource,
 					PossibleSamples: te.possibleSamples,
 				}
 				if aff.active {
@@ -2774,6 +2802,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			Tokens:          te.tokens,
 			Latency:         te.latency,
 			CostUSD:         te.costUSD,
+			CostSource:      te.costSource,
 			PossibleSamples: te.possibleSamples,
 		}
 		if aff.active {
@@ -2848,6 +2877,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			CandidateLatency: te.candLatency,
 			BaseLatency:      te.baseLatency,
 			CostUSD:          te.costUSD,
+			CostSource:       te.costSource,
 			CandidateCostUSD: te.candCostUSD,
 			BaseCostUSD:      te.baseCostUSD,
 			PossibleSamples:  te.possibleSamples,

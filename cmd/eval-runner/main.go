@@ -334,6 +334,8 @@ func main() {
 		PollProgressInterval: clusterConfig.PollProgressInterval,
 		ModelSecret:          clusterConfig.ModelSecret,
 		ModelPrices:          clusterConfig.ModelPrices,
+		ModelPriceSources:    clusterConfig.ModelPriceSources,
+		ModelPricesDisabled:  clusterConfig.ModelPricesDisabled,
 		SampleRunnerImage:    sampleRunnerImage,
 		ArtifactSink:         reloadableSink,
 	}
@@ -354,6 +356,8 @@ func main() {
 		InconclusivePolicy:  clusterConfig.InconclusivePolicy,
 		ComparisonTTL:       clusterConfig.ComparisonTTL,
 		ModelPrices:         clusterConfig.ModelPrices,
+		ModelPriceSources:   clusterConfig.ModelPriceSources,
+		ModelPricesDisabled: clusterConfig.ModelPricesDisabled,
 		CommandUsers:        clusterConfig.CommandUsers,
 		AffinityMode:        clusterConfig.AffinityMode,
 	}
