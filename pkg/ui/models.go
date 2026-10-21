@@ -1648,7 +1648,8 @@ type TaskSampleRow struct {
 }
 
 // sampleNotePreviewRunes caps the pass rule and grader reason shown per row on the task
-// samples list; the full text is kept in a title attribute and on the transcript page.
+// samples list; tooltips are capped by maxSampleTooltipBytes and the full text (capped
+// by maxTranscriptFieldBytes) is on the transcript page.
 const sampleNotePreviewRunes = 140
 
 // TaskSamplesListView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples.
