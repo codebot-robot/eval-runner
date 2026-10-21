@@ -41,6 +41,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -9311,6 +9312,866 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 		}
 		if runningComp.Status.CompletionTime != nil {
 			t.Errorf("expected CompletionTime to be nil when moved back to Running, got %v", runningComp.Status.CompletionTime)
+		}
+	})
+
+	t.Run("TerminalComparisonForeignPrefixPendingExtraSamplesDeletedByTTL", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		foreignCandLog := "gs://old-bucket/runs/cand-sha/task1/inspect.json"
+		foreignBaseLog := "gs://old-bucket/runs/base-sha/task1/inspect.json"
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-foreign", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignBaseLog,
+					},
+				},
+			},
+		}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-foreign", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignCandLog,
+					},
+				},
+			},
+		}
+
+		compTime := metav1.NewTime(now.Add(-30 * time.Minute)) // 30m ago, within ttl (1h)
+		verdictMsg := "Evaluated 1 task(s): 1 improved"
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "comp-foreign-ttl",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-foreign"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-foreign"},
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     99,
+					HeadSHA:    "cand-sha",
+					BaseSHA:    "base-sha",
+				},
+				ExtraSamples: 0,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:               v1alpha1.ComparisonPhaseCompleted,
+				Verdict:             v1alpha1.ComparisonVerdictImproved,
+				Message:             verdictMsg,
+				CompletionTime:      &compTime,
+				ExtraSamplesApplied: 0,
+				Reporting: &v1alpha1.ComparisonReportingStatus{
+					CommentID: 7777,
+				},
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  8888,
+						Login:      "reviewer",
+						Requested:  8,
+						ReceivedAt: metav1.NewTime(now),
+					},
+				},
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task1",
+						Label:      v1alpha1.ComparisonTaskLabelImproved,
+						SamplesRun: 8,
+					},
+				},
+				Batches: []v1alpha1.ComparisonBatchStatus{
+					{
+						Index:        0,
+						Phase:        v1alpha1.ComparisonPhaseCompleted,
+						CandidateRun: "cand-run-foreign",
+						BaselineRun:  "base-run-foreign",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseRun, candRun, comp, tokenSecret).
+			WithStatusSubresource(baseRun, candRun, comp).
+			Build()
+
+		currentNow := now
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ComparisonTTL:       ttl,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+			Now: func() time.Time { return currentNow },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-foreign-ttl"}}
+
+		// Reconcile 1: processes /eval more 8, detects prefix mismatch, records outcome, schedules TTL requeue
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("expected Requeue false, got true")
+		}
+		expectedRequeue := ttl - 30*time.Minute
+		if res.RequeueAfter != expectedRequeue {
+			t.Errorf("expected RequeueAfter %v, got %v", expectedRequeue, res.RequeueAfter)
+		}
+
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if updatedComp.Spec.ExtraSamples != 8 {
+			t.Errorf("expected spec.extraSamples 8, got %d", updatedComp.Spec.ExtraSamples)
+		}
+		if updatedComp.Status.ExtraSamplesApplied != 8 {
+			t.Errorf("expected status.extraSamplesApplied 8, got %d", updatedComp.Status.ExtraSamplesApplied)
+		}
+		if updatedComp.Status.Message != verdictMsg {
+			t.Errorf("expected status.message %q (preserved), got %q", verdictMsg, updatedComp.Status.Message)
+		}
+		if len(updatedComp.Status.HandledCommands) != 1 {
+			t.Fatalf("expected 1 handled command, got %d", len(updatedComp.Status.HandledCommands))
+		}
+		if updatedComp.Status.HandledCommands[0].Outcome != "unserviceable: artifact prefix mismatch" {
+			t.Errorf("expected handled command outcome 'unserviceable: artifact prefix mismatch', got %q", updatedComp.Status.HandledCommands[0].Outcome)
+		}
+		cond := meta.FindStatusCondition(updatedComp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples)
+		if cond == nil {
+			t.Fatalf("expected ConditionTypeExtraSamples on status.conditions")
+		}
+		if cond.Status != metav1.ConditionFalse {
+			t.Errorf("expected condition status False, got %s", cond.Status)
+		}
+		if cond.Reason != "ArtifactPrefixMismatch" {
+			t.Errorf("expected condition reason ArtifactPrefixMismatch, got %s", cond.Reason)
+		}
+		if !strings.Contains(cond.Message, "extra samples cannot be run: artifact prefix mismatch") {
+			t.Errorf("expected condition message to contain 'extra samples cannot be run: artifact prefix mismatch', got %q", cond.Message)
+		}
+		if !strings.Contains(cond.Message, "does not match commit prefix") {
+			t.Errorf("expected condition message to contain mismatch detail 'does not match commit prefix', got %q", cond.Message)
+		}
+
+		// Verify exactly one unserviceable note was posted to PR
+		var noteComments []string
+		for _, c := range server.Comments() {
+			if strings.Contains(c.Body, "Extra samples cannot be run: artifact prefix mismatch.") {
+				noteComments = append(noteComments, c.Body)
+			}
+		}
+		if len(noteComments) != 1 {
+			t.Fatalf("expected exactly 1 unserviceable note comment on PR, got %d: %+v", len(noteComments), server.Comments())
+		}
+		expectedNote := "Extra samples cannot be run: artifact prefix mismatch."
+		if noteComments[0] != expectedNote {
+			t.Errorf("expected comment body %q, got %q", expectedNote, noteComments[0])
+		}
+
+		commentsCountAfterR1 := len(server.Comments())
+
+		// Middle reconcile (age < TTL): advance 10m (age = 40m < 60m ttl).
+		// Ensures no duplicate comments are posted and remaining TTL requeue is returned.
+		currentNow = currentNow.Add(10 * time.Minute)
+		resMid, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected middle reconcile error: %v", err)
+		}
+		expectedMidRequeue := ttl - 40*time.Minute
+		if resMid.RequeueAfter != expectedMidRequeue {
+			t.Errorf("expected middle RequeueAfter %v, got %v", expectedMidRequeue, resMid.RequeueAfter)
+		}
+		if len(server.Comments()) != commentsCountAfterR1 {
+			t.Errorf("expected comments count unchanged (%d) on middle reconcile, got %d", commentsCountAfterR1, len(server.Comments()))
+		}
+
+		// Reconcile after TTL expires: advance clock past TTL (now was +40m since completion, advance by 25m so age = 65m > 60m ttl)
+		currentNow = currentNow.Add(25 * time.Minute)
+		res2, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error on expiry: %v", err)
+		}
+		if res2.RequeueAfter != 0 {
+			t.Errorf("expected RequeueAfter 0 on deletion, got %v", res2.RequeueAfter)
+		}
+
+		var expiredComp v1alpha1.Comparison
+		err = cl.Get(t.Context(), req.NamespacedName, &expiredComp)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected comparison to be deleted by TTL, got err: %v", err)
+		}
+	})
+
+	t.Run("TerminalComparisonForeignPrefixEarlierServedCommandsPreserved", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		foreignCandLog := "gs://old-bucket/runs/cand-sha/task1/inspect.json"
+		foreignBaseLog := "gs://old-bucket/runs/base-sha/task1/inspect.json"
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-served", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignBaseLog,
+					},
+				},
+			},
+		}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-served", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignCandLog,
+					},
+				},
+			},
+		}
+
+		compTime := metav1.NewTime(now.Add(-30 * time.Minute))
+		verdictMsg := "Evaluated 1 task(s): 1 improved"
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "comp-foreign-served",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-served"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-served"},
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     99,
+					HeadSHA:    "cand-sha",
+					BaseSHA:    "base-sha",
+				},
+				ExtraSamples: 4,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:               v1alpha1.ComparisonPhaseCompleted,
+				Verdict:             v1alpha1.ComparisonVerdictImproved,
+				Message:             verdictMsg,
+				CompletionTime:      &compTime,
+				ExtraSamplesApplied: 4,
+				Reporting: &v1alpha1.ComparisonReportingStatus{
+					CommentID: 7777,
+				},
+				HandledCommands: []v1alpha1.ComparisonHandledCommand{
+					{
+						CommentID:  1111,
+						Login:      "reviewer",
+						Requested:  4,
+						ReceivedAt: metav1.NewTime(now.Add(-40 * time.Minute)),
+						HandledAt:  &metav1.Time{Time: now.Add(-35 * time.Minute)},
+						Outcome:    "applied",
+					},
+				},
+				PendingCommands: []v1alpha1.ComparisonPendingCommand{
+					{
+						CommentID:  8888,
+						Login:      "reviewer",
+						Requested:  8,
+						ReceivedAt: metav1.NewTime(now),
+					},
+				},
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task1",
+						Label:      v1alpha1.ComparisonTaskLabelImproved,
+						SamplesRun: 8,
+					},
+				},
+				Batches: []v1alpha1.ComparisonBatchStatus{
+					{
+						Index:        0,
+						Phase:        v1alpha1.ComparisonPhaseCompleted,
+						CandidateRun: "cand-run-served",
+						BaselineRun:  "base-run-served",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseRun, candRun, comp, tokenSecret).
+			WithStatusSubresource(baseRun, candRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ComparisonTTL:       ttl,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+			Now: func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-foreign-served"}}
+
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("expected Requeue false, got true")
+		}
+
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if updatedComp.Spec.ExtraSamples != 12 {
+			t.Errorf("expected spec.extraSamples 12, got %d", updatedComp.Spec.ExtraSamples)
+		}
+		if updatedComp.Status.ExtraSamplesApplied != 12 {
+			t.Errorf("expected status.extraSamplesApplied 12, got %d", updatedComp.Status.ExtraSamplesApplied)
+		}
+		if len(updatedComp.Status.HandledCommands) != 2 {
+			t.Fatalf("expected 2 handled commands, got %d", len(updatedComp.Status.HandledCommands))
+		}
+		// Earlier command 1111 MUST remain "applied"
+		if updatedComp.Status.HandledCommands[0].CommentID != 1111 || updatedComp.Status.HandledCommands[0].Outcome != "applied" {
+			t.Errorf("expected command 1111 to remain 'applied', got %+v", updatedComp.Status.HandledCommands[0])
+		}
+		// New unserviceable command 8888 MUST be flipped
+		if updatedComp.Status.HandledCommands[1].CommentID != 8888 || updatedComp.Status.HandledCommands[1].Outcome != "unserviceable: artifact prefix mismatch" {
+			t.Errorf("expected command 8888 to be 'unserviceable: artifact prefix mismatch', got %+v", updatedComp.Status.HandledCommands[1])
+		}
+
+		// Verify exactly one unserviceable note was posted (for 8888, none for 1111)
+		var noteComments []string
+		for _, c := range server.Comments() {
+			if strings.Contains(c.Body, "Extra samples cannot be run: artifact prefix mismatch.") {
+				noteComments = append(noteComments, c.Body)
+			}
+		}
+		if len(noteComments) != 1 {
+			t.Fatalf("expected exactly 1 unserviceable note comment on PR, got %d: %+v", len(noteComments), server.Comments())
+		}
+	})
+
+	t.Run("TerminalComparisonForeignPrefixSpecEditPreservesServedCommand", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("ghp_test")},
+		}
+
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		foreignCandLog := "gs://old-bucket/runs/cand-sha/task1/inspect.json"
+		foreignBaseLog := "gs://old-bucket/runs/base-sha/task1/inspect.json"
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-specedit", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignBaseLog,
+					},
+				},
+			},
+		}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-specedit", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignCandLog,
+					},
+				},
+			},
+		}
+
+		compTime := metav1.NewTime(now.Add(-30 * time.Minute))
+		verdictMsg := "Evaluated 1 task(s): 1 improved"
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "comp-foreign-specedit",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-specedit"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-specedit"},
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     99,
+					HeadSHA:    "cand-sha",
+					BaseSHA:    "base-sha",
+				},
+				ExtraSamples: 12, // Spec edited to 12 while ExtraSamplesApplied was 4
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:               v1alpha1.ComparisonPhaseCompleted,
+				Verdict:             v1alpha1.ComparisonVerdictImproved,
+				Message:             verdictMsg,
+				CompletionTime:      &compTime,
+				ExtraSamplesApplied: 4,
+				Reporting: &v1alpha1.ComparisonReportingStatus{
+					CommentID: 7777,
+				},
+				HandledCommands: []v1alpha1.ComparisonHandledCommand{
+					{
+						CommentID:  1111,
+						Login:      "reviewer",
+						Requested:  4,
+						ReceivedAt: metav1.NewTime(now.Add(-40 * time.Minute)),
+						HandledAt:  &metav1.Time{Time: now.Add(-35 * time.Minute)}, // before CompletionTime
+						Outcome:    "applied",
+					},
+				},
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task1",
+						Label:      v1alpha1.ComparisonTaskLabelImproved,
+						SamplesRun: 8,
+					},
+				},
+				Batches: []v1alpha1.ComparisonBatchStatus{
+					{
+						Index:        0,
+						Phase:        v1alpha1.ComparisonPhaseCompleted,
+						CandidateRun: "cand-run-specedit",
+						BaselineRun:  "base-run-specedit",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseRun, candRun, comp, tokenSecret).
+			WithStatusSubresource(baseRun, candRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ComparisonTTL:       ttl,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+			Now: func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-foreign-specedit"}}
+
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("expected Requeue false, got true")
+		}
+
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if updatedComp.Spec.ExtraSamples != 12 {
+			t.Errorf("expected spec.extraSamples 12, got %d", updatedComp.Spec.ExtraSamples)
+		}
+		if updatedComp.Status.ExtraSamplesApplied != 12 {
+			t.Errorf("expected status.extraSamplesApplied 12, got %d", updatedComp.Status.ExtraSamplesApplied)
+		}
+		if updatedComp.Status.Message != verdictMsg {
+			t.Errorf("expected verdict message preserved %q, got %q", verdictMsg, updatedComp.Status.Message)
+		}
+		if len(updatedComp.Status.HandledCommands) != 1 {
+			t.Fatalf("expected 1 handled command, got %d", len(updatedComp.Status.HandledCommands))
+		}
+		// Stale served command 1111 MUST remain untouched as "applied"
+		if updatedComp.Status.HandledCommands[0].CommentID != 1111 || updatedComp.Status.HandledCommands[0].Outcome != "applied" {
+			t.Errorf("expected command 1111 to remain untouched 'applied', got %+v", updatedComp.Status.HandledCommands[0])
+		}
+
+		cond := meta.FindStatusCondition(updatedComp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples)
+		if cond == nil {
+			t.Fatalf("expected ConditionTypeExtraSamples to be present")
+		}
+		if cond.Status != metav1.ConditionFalse || cond.Reason != "ArtifactPrefixMismatch" {
+			t.Errorf("expected condition False/ArtifactPrefixMismatch, got %s/%s", cond.Status, cond.Reason)
+		}
+
+		// Verify zero unserviceable notes were posted to the PR because the extra samples came from a spec edit, not a new command
+		var noteComments []string
+		for _, c := range server.Comments() {
+			if strings.Contains(c.Body, "Extra samples cannot be run: artifact prefix mismatch.") {
+				noteComments = append(noteComments, c.Body)
+			}
+		}
+		if len(noteComments) != 0 {
+			t.Fatalf("expected 0 unserviceable note comments on PR, got %d: %+v", len(noteComments), noteComments)
+		}
+	})
+
+	t.Run("TerminalComparisonForeignPrefixPastTTLRequeuesForDelete", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		foreignCandLog := "gs://old-bucket/runs/cand-sha/task1/inspect.json"
+		foreignBaseLog := "gs://old-bucket/runs/base-sha/task1/inspect.json"
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-pastttl", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignBaseLog,
+					},
+				},
+			},
+		}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-pastttl", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignCandLog,
+					},
+				},
+			},
+		}
+
+		compTime := metav1.NewTime(now.Add(-2 * time.Hour))
+		verdictMsg := "Evaluated 1 task(s): 1 improved"
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "comp-foreign-pastttl",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-3 * time.Hour)),
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:     v1alpha1.ComparisonRunRef{Run: "base-run-pastttl"},
+				Candidate:    v1alpha1.ComparisonRunRef{Run: "cand-run-pastttl"},
+				ExtraSamples: 8,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:               v1alpha1.ComparisonPhaseCompleted,
+				Verdict:             v1alpha1.ComparisonVerdictImproved,
+				Message:             verdictMsg,
+				CompletionTime:      &compTime,
+				ExtraSamplesApplied: 4,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task1",
+						Label:      v1alpha1.ComparisonTaskLabelImproved,
+						SamplesRun: 8,
+					},
+				},
+				Batches: []v1alpha1.ComparisonBatchStatus{
+					{
+						Index:        0,
+						Phase:        v1alpha1.ComparisonPhaseCompleted,
+						CandidateRun: "cand-run-pastttl",
+						BaselineRun:  "base-run-pastttl",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseRun, candRun, comp).
+			WithStatusSubresource(baseRun, candRun, comp).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ComparisonTTL:       1 * time.Hour, // age (2h) > TTL (1h)
+			ControllerNamespace: "eval-runner",
+			Now:                 func() time.Time { return now },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-foreign-pastttl"}}
+
+		// Reconcile 1: should record unserviceable outcome and schedule a small RequeueAfter for deletion
+		res1, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error on reconcile 1: %v", err)
+		}
+		if res1.RequeueAfter != time.Second {
+			t.Errorf("expected small RequeueAfter (%v) when past TTL, got %v", time.Second, res1.RequeueAfter)
+		}
+
+		// Reconcile 2: early TTL check should now delete the object
+		res2, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error on reconcile 2: %v", err)
+		}
+		if res2.RequeueAfter != 0 {
+			t.Errorf("expected RequeueAfter 0 on deletion reconcile, got %v", res2.RequeueAfter)
+		}
+
+		var expiredComp v1alpha1.Comparison
+		err = cl.Get(t.Context(), req.NamespacedName, &expiredComp)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected comparison to be deleted by early TTL check, got err: %v", err)
+		}
+	})
+
+	t.Run("TerminalComparisonForeignPrefixDirectExtraSamplesDeletedByTTL", func(t *testing.T) {
+		fakeGCS := fakes.NewFakeStorageClient()
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		if err != nil {
+			t.Fatalf("Failed to create GCS sink: %v", err)
+		}
+
+		foreignCandLog := "gs://old-bucket/runs/cand-sha/task1/inspect.json"
+		foreignBaseLog := "gs://old-bucket/runs/base-sha/task1/inspect.json"
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-direct", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignBaseLog,
+					},
+				},
+			},
+		}
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-direct", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-sha"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "task1",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: foreignCandLog,
+					},
+				},
+			},
+		}
+
+		compTime := metav1.NewTime(now.Add(-30 * time.Minute))
+		verdictMsg := "Evaluated 1 task(s): 1 improved"
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "comp-foreign-direct",
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:     v1alpha1.ComparisonRunRef{Run: "base-run-direct"},
+				Candidate:    v1alpha1.ComparisonRunRef{Run: "cand-run-direct"},
+				ExtraSamples: 8,
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:               v1alpha1.ComparisonPhaseCompleted,
+				Verdict:             v1alpha1.ComparisonVerdictImproved,
+				Message:             verdictMsg,
+				CompletionTime:      &compTime,
+				ExtraSamplesApplied: 0,
+				Tasks: []v1alpha1.ComparisonTaskStatus{
+					{
+						ID:         "task1",
+						Label:      v1alpha1.ComparisonTaskLabelImproved,
+						SamplesRun: 8,
+					},
+				},
+				Batches: []v1alpha1.ComparisonBatchStatus{
+					{
+						Index:        0,
+						Phase:        v1alpha1.ComparisonPhaseCompleted,
+						CandidateRun: "cand-run-direct",
+						BaselineRun:  "base-run-direct",
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseRun, candRun, comp).
+			WithStatusSubresource(baseRun, candRun, comp).
+			Build()
+
+		currentNow := now
+		reconciler := &ComparisonReconciler{
+			Client:        cl,
+			Scheme:        scheme,
+			ArtifactSink:  sink,
+			ComparisonTTL: ttl,
+			Now:           func() time.Time { return currentNow },
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-foreign-direct"}}
+
+		// Reconcile 1: detects prefix mismatch, sets extraSamplesApplied = 8, preserves verdict message, does not requeue
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error: %v", err)
+		}
+		if res.Requeue {
+			t.Errorf("expected Requeue false, got true")
+		}
+		expectedRequeue := ttl - 30*time.Minute
+		if res.RequeueAfter != expectedRequeue {
+			t.Errorf("expected RequeueAfter %v, got %v", expectedRequeue, res.RequeueAfter)
+		}
+
+		var updatedComp v1alpha1.Comparison
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedComp); err != nil {
+			t.Fatalf("failed to get comparison: %v", err)
+		}
+		if updatedComp.Status.ExtraSamplesApplied != 8 {
+			t.Errorf("expected status.extraSamplesApplied 8, got %d", updatedComp.Status.ExtraSamplesApplied)
+		}
+		if updatedComp.Status.Message != verdictMsg {
+			t.Errorf("expected status.message %q (preserved), got %q", verdictMsg, updatedComp.Status.Message)
+		}
+		cond := meta.FindStatusCondition(updatedComp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples)
+		if cond == nil {
+			t.Fatalf("expected ConditionTypeExtraSamples condition on status")
+		}
+		if cond.Status != metav1.ConditionFalse {
+			t.Errorf("expected condition status False, got %s", cond.Status)
+		}
+
+		// Reconcile 2 (after TTL expires): advance clock past TTL
+		currentNow = currentNow.Add(45 * time.Minute)
+		res2, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("unexpected reconcile error on expiry: %v", err)
+		}
+		if res2.RequeueAfter != 0 {
+			t.Errorf("expected RequeueAfter 0 on deletion, got %v", res2.RequeueAfter)
+		}
+
+		var expiredComp v1alpha1.Comparison
+		err = cl.Get(t.Context(), req.NamespacedName, &expiredComp)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected comparison to be deleted by TTL, got err: %v", err)
 		}
 	})
 }

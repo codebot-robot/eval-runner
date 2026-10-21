@@ -36,6 +36,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -641,6 +642,34 @@ func (r *ComparisonReconciler) comparisonAge(comp *v1alpha1.Comparison) (time.Du
 		return 0, false
 	}
 	return r.now().Sub(referenceTime), true
+}
+
+func isUnservicedHandledCommand(h *v1alpha1.ComparisonHandledCommand, completionTime *metav1.Time) bool {
+	if h.Outcome != "applied" || h.HandledAt == nil {
+		return false
+	}
+	if completionTime == nil {
+		return true
+	}
+	return !h.HandledAt.Before(completionTime)
+}
+
+func (r *ComparisonReconciler) postUnserviceableCommandNote(ctx context.Context, comp *v1alpha1.Comparison, reason string) error {
+	if comp == nil || comp.Spec.PullRequest == nil {
+		return nil
+	}
+	ghClient, err := r.getGitHubClient(ctx)
+	if err != nil {
+		return err
+	}
+	if ghClient == nil {
+		return nil
+	}
+	reporter := github.NewReporter(ghClient, github.ReporterOptions{
+		UIBaseURL:          r.UIBaseURL,
+		InconclusivePolicy: r.InconclusivePolicy,
+	})
+	return reporter.PostUnserviceableNote(ctx, comp, reason)
 }
 
 // SetupWithManager sets up the controller with the Manager and watches Runs.
@@ -1864,6 +1893,64 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					mismatchMsg = fmt.Sprintf("baseline log path %q does not match commit prefix %q", baseTask.LogPath, basePrefix)
 				}
 				logger.Error(nil, mismatchMsg, "task", taskID)
+
+				if isTerminalComparisonPhase(comp.Status.Phase) {
+					delta := comp.Spec.ExtraSamples - comp.Status.ExtraSamplesApplied
+					hasPRCommentSource := false
+					for i := range comp.Status.HandledCommands {
+						h := &comp.Status.HandledCommands[i]
+						if isUnservicedHandledCommand(h, comp.Status.CompletionTime) {
+							if h.CommentID != 0 {
+								hasPRCommentSource = true
+							}
+						}
+					}
+
+					conditionMissing := meta.FindStatusCondition(comp.Status.Conditions, v1alpha1.ConditionTypeExtraSamples) == nil
+					if delta > 0 || conditionMissing {
+						condMsg := fmt.Sprintf("extra samples cannot be run: artifact prefix mismatch (%s)", mismatchMsg)
+						if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
+							if status.ExtraSamplesApplied < comp.Spec.ExtraSamples {
+								status.ExtraSamplesApplied = comp.Spec.ExtraSamples
+							}
+							for i := range status.HandledCommands {
+								h := &status.HandledCommands[i]
+								if isUnservicedHandledCommand(h, status.CompletionTime) {
+									h.Outcome = "unserviceable: artifact prefix mismatch"
+								}
+							}
+							meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+								Type:               v1alpha1.ConditionTypeExtraSamples,
+								Status:             metav1.ConditionFalse,
+								Reason:             "ArtifactPrefixMismatch",
+								Message:            condMsg,
+								ObservedGeneration: comp.Generation,
+							})
+						}); statusErr != nil {
+							logger.Error(statusErr, "failed to update terminal comparison status for unserviceable extra samples", "comparison", comp.Name)
+							return ctrl.Result{}, statusErr
+						}
+					}
+
+					if hasPRCommentSource {
+						if postErr := r.postUnserviceableCommandNote(ctx, &comp, "artifact prefix mismatch"); postErr != nil {
+							logger.Info("warning: failed to post unserviceable command note to PR", "pr", comp.Spec.PullRequest.Number, "err", postErr)
+						}
+					}
+
+					var result ctrl.Result
+					if r.ComparisonTTL > 0 {
+						if age, ok := r.comparisonAge(&comp); ok {
+							if age < r.ComparisonTTL {
+								result.RequeueAfter = r.ComparisonTTL - age
+							} else {
+								result.RequeueAfter = time.Second
+							}
+						}
+					}
+					return result, nil
+				}
+
 				err := fmt.Errorf("%s", mismatchMsg)
 				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
 					status.Message = mismatchMsg
