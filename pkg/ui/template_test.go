@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"html"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2888,6 +2889,26 @@ func TestTemplateRenderingSeriesDetailGolden(t *testing.T) {
 	}
 
 	assertGolden(t, "series_detail.golden.html", buf.String())
+}
+
+func TestTemplateRenderingRepoSeriesGolden(t *testing.T) {
+	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	view := sampleSeriesDetailView()
+	view.Repo = ref
+	view.BackLink = "/github.com/gke-labs/eval-runner/series"
+	for i := range view.Tasks {
+		view.Tasks[i].Link = "/github.com/gke-labs/eval-runner/series/main?task=" + url.QueryEscape(view.Tasks[i].ID)
+	}
+	for i := range view.Items {
+		view.Items[i].RunLink = "/github.com/gke-labs/eval-runner/runs/" + view.Items[i].RunName
+	}
+
+	var buf bytes.Buffer
+	if err := tmplSeriesDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo series template: %v", err)
+	}
+
+	assertGolden(t, "repo_series.golden.html", buf.String())
 }
 func TestFormatLogURL(t *testing.T) {
 	tests := []struct {
