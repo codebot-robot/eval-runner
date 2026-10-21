@@ -77,6 +77,41 @@ func Proportion(successes, n int, confidence float64) Estimate {
 	}
 }
 
+// TaskCounts represents sample and success counts for an evaluated task.
+type TaskCounts struct {
+	Successes int
+	Samples   int
+}
+
+// PooledWilson computes the pooled Wilson score interval over summed successes and samples
+// across multiple tasks (e.g. within a cohort or the entire suite).
+//
+// Why pooled Wilson:
+// Within an evaluation suite or cohort, tasks share a common Bernoulli outcome model per sample.
+// Summing successes and samples across cohort tasks weights tasks proportionally to their sample counts
+// and avoids distortion from high-variance small-sample tasks. The Wilson score interval inverts the
+// binomial score test on the pooled proportion, respecting the [0, 1] parameter boundary and providing
+// accurate coverage even with small sample sizes or extreme success rates.
+func PooledWilson(tasks []TaskCounts, confidence float64) Estimate {
+	var totalSuccesses, totalSamples int
+	for _, t := range tasks {
+		if t.Successes > 0 {
+			totalSuccesses += t.Successes
+		}
+		if t.Samples > 0 {
+			totalSamples += t.Samples
+		}
+	}
+	return PooledWilsonFromTotals(totalSuccesses, totalSamples, confidence)
+}
+
+// PooledWilsonFromTotals computes the pooled Wilson score interval from total successes and total samples.
+func PooledWilsonFromTotals(totalSuccesses, totalSamples int, confidence float64) Estimate {
+	est := Proportion(totalSuccesses, totalSamples, confidence)
+	est.Method = "pooled-wilson"
+	return est
+}
+
 // Mean computes the sample mean and Student's t-distribution confidence interval
 // for non-binary scores (such as Inspect partial credit scores in [0, 1]).
 // If confidence is not in (0, 1), it defaults to DefaultConfidence (0.95).

@@ -114,3 +114,56 @@ func TestMeanStudentT(t *testing.T) {
 		t.Errorf("Mean upper CI = %v, want ~%v", est.CI.Upper, expectedUpper)
 	}
 }
+
+func TestPooledWilson(t *testing.T) {
+	// Acceptance criterion:
+	// Pooled Wilson sums successes and samples across tasks and calculates Wilson score interval.
+	tasks := []TaskCounts{
+		{Successes: 8, Samples: 10},
+		{Successes: 7, Samples: 10},
+	}
+	est := PooledWilson(tasks, 0.95)
+	if math.Abs(est.Point-0.75) > 1e-9 {
+		t.Errorf("PooledWilson point = %v, want 0.75", est.Point)
+	}
+	if est.N != 20 {
+		t.Errorf("PooledWilson N = %d, want 20", est.N)
+	}
+	if est.Method != "pooled-wilson" {
+		t.Errorf("PooledWilson Method = %q, want 'pooled-wilson'", est.Method)
+	}
+
+	expectedEst := Proportion(15, 20, 0.95)
+	if math.Abs(est.CI.Lower-expectedEst.CI.Lower) > 1e-9 {
+		t.Errorf("PooledWilson lower = %v, want %v", est.CI.Lower, expectedEst.CI.Lower)
+	}
+	if math.Abs(est.CI.Upper-expectedEst.CI.Upper) > 1e-9 {
+		t.Errorf("PooledWilson upper = %v, want %v", est.CI.Upper, expectedEst.CI.Upper)
+	}
+
+	// Direct total call
+	estTotals := PooledWilsonFromTotals(15, 20, 0.95)
+	if estTotals.Point != est.Point || estTotals.CI != est.CI || estTotals.Method != est.Method {
+		t.Errorf("PooledWilsonFromTotals mismatch: got %+v, want %+v", estTotals, est)
+	}
+
+	// Zero samples
+	estZero := PooledWilson([]TaskCounts{}, 0.95)
+	if estZero.Point != 0.0 || estZero.N != 0 || estZero.CI.Lower != 0.0 || estZero.CI.Upper != 1.0 {
+		t.Errorf("PooledWilson zero samples = %+v, want [0, 1] point 0", estZero)
+	}
+	if estZero.Method != "pooled-wilson" {
+		t.Errorf("PooledWilson zero samples method = %q, want 'pooled-wilson'", estZero.Method)
+	}
+
+	// Extreme 0/20 and 20/20
+	estNone := PooledWilson([]TaskCounts{{Successes: 0, Samples: 10}, {Successes: 0, Samples: 10}}, 0.95)
+	if estNone.Point != 0.0 || estNone.CI.Lower != 0.0 || estNone.CI.Upper <= 0.0 {
+		t.Errorf("PooledWilson 0/20 = %+v", estNone)
+	}
+
+	estAll := PooledWilson([]TaskCounts{{Successes: 10, Samples: 10}, {Successes: 10, Samples: 10}}, 0.95)
+	if estAll.Point != 1.0 || estAll.CI.Upper != 1.0 || estAll.CI.Lower >= 1.0 {
+		t.Errorf("PooledWilson 20/20 = %+v", estAll)
+	}
+}
