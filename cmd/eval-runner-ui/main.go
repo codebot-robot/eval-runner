@@ -31,6 +31,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/ui"
+	"github.com/gke-labs/eval-runner/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -58,12 +59,21 @@ func main() {
 	var namespace string
 	var artifactBucket string
 	var artifactDir string
+	var showVersion bool
 
 	flag.StringVar(&listenAddr, "listen-addr", ":8080", "The TCP address for the HTTP server to listen on")
 	flag.StringVar(&namespace, "namespace", defaultNs, "Default Kubernetes namespace to query for Runs and Comparisons")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "Optional GCS bucket for reading artifacts")
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Optional local filesystem directory for reading artifacts")
+	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version.String())
+		os.Exit(0)
+	}
+
+	log.Printf("starting eval-runner-ui %s on %s (namespace %s)", version.String(), listenAddr, namespace)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -163,6 +173,7 @@ func main() {
 		ArtifactSink:     sink,
 		InitialBucket:    bucket,
 		InitialDir:       dir,
+		Version:          version.String(),
 	})
 	defer func() {
 		if err := server.ArtifactSink().Close(); err != nil {

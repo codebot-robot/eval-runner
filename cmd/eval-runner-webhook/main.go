@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/version"
 	"github.com/gke-labs/eval-runner/pkg/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -60,6 +62,7 @@ func main() {
 	var webhookRepositories string
 	var workers int
 	var queueSize int
+	var showVersion bool
 
 	flag.StringVar(&listenAddr, "listen-addr", webhook.DefaultListenAddr, "TCP address for HTTP webhook server to listen on")
 	flag.StringVar(&namespace, "namespace", defaultNs, "Kubernetes namespace to manage Runs and Comparisons in")
@@ -74,7 +77,15 @@ func main() {
 	flag.StringVar(&webhookRepositories, "webhook-repositories", "", "Comma-separated allow-list of repositories (owner/repo)")
 	flag.IntVar(&workers, "workers", webhook.DefaultWorkers, "Number of concurrent worker goroutines")
 	flag.IntVar(&queueSize, "queue-size", webhook.DefaultQueueSize, "Queue buffer size for incoming webhook events")
+	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version.String())
+		os.Exit(0)
+	}
+
+	log.Printf("starting eval-runner-webhook %s on %s (namespace %s)", version.String(), listenAddr, namespace)
 
 	explicit := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
