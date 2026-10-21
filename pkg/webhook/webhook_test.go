@@ -1322,7 +1322,7 @@ func TestResolveWebhookConfig_DefaultBudgetUSD(t *testing.T) {
 		t.Errorf("expected DefaultBudgetUSD 0.50, got %v", cfg.DefaultBudgetUSD)
 	}
 
-	// 2. ConfigMap sentinel "none" disables default budget
+	// 2. ConfigMap sentinel "none" or "0" disables default budget (unlimited)
 	cmDisabled := &corev1.ConfigMap{
 		Data: map[string]string{
 			ConfigMapKeyDefaultBudgetUSD: "none",
@@ -1334,6 +1334,19 @@ func TestResolveWebhookConfig_DefaultBudgetUSD(t *testing.T) {
 	}
 	if cfgDisabled.DefaultBudgetUSD != nil {
 		t.Errorf("expected DefaultBudgetUSD nil for 'none', got %v", cfgDisabled.DefaultBudgetUSD)
+	}
+
+	cmZero := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyDefaultBudgetUSD: "0",
+		},
+	}
+	cfgZero, err := ResolveWebhookConfig(cmZero, RawWebhookFlags{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgZero.DefaultBudgetUSD != nil {
+		t.Errorf("expected DefaultBudgetUSD nil for '0', got %v", cfgZero.DefaultBudgetUSD)
 	}
 
 	// 3. Negative budget in ConfigMap returns error
@@ -1370,6 +1383,21 @@ func TestResolveWebhookConfig_DefaultBudgetUSD(t *testing.T) {
 	}
 	if cfgFlag.DefaultBudgetUSD == nil || *cfgFlag.DefaultBudgetUSD != 1.25 {
 		t.Errorf("expected explicit flag to override defaultBudgetUSD, got %v", cfgFlag.DefaultBudgetUSD)
+	}
+
+	zeroFlag := 0.0
+	flagsZero := RawWebhookFlags{
+		DefaultBudgetUSD: &zeroFlag,
+		Explicit: map[string]bool{
+			"default-budget-usd": true,
+		},
+	}
+	cfgZeroFlag, err := ResolveWebhookConfig(cm, flagsZero, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgZeroFlag.DefaultBudgetUSD != nil {
+		t.Errorf("expected explicit flag 0 to unset defaultBudgetUSD, got %v", cfgZeroFlag.DefaultBudgetUSD)
 	}
 }
 

@@ -262,7 +262,11 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 						return Config{}, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be a non-negative number",
 							ConfigMapKeyDefaultBudgetUSD, val, cm.Namespace, cm.Name)
 					}
-					cfg.DefaultBudgetUSD = &budget
+					if budget > 0 {
+						cfg.DefaultBudgetUSD = &budget
+					} else {
+						cfg.DefaultBudgetUSD = nil
+					}
 				}
 			}
 		}
@@ -299,7 +303,11 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 		cfg.DefaultMaxSamplesPerTask = *flags.DefaultMaxSamplesPerTask
 	}
 	if flags.IsExplicit("default-budget-usd") && flags.DefaultBudgetUSD != nil {
-		cfg.DefaultBudgetUSD = flags.DefaultBudgetUSD
+		if *flags.DefaultBudgetUSD > 0 {
+			cfg.DefaultBudgetUSD = flags.DefaultBudgetUSD
+		} else {
+			cfg.DefaultBudgetUSD = nil
+		}
 	}
 	if flags.IsExplicit("webhook-repositories") {
 		cfg.WebhookRepositories = ParseRepositoryList(flags.WebhookRepositories)
