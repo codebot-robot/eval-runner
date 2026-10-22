@@ -646,3 +646,262 @@ func TestBuildRepoSuiteChartSVG_DimensionHarness(t *testing.T) {
 			lines[0].Color, lines[1].Color, svg.Ticks[0].Stroke, svg.Ticks[1].Stroke)
 	}
 }
+
+func TestOverviewAndSuitePageAgreeOnSuiteScore(t *testing.T) {
+	scheme := newTestScheme(t)
+	t1 := time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
+
+	rate1A := 0.70
+	rate1B := 0.80
+	rate2A := 0.90
+	rate2B := 0.70
+	rateOther := 0.50
+
+	run1 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-1111111",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(t1),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": t1.Format(time.RFC3339),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "1111111111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "docs/eval-a", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 7, SuccessRate: &rate1A},
+				{ID: "docs/eval-b", Phase: v1alpha1.TaskPhaseCompleted, Samples: 20, Successes: 16, SuccessRate: &rate1B},
+			},
+		},
+	}
+
+	run2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-2222222",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(t2),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": t2.Format(time.RFC3339),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "2222222222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "docs/eval-a", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 9, SuccessRate: &rate2A},
+				{ID: "docs/eval-b", Phase: v1alpha1.TaskPhaseCompleted, Samples: 20, Successes: 14, SuccessRate: &rate2B},
+				{ID: "triage/issue-eval", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 5, SuccessRate: &rateOther},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run1, run2).Build()
+	server := NewServer(Config{Client: cl, DefaultNamespace: "eval-runner"})
+
+	// Query Overview page
+	reqOverview := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner", nil)
+	wOverview := httptest.NewRecorder()
+	server.ServeHTTP(wOverview, reqOverview)
+	if wOverview.Code != http.StatusOK {
+		t.Fatalf("overview expected 200 OK, got %d: %s", wOverview.Code, wOverview.Body.String())
+	}
+	bodyOverview := wOverview.Body.String()
+
+	// Query Suite Detail page
+	reqSuite := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/evals/docs", nil)
+	wSuite := httptest.NewRecorder()
+	server.ServeHTTP(wSuite, reqSuite)
+	if wSuite.Code != http.StatusOK {
+		t.Fatalf("suite detail expected 200 OK, got %d: %s", wSuite.Code, wSuite.Body.String())
+	}
+	bodySuite := wSuite.Body.String()
+
+	// Expected values for docs suite:
+	// - eval-a = 9/10 = 0.90
+	// - eval-b = 14/20 = 0.70
+	// - Suite score mean = (0.90 + 0.70) / 2 = 0.80 (distinct from both evals)
+	// - Pooled Wilson CI from (9+14)/(10+20) = 23/30 at 95% = [0.59, 0.88]
+	// - Delta vs commit 1 (where eval-a=7/10, eval-b=16/20 -> mean=0.75, pooled=23/30):
+	//   Point delta = 0.80 - 0.75 = +0.05, 95% CI = [−0.17, +0.24]
+	const (
+		expectedScore     = "0.80"
+		expectedCI        = "[0.59, 0.88]"
+		expectedDelta     = "Δ +0.05 [−0.17, +0.24]"
+		expectedHTMLDelta = "Δ &#43;0.05 [−0.17, &#43;0.24]"
+	)
+
+	// 1. Assert Overview suite-row cells (not whole body) equal the expected literals
+	idx := strings.Index(bodyOverview, `/evals/docs`)
+	if idx == -1 {
+		t.Fatalf("expected overview to contain suite row for docs:\n%s", bodyOverview)
+	}
+	rowStart := strings.LastIndex(bodyOverview[:idx], `<tr class="suite-row">`)
+	if rowStart == -1 {
+		t.Fatalf("could not find suite row start before docs link")
+	}
+	rowEnd := strings.Index(bodyOverview[idx:], "</tr>")
+	if rowEnd == -1 {
+		t.Fatalf("could not find suite row end after docs link")
+	}
+	docsRow := bodyOverview[rowStart : idx+rowEnd]
+
+	expectedRowScoreSpan := `<span class="mono" style="font-weight:600">` + expectedScore + `</span>`
+	if !strings.Contains(docsRow, expectedRowScoreSpan) {
+		t.Errorf("expected overview suite row to contain score %s, got row:\n%s", expectedRowScoreSpan, docsRow)
+	}
+	if !strings.Contains(docsRow, expectedCI) {
+		t.Errorf("expected overview suite row to contain CI %s, got row:\n%s", expectedCI, docsRow)
+	}
+	if !strings.Contains(docsRow, expectedDelta) && !strings.Contains(docsRow, expectedHTMLDelta) {
+		t.Errorf("expected overview suite row to contain delta %s, got row:\n%s", expectedHTMLDelta, docsRow)
+	}
+
+	// 2. Assert Suite detail headline contains the EXACT SAME literals
+	expectedHeadlineScore := `<span class="headline-score">` + expectedScore + `</span>`
+	if !strings.Contains(bodySuite, expectedHeadlineScore) {
+		t.Errorf("expected suite detail to contain headline score %s, got body:\n%s", expectedHeadlineScore, bodySuite)
+	}
+	expectedHeadlineCI := `<span class="headline-ci">` + expectedCI + `</span>`
+	if !strings.Contains(bodySuite, expectedHeadlineCI) {
+		t.Errorf("expected suite detail to contain headline CI %s, got body:\n%s", expectedHeadlineCI, bodySuite)
+	}
+	if !strings.Contains(bodySuite, expectedDelta) && !strings.Contains(bodySuite, expectedHTMLDelta) {
+		t.Errorf("expected suite detail to contain delta %s, got body:\n%s", expectedHTMLDelta, bodySuite)
+	}
+}
+
+func TestRepoSuiteDetail_AtCommitHeader_PicksScoreCommit(t *testing.T) {
+	scheme := newTestScheme(t)
+	t1 := time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 10, 20, 3, 0, 0, 0, time.UTC)
+
+	rate1 := 0.80
+	rate2 := 0.60
+
+	// Commit 1 has completed observations for suite "docs"
+	run1 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-1111111",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(t1),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": t1.Format(time.RFC3339),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "1111111111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "docs/readme", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 8, SuccessRate: &rate1},
+			},
+		},
+	}
+
+	// Commit 2 is a newer run on main for a DIFFERENT suite ("triage")
+	run2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-2222222",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(t2),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": t2.Format(time.RFC3339),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "2222222222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "triage/lookup", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 6, SuccessRate: &rate2},
+			},
+		},
+	}
+
+	// Commit 3 is an even newer run on main where tasks for "docs" are not completed (samples = 0)
+	run3 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "base-3333333",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(t3),
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "main",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": t3.Format(time.RFC3339),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "3333333333333333333333333333333333333333",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "docs/readme", Phase: v1alpha1.TaskPhasePending, Samples: 0},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run1, run2, run3).Build()
+	server := NewServer(Config{Client: cl, DefaultNamespace: "eval-runner"})
+
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/evals/docs", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+
+	// Assert that "at commit" in the suite header shows the commit the score came from (1111111),
+	// NOT the newer commit with another suite (2222222) or the newer run without completed samples (3333333).
+	expectedHeader := `<span>at commit <span class="mono">1111111</span></span>`
+	if !strings.Contains(body, expectedHeader) {
+		t.Errorf("expected suite header to contain %q, but body was:\n%s", expectedHeader, body)
+	}
+
+	if strings.Contains(body, `at commit <span class="mono">2222222</span>`) {
+		t.Errorf("suite header incorrectly picked newer commit 2222222 from a different suite")
+	}
+	if strings.Contains(body, `at commit <span class="mono">3333333</span>`) {
+		t.Errorf("suite header incorrectly picked newest run commit 3333333 with no completed samples")
+	}
+}

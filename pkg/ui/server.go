@@ -745,22 +745,14 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 	}
 	cohortFilter := strings.TrimSpace(r.URL.Query().Get("cohort"))
 
-	// Single list call for Runs in namespace
-	var allRuns v1alpha1.RunList
-	if err := s.readerFor(ns).List(ctx, &allRuns, client.InNamespace(ns)); err != nil {
+	obs, err := s.collectRepoObservations(ctx, ns, ref, branch, cohortFilter)
+	if err != nil {
 		if apierrors.IsForbidden(err) {
 			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
 		}
 		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
 		return
-	}
-
-	var totalRuns int
-	for i := range allRuns.Items {
-		if rRef, ok := runRepoRef(&allRuns.Items[i]); ok && rRef.Equal(ref) {
-			totalRuns++
-		}
 	}
 
 	var compList v1alpha1.ComparisonList
@@ -781,9 +773,7 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 	}
 	totalPulls := len(groupPullRequests(compList.Items, &ref))
 
-	matched := collectSeries(allRuns.Items, ref, branch, cohortFilter)
-
-	if len(matched) == 0 {
+	if len(obs.MatchedSeries) == 0 || len(obs.Observations) == 0 {
 		view := RepoOverviewView{
 			ActiveTab:             NavTabOverview,
 			Repo:                  ref,
@@ -791,7 +781,7 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 			LinkNamespace:         linkNS,
 			Branch:                branch,
 			Cohort:                cohortFilter,
-			TotalRunsCount:        totalRuns,
+			TotalRunsCount:        obs.TotalRuns,
 			RunsLink:              repoLink(ref, "/runs", linkNS),
 			TotalComparisonsCount: totalComparisons,
 			ComparisonsLink:       repoLink(ref, "/comparisons", linkNS),
@@ -806,474 +796,68 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 		return
 	}
 
-	// Link to suite detail page when the route exists; false until suite page is registered
 	const suiteRouteExists = true
 
-	// Collect distinct commits in chronological order
-	type commitEntry struct {
-		sha        string
-		commitTime time.Time
-	}
-	var orderedCommits []commitEntry
-	seenCommits := make(map[string]bool)
-	for _, sr := range matched {
-		c := runCommitSHA(sr.run)
-		if c == "" {
-			continue
-		}
-		if !seenCommits[c] {
-			seenCommits[c] = true
-			orderedCommits = append(orderedCommits, commitEntry{
-				sha:        c,
-				commitTime: sr.commitTime,
-			})
-		}
-	}
-
 	// For sparklines, use up to the last 20 main-branch commits
-	sparklineCommits := orderedCommits
+	sparklineCommits := obs.Commits
 	if len(sparklineCommits) > 20 {
 		sparklineCommits = sparklineCommits[len(sparklineCommits)-20:]
 	}
 
-	type obsData struct {
-		run        *v1alpha1.Run
-		task       *v1alpha1.TaskStatus
-		commitSHA  string
-		commitTime time.Time
-		successes  int
-		samples    int
-	}
-
-	// Group observations by task ID and commit SHA
-	evalObsByCommit := make(map[string]map[string][]obsData)
-	evalSet := make(map[string]bool)
-	evalSuites := make(map[string]string)
-	suitesMap := make(map[string]map[string]bool)
-
-	// Collect all completed task observations (only tasks with Samples > 0)
-	for _, sr := range matched {
-		run := sr.run
-		commit := runCommitSHA(run)
-		if commit == "" {
-			continue
-		}
-		for idx := range run.Status.Tasks {
-			t := &run.Status.Tasks[idx]
-			if t.ID == "" {
-				continue
-			}
-			if t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
-				evalSet[t.ID] = true
-				suite := SuiteOf(t.ID)
-				evalSuites[t.ID] = suite
-				if suitesMap[suite] == nil {
-					suitesMap[suite] = make(map[string]bool)
-				}
-				suitesMap[suite][t.ID] = true
-
-				samples := t.Samples
-				succ := t.Successes
-				if succ == 0 && t.SuccessRate != nil && *t.SuccessRate > 0 {
-					succ = int(math.Round(*t.SuccessRate * float64(samples)))
-				}
-
-				if evalObsByCommit[t.ID] == nil {
-					evalObsByCommit[t.ID] = make(map[string][]obsData)
-				}
-				evalObsByCommit[t.ID][commit] = append(evalObsByCommit[t.ID][commit], obsData{
-					run:        run,
-					task:       t,
-					commitSHA:  commit,
-					commitTime: sr.commitTime,
-					successes:  succ,
-					samples:    samples,
-				})
-			}
-		}
-	}
-
-	if len(evalSet) == 0 {
-		view := RepoOverviewView{
-			ActiveTab:             NavTabOverview,
-			Repo:                  ref,
-			Namespace:             ns,
-			LinkNamespace:         linkNS,
-			Branch:                branch,
-			Cohort:                cohortFilter,
-			TotalRunsCount:        totalRuns,
-			RunsLink:              repoLink(ref, "/runs", linkNS),
-			TotalComparisonsCount: totalComparisons,
-			ComparisonsLink:       repoLink(ref, "/comparisons", linkNS),
-			TotalPullsCount:       totalPulls,
-			PullsLink:             repoLink(ref, "/pulls", linkNS),
-			IsEmpty:               true,
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := RenderRepoOverview(w, view); err != nil {
-			httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
-		}
-		return
-	}
-
-	var sortedSuiteNames []string
-	for sName := range suitesMap {
-		sortedSuiteNames = append(sortedSuiteNames, sName)
-	}
-	sort.Strings(sortedSuiteNames)
-
-	type evalScoreResult struct {
-		row         RepoOverviewEvalRow
-		point       float64
-		newestTasks []stats.TaskCounts
-		newestRun   *v1alpha1.Run
-		newestTime  time.Time
-	}
-
-	type suiteScoreResult struct {
-		row         RepoOverviewSuiteRow
-		point       float64
-		newestTasks []stats.TaskCounts
-		newestTime  time.Time
-	}
+	scores := suiteScores(obs)
 
 	var suiteRows []RepoOverviewSuiteRow
-	var allSuitesResults []suiteScoreResult
-
-	for _, sName := range sortedSuiteNames {
-		var evalIDsInSuite []string
-		for eID := range suitesMap[sName] {
-			evalIDsInSuite = append(evalIDsInSuite, eID)
-		}
-		sort.Strings(evalIDsInSuite)
-
+	for _, sName := range scores.SortedSuites {
+		sScore := scores.Suites[sName]
 		var evalRowsInSuite []RepoOverviewEvalRow
-		var evalResultsInSuite []evalScoreResult
 
-		for _, eID := range evalIDsInSuite {
-			// Find commits where eID has observations, in chronological order
-			var evalCommits []commitEntry
-			for _, c := range orderedCommits {
-				if len(evalObsByCommit[eID][c.sha]) > 0 {
-					evalCommits = append(evalCommits, c)
-				}
-			}
-
-			if len(evalCommits) == 0 {
-				continue
-			}
-
-			newestCommit := evalCommits[len(evalCommits)-1]
-			newestObs := evalObsByCommit[eID][newestCommit.sha]
-
-			var newestTasks []stats.TaskCounts
-			var latestRun *v1alpha1.Run
-			var latestTask *v1alpha1.TaskStatus
-			var newestTime time.Time
-			for _, o := range newestObs {
-				newestTasks = append(newestTasks, stats.TaskCounts{
-					Successes: o.successes,
-					Samples:   o.samples,
-				})
-				latestRun = o.run
-				latestTask = o.task
-				if o.commitTime.After(newestTime) {
-					newestTime = o.commitTime
-				}
-			}
-			if newestTime.IsZero() && latestRun != nil {
-				newestTime = latestRun.CreationTimestamp.Time
-			}
-
-			evalEst := stats.PooledWilson(newestTasks, 0.95)
-			evalScoreStr := fmt.Sprintf("%.2f", evalEst.Point)
-			evalCIStr := fmt.Sprintf("[%.2f, %.2f]", evalEst.CI.Lower, evalEst.CI.Upper)
-
-			// Delta vs previous commit for this eval
-			var evalDeltaStr string = "—"
-			var evalDeltaClass string
-			var evalHasDelta bool
-			if len(evalCommits) > 1 {
-				prevCommit := evalCommits[len(evalCommits)-2]
-				prevObs := evalObsByCommit[eID][prevCommit.sha]
-				var prevTasks []stats.TaskCounts
-				for _, o := range prevObs {
-					prevTasks = append(prevTasks, stats.TaskCounts{
-						Successes: o.successes,
-						Samples:   o.samples,
-					})
-				}
-				prevEst := stats.PooledWilson(prevTasks, 0.95)
-				delta := stats.DifferenceUnpaired(evalEst, prevEst, 0.95)
-				evalDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
-				evalDeltaClass = DeltaChipClass(delta.CI)
-				evalHasDelta = true
-			}
-
-			// Sparkline for eval over sparklineCommits
-			var evalSparkItems []SeriesItem
-			for _, sc := range sparklineCommits {
-				obsList := evalObsByCommit[eID][sc.sha]
-				sItem := SeriesItem{
-					CommitSHA:      sc.sha,
-					CommitSHAShort: ShortCommit(sc.sha),
-					CommitTime:     sc.commitTime,
-				}
-				if len(obsList) > 0 {
-					var cTasks []stats.TaskCounts
-					for _, o := range obsList {
-						cTasks = append(cTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
-					}
-					cEst := stats.PooledWilson(cTasks, 0.95)
-					p := cEst.Point
-					ci := v1alpha1.ConfidenceInterval{
-						Lower:      cEst.CI.Lower,
-						Upper:      cEst.CI.Upper,
-						Confidence: cEst.Confidence,
-						Method:     cEst.Method,
-					}
-					sItem.HasPoint = true
-					sItem.SuccessRate = &p
-					sItem.CI = &ci
-					sItem.ObsCount = len(obsList)
-				}
-				evalSparkItems = append(evalSparkItems, sItem)
-			}
-			evalSpark := BuildSparklineSVG(evalSparkItems)
-
-			evalRunLink := ""
-			evalSamplesLink := ""
-			if latestRun != nil {
-				evalRunLink = repoLink(ref, "/runs/"+latestRun.Name, linkNS)
-				if latestTask != nil && latestTask.LogPath != "" && s.hasArtifactStorage() {
-					evalSamplesLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", latestRun.Name, url.PathEscape(eID)), linkNS)
-				}
-			}
-
-			evalRow := RepoOverviewEvalRow{
-				ID:          eID,
-				SamplesLink: evalSamplesLink,
-				RunLink:     evalRunLink,
-				ScoreStr:    evalScoreStr,
-				CILabel:     evalCIStr,
-				DeltaStr:    evalDeltaStr,
-				DeltaClass:  evalDeltaClass,
-				HasDelta:    evalHasDelta,
+		for _, eScore := range sScore.Evals {
+			evalSpark := BuildSparklineSVG(obs.EvalSparklineItems(eScore.ID, sparklineCommits))
+			evalRowsInSuite = append(evalRowsInSuite, RepoOverviewEvalRow{
+				ID:          eScore.ID,
+				SamplesLink: eScore.SamplesLink,
+				RunLink:     eScore.RunLink,
+				ScoreStr:    eScore.ScoreStr,
+				CILabel:     eScore.CIStr,
+				DeltaStr:    eScore.DeltaStr,
+				DeltaClass:  eScore.DeltaClass,
+				HasDelta:    eScore.HasDelta,
 				Sparkline:   evalSpark,
-			}
-			evalRowsInSuite = append(evalRowsInSuite, evalRow)
-			evalResultsInSuite = append(evalResultsInSuite, evalScoreResult{
-				row:         evalRow,
-				point:       evalEst.Point,
-				newestTasks: newestTasks,
-				newestRun:   latestRun,
-				newestTime:  newestTime,
 			})
 		}
 
-		if len(evalResultsInSuite) == 0 {
-			continue
-		}
-
-		// Suite score at main = mean of its evals' scores with interval from pooled samples
-		var sumEvalScores float64
-		var suiteTasks []stats.TaskCounts
-		var newestSuiteTime time.Time
-		for _, er := range evalResultsInSuite {
-			sumEvalScores += er.point
-			suiteTasks = append(suiteTasks, er.newestTasks...)
-			if er.newestTime.After(newestSuiteTime) {
-				newestSuiteTime = er.newestTime
-			}
-		}
-		suiteScorePoint := sumEvalScores / float64(len(evalResultsInSuite))
-		suitePooledEst := stats.PooledWilson(suiteTasks, 0.95)
-		suiteScoreStr := fmt.Sprintf("%.2f", suiteScorePoint)
-		suiteCIStr := fmt.Sprintf("[%.2f, %.2f]", suitePooledEst.CI.Lower, suitePooledEst.CI.Upper)
-
-		// Suite delta vs previous commit
-		var suiteCommits []commitEntry
-		for _, c := range orderedCommits {
-			hasObs := false
-			for _, eID := range evalIDsInSuite {
-				if len(evalObsByCommit[eID][c.sha]) > 0 {
-					hasObs = true
-					break
-				}
-			}
-			if hasObs {
-				suiteCommits = append(suiteCommits, c)
-			}
-		}
-
-		var suiteDeltaStr string = "—"
-		var suiteDeltaClass string
-		var suiteHasDelta bool
-		if len(suiteCommits) > 1 {
-			prevCommit := suiteCommits[len(suiteCommits)-2]
-			var prevEvalScores []float64
-			var prevSuiteTasks []stats.TaskCounts
-			for _, eID := range evalIDsInSuite {
-				eObs := evalObsByCommit[eID][prevCommit.sha]
-				if len(eObs) > 0 {
-					var eTasks []stats.TaskCounts
-					for _, o := range eObs {
-						eTasks = append(eTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
-						prevSuiteTasks = append(prevSuiteTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
-					}
-					eEst := stats.PooledWilson(eTasks, 0.95)
-					prevEvalScores = append(prevEvalScores, eEst.Point)
-				}
-			}
-			if len(prevEvalScores) > 0 {
-				var prevSum float64
-				for _, s := range prevEvalScores {
-					prevSum += s
-				}
-				prevSuitePoint := prevSum / float64(len(prevEvalScores))
-				prevSuitePooled := stats.PooledWilson(prevSuiteTasks, 0.95)
-
-				curSuiteEst := stats.Estimate{
-					Point:  suiteScorePoint,
-					CI:     suitePooledEst.CI,
-					N:      suitePooledEst.N,
-					Method: "pooled-wilson",
-				}
-				prevSuiteEst := stats.Estimate{
-					Point:  prevSuitePoint,
-					CI:     prevSuitePooled.CI,
-					N:      prevSuitePooled.N,
-					Method: "pooled-wilson",
-				}
-				delta := stats.DifferenceUnpaired(curSuiteEst, prevSuiteEst, 0.95)
-				suiteDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
-				suiteDeltaClass = DeltaChipClass(delta.CI)
-				suiteHasDelta = true
-			}
-		}
-
-		// Sparkline for suite over sparklineCommits
-		var suiteSparkItems []SeriesItem
-		for _, sc := range sparklineCommits {
-			sItem := SeriesItem{
-				CommitSHA:      sc.sha,
-				CommitSHAShort: ShortCommit(sc.sha),
-				CommitTime:     sc.commitTime,
-			}
-			var cEvalsScores []float64
-			var cSuiteTasks []stats.TaskCounts
-			obsInSuite := 0
-			for _, eID := range evalIDsInSuite {
-				obsList := evalObsByCommit[eID][sc.sha]
-				if len(obsList) > 0 {
-					obsInSuite += len(obsList)
-					var eTasks []stats.TaskCounts
-					for _, o := range obsList {
-						eTasks = append(eTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
-						cSuiteTasks = append(cSuiteTasks, stats.TaskCounts{Successes: o.successes, Samples: o.samples})
-					}
-					eEst := stats.PooledWilson(eTasks, 0.95)
-					cEvalsScores = append(cEvalsScores, eEst.Point)
-				}
-			}
-			if len(cEvalsScores) > 0 {
-				sum := 0.0
-				for _, s := range cEvalsScores {
-					sum += s
-				}
-				meanScore := sum / float64(len(cEvalsScores))
-				cEst := stats.PooledWilson(cSuiteTasks, 0.95)
-				ci := v1alpha1.ConfidenceInterval{
-					Lower:      cEst.CI.Lower,
-					Upper:      cEst.CI.Upper,
-					Confidence: cEst.Confidence,
-					Method:     cEst.Method,
-				}
-				sItem.HasPoint = true
-				sItem.SuccessRate = &meanScore
-				sItem.CI = &ci
-				sItem.ObsCount = obsInSuite
-			}
-			suiteSparkItems = append(suiteSparkItems, sItem)
-		}
-		suiteSpark := BuildSparklineSVG(suiteSparkItems)
+		suiteSpark := BuildSparklineSVG(obs.SuiteSparklineItems(sName, sparklineCommits))
 
 		suiteLink := ""
 		if suiteRouteExists {
 			suiteLink = repoLink(ref, "/evals/"+url.PathEscape(sName), linkNS)
 		}
 
-		suiteRow := RepoOverviewSuiteRow{
+		suiteRows = append(suiteRows, RepoOverviewSuiteRow{
 			Name:       sName,
 			SuiteLink:  suiteLink,
-			ScoreStr:   suiteScoreStr,
-			CILabel:    suiteCIStr,
+			ScoreStr:   sScore.ScoreStr,
+			CILabel:    sScore.CIStr,
 			EvalsCount: len(evalRowsInSuite),
-			DeltaStr:   suiteDeltaStr,
-			DeltaClass: suiteDeltaClass,
-			HasDelta:   suiteHasDelta,
+			DeltaStr:   sScore.DeltaStr,
+			DeltaClass: sScore.DeltaClass,
+			HasDelta:   sScore.HasDelta,
 			Sparkline:  suiteSpark,
 			Evals:      evalRowsInSuite,
-		}
-		suiteRows = append(suiteRows, suiteRow)
-		allSuitesResults = append(allSuitesResults, suiteScoreResult{
-			row:         suiteRow,
-			point:       suiteScorePoint,
-			newestTasks: suiteTasks,
-			newestTime:  newestSuiteTime,
 		})
 	}
 
-	// Overall Headline: overall eval score at main with its 95% interval, the commit sha it was measured at, and the time of the newest observation.
-	var overallPoint float64
-	var allTasks []stats.TaskCounts
-	for _, sr := range allSuitesResults {
-		overallPoint += sr.point
-		allTasks = append(allTasks, sr.newestTasks...)
-	}
-	if len(allSuitesResults) > 0 {
-		overallPoint /= float64(len(allSuitesResults))
-	}
-	overallPooled := stats.PooledWilson(allTasks, 0.95)
-	overallScoreStr := fmt.Sprintf("%.2f", overallPoint)
-	overallCIStr := fmt.Sprintf("[%.2f, %.2f]", overallPooled.CI.Lower, overallPooled.CI.Upper)
-
-	// Derive headline commit and time from newest commit that actually has observations
-	var newestOverallCommitSHA string
-	var newestOverallTime time.Time
-	var newestRun *v1alpha1.Run
-	for i := len(orderedCommits) - 1; i >= 0; i-- {
-		c := orderedCommits[i]
-		hasAnyObs := false
-		for eID := range evalSet {
-			if len(evalObsByCommit[eID][c.sha]) > 0 {
-				hasAnyObs = true
-				break
-			}
-		}
-		if hasAnyObs {
-			newestOverallCommitSHA = c.sha
-			newestOverallTime = c.commitTime
-			for _, sr := range matched {
-				if runCommitSHA(sr.run) == c.sha {
-					newestRun = sr.run
-					break
-				}
-			}
-			break
-		}
-	}
-
-	overallCommitShort := ShortCommit(newestOverallCommitSHA)
+	overallCommitShort := scores.CommitShort
 	var overallCommitLink string
-	if newestRun != nil {
-		overallCommitLink = repoLink(ref, "/runs/"+newestRun.Name, linkNS)
+	if scores.NewestRun != nil {
+		overallCommitLink = repoLink(ref, "/runs/"+scores.NewestRun.Name, linkNS)
 	}
 
-	if newestOverallTime.IsZero() && newestRun != nil {
-		newestOverallTime, _ = runCommitTime(newestRun)
+	newestOverallTime := scores.NewestTime
+	if newestOverallTime.IsZero() && scores.NewestRun != nil {
+		newestOverallTime, _ = runCommitTime(scores.NewestRun)
 		if newestOverallTime.IsZero() {
-			newestOverallTime = newestRun.CreationTimestamp.Time
+			newestOverallTime = scores.NewestRun.CreationTimestamp.Time
 		}
 	}
 	overallTimeStr := FormatAge(metav1.Time{Time: newestOverallTime})
@@ -1287,15 +871,15 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 		Branch:                branch,
 		Cohort:                cohortFilter,
 		IsEmpty:               len(suiteRows) == 0,
-		OverallScore:          overallScoreStr,
-		OverallCILabel:        overallCIStr,
-		OverallCommitSHA:      newestOverallCommitSHA,
+		OverallScore:          scores.OverallScore,
+		OverallCILabel:        scores.OverallCI,
+		OverallCommitSHA:      scores.CommitSHA,
 		OverallCommitShort:    overallCommitShort,
 		OverallCommitLink:     overallCommitLink,
 		OverallTimeStr:        overallTimeStr,
 		OverallTimeUTC:        overallTimeUTC,
 		Suites:                suiteRows,
-		TotalRunsCount:        totalRuns,
+		TotalRunsCount:        obs.TotalRuns,
 		RunsLink:              repoLink(ref, "/runs", linkNS),
 		TotalComparisonsCount: totalComparisons,
 		ComparisonsLink:       repoLink(ref, "/comparisons", linkNS),
@@ -1332,9 +916,8 @@ func (s *Server) renderRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	linkNS := s.linkNamespace(ns)
 
-	// Single list call for Runs in namespace
-	var allRuns v1alpha1.RunList
-	if err := s.readerFor(ns).List(ctx, &allRuns, client.InNamespace(ns)); err != nil {
+	obs, err := s.collectRepoObservations(ctx, ns, ref, "main")
+	if err != nil {
 		if apierrors.IsForbidden(err) {
 			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
 			return
@@ -1343,237 +926,29 @@ func (s *Server) renderRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	matched := collectSeries(allRuns.Items, ref, "main", "")
-	if len(matched) == 0 {
+	if len(obs.MatchedSeries) == 0 {
 		httpError(w, http.StatusNotFound, "suite not found", fmt.Sprintf("no runs for repo %s branch main in namespace %s", ref.String(), ns), nil)
 		return
 	}
 
-	var orderedCommits []CommitEntry
-	seenCommits := make(map[string]bool)
-	for _, sr := range matched {
-		c := runCommitSHA(sr.run)
-		if c == "" {
-			continue
-		}
-		if !seenCommits[c] {
-			seenCommits[c] = true
-			orderedCommits = append(orderedCommits, CommitEntry{
-				SHA:        c,
-				CommitTime: sr.commitTime,
-			})
-		}
-	}
-
-	chartCommits := orderedCommits
-	if len(chartCommits) > 20 {
-		chartCommits = chartCommits[len(chartCommits)-20:]
-	}
-
-	evalObsByCommit := make(map[string]map[string][]EvalObservation)
-	evalAllObs := make(map[string][]EvalObservation)
-	evalSet := make(map[string]bool)
-
-	for _, sr := range matched {
-		run := sr.run
-		commit := runCommitSHA(run)
-		if commit == "" {
-			continue
-		}
-		for idx := range run.Status.Tasks {
-			t := &run.Status.Tasks[idx]
-			if t.ID == "" {
-				continue
-			}
-			if t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
-				if SuiteOf(t.ID) != suiteName {
-					continue
-				}
-				evalSet[t.ID] = true
-				samples := t.Samples
-				succ := t.Successes
-				if succ == 0 && t.SuccessRate != nil && *t.SuccessRate > 0 {
-					succ = int(math.Round(*t.SuccessRate * float64(samples)))
-				}
-				est := stats.PooledWilsonFromTotals(succ, samples, 0.95)
-				scoreStr := fmt.Sprintf("%.2f", est.Point)
-				ciStr := fmt.Sprintf("[%.2f, %.2f]", est.CI.Lower, est.CI.Upper)
-
-				samplesLink := ""
-				if t.LogPath != "" && s.hasArtifactStorage() {
-					samplesLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", run.Name, url.PathEscape(t.ID)), linkNS)
-				}
-
-				obs := EvalObservation{
-					RunName:     run.Name,
-					Run:         run,
-					TaskID:      t.ID,
-					CommitSHA:   commit,
-					CommitTime:  sr.commitTime,
-					Model:       run.Spec.Model,
-					Harness:     run.Labels["evalrunner.gke-labs.dev/harness"],
-					Samples:     samples,
-					Successes:   succ,
-					SuccessRate: t.SuccessRate,
-					ScoreStr:    scoreStr,
-					CIStr:       ciStr,
-					Est:         est,
-					SamplesLink: samplesLink,
-				}
-
-				if evalObsByCommit[t.ID] == nil {
-					evalObsByCommit[t.ID] = make(map[string][]EvalObservation)
-				}
-				evalObsByCommit[t.ID][commit] = append(evalObsByCommit[t.ID][commit], obs)
-				evalAllObs[t.ID] = append(evalAllObs[t.ID], obs)
-			}
-		}
-	}
-
-	if len(evalSet) == 0 {
+	scores := suiteScores(obs)
+	suiteScore, ok := scores.Suites[suiteName]
+	if !ok || len(suiteScore.Evals) == 0 {
 		httpError(w, http.StatusNotFound, "suite not found", fmt.Sprintf("suite %s has no completed observations in repo %s", suiteName, ref.String()), nil)
 		return
 	}
 
-	var evalIDs []string
-	for eID := range evalSet {
-		evalIDs = append(evalIDs, eID)
-	}
-	sort.Strings(evalIDs)
-
-	type evalMainResult struct {
-		point       float64
-		est         stats.Estimate
-		newestTasks []stats.TaskCounts
-	}
-	evalMainResults := make(map[string]evalMainResult)
-
-	for _, eID := range evalIDs {
-		var eCommits []CommitEntry
-		for _, c := range orderedCommits {
-			if len(evalObsByCommit[eID][c.SHA]) > 0 {
-				eCommits = append(eCommits, c)
-			}
-		}
-		if len(eCommits) == 0 {
-			continue
-		}
-		newestCommit := eCommits[len(eCommits)-1]
-		newestObs := evalObsByCommit[eID][newestCommit.SHA]
-		var tasks []stats.TaskCounts
-		for _, o := range newestObs {
-			tasks = append(tasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
-		}
-		est := stats.PooledWilson(tasks, 0.95)
-		evalMainResults[eID] = evalMainResult{
-			point:       est.Point,
-			est:         est,
-			newestTasks: tasks,
-		}
-	}
-
-	var sumEvalScores float64
-	var suiteTasks []stats.TaskCounts
-	for _, eID := range evalIDs {
-		res := evalMainResults[eID]
-		sumEvalScores += res.point
-		suiteTasks = append(suiteTasks, res.newestTasks...)
-	}
-	suiteScorePoint := sumEvalScores / float64(len(evalIDs))
-	suitePooledEst := stats.PooledWilson(suiteTasks, 0.95)
-	suiteScoreStr := fmt.Sprintf("%.2f", suiteScorePoint)
-	suiteCIStr := fmt.Sprintf("[%.2f, %.2f]", suitePooledEst.CI.Lower, suitePooledEst.CI.Upper)
-
-	var suiteCommits []CommitEntry
-	for _, c := range orderedCommits {
-		hasObs := false
-		for _, eID := range evalIDs {
-			if len(evalObsByCommit[eID][c.SHA]) > 0 {
-				hasObs = true
-				break
-			}
-		}
-		if hasObs {
-			suiteCommits = append(suiteCommits, c)
-		}
-	}
-
-	var suiteDeltaStr string = "—"
-	var suiteDeltaClass string
-	var suiteHasDelta bool
-	if len(suiteCommits) > 1 {
-		prevCommit := suiteCommits[len(suiteCommits)-2]
-		var prevEvalScores []float64
-		var prevSuiteTasks []stats.TaskCounts
-		for _, eID := range evalIDs {
-			eObs := evalObsByCommit[eID][prevCommit.SHA]
-			if len(eObs) > 0 {
-				var eTasks []stats.TaskCounts
-				for _, o := range eObs {
-					eTasks = append(eTasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
-					prevSuiteTasks = append(prevSuiteTasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
-				}
-				eEst := stats.PooledWilson(eTasks, 0.95)
-				prevEvalScores = append(prevEvalScores, eEst.Point)
-			}
-		}
-		if len(prevEvalScores) > 0 {
-			var prevSum float64
-			for _, s := range prevEvalScores {
-				prevSum += s
-			}
-			prevSuitePoint := prevSum / float64(len(prevEvalScores))
-			prevSuitePooled := stats.PooledWilson(prevSuiteTasks, 0.95)
-
-			curSuiteEst := stats.Estimate{
-				Point:  suiteScorePoint,
-				CI:     suitePooledEst.CI,
-				N:      suitePooledEst.N,
-				Method: "pooled-wilson",
-			}
-			prevSuiteEst := stats.Estimate{
-				Point:  prevSuitePoint,
-				CI:     prevSuitePooled.CI,
-				N:      prevSuitePooled.N,
-				Method: "pooled-wilson",
-			}
-			delta := stats.DifferenceUnpaired(curSuiteEst, prevSuiteEst, 0.95)
-			suiteDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
-			suiteDeltaClass = DeltaChipClass(delta.CI)
-			suiteHasDelta = true
-		}
+	chartCommits := obs.Commits
+	if len(chartCommits) > 20 {
+		chartCommits = chartCommits[len(chartCommits)-20:]
 	}
 
 	var evalSections []RepoSuiteEvalSection
-	for _, eID := range evalIDs {
-		obs := evalAllObs[eID]
-		eMain := evalMainResults[eID]
+	for _, eScore := range suiteScore.Evals {
+		eID := eScore.ID
+		eObs := obs.ByEval[eID]
 
-		var evalCommits []CommitEntry
-		for _, c := range orderedCommits {
-			if len(evalObsByCommit[eID][c.SHA]) > 0 {
-				evalCommits = append(evalCommits, c)
-			}
-		}
-
-		var evalDeltaStr string = "—"
-		var evalDeltaClass string
-		var evalHasDelta bool
-		if len(evalCommits) > 1 {
-			prevCommit := evalCommits[len(evalCommits)-2]
-			prevObs := evalObsByCommit[eID][prevCommit.SHA]
-			var prevTasks []stats.TaskCounts
-			for _, o := range prevObs {
-				prevTasks = append(prevTasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
-			}
-			prevEst := stats.PooledWilson(prevTasks, 0.95)
-			delta := stats.DifferenceUnpaired(eMain.est, prevEst, 0.95)
-			evalDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
-			evalDeltaClass = DeltaChipClass(delta.CI)
-			evalHasDelta = true
-		}
-
-		lines := LinesPerDimension(obs, DimensionModel, chartCommits)
+		lines := LinesPerDimension(eObs, DimensionModel, chartCommits)
 		hasModelBreakdown := len(lines) > 1
 
 		var modelLegend []RepoSuiteModelLegendItem
@@ -1588,7 +963,7 @@ func (s *Server) renderRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
-		chartSVG := BuildRepoSuiteChartSVG(lines, obs, chartCommits, DimensionModel)
+		chartSVG := BuildRepoSuiteChartSVG(lines, eObs, chartCommits, DimensionModel)
 
 		firstCommit := ""
 		lastCommit := ""
@@ -1597,11 +972,11 @@ func (s *Server) renderRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Reques
 			lastCommit = ShortCommit(chartCommits[len(chartCommits)-1].SHA)
 		}
 
-		newestChanged := newestChangedCommit(chartCommits, evalObsByCommit[eID])
+		newestChanged := newestChangedCommit(chartCommits, obs.ByCommit[eID])
 
 		var obsRows []RepoSuiteObservationRow
-		for i := len(obs) - 1; i >= 0; i-- {
-			o := obs[i]
+		for i := len(eObs) - 1; i >= 0; i-- {
+			o := eObs[i]
 			tStr := ""
 			tUTC := ""
 			if !o.CommitTime.IsZero() {
@@ -1626,11 +1001,11 @@ func (s *Server) renderRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Reques
 
 		evalSections = append(evalSections, RepoSuiteEvalSection{
 			ID:                       eID,
-			ScoreStr:                 fmt.Sprintf("%.2f", eMain.point),
-			CIStr:                    fmt.Sprintf("[%.2f, %.2f]", eMain.est.CI.Lower, eMain.est.CI.Upper),
-			HasDelta:                 evalHasDelta,
-			DeltaStr:                 evalDeltaStr,
-			DeltaClass:               evalDeltaClass,
+			ScoreStr:                 eScore.ScoreStr,
+			CIStr:                    eScore.CIStr,
+			HasDelta:                 eScore.HasDelta,
+			DeltaStr:                 eScore.DeltaStr,
+			DeltaClass:               eScore.DeltaClass,
 			HasModelBreakdown:        hasModelBreakdown,
 			ModelLegend:              modelLegend,
 			SVG:                      chartSVG,
@@ -1641,27 +1016,20 @@ func (s *Server) renderRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Reques
 		})
 	}
 
-	currentCommit := ""
-	currentShort := ""
-	if len(suiteCommits) > 0 {
-		currentCommit = suiteCommits[len(suiteCommits)-1].SHA
-		currentShort = ShortCommit(currentCommit)
-	}
-
 	view := RepoSuiteDetailView{
 		ActiveTab:          NavTabEvals,
 		Repo:               ref,
 		Namespace:          ns,
 		LinkNamespace:      linkNS,
 		SuiteName:          suiteName,
-		SuiteScore:         suiteScoreStr,
-		SuiteCI:            suiteCIStr,
-		EvalsCount:         len(evalIDs),
-		HasDelta:           suiteHasDelta,
-		DeltaStr:           suiteDeltaStr,
-		DeltaClass:         suiteDeltaClass,
-		CurrentCommitSHA:   currentCommit,
-		CurrentCommitShort: currentShort,
+		SuiteScore:         suiteScore.ScoreStr,
+		SuiteCI:            suiteScore.CIStr,
+		EvalsCount:         suiteScore.EvalsCount,
+		HasDelta:           suiteScore.HasDelta,
+		DeltaStr:           suiteScore.DeltaStr,
+		DeltaClass:         suiteScore.DeltaClass,
+		CurrentCommitSHA:   suiteScore.CommitSHA,
+		CurrentCommitShort: suiteScore.CommitShort,
 		Evals:              evalSections,
 		OverviewLink:       repoLink(ref, "", linkNS),
 	}
