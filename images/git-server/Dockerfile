@@ -41,6 +41,10 @@ RUN git config --global user.email "test@example.com" && \
     git commit -m "initial commit" && \
     git clone --bare /docs-work /git/docs-eval.git && \
     touch /git/docs-eval.git/git-daemon-export-ok && \
+    sed -i '2i sleep 60' .evals/list && \
+    git commit -am "slow evals list" && \
+    git clone --bare /docs-work /git/docs-eval-slow.git && \
+    touch /git/docs-eval-slow.git/git-daemon-export-ok && \
     git rm -r .evals && \
     git commit -m "remove evals list" && \
     git clone --bare /docs-work /git/docs-no-manifest.git && \
