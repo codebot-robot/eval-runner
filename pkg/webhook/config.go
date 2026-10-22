@@ -23,6 +23,7 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -110,6 +111,9 @@ type Config struct {
 
 	// ForgeRegistry optionally provides a multi-host forge registry.
 	ForgeRegistry *forge.Registry
+
+	// Consumer optionally turns forge events into Runs and Comparisons.
+	Consumer *syncer.Consumer
 }
 
 // RawWebhookFlags captures explicit flags passed on the command line.

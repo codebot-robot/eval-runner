@@ -711,7 +711,7 @@ func TestProcessPullRequest_BaselineCacheReuse(t *testing.T) {
 		BaselineRepo:      "other/other-repo",
 		TargetRepo:        "other/other-repo",
 	}
-	found, err := worker.findCompletedBaselineRun(ctx, "eval-runner", baseSHA, "https://github.com/other/other-repo.git", "mockllm/model")
+	found, err := worker.FindCompletedBaselineRun(ctx, "eval-runner", baseSHA, "https://github.com/other/other-repo.git", "mockllm/model")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
