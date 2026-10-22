@@ -335,6 +335,10 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Changed files cap | `MaxPullRequestFiles` | `300` | Maximum changed files retrieved from GitHub; exceeding cap treats all tasks declaring paths as matched. |
 | Affinity mode | `--affinity-mode` / ConfigMap `affinityMode` | `"order"` | Changed-file task affinity scheduling mode: `"order"` (matched/always tasks scheduled first, unmatched second) or `"prune"` (unmatched tasks dropped from batches and reported as skipped). |
 | Comparison TTL | `--comparison-ttl` / ConfigMap `comparisonTTL` | `0` (disabled) | Duration after which `Completed` Comparisons are deleted by the controller as a safety net; defaults to `0` (disabled). Owned batch Runs are deleted via Kubernetes owner references. Baseline Runs are preserved. |
+| Git ls-remote poll interval | ConfigMap `lsRemoteInterval` | `60s` | Polling cadence for `git ls-remote` change detection per repository (randomized symmetrically within ±20% jitter bounds). |
+| API fill-in throttle interval | ConfigMap `apiFillInInterval` | `0s` (immediate) | Minimum throttle duration between forge REST API fill-in operations for changed refs. |
+| Full reconcile interval | ConfigMap `fullReconcileInterval` | `1h` | Cadence for full repository reconciliation using conditional requests with `ETag` (reconciling open PRs and closing stale ones). |
+| Rate-limit budget floor | ConfigMap `rateLimitFloorPercent` | `10` (10%) | Percentage floor of total rate limit quota below which forge REST API calls back off until reset, while `git ls-remote` polling continues. |
 
 ---
 

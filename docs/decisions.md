@@ -425,6 +425,39 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Treating the local store as a cache ensures resilience against corruption and crashes. Consume-before-commit guarantees no dropped events without requiring complex distributed queues. A unified consumer guarantees identical Kubernetes object creation across all ingestion paths.
 
+### ADR-035: Polling Strategy without Webhooks: Git ls-remote, Conditional Requests, and Rate-Limit Budget (#327)
+- **Status**: Decided
+- **Context**:
+  eval-runner must support polling as a first-class ingestion mechanism rather than requiring webhooks. However, polling github.com naively can rapidly exhaust rate limits (60 req/h unauthenticated, 5,000 req/h authenticated). A resilient, rate-limit-conscious polling architecture is required to keep API consumption near zero when repositories are idle while delivering timely updates when code is pushed.
+- **Decision**:
+  1. **The Three Levers**:
+     - **Lever 1 (Token Authentication)**: Use an authenticated token or GitHub App installation token resolved at startup (App token > token > unauthenticated) to raise the rate limit to 5,000 req/h. Absence of credentials never fails startup; polling operates unauthenticated.
+     - **Lever 2 (`git ls-remote` Change Detection)**: Every poll tick queries remote advertised references via `git ls-remote` (through the pure Go `gitremote` forge). Tags (`refs/tags/*`), `HEAD`, and merge refs (`refs/pull/*/merge`) are ignored. Only new or changed `refs/heads/*` and `refs/pull/*/head` trigger forge REST API calls. If the ref set is unchanged, zero API calls are made. Because `git ls-remote` uses the Git transport, it costs 0 GitHub REST API calls and is completely free for both authenticated and unauthenticated setups.
+     - **Lever 3 (Conditional Requests with ETag)**: The GitHub forge stages `ETag` and `Last-Modified` headers per endpoint URL. To preserve consume-before-commit semantics, validators travel with the batch and are written atomically in `SaveSyncBatch`; failed event consumption drops the validators so subsequent ticks re-fetch without serving uncommitted 304s. On api.github.com, unauthenticated requests consume quota even on 304 responses (60 req/h budget), so without credentials Lever 2 (`git ls-remote`) is the only free lever. With an authenticated token or GitHub App (5,000 req/h), conditional 304s provide lightweight re-validation.
+  2. **Measured Costs per Poll Tick**:
+     Unit tests (`TestSyncer_ExactAPICallSequencePerScenario`) assert the following exact API call sequences per scenario:
+     - **Idle / Unchanged repository**: 0 REST API calls per tick (`[]`).
+     - **Branch push / fast-forward / force-push**: Exactly 1 REST API call (`Commit(sha)` for unknown commit SHA). `Repository`, `Branches`, and `ChangeRequests` are skipped on fill-in ticks because repository metadata is cached in the store, branches are known from `ls-remote`, and no PR refs changed.
+     - **Branch deletion**: Exactly 0 REST API calls (`[]`).
+     - **Pull Request opened**: Exactly 2 REST API calls (`PullRequest(num)` to fetch PR metadata + `Commit(headSHA)` for unknown head commit SHA).
+     - **Pull Request synchronized**: Exactly 2 REST API calls (`PullRequest(num)` to update PR metadata + `Commit(newHeadSHA)` for new head commit SHA).
+     - **Closed PR with surviving head ref**: github.com retains `refs/pull/N/head` indefinitely; diffing against all stored change requests (including closed ones) ensures 0 REST API calls when refs are unchanged.
+     - **Full reconcile (stale PR cleanup)**: Exactly 3 conditional calls (`Repository`, `Branches`, `ChangeRequests`) once per hour; open PRs absent from the fetch are closed.
+  3. **Rate-Limit Budget and Back-off**:
+     - Every response parses `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`.
+     - When `Remaining` drops below a configurable floor (default 10% of the limit: 6 for unauthenticated, 500 for authenticated), all forge REST API calls back off until `Reset`.
+     - While API calls are backed off, `git ls-remote` polling continues uninterrupted every tick (since `ls-remote` consumes zero GitHub REST API quota).
+     - Rate limit remaining, limit, and reset timestamps are exposed as Prometheus metrics (`evalrunner_forge_ratelimit_remaining`, `evalrunner_forge_ratelimit_limit`, `evalrunner_forge_ratelimit_reset_seconds`) and logged in controller output once per threshold transition or reset.
+  4. **Cadence, Lifecycle, and Hot-Reloading**:
+     - `lsRemoteInterval`: Default 60s per repository with ±20% symmetric jitter (`[48s, 72s]`).
+     - `apiFillInInterval`: Default 0s (immediate execution for changed refs; throttles if configured).
+     - `fullReconcileInterval`: Default 1h (conditional request to reconcile open PRs and close stale ones).
+     - All intervals and `rateLimitFloorPercent` are configurable in `eval-runner-config` ConfigMap and runtime-reloadable without pod restarts.
+     - Per-repository loop lifecycle: dynamically canceled when repositories are removed; timer re-armed immediately when intervals change; duplicate loops prevented on re-addition.
+     - Webhook accelerator: `ScheduleImmediatePoll(ref)` is provided as an immediate-poll trigger; connecting the delivery-to-controller hint path from the webhook pod is tracked as a separate follow-up under #327.
+- **Rationale**:
+  Combining `git ls-remote` with conditional requests guarantees that polling scales efficiently across hundreds of repositories without exhausting GitHub rate limits, while preserving rapid reaction times when code changes occur.
+
 
 
 

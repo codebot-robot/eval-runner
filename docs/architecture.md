@@ -371,13 +371,44 @@ eval-runner interacts with code hosting environments (such as github.com, GitLab
   - Features page-size-aware sanity checks, moving corrupted files aside (`.corrupted.<timestamp>`) and opening fresh.
   - Rebuilds in-memory indexes (repos, commits by SHA, branch heads newest-first, open change requests) in milliseconds on open.
 - `pkg/forge/syncer`: Polling and synchronization engine:
+  - Efficient polling without webhooks via `git ls-remote` change detection (0 REST API calls when refs are unchanged).
+  - Conditional requests storing `ETag` and `Last-Modified` in bbolt `sync/<repo>` bucket (HTTP 304 responses do not count against rate limits).
+  - Rate-limit budget tracking (`X-RateLimit-Remaining`, `X-RateLimit-Limit`, `X-RateLimit-Reset`), automatically backing off REST API calls below a floor (default 10%) while continuing ls-remote polling.
+  - Jittered cadence polling (default 60s ls-remote, 1h full reconcile) with runtime ConfigMap reloading (`lsRemoteInterval`, `apiFillInInterval`, `fullReconcileInterval`, `rateLimitFloorPercent`).
+  - Webhook acceleration: delivered webhooks trigger an immediate poll tick via `ScheduleImmediatePoll(ref)` / `TriggerSync(ref)`.
   - Syncs authoritative forge state to the local store using synchronous consume-before-commit delivery.
   - Diffs branches and change requests, emitting typed events (`BranchAdvanced`, `ChangeOpened`, `ChangeUpdated`, `ChangeClosed`).
-  - Merges out-of-band hints into stored state and records Prometheus metrics (`evalrunner_forge_syncs_total`, `evalrunner_forge_events_total`, `evalrunner_forge_store_bytes`).
+  - Merges out-of-band hints into stored state and records Prometheus metrics (`evalrunner_forge_syncs_total`, `evalrunner_forge_events_total`, `evalrunner_forge_errors_total`, `evalrunner_forge_store_bytes`, `evalrunner_forge_ratelimit_remaining`, `evalrunner_forge_ratelimit_limit`, `evalrunner_forge_ratelimit_reset_seconds`).
 - `pkg/forge/consumer`: Unified object reconciliation:
   - Reconciles candidate Runs, baseline Runs (with baseline cache reuse), and Comparisons from typed forge events.
   - Shared across controller and webhook binaries to guarantee byte-identical Kubernetes object generation.
   - Enforces the single canonical `IsMultiRepo` naming rule and deterministic naming schemes (`ComparisonName`, `CandidateRunName`, `BaselineRunName`).
+
+### Operator Note: Polling Strategy and Expected API Usage for N Repositories
+
+eval-runner supports polling as a reliable alternative to webhooks. It employs three levers to operate safely within github.com's rate limits:
+
+1. **Change detection via `git ls-remote` first**: Every 60 seconds (with ±20% symmetric jitter), the syncer queries advertised references over the Git transport via go-git. This protocol handshake downloads zero packfiles, blobs, or trees and costs **0 GitHub REST API calls**, regardless of repository count $N$ or tick frequency.
+2. **Conditional API requests with `ETag`**: The syncer stages ETags and commits them atomically in `SaveSyncBatch` (consume-before-commit). When full reconcile runs (default once per hour per repo) to synchronize pull requests and clean up closed ones, it sends `If-None-Match`. Unchanged endpoints return `304 Not Modified`.
+   - *Important note on rate limits*: On api.github.com, **unauthenticated** requests consume rate-limit budget even on 304 responses (decrementing the 60 req/h quota). For unauthenticated operation, Lever 1 (`git ls-remote`) is the only free lever. An authenticated token or GitHub App installation token raises the limit to 5,000 req/h, where conditional 304s have negligible budget impact.
+3. **API fill-in only on changed refs**: REST API calls are initiated exclusively when `ls-remote` ref diffing reveals a new/updated branch (1 call to fetch commit metadata for unknown SHAs; repository metadata and branches are skipped on fill-in ticks) or a new/updated pull request (1 call to fetch PR metadata via `/pulls/{number}` plus 1 call for unknown head commit SHAs). Closed PRs retain `refs/pull/N/head` indefinitely on github.com; diffing against all stored change requests guarantees zero API calls for surviving closed PR refs.
+
+#### Measured Costs per Scenario (Unit-Asserted):
+- **Idle / unchanged tick**: Exactly 0 REST API calls.
+- **Branch push / fast-forward / force-push**: Exactly 1 REST API call (`Commit(sha)` for unknown commit SHA).
+- **Branch deletion**: Exactly 0 REST API calls.
+- **Pull Request opened**: Exactly 2 REST API calls (`PullRequest(number)` + `Commit(headSHA)`).
+- **Pull Request synchronized**: Exactly 2 REST API calls (`PullRequest(number)` + `Commit(newHeadSHA)`).
+- **Hourly full reconcile**: Exactly 3 conditional REST API calls (`Repository`, `Branches`, `ChangeRequests`).
+
+#### Expected API Usage Calculation:
+- **Idle state ($N$ repositories)**: 0 REST API calls per normal tick. During hourly full reconcile, $N \times 3$ conditional requests are sent. With authenticated tokens, 304 responses consume negligible budget within the 5,000 req/h pool. For unauthenticated deployments, keep $N \le 15$ to stay comfortably under 60 req/h during hourly reconciles.
+- **Active development**: Approximately 1 REST API call per pushed commit, and 2 REST API calls per PR open/synchronize.
+- **Representative scenarios (Authenticated with App or Token)**:
+  - $N = 10$ repositories with 20 pushed commits/hour: ~20 API calls/hour + 30 hourly reconcile calls = ~50 API calls/hour (1% of the 5,000 req/h limit).
+  - $N = 100$ repositories with 100 pushed commits/hour: ~100 API calls/hour + 300 hourly reconcile calls = ~400 API calls/hour (8% of the 5,000 req/h limit).
+  - $N = 500$ repositories with 500 pushed commits/hour: ~500 API calls/hour + 1,500 hourly reconcile calls = ~2,000 API calls/hour (40% of the 5,000 req/h limit).
+- **Rate-limit floor protection**: If remaining quota drops below the floor (default 10% of limit), API calls back off until the reset timestamp while `git ls-remote` polling continues to detect code activity. Cadence intervals can be tuned in `eval-runner-config` via `lsRemoteInterval`, `apiFillInInterval`, `fullReconcileInterval`, and `rateLimitFloorPercent` without restarting the controller.
 
 ---
 
