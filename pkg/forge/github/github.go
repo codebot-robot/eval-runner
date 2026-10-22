@@ -21,9 +21,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/store"
 	gh "github.com/gke-labs/eval-runner/pkg/github"
 )
 
@@ -35,14 +37,100 @@ var (
 	ErrCheckRunsUnavailable = errors.New("check runs unavailable with token auth; comment posted")
 )
 
+// Store defines the store methods required by the GitHub forge for conditional ETag caching.
+type Store interface {
+	GetEndpointSync(repo forge.RepoRef, endpoint string) (*store.EndpointSync, error)
+	SaveEndpointSync(repo forge.RepoRef, endpoint string, sync *store.EndpointSync) error
+	GetRepository(repo forge.RepoRef) (*forge.Repository, bool)
+	ListBranches(repo forge.RepoRef) ([]forge.Branch, error)
+	GetOpenChangeRequests(repo forge.RepoRef) []forge.ChangeRequest
+	GetChangeRequest(repo forge.RepoRef, numberOrID string) (*forge.ChangeRequest, error)
+	GetCommit(sha string) (*forge.Commit, bool)
+}
+
 // Forge implements forge.Forge and forge.Reporter for github.com.
 type Forge struct {
-	client *gh.HTTPClient
+	mu           sync.RWMutex
+	client       *gh.HTTPClient
+	store        Store
+	pendingSyncs map[string]map[string]*store.EndpointSync
+}
+
+// Client returns the underlying gh.HTTPClient.
+func (f *Forge) Client() *gh.HTTPClient {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.client
 }
 
 // SetClient sets or updates the underlying HTTPClient (e.g. after resolving credentials).
 func (f *Forge) SetClient(client *gh.HTTPClient) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if client == nil {
+		return
+	}
+	if f.client != nil {
+		prevRate := f.client.RateLimit()
+		if prevRate.Limit > 0 && client.RateLimit().Limit == 0 {
+			h := http.Header{}
+			h.Set("X-RateLimit-Limit", strconv.Itoa(prevRate.Limit))
+			h.Set("X-RateLimit-Remaining", strconv.Itoa(prevRate.Remaining))
+			h.Set("X-RateLimit-Reset", strconv.FormatInt(prevRate.Reset.Unix(), 10))
+			client.UpdateRateLimits(h)
+		}
+	}
 	f.client = client
+}
+
+// SetStore sets or updates the backing store for ETag conditional caching.
+func (f *Forge) SetStore(s Store) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.store = s
+}
+
+// RateLimit returns the current rate limit info from the underlying client.
+func (f *Forge) RateLimit() gh.RateLimitInfo {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.client != nil {
+		return f.client.RateLimit()
+	}
+	return gh.RateLimitInfo{}
+}
+
+func (f *Forge) stageEndpointSync(ref forge.RepoRef, endpoint string, etag, lastMod string) {
+	if etag == "" && lastMod == "" {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingSyncs == nil {
+		f.pendingSyncs = make(map[string]map[string]*store.EndpointSync)
+	}
+	rKey := strings.ToLower(ref.String())
+	if f.pendingSyncs[rKey] == nil {
+		f.pendingSyncs[rKey] = make(map[string]*store.EndpointSync)
+	}
+	f.pendingSyncs[rKey][endpoint] = &store.EndpointSync{
+		ETag:         etag,
+		LastModified: lastMod,
+	}
+}
+
+// PopPendingEndpointSyncs returns any new endpoint sync validators collected for ref
+// and clears them from pending.
+func (f *Forge) PopPendingEndpointSyncs(ref forge.RepoRef) map[string]*store.EndpointSync {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingSyncs == nil {
+		return nil
+	}
+	rKey := strings.ToLower(ref.String())
+	syncs := f.pendingSyncs[rKey]
+	delete(f.pendingSyncs, rKey)
+	return syncs
 }
 
 // Option configures a GitHub Forge.
@@ -54,12 +142,20 @@ type options struct {
 	appAuth    *gh.AppTokenProvider
 	baseURL    string
 	httpClient *http.Client
+	store      Store
 }
 
 // WithClient configures an existing gh.HTTPClient.
 func WithClient(client *gh.HTTPClient) Option {
 	return func(o *options) {
 		o.client = client
+	}
+}
+
+// WithStore configures a backing store for ETag conditional requests.
+func WithStore(s Store) Option {
+	return func(o *options) {
+		o.store = s
 	}
 }
 
@@ -99,7 +195,7 @@ func New(opts ...Option) *Forge {
 	}
 
 	if o.client != nil {
-		return &Forge{client: o.client}
+		return &Forge{client: o.client, store: o.store}
 	}
 
 	client := gh.NewHTTPClient(gh.HTTPClientConfig{
@@ -108,7 +204,7 @@ func New(opts ...Option) *Forge {
 		BaseURL:    o.baseURL,
 		HTTPClient: o.httpClient,
 	})
-	return &Forge{client: client}
+	return &Forge{client: client, store: o.store}
 }
 
 // Kind returns "github.com".
@@ -124,10 +220,29 @@ type repoResponse struct {
 // Repository returns metadata for a repository reference.
 func (f *Forge) Repository(ctx context.Context, ref forge.RepoRef) (*forge.Repository, error) {
 	path := fmt.Sprintf("/repos/%s/%s", ref.Owner, ref.Name)
+	var etag, lastMod string
+	if f.store != nil {
+		if ep, err := f.store.GetEndpointSync(ref, path); err == nil && ep != nil {
+			etag = ep.ETag
+			lastMod = ep.LastModified
+		}
+	}
+
 	var resp repoResponse
-	if err := f.client.DoRequest(ctx, http.MethodGet, path, nil, &resp); err != nil {
+	headers, notModified, err := f.client.DoRequestConditional(ctx, http.MethodGet, path, nil, &resp, etag, lastMod)
+	if err != nil {
 		return nil, mapError(err)
 	}
+	if notModified {
+		if f.store != nil {
+			if r, ok := f.store.GetRepository(ref); ok && r != nil {
+				return r, nil
+			}
+		}
+		return nil, nil
+	}
+
+	f.stageEndpointSync(ref, path, headers.Get("ETag"), headers.Get("Last-Modified"))
 
 	return &forge.Repository{
 		Ref:           ref,
@@ -150,11 +265,30 @@ func (f *Forge) Branches(ctx context.Context, ref forge.RepoRef) ([]forge.Branch
 	const maxPages = 100
 
 	for page := 0; page < maxPages && path != ""; page++ {
+		var etag, lastMod string
+		if page == 0 && f.store != nil {
+			if ep, err := f.store.GetEndpointSync(ref, path); err == nil && ep != nil {
+				etag = ep.ETag
+				lastMod = ep.LastModified
+			}
+		}
+
 		var pageBranches []branchResponse
-		headers, err := f.client.DoRequestHeader(ctx, http.MethodGet, path, nil, &pageBranches)
+		headers, notModified, err := f.client.DoRequestConditional(ctx, http.MethodGet, path, nil, &pageBranches, etag, lastMod)
 		if err != nil {
 			return nil, mapError(err)
 		}
+		if notModified {
+			if f.store != nil {
+				return f.store.ListBranches(ref)
+			}
+			return nil, nil
+		}
+
+		if page == 0 {
+			f.stageEndpointSync(ref, path, headers.Get("ETag"), headers.Get("Last-Modified"))
+		}
+
 		for _, b := range pageBranches {
 			allBranches = append(allBranches, forge.Branch{
 				Name: b.Name,
@@ -204,6 +338,74 @@ type pullResponse struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest {
+	headRepoRef := ref
+	if pr.Head.Repo != nil {
+		if parsed, ok := forge.ParseRepoURL(pr.Head.Repo.CloneURL); ok {
+			headRepoRef = parsed
+		} else if pr.Head.Repo.FullName != "" {
+			if parsed, ok := forge.RepoRefFromOwnerName(pr.Head.Repo.FullName); ok {
+				headRepoRef = parsed
+			}
+		} else if pr.Head.Repo.Owner.Login != "" && pr.Head.Repo.Name != "" {
+			headRepoRef = forge.RepoRef{
+				Host:  ref.Host,
+				Owner: pr.Head.Repo.Owner.Login,
+				Name:  pr.Head.Repo.Name,
+			}
+		}
+	}
+
+	return forge.ChangeRequest{
+		ID:     forge.ChangeRequestID(strconv.Itoa(pr.Number)),
+		Number: pr.Number,
+		Title:  pr.Title,
+		Author: pr.User.Login,
+		Head: forge.ChangeRequestHead{
+			Ref:     pr.Head.Ref,
+			SHA:     pr.Head.SHA,
+			RepoRef: headRepoRef,
+		},
+		Base: forge.ChangeRequestBase{
+			Ref: pr.Base.Ref,
+			SHA: pr.Base.SHA,
+		},
+		State:     pr.State,
+		UpdatedAt: pr.UpdatedAt,
+	}
+}
+
+// PullRequest retrieves a single change request by number.
+func (f *Forge) PullRequest(ctx context.Context, ref forge.RepoRef, number int) (*forge.ChangeRequest, error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", ref.Owner, ref.Name, number)
+	var etag, lastMod string
+	if f.store != nil {
+		if ep, err := f.store.GetEndpointSync(ref, path); err == nil && ep != nil {
+			etag = ep.ETag
+			lastMod = ep.LastModified
+		}
+	}
+
+	var pr pullResponse
+	headers, notModified, err := f.client.DoRequestConditional(ctx, http.MethodGet, path, nil, &pr, etag, lastMod)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if notModified {
+		if f.store != nil {
+			if cr, err := f.store.GetChangeRequest(ref, strconv.Itoa(number)); err == nil && cr != nil {
+				return cr, nil
+			}
+		}
+		return nil, nil
+	}
+
+	f.stageEndpointSync(ref, path, headers.Get("ETag"), headers.Get("Last-Modified"))
+
+	cr := convertPullResponse(ref, pr)
+	return &cr, nil
+}
+
 // ChangeRequests lists open change requests with head/base refs and shas.
 func (f *Forge) ChangeRequests(ctx context.Context, ref forge.RepoRef) ([]forge.ChangeRequest, error) {
 	path := fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100", ref.Owner, ref.Name)
@@ -211,47 +413,32 @@ func (f *Forge) ChangeRequests(ctx context.Context, ref forge.RepoRef) ([]forge.
 	const maxPages = 100
 
 	for page := 0; page < maxPages && path != ""; page++ {
+		var etag, lastMod string
+		if page == 0 && f.store != nil {
+			if ep, err := f.store.GetEndpointSync(ref, path); err == nil && ep != nil {
+				etag = ep.ETag
+				lastMod = ep.LastModified
+			}
+		}
+
 		var pagePRs []pullResponse
-		headers, err := f.client.DoRequestHeader(ctx, http.MethodGet, path, nil, &pagePRs)
+		headers, notModified, err := f.client.DoRequestConditional(ctx, http.MethodGet, path, nil, &pagePRs, etag, lastMod)
 		if err != nil {
 			return nil, mapError(err)
 		}
+		if notModified {
+			if f.store != nil {
+				return f.store.GetOpenChangeRequests(ref), nil
+			}
+			return nil, nil
+		}
+
+		if page == 0 {
+			f.stageEndpointSync(ref, path, headers.Get("ETag"), headers.Get("Last-Modified"))
+		}
 
 		for _, pr := range pagePRs {
-			headRepoRef := ref
-			if pr.Head.Repo != nil {
-				if parsed, ok := forge.ParseRepoURL(pr.Head.Repo.CloneURL); ok {
-					headRepoRef = parsed
-				} else if pr.Head.Repo.FullName != "" {
-					if parsed, ok := forge.RepoRefFromOwnerName(pr.Head.Repo.FullName); ok {
-						headRepoRef = parsed
-					}
-				} else if pr.Head.Repo.Owner.Login != "" && pr.Head.Repo.Name != "" {
-					headRepoRef = forge.RepoRef{
-						Host:  ref.Host,
-						Owner: pr.Head.Repo.Owner.Login,
-						Name:  pr.Head.Repo.Name,
-					}
-				}
-			}
-
-			allCRs = append(allCRs, forge.ChangeRequest{
-				ID:     forge.ChangeRequestID(strconv.Itoa(pr.Number)),
-				Number: pr.Number,
-				Title:  pr.Title,
-				Author: pr.User.Login,
-				Head: forge.ChangeRequestHead{
-					Ref:     pr.Head.Ref,
-					SHA:     pr.Head.SHA,
-					RepoRef: headRepoRef,
-				},
-				Base: forge.ChangeRequestBase{
-					Ref: pr.Base.Ref,
-					SHA: pr.Base.SHA,
-				},
-				State:     pr.State,
-				UpdatedAt: pr.UpdatedAt,
-			})
+			allCRs = append(allCRs, convertPullResponse(ref, pr))
 		}
 
 		next := gh.ParseNextLink(headers.Get("Link"))
@@ -287,11 +474,36 @@ type commitResponse struct {
 
 // Commit returns commit metadata (sha, parents, author time, message title).
 func (f *Forge) Commit(ctx context.Context, ref forge.RepoRef, sha string) (*forge.Commit, error) {
+	if f.store != nil {
+		if sc, ok := f.store.GetCommit(sha); ok && sc != nil {
+			return sc, nil
+		}
+	}
+
 	path := fmt.Sprintf("/repos/%s/%s/commits/%s", ref.Owner, ref.Name, sha)
+	var etag, lastMod string
+	if f.store != nil {
+		if ep, err := f.store.GetEndpointSync(ref, path); err == nil && ep != nil {
+			etag = ep.ETag
+			lastMod = ep.LastModified
+		}
+	}
+
 	var resp commitResponse
-	if err := f.client.DoRequest(ctx, http.MethodGet, path, nil, &resp); err != nil {
+	headers, notModified, err := f.client.DoRequestConditional(ctx, http.MethodGet, path, nil, &resp, etag, lastMod)
+	if err != nil {
 		return nil, mapError(err)
 	}
+	if notModified {
+		if f.store != nil {
+			if sc, ok := f.store.GetCommit(sha); ok && sc != nil {
+				return sc, nil
+			}
+		}
+		return nil, nil
+	}
+
+	f.stageEndpointSync(ref, path, headers.Get("ETag"), headers.Get("Last-Modified"))
 
 	parents := make([]string, len(resp.Parents))
 	for i, p := range resp.Parents {

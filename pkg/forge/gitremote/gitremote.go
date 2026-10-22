@@ -157,6 +157,12 @@ func (f *Forge) Kind() string {
 	return "gitremote"
 }
 
+// ListRefs queries references from the remote repository using git ls-remote / ref advertisement.
+func (f *Forge) ListRefs(ctx context.Context, ref forge.RepoRef) ([]*plumbing.Reference, error) {
+	refs, _, err := f.listRefs(ctx, ref)
+	return refs, err
+}
+
 func (f *Forge) listRefs(ctx context.Context, ref forge.RepoRef) ([]*plumbing.Reference, string, error) {
 	if !ref.IsValid() {
 		return nil, "", fmt.Errorf("invalid repository reference: %v", ref)
