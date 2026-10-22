@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/store"
 )
 
 func TestGitHubForge_Kind(t *testing.T) {
@@ -497,5 +499,152 @@ func TestGitHubForge_Reporter_SetStatus_InProgressAndCompleted(t *testing.T) {
 				t.Errorf("payload conclusion = %v, want %v", lastPayload["conclusion"], tc.wantConclusion)
 			}
 		})
+	}
+}
+
+func TestGitHubForge_ETagAndPullRequest(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "github-forge-test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	var prHits, pullsHits int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/gke-labs/eval-runner/pulls/42":
+			prHits++
+			if r.Header.Get("If-None-Match") == `"pr-42-etag"` {
+				w.Header().Set("ETag", `"pr-42-etag"`)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", `"pr-42-etag"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"id": 4200,
+				"number": 42,
+				"title": "Fix something",
+				"user": {"login": "alice"},
+				"head": {"ref": "fix-branch", "sha": "1111111111111111111111111111111111111111"},
+				"base": {"ref": "main", "sha": "0000000000000000000000000000000000000000"},
+				"state": "open"
+			}`))
+		case "/repos/gke-labs/eval-runner/pulls":
+			pullsHits++
+			if r.Header.Get("If-None-Match") == `"pulls-etag"` {
+				w.Header().Set("ETag", `"pulls-etag"`)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", `"pulls-etag"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{
+				"id": 4200,
+				"number": 42,
+				"title": "Fix something",
+				"user": {"login": "alice"},
+				"head": {"ref": "fix-branch", "sha": "1111111111111111111111111111111111111111"},
+				"base": {"ref": "main", "sha": "0000000000000000000000000000000000000000"},
+				"state": "open"
+			}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	f := New(WithBaseURL(ts.URL), WithStore(st))
+	ctx := t.Context()
+
+	// 1. Initial PullRequest(42) -> 200 OK
+	cr, err := f.PullRequest(ctx, ref, 42)
+	if err != nil {
+		t.Fatalf("PullRequest failed: %v", err)
+	}
+	if cr == nil || cr.Number != 42 || cr.Title != "Fix something" {
+		t.Fatalf("unexpected change request: %+v", cr)
+	}
+	if prHits != 1 {
+		t.Errorf("expected 1 pr hit, got %d", prHits)
+	}
+
+	// Verify validator staged in pending, not yet in store
+	if _, err := st.GetEndpointSync(ref, "/repos/gke-labs/eval-runner/pulls/42"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected validator NOT to be in store before batch commit, got %v", err)
+	}
+
+	pending := f.PopPendingEndpointSyncs(ref)
+	if pending == nil || pending["/repos/gke-labs/eval-runner/pulls/42"] == nil || pending["/repos/gke-labs/eval-runner/pulls/42"].ETag != `"pr-42-etag"` {
+		t.Fatalf("expected pending ETag, got %+v", pending)
+	}
+
+	// Save CR and EndpointSync atomically in batch
+	if err := st.SaveSyncBatch(ctx, ref, &store.SyncBatch{
+		Changes:       []forge.ChangeRequest{*cr},
+		EndpointSyncs: pending,
+	}); err != nil {
+		t.Fatalf("SaveSyncBatch failed: %v", err)
+	}
+
+	// Now validator is in store
+	ep, err := st.GetEndpointSync(ref, "/repos/gke-labs/eval-runner/pulls/42")
+	if err != nil || ep == nil || ep.ETag != `"pr-42-etag"` {
+		t.Fatalf("expected stored ETag after batch commit, got %+v (err: %v)", ep, err)
+	}
+
+	// 2. Second PullRequest(42) -> sends If-None-Match, server returns 304
+	crCached, err := f.PullRequest(ctx, ref, 42)
+	if err != nil {
+		t.Fatalf("cached PullRequest failed: %v", err)
+	}
+	if crCached == nil || crCached.Number != 42 {
+		t.Errorf("expected cached CR on 304, got %+v", crCached)
+	}
+	if prHits != 2 {
+		t.Errorf("expected 2 pr hits, got %d", prHits)
+	}
+
+	// 3. ChangeRequests lists open PRs and stages ETag
+	crs, err := f.ChangeRequests(ctx, ref)
+	if err != nil {
+		t.Fatalf("ChangeRequests failed: %v", err)
+	}
+	if len(crs) != 1 || crs[0].Number != 42 {
+		t.Fatalf("unexpected change requests: %+v", crs)
+	}
+	if pullsHits != 1 {
+		t.Errorf("expected 1 pulls hit, got %d", pullsHits)
+	}
+
+	pendingCRs := f.PopPendingEndpointSyncs(ref)
+	if err := st.SaveSyncBatch(ctx, ref, &store.SyncBatch{
+		Changes:       crs,
+		EndpointSyncs: pendingCRs,
+	}); err != nil {
+		t.Fatalf("SaveSyncBatch with CRs failed: %v", err)
+	}
+
+	// 4. Second ChangeRequests sends If-None-Match and receives 304
+	crsCached, err := f.ChangeRequests(ctx, ref)
+	if err != nil {
+		t.Fatalf("cached ChangeRequests failed: %v", err)
+	}
+	if len(crsCached) != 1 || crsCached[0].Number != 42 {
+		t.Errorf("expected 1 cached CR on 304, got %d", len(crsCached))
+	}
+	if pullsHits != 2 {
+		t.Errorf("expected 2 pulls hits, got %d", pullsHits)
+	}
+
+	// 5. ClearPendingEndpointSyncs clears pending
+	f.stageEndpointSync(ref, "/test-clear", `"etag-clear"`, "")
+	f.ClearPendingEndpointSyncs(ref)
+	if p := f.PopPendingEndpointSyncs(ref); p != nil {
+		t.Errorf("expected nil after ClearPendingEndpointSyncs, got %+v", p)
 	}
 }
