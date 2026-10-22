@@ -50,6 +50,8 @@ RUN git config --global user.email "test@example.com" && \
     git clone --bare /docs-work /git/docs-no-manifest.git && \
     touch /git/docs-no-manifest.git/git-daemon-export-ok && \
     chown -R 65534:65534 /git && \
+    chmod -R 775 /git && \
+    cp -a /git /git-baked && \
     git config --system --add safe.directory '*' && \
     rm -rf /docs-work
 USER 65534:65534

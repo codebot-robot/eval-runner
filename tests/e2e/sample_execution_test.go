@@ -1371,4 +1371,54 @@ spec:
 		// Clean up sandboxes
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 	})
+
+	t.Run("PollingWithoutWebhook_NewBranchCreatesRun", func(t *testing.T) {
+		branchName := fmt.Sprintf("poll-test-%d", time.Now().UnixNano()%1000000)
+		pollInterval := 5 * time.Second
+		configPatch := fmt.Sprintf(`{"data":{"lsRemoteInterval":"%v","repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main, %s]\n"}}`, pollInterval, branchName)
+		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", configPatch)
+		defer func() {
+			restorePatch := `{"data":{"lsRemoteInterval":"60s","repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
+			harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", restorePatch)
+		}()
+		time.Sleep(2 * time.Second)
+
+		// Create a new commit and push a new branch in git-server with author identity set
+		gitDir := "/git/docs-eval.git"
+		headCommit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
+
+		newCommit := strings.TrimSpace(harness.runCmd(
+			"kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+			"git", "-c", "user.name=eval-runner-e2e", "-c", "user.email=e2e@example.com",
+			"--git-dir="+gitDir, "commit-tree", headCommit+"^{tree}", "-p", headCommit, "-m", "feat: poll commit",
+		))
+		newShortSHA := newCommit[:7]
+		baseRunName := fmt.Sprintf("base-%s", newShortSHA)
+
+		pushStart := time.Now()
+		harness.runCmd(
+			"kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+			"git", "--git-dir="+gitDir, "update-ref", "refs/heads/"+branchName, newCommit,
+		)
+
+		maxWait := 2 * pollInterval
+		timingStartMsg := fmt.Sprintf("poll timing: push initiated at %s, waiting for baseline Run %s within two poll intervals (%v)",
+			pushStart.Format(time.RFC3339), baseRunName, maxWait)
+		t.Log(timingStartMsg)
+		fmt.Println(timingStartMsg)
+
+		r := harness.WaitForRunExists("eval-runner", baseRunName, maxWait)
+		if r == nil {
+			t.Fatalf("expected baseline run %s to be created within two poll intervals (%v), but was not found", baseRunName, maxWait)
+		}
+		duration := time.Since(pushStart)
+		timingEndMsg := fmt.Sprintf("poll timing: branch %s pushed at %s, Run %s created at %s (elapsed %v <= max %v)",
+			branchName, pushStart.Format(time.RFC3339), baseRunName, time.Now().Format(time.RFC3339), duration, maxWait)
+		t.Log(timingEndMsg)
+		fmt.Println(timingEndMsg)
+
+		// Wait for Run to complete and clean up sandboxes
+		harness.WaitForRunPhase("eval-runner", baseRunName, "Completed", 3*time.Minute)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+	})
 }
