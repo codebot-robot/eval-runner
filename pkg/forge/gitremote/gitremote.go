@@ -180,6 +180,11 @@ func (f *Forge) listRefs(ctx context.Context, ref forge.RepoRef) ([]*plumbing.Re
 	return refs, cloneURL, nil
 }
 
+// ListRefs queries reference advertisements from the remote repository.
+func (f *Forge) ListRefs(ctx context.Context, ref forge.RepoRef) ([]*plumbing.Reference, string, error) {
+	return f.listRefs(ctx, ref)
+}
+
 // Repository returns metadata for ref, discovering the default branch via symbolic HEAD.
 func (f *Forge) Repository(ctx context.Context, ref forge.RepoRef) (*forge.Repository, error) {
 	refs, cloneURL, err := f.listRefs(ctx, ref)
