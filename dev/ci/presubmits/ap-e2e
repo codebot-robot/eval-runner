@@ -21,5 +21,24 @@ set -o pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
 
+ARTIFACTS="${ARTIFACTS:-/tmp/artifacts}"
+mkdir -p "${ARTIFACTS}"
+
+collect_diagnostics() {
+  local exit_code=$?
+  if [[ ${exit_code} -ne 0 ]]; then
+    echo "Collecting kind cluster diagnostics on failure/timeout..."
+    mkdir -p "${ARTIFACTS}/diagnostics"
+    kubectl logs --namespace eval-runner deployment/eval-runner-controller --all-containers=true > "${ARTIFACTS}/diagnostics/controller.log" 2>&1 || true
+    kubectl get runs,comparisons -A -o yaml > "${ARTIFACTS}/diagnostics/runs-comparisons.yaml" 2>&1 || true
+    kubectl get events -A --sort-by=.lastTimestamp > "${ARTIFACTS}/diagnostics/events.txt" 2>&1 || true
+  fi
+}
+trap collect_diagnostics EXIT
+
+# Ensure pinned tools (kind, kubectl) are installed
+./dev/tasks/test-e2e
+export PATH="${REPO_ROOT}/.build/bin:${PATH}"
+
 # Run e2e tests
-go run github.com/gke-labs/gke-labs-infra/ap@latest e2e .
+RUN_E2E=1 go test -v -count=1 -timeout 35m ./tests/e2e/...
