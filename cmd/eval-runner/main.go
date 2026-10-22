@@ -35,6 +35,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 	"github.com/gke-labs/eval-runner/pkg/forge/store"
 	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
+	gh "github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
@@ -398,7 +399,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	forgeRegistry := forge.NewDefaultRegistry(forgegithub.New(), gitremote.New())
+	ghClient, err := controller.ResolveGitHubClient(
+		context.Background(),
+		kubeClient,
+		evalRunnerNamespace,
+		clusterConfig.GitHubAppSecret,
+		clusterConfig.GitHubTokenSecret,
+		"",
+	)
+	if err != nil {
+		setupLog.Error(err, "error resolving GitHub credentials at startup; proceeding unauthenticated", "namespace", evalRunnerNamespace)
+		ghClient = gh.NewHTTPClient(gh.HTTPClientConfig{})
+	} else if ghClient.HasCredentials() {
+		setupLog.Info("resolved GitHub credentials at startup for forge and reporter")
+	} else {
+		setupLog.Info("no GitHub credentials configured; operating forge in unauthenticated mode")
+	}
+
+	forgeGitHub := forgegithub.New(forgegithub.WithClient(ghClient))
+	forgeRegistry := forge.NewDefaultRegistry(forgeGitHub, gitremote.New())
 
 	comparisonReconciler := &controller.ComparisonReconciler{
 		Client:              mgr.GetClient(),
@@ -434,6 +453,8 @@ func main() {
 		}
 	}()
 
+	forgeGitHub.SetStore(forgeStore)
+
 	var repoNames []string
 	for _, r := range clusterConfig.Repositories {
 		repoNames = append(repoNames, r.Name)
@@ -452,21 +473,17 @@ func main() {
 	})
 
 	forgeSyncer := syncer.New(syncer.SyncerOptions{
-		Store:        forgeStore,
-		Registry:     forgeRegistry,
-		Consumer:     forgeConsumer,
-		Repositories: clusterConfig.Repositories,
+		Store:                 forgeStore,
+		Registry:              forgeRegistry,
+		Consumer:              forgeConsumer,
+		Repositories:          clusterConfig.Repositories,
+		LsRemoteInterval:      clusterConfig.LsRemoteInterval,
+		APIFillInInterval:     clusterConfig.APIFillInInterval,
+		FullReconcileInterval: clusterConfig.FullReconcileInterval,
+		RateFloorPercent:      clusterConfig.RateLimitFloorPercent,
 	})
 
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		if len(clusterConfig.Repositories) > 0 {
-			if err := forgeSyncer.SyncAll(ctx); err != nil {
-				setupLog.Info("initial forge sync completed with warnings", "error", err)
-			}
-		}
-		<-ctx.Done()
-		return nil
-	})); err != nil {
+	if err := mgr.Add(forgeSyncer); err != nil {
 		setupLog.Error(err, "unable to add forge syncer runnable")
 		os.Exit(1)
 	}

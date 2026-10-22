@@ -61,6 +61,14 @@ const (
 	ConfigMapKeyComparisonTTL = "comparisonTTL"
 	// ConfigMapKeyModelPrices is the ConfigMap key for model pricing table (JSON map model -> {inputPer1M, outputPer1M} in USD).
 	ConfigMapKeyModelPrices = "modelPrices"
+	// ConfigMapKeyLsRemoteInterval is the ConfigMap key for git ls-remote polling interval (default 60s).
+	ConfigMapKeyLsRemoteInterval = "lsRemoteInterval"
+	// ConfigMapKeyAPIFillInInterval is the ConfigMap key for forge API fill-in throttle interval (default 0s).
+	ConfigMapKeyAPIFillInInterval = "apiFillInInterval"
+	// ConfigMapKeyFullReconcileInterval is the ConfigMap key for full reconcile interval with conditional requests (default 1h).
+	ConfigMapKeyFullReconcileInterval = "fullReconcileInterval"
+	// ConfigMapKeyRateLimitFloorPercent is the ConfigMap key for rate limit floor backoff percentage (default 10).
+	ConfigMapKeyRateLimitFloorPercent = "rateLimitFloorPercent"
 
 	// Webhook keys
 

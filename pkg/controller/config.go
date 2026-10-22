@@ -135,6 +135,10 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyAffinityMode:             {},
 	configkeys.ConfigMapKeySandboxEgressHosts:       {},
 	configkeys.ConfigMapKeyRepositories:             {},
+	configkeys.ConfigMapKeyLsRemoteInterval:         {},
+	configkeys.ConfigMapKeyAPIFillInInterval:        {},
+	configkeys.ConfigMapKeyFullReconcileInterval:    {},
+	configkeys.ConfigMapKeyRateLimitFloorPercent:    {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -192,6 +196,10 @@ type ClusterConfig struct {
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
 	DefaultBudgetUSD         *float64
+	LsRemoteInterval         time.Duration
+	APIFillInInterval        time.Duration
+	FullReconcileInterval    time.Duration
+	RateLimitFloorPercent    int
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -253,6 +261,10 @@ func DefaultClusterConfig() ClusterConfig {
 		DefaultCohort:            "default",
 		DefaultBatchSize:         8,
 		DefaultMaxSamplesPerTask: 64,
+		LsRemoteInterval:         syncer.DefaultLsRemoteInterval,
+		APIFillInInterval:        syncer.DefaultAPIFillInInterval,
+		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
+		RateLimitFloorPercent:    syncer.DefaultRateFloorPercent,
 	}
 }
 
@@ -647,6 +659,54 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.DefaultBudgetUSD = &f
 			}
 		}
+
+		// 18. lsRemoteInterval
+		if val, ok := cm.Data[configkeys.ConfigMapKeyLsRemoteInterval]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				d, err := time.ParseDuration(trimmed)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: %w", configkeys.ConfigMapKeyLsRemoteInterval, ns, name, err)
+				}
+				cfg.LsRemoteInterval = d
+			}
+		}
+
+		// 19. apiFillInInterval
+		if val, ok := cm.Data[configkeys.ConfigMapKeyAPIFillInInterval]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				d, err := time.ParseDuration(trimmed)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: %w", configkeys.ConfigMapKeyAPIFillInInterval, ns, name, err)
+				}
+				cfg.APIFillInInterval = d
+			}
+		}
+
+		// 20. fullReconcileInterval
+		if val, ok := cm.Data[configkeys.ConfigMapKeyFullReconcileInterval]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				d, err := time.ParseDuration(trimmed)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: %w", configkeys.ConfigMapKeyFullReconcileInterval, ns, name, err)
+				}
+				cfg.FullReconcileInterval = d
+			}
+		}
+
+		// 21. rateLimitFloorPercent
+		if val, ok := cm.Data[configkeys.ConfigMapKeyRateLimitFloorPercent]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				pct, err := strconv.Atoi(trimmed)
+				if err != nil || pct <= 0 {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: must be a positive integer", configkeys.ConfigMapKeyRateLimitFloorPercent, ns, name)
+				}
+				cfg.RateLimitFloorPercent = pct
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -1005,6 +1065,8 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 		})
 	}
 	if r.syncer != nil {
+		r.syncer.UpdateIntervals(resolved.LsRemoteInterval, resolved.APIFillInInterval, resolved.FullReconcileInterval)
+		r.syncer.SetRateFloorPercent(resolved.RateLimitFloorPercent)
 		oldRepos := make(map[string]bool)
 		if r.lastConfig != nil {
 			for _, repo := range r.lastConfig.Repositories {

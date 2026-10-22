@@ -44,6 +44,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -367,6 +368,76 @@ func (r *ComparisonReconciler) getOrCreateAppAuth(secret *corev1.Secret, appID, 
 	return appAuth, nil
 }
 
+// ResolveGitHubClient resolves GitHub credentials from Kubernetes Secrets with precedence:
+// App installation token > plain token > unauthenticated.
+// Absence of secrets or credentials never fails and returns an unauthenticated client.
+func ResolveGitHubClient(ctx context.Context, kubeClient kubernetes.Interface, namespace, appSecretName, tokenSecretName, baseURL string) (*github.HTTPClient, error) {
+	if kubeClient == nil {
+		return github.NewHTTPClient(github.HTTPClientConfig{BaseURL: baseURL}), nil
+	}
+
+	secretNames := []string{}
+	if appSecretName != "" {
+		secretNames = append(secretNames, appSecretName)
+	}
+	if tokenSecretName != "" && tokenSecretName != appSecretName {
+		secretNames = append(secretNames, tokenSecretName)
+	}
+
+	for _, secretName := range secretNames {
+		secret, err := kubeClient.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to get github credentials secret %q: %w", secretName, err)
+		}
+
+		appID := strings.TrimSpace(string(secret.Data["app-id"]))
+		if appID == "" {
+			appID = strings.TrimSpace(string(secret.Data["app_id"]))
+		}
+		installationID := strings.TrimSpace(string(secret.Data["installation-id"]))
+		if installationID == "" {
+			installationID = strings.TrimSpace(string(secret.Data["installation_id"]))
+		}
+		privKey := secret.Data["private-key"]
+		if len(privKey) == 0 {
+			privKey = secret.Data["private_key"]
+		}
+		appSlug := strings.TrimSpace(string(secret.Data["app-slug"]))
+		if appSlug == "" {
+			appSlug = strings.TrimSpace(string(secret.Data["app_slug"]))
+		}
+		token := strings.TrimSpace(string(secret.Data["token"]))
+
+		// App credentials are preferred over token
+		if appID != "" && installationID != "" && len(privKey) > 0 {
+			appAuth, err := github.NewAppTokenProvider(github.AppConfig{
+				AppID:          appID,
+				InstallationID: installationID,
+				PrivateKeyPEM:  privKey,
+				AppSlug:        appSlug,
+				BaseURL:        baseURL,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("invalid app credentials in secret %q: %w", secretName, err)
+			}
+			return github.NewHTTPClient(github.HTTPClientConfig{
+				AppAuth: appAuth,
+				BaseURL: baseURL,
+			}), nil
+		} else if token != "" {
+			return github.NewHTTPClient(github.HTTPClientConfig{
+				Token:   token,
+				BaseURL: baseURL,
+			}), nil
+		}
+	}
+
+	return github.NewHTTPClient(github.HTTPClientConfig{BaseURL: baseURL}), nil
+}
+
 func (r *ComparisonReconciler) getGitHubClient(ctx context.Context) (github.Client, error) {
 	secretNames := []string{}
 	appSec := r.gitHubAppSecret()
@@ -379,6 +450,12 @@ func (r *ComparisonReconciler) getGitHubClient(ctx context.Context) (github.Clie
 	}
 
 	if len(secretNames) == 0 {
+		if r.ForgeRegistry != nil {
+			f := r.ForgeRegistry.ForRepo(forge.RepoRef{Host: "github.com"})
+			if ghForge, ok := f.(*forgegithub.Forge); ok && ghForge.Client() != nil && ghForge.Client().HasCredentials() {
+				return ghForge.Client(), nil
+			}
+		}
 		return nil, nil
 	}
 

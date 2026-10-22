@@ -1371,4 +1371,56 @@ spec:
 		// Clean up sandboxes
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 	})
+
+	t.Run("PollingWithoutWebhook_NewBranchCreatesRun", func(t *testing.T) {
+		pollInterval := 5 * time.Second
+		branchName := "feat-poll-test"
+		gitDir := "/git/docs-eval.git"
+
+		runSubCmd := func(args ...string) string {
+			t.Helper()
+			cmd := exec.Command(args[0], args[1:]...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("command %v failed: %v: %s", args, err, string(out))
+			}
+			return string(out)
+		}
+
+		// 1. Configure repository with fast lsRemoteInterval and tracked branches in ConfigMap
+		configPatch := fmt.Sprintf(`{"data":{"defaultModel":"mockllm/model","lsRemoteInterval":"%s","repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main, %s]\n"}}`, pollInterval.String(), branchName)
+		runSubCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", configPatch)
+
+		// Create a distinct new commit on git-server for the new branch with explicit author identity
+		headCommit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
+		newCommit := strings.TrimSpace(runSubCmd(
+			"kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+			"git", "-c", "user.name=eval-runner-e2e", "-c", "user.email=e2e@example.com",
+			"--git-dir="+gitDir, "commit-tree", headCommit+"^{tree}", "-p", headCommit, "-m", "feat: poll commit",
+		))
+		newShortSHA := newCommit[:7]
+		baseRunName := fmt.Sprintf("base-%s", newShortSHA)
+
+		t.Cleanup(func() {
+			cleanPatch := `{"data":{"repositories":"","lsRemoteInterval":"","defaultModel":"mockllm/model"}}`
+			_ = exec.Command("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", cleanPatch).Run()
+			_ = exec.Command("kubectl", "delete", "run", baseRunName, "-n", "eval-runner", "--ignore-not-found").Run()
+			_ = exec.Command("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--", "git", "--git-dir="+gitDir, "branch", "-D", branchName).Run()
+		})
+
+		// 2. Push/create new branch pointing to newCommit directly on git-server fixture without webhook
+		t.Logf("Creating new branch %s pointing to %s on git-server without webhook...", branchName, newShortSHA)
+		pushStart := time.Now()
+		runSubCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--", "git", "--git-dir="+gitDir, "update-ref", "refs/heads/"+branchName, newCommit)
+
+		// 3. Invariant: pushing a new branch results in a baseline Run within two poll intervals
+		maxWait := 2*pollInterval + 5*time.Second
+		t.Logf("Waiting for baseline Run %s to be created within two poll intervals (%v)...", baseRunName, maxWait)
+		r := harness.WaitForRunExists("eval-runner", baseRunName, maxWait)
+		if r == nil {
+			t.Fatalf("expected baseline run %s to be created within two poll intervals (%v), but was not found", baseRunName, maxWait)
+		}
+		duration := time.Since(pushStart)
+		t.Logf("Baseline Run %s successfully created via polling in %v (within two poll intervals)", baseRunName, duration)
+	})
 }
