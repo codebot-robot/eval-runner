@@ -28,35 +28,234 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 	"github.com/gke-labs/eval-runner/pkg/forge/store"
+	gh "github.com/gke-labs/eval-runner/pkg/github"
+	"github.com/go-git/go-git/v5/plumbing"
 )
+
+const (
+	// DefaultLsRemoteInterval is the default polling interval for git ls-remote (60s).
+	DefaultLsRemoteInterval = 60 * time.Second
+	// DefaultAPIFillInInterval is the default interval for API fill-in (0s / immediate on change).
+	DefaultAPIFillInInterval = 0 * time.Second
+	// DefaultFullReconcileInterval is the default interval for full reconcile with conditional requests (1h).
+	DefaultFullReconcileInterval = 1 * time.Hour
+	// DefaultRateFloorPercent is the default rate limit remaining floor (10%).
+	DefaultRateFloorPercent = 10
+)
+
+// PullRequestGetter is optionally implemented by forges that support fetching individual PRs.
+type PullRequestGetter interface {
+	PullRequest(ctx context.Context, ref forge.RepoRef, number int) (*forge.ChangeRequest, error)
+}
+
+// RateLimitReporter is optionally implemented by forges that report rate limits.
+type RateLimitReporter interface {
+	RateLimit() gh.RateLimitInfo
+}
+
+type repoLoop struct {
+	cancel       context.CancelFunc
+	trigger      chan struct{}
+	intervalChan chan time.Duration
+}
 
 // Syncer synchronizes configured repositories from their authoritative forges into
 // the local bbolt store and notifies the event consumer.
 type Syncer struct {
-	mu       sync.RWMutex
-	store    *store.Store
-	registry *forge.Registry
-	consumer EventHandler
-	repos    []RepoConfig
+	mu                    sync.RWMutex
+	store                 *store.Store
+	registry              *forge.Registry
+	consumer              EventHandler
+	repos                 []RepoConfig
+	gitremote             *gitremote.Forge
+	lsRemoteInterval      time.Duration
+	apiFillInInterval     time.Duration
+	fullReconcileInterval time.Duration
+	rateFloorPercent      int
+
+	runCtx              context.Context
+	repoLoops           map[string]*repoLoop
+	lastFullReconcile   map[string]time.Time
+	lastAPIFillIn       map[string]time.Time
+	lastRateLimitLogged map[string]int
 }
 
 // SyncerOptions configures a Syncer instance.
 type SyncerOptions struct {
-	Store        *store.Store
-	Registry     *forge.Registry
-	Consumer     EventHandler
-	Repositories []RepoConfig
+	Store                 *store.Store
+	Registry              *forge.Registry
+	Consumer              EventHandler
+	Repositories          []RepoConfig
+	GitRemote             *gitremote.Forge
+	LsRemoteInterval      time.Duration
+	APIFillInInterval     time.Duration
+	FullReconcileInterval time.Duration
+	RateFloorPercent      int
 }
 
 // New creates a new Syncer with the given options.
 func New(opts SyncerOptions) *Syncer {
+	gr := opts.GitRemote
+	if gr == nil {
+		gr = gitremote.New()
+	}
+	lsInterval := opts.LsRemoteInterval
+	if lsInterval <= 0 {
+		lsInterval = DefaultLsRemoteInterval
+	}
+	apiInterval := opts.APIFillInInterval
+	if apiInterval < 0 {
+		apiInterval = DefaultAPIFillInInterval
+	}
+	fullRecInterval := opts.FullReconcileInterval
+	if fullRecInterval <= 0 {
+		fullRecInterval = DefaultFullReconcileInterval
+	}
+	rateFloor := opts.RateFloorPercent
+	if rateFloor <= 0 {
+		rateFloor = DefaultRateFloorPercent
+	}
+
 	s := &Syncer{
-		store:    opts.Store,
-		registry: opts.Registry,
-		consumer: opts.Consumer,
-		repos:    opts.Repositories,
+		store:                 opts.Store,
+		registry:              opts.Registry,
+		consumer:              opts.Consumer,
+		repos:                 opts.Repositories,
+		gitremote:             gr,
+		lsRemoteInterval:      lsInterval,
+		apiFillInInterval:     apiInterval,
+		fullReconcileInterval: fullRecInterval,
+		rateFloorPercent:      rateFloor,
+		repoLoops:             make(map[string]*repoLoop),
+		lastFullReconcile:     make(map[string]time.Time),
+		lastAPIFillIn:         make(map[string]time.Time),
+		lastRateLimitLogged:   make(map[string]int),
 	}
 	return s
+}
+
+// Start starts the background polling loops for tracked repositories.
+// It implements manager.Runnable.
+func (s *Syncer) Start(ctx context.Context) error {
+	s.mu.Lock()
+	s.runCtx = ctx
+	repos := make([]RepoConfig, len(s.repos))
+	copy(repos, s.repos)
+	s.mu.Unlock()
+
+	for _, r := range repos {
+		if !r.Ref.IsZero() {
+			s.startRepoLoop(ctx, r.Ref)
+		}
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func (s *Syncer) startRepoLoop(ctx context.Context, ref forge.RepoRef) {
+	rKey := strings.ToLower(ref.String())
+	s.mu.Lock()
+	if s.repoLoops == nil {
+		s.repoLoops = make(map[string]*repoLoop)
+	}
+	if _, exists := s.repoLoops[rKey]; exists {
+		// Already running; do not start a duplicate goroutine.
+		s.mu.Unlock()
+		return
+	}
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	loop := &repoLoop{
+		cancel:       cancel,
+		trigger:      make(chan struct{}, 1),
+		intervalChan: make(chan time.Duration, 1),
+	}
+	s.repoLoops[rKey] = loop
+	interval := s.lsRemoteInterval
+	s.mu.Unlock()
+
+	go func() {
+		defer cancel()
+
+		// Run initial poll
+		if err := s.SyncRepo(loopCtx, ref); err != nil {
+			log.Printf("forge syncer: initial poll for %s completed with error: %v", ref.String(), err)
+		}
+
+		currentInterval := interval
+		for {
+			jittered := Jitter(currentInterval, DefaultJitterFactor)
+			timer := time.NewTimer(jittered)
+
+			select {
+			case <-loopCtx.Done():
+				timer.Stop()
+				return
+			case <-loop.trigger:
+				timer.Stop()
+			case newInterval := <-loop.intervalChan:
+				timer.Stop()
+				if newInterval > 0 {
+					currentInterval = newInterval
+				}
+				continue
+			case <-timer.C:
+			}
+
+			if err := s.SyncRepo(loopCtx, ref); err != nil {
+				log.Printf("forge syncer: poll for %s failed: %v", ref.String(), err)
+			}
+		}
+	}()
+}
+
+// ScheduleImmediatePoll triggers an immediate poll for the specified repository.
+func (s *Syncer) ScheduleImmediatePoll(ref forge.RepoRef) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rKey := strings.ToLower(ref.String())
+	if loop, ok := s.repoLoops[rKey]; ok {
+		select {
+		case loop.trigger <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// TriggerSync is an alias for ScheduleImmediatePoll.
+func (s *Syncer) TriggerSync(ref forge.RepoRef) {
+	s.ScheduleImmediatePoll(ref)
+}
+
+// UpdateIntervals updates cadence intervals at runtime and immediately re-arms running loops.
+func (s *Syncer) UpdateIntervals(lsRemote, apiFillIn, fullReconcile time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lsRemote > 0 {
+		s.lsRemoteInterval = lsRemote
+	}
+	if apiFillIn >= 0 {
+		s.apiFillInInterval = apiFillIn
+	}
+	if fullReconcile > 0 {
+		s.fullReconcileInterval = fullReconcile
+	}
+	for _, loop := range s.repoLoops {
+		select {
+		case loop.intervalChan <- lsRemote:
+		default:
+		}
+	}
+}
+
+// SetRateFloorPercent updates the rate limit floor percentage at runtime.
+func (s *Syncer) SetRateFloorPercent(pct int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pct <= 0 {
+		pct = DefaultRateFloorPercent
+	}
+	s.rateFloorPercent = pct
 }
 
 // SetConsumer configures the event handler for the syncer.
@@ -75,11 +274,36 @@ func (s *Syncer) Repositories() []RepoConfig {
 	return out
 }
 
-// UpdateRepositories updates the list of tracked repositories at runtime.
+// UpdateRepositories updates the list of tracked repositories at runtime,
+// canceling loops for removed repositories and starting loops for newly added ones.
 func (s *Syncer) UpdateRepositories(repos []RepoConfig) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.repos = repos
+	ctx := s.runCtx
+
+	// Cancel and remove loops for dropped repositories
+	newRepoSet := make(map[string]bool)
+	for _, r := range repos {
+		if !r.Ref.IsZero() {
+			newRepoSet[strings.ToLower(r.Ref.String())] = true
+		}
+	}
+	for rKey, loop := range s.repoLoops {
+		if !newRepoSet[rKey] {
+			loop.cancel()
+			delete(s.repoLoops, rKey)
+		}
+	}
+	s.mu.Unlock()
+
+	// Start loops for newly added repositories
+	if ctx != nil {
+		for _, r := range repos {
+			if !r.Ref.IsZero() {
+				s.startRepoLoop(ctx, r.Ref)
+			}
+		}
+	}
 }
 
 func (s *Syncer) getRepoConfig(ref forge.RepoRef) RepoConfig {
@@ -131,6 +355,19 @@ func recordError(ref forge.RepoRef, phase string) {
 	ErrorsTotal.WithLabelValues(ref.String(), phase).Inc()
 }
 
+func (s *Syncer) logRateLimitBackoff(ref forge.RepoRef, remaining, floor int, reset time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rKey := strings.ToLower(ref.String())
+	if s.lastRateLimitLogged == nil {
+		s.lastRateLimitLogged = make(map[string]int)
+	}
+	if s.lastRateLimitLogged[rKey] != remaining {
+		s.lastRateLimitLogged[rKey] = remaining
+		log.Printf("forge syncer: rate limit budget floor reached for %s (%d remaining <= floor %d); backing off API calls until reset at %s", ref.String(), remaining, floor, reset.Format(time.RFC3339))
+	}
+}
+
 // SyncRepoWithHint syncs a repository against its forge, merging an optional hint into the state.
 func (s *Syncer) SyncRepoWithHint(ctx context.Context, ref forge.RepoRef, hint *Hint) error {
 	if !ref.IsValid() {
@@ -150,6 +387,9 @@ func (s *Syncer) SyncRepoWithHint(ctx context.Context, ref forge.RepoRef, hint *
 			if gr, ok := f.(*gitremote.Forge); ok {
 				gr.RegisterURL(ref, repo.CloneURL)
 			}
+			if s.gitremote != nil {
+				s.gitremote.RegisterURL(ref, repo.CloneURL)
+			}
 		}
 	}
 	repoCfg := s.getRepoConfig(ref)
@@ -157,20 +397,15 @@ func (s *Syncer) SyncRepoWithHint(ctx context.Context, ref forge.RepoRef, hint *
 		if gr, ok := f.(*gitremote.Forge); ok {
 			gr.RegisterURL(ref, repoCfg.CloneURL)
 		}
+		if s.gitremote != nil {
+			s.gitremote.RegisterURL(ref, repoCfg.CloneURL)
+		}
 	}
 
-	// 2. Fetch repository metadata from forge
-	var repoMeta *forge.Repository
-	if r, rErr := f.Repository(ctx, ref); rErr == nil && r != nil {
-		repoMeta = r
-	} else if rErr != nil && !errors.Is(rErr, forge.ErrUnsupported) && !errors.Is(rErr, forge.ErrNotFound) {
-		recordError(ref, "repository")
-		return fmt.Errorf("failed to fetch repository %s: %w", ref.String(), rErr)
-	}
-
-	// 3. Load previous state from store
+	// 2. Load previous state from store
 	var prevBranches []forge.Branch
 	var prevChanges []forge.ChangeRequest
+	var allStoredChanges []forge.ChangeRequest
 	if s.store != nil {
 		storedBranches, bErr := s.store.ListBranches(ref)
 		if bErr != nil {
@@ -179,36 +414,180 @@ func (s *Syncer) SyncRepoWithHint(ctx context.Context, ref forge.RepoRef, hint *
 		}
 		prevBranches = storedBranches
 		prevChanges = s.store.GetOpenChangeRequests(ref)
+		allStored, cErr := s.store.ListChangeRequests(ref)
+		if cErr != nil {
+			recordError(ref, "store_read")
+			return fmt.Errorf("failed to list change requests from store for %s: %w", ref.String(), cErr)
+		}
+		allStoredChanges = allStored
 	}
 
-	// 4. Fetch branches from forge
+	// 3. Change detection via git ls-remote first
+	rKey := strings.ToLower(ref.String())
+	s.mu.RLock()
+	lastRec := s.lastFullReconcile[rKey]
+	fullRecInterval := s.fullReconcileInterval
+	s.mu.RUnlock()
+
+	var diff RefDiff
+	var remoteRefs []*plumbing.Reference
+	var lsErr error
+	if s.gitremote != nil && (f.Kind() == "github.com" || f.Kind() == "gitremote") {
+		remoteRefs, lsErr = s.gitremote.ListRefs(ctx, ref)
+		if lsErr != nil && f.Kind() == "gitremote" {
+			recordError(ref, "ls_remote")
+			return fmt.Errorf("failed to list remote refs for %s: %w", ref.String(), lsErr)
+		}
+	}
+
+	useLSRemote := (lsErr == nil && remoteRefs != nil)
+	isFullRec := !useLSRemote || time.Since(lastRec) >= fullRecInterval || len(prevBranches) == 0
+
+	if useLSRemote {
+		diff = DiffRefs(prevBranches, allStoredChanges, remoteRefs)
+		if !diff.HasChanges && !isFullRec && hint == nil {
+			// No change in refs -> no API call at all!
+			SyncsTotal.WithLabelValues(ref.String(), "success").Inc()
+			return nil
+		}
+	}
+
+	// 4. API fill-in throttle check
+	if !isFullRec && diff.HasChanges && s.apiFillInInterval > 0 && hint == nil {
+		s.mu.RLock()
+		lastFillIn := s.lastAPIFillIn[rKey]
+		s.mu.RUnlock()
+		if time.Since(lastFillIn) < s.apiFillInInterval {
+			// Throttle API fill-in until interval passes
+			return nil
+		}
+	}
+
+	// 5. Rate-limit budget check and client floor sync
+	if crfs, ok := f.(interface{ Client() *gh.HTTPClient }); ok && crfs.Client() != nil {
+		crfs.Client().SetRateFloorPercent(s.rateFloorPercent)
+	}
+	if rlr, ok := f.(RateLimitReporter); ok {
+		rl := rlr.RateLimit()
+		if rl.Limit > 0 {
+			RateLimitRemaining.WithLabelValues(ref.Host).Set(float64(rl.Remaining))
+			RateLimitLimit.WithLabelValues(ref.Host).Set(float64(rl.Limit))
+			RateLimitReset.WithLabelValues(ref.Host).Set(float64(rl.Reset.Unix()))
+
+			floor := rl.Limit * s.rateFloorPercent / 100
+			if floor <= 0 {
+				floor = 1
+			}
+			if rl.Remaining <= floor && time.Now().Before(rl.Reset) {
+				s.logRateLimitBackoff(ref, rl.Remaining, floor, rl.Reset)
+				// Back off API calls until reset, keep ls-remote polling
+				return nil
+			}
+		}
+	}
+
+	// 6. Fetch repository metadata from store or forge
+	var repoMeta *forge.Repository
+	if s.store != nil {
+		if r, ok := s.store.GetRepository(ref); ok && r != nil {
+			repoMeta = r
+		}
+	}
+	if repoMeta == nil || isFullRec {
+		if r, rErr := f.Repository(ctx, ref); rErr == nil && r != nil {
+			repoMeta = r
+		} else if rErr != nil && !errors.Is(rErr, forge.ErrUnsupported) && !errors.Is(rErr, forge.ErrNotFound) {
+			recordError(ref, "repository")
+			return fmt.Errorf("failed to fetch repository %s: %w", ref.String(), rErr)
+		}
+	}
+
+	// 7. Fetch branches from forge or ls-remote
 	var branches []forge.Branch
 	var branchesFetchSucceeded bool
-	bList, bErr := f.Branches(ctx, ref)
-	if bErr != nil {
-		recordError(ref, "branches")
-		return fmt.Errorf("failed to fetch branches for %s: %w", ref.String(), bErr)
+	if useLSRemote && len(diff.AllBranches) > 0 && !isFullRec {
+		branches = diff.AllBranches
+		branchesFetchSucceeded = true
+	} else {
+		bList, bErr := f.Branches(ctx, ref)
+		if bErr != nil {
+			recordError(ref, "branches")
+			return fmt.Errorf("failed to fetch branches for %s: %w", ref.String(), bErr)
+		}
+		branches = bList
+		branchesFetchSucceeded = true
 	}
-	branches = bList
-	branchesFetchSucceeded = true
 
-	// 5. Fetch change requests from forge
+	// 8. Fetch change requests from forge
 	var crs []forge.ChangeRequest
 	var crsFetchSucceeded bool
-	crList, cErr := f.ChangeRequests(ctx, ref)
-	if cErr != nil && !errors.Is(cErr, forge.ErrUnsupported) {
-		recordError(ref, "change_requests")
-		return fmt.Errorf("failed to fetch change requests for %s: %w", ref.String(), cErr)
-	}
-	if cErr == nil {
-		crs = crList
-		crsFetchSucceeded = true
-	} else if errors.Is(cErr, forge.ErrUnsupported) && hint != nil {
-		// When ChangeRequests is unsupported, keep stored changes
+	if isFullRec {
+		crList, cErr := f.ChangeRequests(ctx, ref)
+		if cErr != nil && !errors.Is(cErr, forge.ErrUnsupported) {
+			recordError(ref, "change_requests")
+			return fmt.Errorf("failed to fetch change requests for %s: %w", ref.String(), cErr)
+		}
+		s.mu.Lock()
+		s.lastFullReconcile[rKey] = time.Now()
+		s.mu.Unlock()
+
+		if cErr == nil {
+			crs = crList
+			crsFetchSucceeded = true
+		} else if errors.Is(cErr, forge.ErrUnsupported) {
+			crs = append([]forge.ChangeRequest(nil), prevChanges...)
+		}
+	} else if len(diff.OpenedPRs)+len(diff.SyncPRs) == 0 {
+		// Fill-in tick with NO PR head changes (e.g. branch push or deletion):
+		// Do not call ChangeRequests() or PullRequest()! Keep existing change requests.
 		crs = append([]forge.ChangeRequest(nil), prevChanges...)
+		crsFetchSucceeded = false
+	} else if prg, ok := f.(PullRequestGetter); ok && useLSRemote {
+		// API fill-in ONLY for changed PR refs
+		crs = append([]forge.ChangeRequest(nil), prevChanges...)
+		for _, num := range append(diff.OpenedPRs, diff.SyncPRs...) {
+			cr, err := prg.PullRequest(ctx, ref, num)
+			if err != nil {
+				recordError(ref, "change_request_single")
+				continue
+			}
+			if cr != nil {
+				found := false
+				for idx := range crs {
+					if crs[idx].Number == num {
+						crs[idx] = *cr
+						found = true
+						break
+					}
+				}
+				if !found {
+					crs = append(crs, *cr)
+				}
+			}
+		}
+		crsFetchSucceeded = false
+	} else {
+		crList, cErr := f.ChangeRequests(ctx, ref)
+		if cErr != nil && !errors.Is(cErr, forge.ErrUnsupported) {
+			recordError(ref, "change_requests")
+			return fmt.Errorf("failed to fetch change requests for %s: %w", ref.String(), cErr)
+		}
+		if cErr == nil {
+			crs = crList
+			crsFetchSucceeded = true
+		} else if errors.Is(cErr, forge.ErrUnsupported) && hint != nil {
+			crs = append([]forge.ChangeRequest(nil), prevChanges...)
+		}
 	}
 
-	// 6. Merge hint if present (never merge into an empty list)
+	s.mu.Lock()
+	if s.lastAPIFillIn == nil {
+		s.lastAPIFillIn = make(map[string]time.Time)
+	}
+	s.lastAPIFillIn[rKey] = time.Now()
+	s.mu.Unlock()
+
+	// 9. Merge hint if present (never merge into an empty list)
 	if hint != nil {
 		if hint.Branch != nil {
 			var found bool
@@ -430,6 +809,11 @@ func (s *Syncer) SyncRepoWithHint(ctx context.Context, ref forge.RepoRef, hint *
 			Sync: &store.SyncMeta{
 				LastPolled: time.Now().UTC(),
 			},
+		}
+		if epCollector, ok := f.(interface {
+			PopPendingEndpointSyncs(ref forge.RepoRef) map[string]*store.EndpointSync
+		}); ok {
+			batch.EndpointSyncs = epCollector.PopPendingEndpointSyncs(ref)
 		}
 		if err := s.store.SaveSyncBatch(ctx, ref, batch); err != nil {
 			recordError(ref, "store_write")
