@@ -2609,6 +2609,12 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		if len(server.CheckRuns()) != 1 {
 			t.Fatalf("expected 1 check run created, got %d", len(server.CheckRuns()))
 		}
+		if server.CheckRuns()[0].Status != "in_progress" {
+			t.Errorf("expected check run status 'in_progress', got %q", server.CheckRuns()[0].Status)
+		}
+		if server.CheckRuns()[0].Conclusion != "" {
+			t.Errorf("expected empty check run conclusion for in_progress, got %q", server.CheckRuns()[0].Conclusion)
+		}
 
 		// 2. Idempotency: second reconcile with same status makes no new HTTP requests
 		reqCountBefore := len(server.RequestLog())
@@ -2645,6 +2651,12 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		}
 		if len(server.CheckRuns()) != 1 {
 			t.Errorf("expected still 1 check run, got %d", len(server.CheckRuns()))
+		}
+		if server.CheckRuns()[0].Status != "completed" {
+			t.Errorf("expected check run status 'completed', got %q", server.CheckRuns()[0].Status)
+		}
+		if server.CheckRuns()[0].Conclusion != "neutral" {
+			t.Errorf("expected check run conclusion 'neutral', got %q", server.CheckRuns()[0].Conclusion)
 		}
 		if updated2.Status.Reporting.LastPostedHash == updated1.Status.Reporting.LastPostedHash {
 			t.Errorf("expected LastPostedHash to change from in_progress to completed")
@@ -17023,6 +17035,12 @@ func TestComparisonReconciler_FakeForgeReporting(t *testing.T) {
 		}
 		if statusCalls[0].SHA != "cand-sha-1234" {
 			t.Errorf("statusCall = %+v", statusCalls[0])
+		}
+		if statusCalls[0].Status.Status != "completed" {
+			t.Errorf("statusCall status = %q, want 'completed'", statusCalls[0].Status.Status)
+		}
+		if statusCalls[0].Status.Conclusion != "neutral" {
+			t.Errorf("statusCall conclusion = %q, want 'neutral'", statusCalls[0].Status.Conclusion)
 		}
 	})
 

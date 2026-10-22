@@ -864,6 +864,8 @@ func (r *ComparisonReconciler) reportToGitHub(
 	}
 	if headSHA != "" {
 		st := forge.Status{
+			Status:      checkState.Status,
+			Conclusion:  checkState.Conclusion,
 			State:       checkState.Conclusion,
 			Context:     checkState.Name,
 			Description: checkState.Summary,
