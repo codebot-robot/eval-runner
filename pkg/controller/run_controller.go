@@ -82,6 +82,9 @@ const (
 
 	// evalsListNotFoundOrNotExecutableMessage is the failure message reported when .evals/list is absent or not executable.
 	evalsListNotFoundOrNotExecutableMessage = ".evals/list not found or not executable; see docs/concept/functionality.md §2.3"
+
+	// logMsgRecreatingSandbox is the log message recorded when discovery sandbox is missing and recreated.
+	logMsgRecreatingSandbox = "Discovery sandbox does not exist; recreating sandbox and restarting discovery"
 )
 
 var (
@@ -133,6 +136,13 @@ func isNotFoundError(err error) bool {
 
 func isPermissionError(err error) bool {
 	return status.Code(err) == codes.PermissionDenied
+}
+
+func isUnavailableOrDialTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	return status.Code(err) == codes.Unavailable
 }
 
 func defaultSleep(ctx context.Context, d time.Duration) error {
@@ -872,35 +882,26 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	sandboxExists := (err == nil)
+	if !sandboxExists && run.Status.Phase == v1alpha1.RunPhaseDiscovering {
+		if foundSB, findErr := r.findDiscoverySandbox(ctx, &run); findErr == nil && foundSB != nil {
+			sandbox = *foundSB
+			sandboxExists = true
+		}
+	}
 
 	// Step 1: Create sandbox if it does not exist
 	if !sandboxExists {
-		authToken, tokenErr := r.ensureAuthToken(ctx, &run, sandboxKey)
-		if tokenErr != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to ensure auth token: %w", tokenErr)
+		if run.Status.Phase == v1alpha1.RunPhaseDiscovering {
+			logger.Info(logMsgRecreatingSandbox, "run", run.Name, "sandbox", sandboxName)
 		}
-		tokenDigest := discovery.AuthTokenDigest(authToken)
-
-		// Create server cert Secret before Sandbox so it exists when pod starts
-		if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.discoveryDeadline()+time.Hour); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to ensure server cert secret: %w", err)
-		}
-
-		logger.Info("Creating discovery sandbox", "sandbox", sandboxName, "namespace", sandboxNamespace)
-		desiredSandbox := discovery.BuildSandbox(&run, sandboxNamespace, tokenDigest, discovery.SandboxOptions{
-			ServerCertSecret: pki.ServerSecretName(sandboxName),
-			CAConfigMap:      pki.DefaultCAConfigMapName,
-			SandboxdImage:    r.sandboxdImage(),
-		})
-		if err := r.Create(ctx, desiredSandbox); err != nil {
-			if !apierrors.IsAlreadyExists(err) {
-				return ctrl.Result{}, fmt.Errorf("failed to create sandbox: %w", err)
-			}
+		if err := r.recreateDiscoverySandbox(ctx, &run); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		deadline := metav1.NewTime(r.now().Add(r.discoveryDeadline()))
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			status.Phase = v1alpha1.RunPhaseDiscovering
+			status.Message = ""
 			if status.DiscoveryDeadline == nil {
 				status.DiscoveryDeadline = &deadline
 			}
@@ -1018,39 +1019,27 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// Obtain sandbox client (via direct instance or factory from pod IP)
 	var sbClient sandboxclient.Client
-	if r.SandboxClient != nil {
-		sbClient = r.SandboxClient
-	} else {
-		if pod.Status.PodIP == "" {
-			logger.Info("Pod IP not yet assigned", "pod", podKey)
-			return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
-		}
-		factory := r.ClientFactory
-		if factory == nil {
-			factory = sandboxclient.DefaultFactory()
-		}
-		authToken, tokenErr := r.ensureAuthToken(ctx, &run, sandboxKey)
-		if tokenErr != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to retrieve auth token for sandbox: %w", tokenErr)
-		}
-		var opts []sandboxclient.Option
-		if authToken != "" {
-			opts = append(opts, sandboxclient.WithAuthToken(authToken))
-		}
-		if tlsConfig := r.pki().ClientTLSConfig(sandbox.Name, sandbox.Namespace); tlsConfig != nil {
-			opts = append(opts, sandboxclient.WithTLSConfig(tlsConfig))
-		}
-		var clientErr error
-		sbClient, clientErr = factory.NewClient(pod.Status.PodIP, opts...)
-		if clientErr != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to create sandbox client for %s: %w", pod.Status.PodIP, clientErr)
-		}
-		defer func() {
+	currentEndpoint := pod.Status.PodIP
+	if currentEndpoint == "" {
+		currentEndpoint = r.resolveSandboxEndpoint(ctx, &sandbox)
+	}
+	if currentEndpoint == "" && r.SandboxClient == nil {
+		logger.Info("Pod IP not yet assigned", "pod", podKey)
+		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
+	}
+
+	var clientErr error
+	sbClient, clientErr = r.createSandboxClient(ctx, &run, sandbox.Name, sandbox.Namespace, currentEndpoint)
+	if clientErr != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to create sandbox client for %s: %w", currentEndpoint, clientErr)
+	}
+	defer func() {
+		if sbClient != nil && sbClient != r.SandboxClient {
 			if closeErr := sbClient.Close(); closeErr != nil {
 				logger.Error(closeErr, "failed to close sandbox client")
 			}
-		}()
-	}
+		}
+	}()
 
 	// Set execution deadline context
 	execTimeout := 5 * time.Minute
@@ -1084,22 +1073,110 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	var cloneRes *sandboxclient.ExecuteResult
 	var cloneErr error
 	var cloneAttempts int
+	var uncountedRetried bool
+
+	handleUnavailable := func(dialErr error) (retried bool, res ctrl.Result, err error) {
+		logger.Info("Discovery step failed with Unavailable; checking sandbox status", "error", dialErr, "run", run.Name, "endpoint", currentEndpoint)
+
+		foundSB, sbErr := r.findDiscoverySandbox(ctx, &run)
+		if sbErr != nil {
+			return false, ctrl.Result{}, sbErr
+		}
+		if foundSB == nil {
+			logger.Info(logMsgRecreatingSandbox, "run", run.Name, "sandbox", sandboxName)
+			if err := r.recreateDiscoverySandbox(ctx, &run); err != nil {
+				return false, ctrl.Result{}, err
+			}
+			if updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Phase = v1alpha1.RunPhaseDiscovering
+				status.Message = ""
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               v1alpha1.ConditionTypeDiscovered,
+					Status:             metav1.ConditionFalse,
+					Reason:             "Discovering",
+					Message:            "Running discovery in sandbox",
+					ObservedGeneration: gen,
+				})
+			}); updateErr != nil {
+				logger.Error(updateErr, "failed to update run status after recreating sandbox")
+			}
+			return false, ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
+		}
+
+		newEndpoint := r.resolveFreshSandboxEndpoint(ctx, foundSB, currentEndpoint)
+		if newEndpoint == "" || newEndpoint == currentEndpoint {
+			logger.Info("Sandbox endpoint unchanged or not yet ready after Unavailable failure; requeuing without counting attempt",
+				"run", run.Name, "endpoint", currentEndpoint, "resolved", newEndpoint)
+			return false, ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
+		}
+
+		newClient, clientErr := r.createSandboxClient(ctx, &run, foundSB.Name, foundSB.Namespace, newEndpoint)
+		if clientErr != nil {
+			return false, ctrl.Result{}, fmt.Errorf("failed to create sandbox client for recovered endpoint %s: %w", newEndpoint, clientErr)
+		}
+		if sbClient != nil && sbClient != r.SandboxClient {
+			if closeErr := sbClient.Close(); closeErr != nil {
+				logger.Error(closeErr, "failed to close sandbox client during endpoint recovery")
+			}
+		}
+		sbClient = newClient
+		currentEndpoint = newEndpoint
+		return true, ctrl.Result{}, nil
+	}
+
+	executeCleanAndClone := func() (*sandboxclient.ExecuteResult, error) {
+		if _, cleanErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+			Command: []string{"rm", "-rf", "repo"},
+		}); cleanErr != nil {
+			logger.V(1).Info("Failed to clean repo directory before clone attempt", "error", cleanErr)
+			if isUnavailableOrDialTimeout(cleanErr) {
+				return nil, cleanErr
+			}
+		}
+		return sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+			Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
+		})
+	}
 
 	for cloneAttempts = 1; cloneAttempts <= maxAttempts; cloneAttempts++ {
 		if run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time) {
 			break
 		}
 
-		// Clean up any previous partial clone before attempting
-		if _, cleanErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
-			Command: []string{"rm", "-rf", "repo"},
-		}); cleanErr != nil {
-			logger.V(1).Info("Failed to clean repo directory before clone attempt", "error", cleanErr)
+		// Re-resolve the sandbox pod IP (informer Get, falling back to Sandbox.status) before every attempt
+		latestEndpoint := r.resolveSandboxEndpoint(ctx, &sandbox)
+		if latestEndpoint != "" && latestEndpoint != currentEndpoint {
+			newClient, clientErr := r.createSandboxClient(ctx, &run, sandbox.Name, sandbox.Namespace, latestEndpoint)
+			if clientErr != nil {
+				logger.Error(clientErr, "failed to recreate sandbox client on endpoint change", "endpoint", latestEndpoint)
+			} else {
+				if sbClient != nil && sbClient != r.SandboxClient {
+					if closeErr := sbClient.Close(); closeErr != nil {
+						logger.Error(closeErr, "failed to close old sandbox client on endpoint change")
+					}
+				}
+				sbClient = newClient
+				currentEndpoint = latestEndpoint
+			}
 		}
 
-		cloneRes, cloneErr = sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
-			Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
-		})
+		cloneRes, cloneErr = executeCleanAndClone()
+
+		if isUnavailableOrDialTimeout(cloneErr) && !uncountedRetried {
+			uncountedRetried = true
+			recovered, res, err := handleUnavailable(cloneErr)
+			if err != nil || !res.IsZero() {
+				return res, err
+			}
+			if recovered {
+				cloneRes, cloneErr = executeCleanAndClone()
+			}
+		} else if isUnavailableOrDialTimeout(cloneErr) {
+			_, res, err := handleUnavailable(cloneErr)
+			if err != nil || !res.IsZero() {
+				return res, err
+			}
+		}
 
 		if cloneErr == nil && cloneRes != nil && cloneRes.ExitCode == 0 {
 			break
@@ -1453,6 +1530,144 @@ func (r *RunReconciler) sandboxNamespace() string {
 		return r.SandboxNamespace
 	}
 	return discovery.DefaultSandboxNamespace
+}
+
+func (r *RunReconciler) recreateDiscoverySandbox(ctx context.Context, run *v1alpha1.Run) error {
+	logger := log.FromContext(ctx)
+	sandboxNamespace := r.sandboxNamespace()
+	sandboxName := discovery.SandboxNameForRun(run.Name)
+	sandboxKey := types.NamespacedName{Namespace: sandboxNamespace, Name: sandboxName}
+
+	authToken, tokenErr := r.ensureAuthToken(ctx, run, sandboxKey)
+	if tokenErr != nil {
+		return fmt.Errorf("failed to ensure auth token: %w", tokenErr)
+	}
+	tokenDigest := discovery.AuthTokenDigest(authToken)
+
+	// Create server cert Secret before Sandbox so it exists when pod starts
+	if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.discoveryDeadline()+time.Hour); err != nil {
+		return fmt.Errorf("failed to ensure server cert secret: %w", err)
+	}
+
+	logger.Info("Creating discovery sandbox", "sandbox", sandboxName, "namespace", sandboxNamespace)
+	desiredSandbox := discovery.BuildSandbox(run, sandboxNamespace, tokenDigest, discovery.SandboxOptions{
+		ServerCertSecret: pki.ServerSecretName(sandboxName),
+		CAConfigMap:      pki.DefaultCAConfigMapName,
+		SandboxdImage:    r.sandboxdImage(),
+	})
+	if err := r.Create(ctx, desiredSandbox); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create sandbox: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *RunReconciler) findDiscoverySandbox(ctx context.Context, run *v1alpha1.Run) (*sandboxv1beta1.Sandbox, error) {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+
+	runNamespace := run.Namespace
+	if runNamespace == "" {
+		runNamespace = discovery.DefaultControllerNamespace
+	}
+
+	matchingLabels := client.MatchingLabels{
+		discovery.LabelRunName:      run.Name,
+		discovery.LabelRunNamespace: runNamespace,
+		discovery.LabelRole:         discovery.RoleDiscovery,
+	}
+	var sbList sandboxv1beta1.SandboxList
+	if err := reader.List(ctx, &sbList, client.InNamespace(r.sandboxNamespace()), matchingLabels); err != nil {
+		return nil, err
+	}
+	for i := range sbList.Items {
+		sb := &sbList.Items[i]
+		if sb.DeletionTimestamp.IsZero() {
+			return sb, nil
+		}
+	}
+
+	// Fallback to direct name lookup if labels were not matched
+	sbName := discovery.SandboxNameForRun(run.Name)
+	var directSB sandboxv1beta1.Sandbox
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}, &directSB); err == nil {
+		if directSB.DeletionTimestamp.IsZero() {
+			return &directSB, nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+func (r *RunReconciler) resolveSandboxEndpoint(ctx context.Context, sb *sandboxv1beta1.Sandbox) string {
+	return r.resolveEndpointWithReader(ctx, r.Client, sb, "")
+}
+
+func (r *RunReconciler) resolveFreshSandboxEndpoint(ctx context.Context, sb *sandboxv1beta1.Sandbox, failedEndpoint string) string {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	return r.resolveEndpointWithReader(ctx, reader, sb, failedEndpoint)
+}
+
+func (r *RunReconciler) resolveEndpointWithReader(ctx context.Context, reader client.Reader, sb *sandboxv1beta1.Sandbox, failedEndpoint string) string {
+	podName := sb.Name
+	if name, ok := sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
+		podName = name
+	}
+	var pod corev1.Pod
+	podKey := types.NamespacedName{Namespace: sb.Namespace, Name: podName}
+	var podIP string
+	if err := reader.Get(ctx, podKey, &pod); err == nil && pod.Status.PodIP != "" {
+		podIP = pod.Status.PodIP
+	}
+	var sbIP string
+	if len(sb.Status.PodIPs) > 0 && sb.Status.PodIPs[0] != "" {
+		sbIP = sb.Status.PodIPs[0]
+	}
+
+	if podIP != "" && podIP != failedEndpoint {
+		return podIP
+	}
+	if sbIP != "" && sbIP != failedEndpoint {
+		return sbIP
+	}
+	if podIP != "" {
+		return podIP
+	}
+	if sbIP != "" {
+		return sbIP
+	}
+	return ""
+}
+
+func (r *RunReconciler) createSandboxClient(ctx context.Context, run *v1alpha1.Run, sbName, sbNamespace, endpoint string) (sandboxclient.Client, error) {
+	if r.SandboxClient != nil {
+		return r.SandboxClient, nil
+	}
+
+	factory := r.ClientFactory
+	if factory == nil {
+		factory = sandboxclient.DefaultFactory()
+	}
+	authToken, tokenErr := r.ensureAuthToken(ctx, run, types.NamespacedName{Namespace: sbNamespace, Name: sbName})
+	if tokenErr != nil {
+		return nil, fmt.Errorf("failed to retrieve auth token for sandbox: %w", tokenErr)
+	}
+	var opts []sandboxclient.Option
+	if authToken != "" {
+		opts = append(opts, sandboxclient.WithAuthToken(authToken))
+	}
+	if tlsConfig := r.pki().ClientTLSConfig(sbName, sbNamespace); tlsConfig != nil {
+		opts = append(opts, sandboxclient.WithTLSConfig(tlsConfig))
+	}
+	return factory.NewClient(endpoint, opts...)
 }
 
 func (r *RunReconciler) deleteAllSandboxesForRun(ctx context.Context, runNamespace, runName string) error {

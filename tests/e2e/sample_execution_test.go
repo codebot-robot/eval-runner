@@ -1136,4 +1136,96 @@ spec:
 		// Clean up sandboxes
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
 	})
+
+	t.Run("ResumeDiscoveringAfterControllerRestart", func(t *testing.T) {
+		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval-slow.git")
+		runName := "resume-discovering-restart-run"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval-slow.git
+    commit: %s
+  model: mockllm/model
+  limit: 2
+`, runName, commit)
+
+		harness.KubectlApplyContent(manifest)
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+		})
+
+		// Wait until the Run enters Discovering
+		harness.WaitForRunPhase("eval-runner", runName, "Discovering", 30*time.Second)
+
+		// Record initial discovery sandbox UID
+		sandboxName := discovery.SandboxNameForRun(runName)
+		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+		sbUIDBefore := strings.TrimSpace(harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "-o", "jsonpath={.metadata.uid}"))
+
+		// Scale down controller deployment to 0 and wait until zero controller pods remain
+		harness.runCmd("kubectl", "scale", "deployment/eval-runner-controller", "-n", "eval-runner", "--replicas=0")
+		harness.runCmd("kubectl", "wait", "--for=delete", "pod", "-l", "app=eval-runner-controller", "-n", "eval-runner", "--timeout=60s")
+
+		// Assert the Run is still Discovering while controller is absent
+		run := harness.WaitForRunExists("eval-runner", runName, 10*time.Second)
+		if run.Status.Phase != v1alpha1.RunPhaseDiscovering {
+			t.Fatalf("expected Run to remain in Discovering while controller was scaled to 0, got %s", run.Status.Phase)
+		}
+
+		// Scale controller deployment back to 1
+		harness.runCmd("kubectl", "scale", "deployment/eval-runner-controller", "-n", "eval-runner", "--replicas=1")
+		harness.runCmd("kubectl", "rollout", "status", "deployment/eval-runner-controller", "-n", "eval-runner", "--timeout=90s")
+
+		// Wait for Run to reach Completed, dumping diagnostics on failure
+		var runCompleted *v1alpha1.Run
+		var lastObservedUID string
+		startWait := time.Now()
+		for time.Since(startWait) < 180*time.Second {
+			r := harness.WaitForRunExists("eval-runner", runName, 5*time.Second)
+			if r != nil {
+				if curUID := strings.TrimSpace(harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found", "-o", "jsonpath={.metadata.uid}")); curUID != "" {
+					lastObservedUID = curUID
+				}
+				if r.Status.Phase == v1alpha1.RunPhaseCompleted {
+					runCompleted = r
+					break
+				}
+				if r.Status.Phase == v1alpha1.RunPhaseFailed {
+					runCompleted = r
+					break
+				}
+			}
+			time.Sleep(2 * time.Second)
+		}
+
+		if runCompleted == nil || runCompleted.Status.Phase != v1alpha1.RunPhaseCompleted {
+			t.Log("=== E2E FAILURE DIAGNOSTICS DUMP ===")
+			t.Logf("Sandbox, Pods:\n%s", harness.runCmd("kubectl", "get", "sandbox,pods", "-o", "wide", "-n", "eval-runner-sandbox"))
+			t.Logf("NetworkPolicies:\n%s", harness.runCmd("kubectl", "get", "networkpolicy", "-n", "eval-runner-sandbox", "-o", "yaml"))
+			t.Logf("Controller logs:\n%s", harness.runCmd("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", "--tail=200"))
+			sbIP := strings.TrimSpace(harness.runCmd("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found", "-o", "jsonpath={.status.podIP}"))
+			if sbIP != "" {
+				probeOut, probeErr := exec.Command("kubectl", "exec", "-n", "eval-runner", "deployment/eval-runner-controller", "--", "/eval-runner", fmt.Sprintf("--probe-tcp=%s:9090", sbIP)).CombinedOutput()
+				t.Logf("TCP probe to %s:9090: err=%v output:\n%s", sbIP, probeErr, string(probeOut))
+			}
+			t.Log("=== END E2E FAILURE DIAGNOSTICS DUMP ===")
+			if runCompleted == nil {
+				t.Fatalf("Timeout waiting for Run %s to reach Completed", runName)
+			} else {
+				t.Fatalf("Run failed: %s (message: %s)", runCompleted.Status.Phase, runCompleted.Status.Message)
+			}
+		}
+
+		// Compare discovery Sandbox UID before and after (at most one change)
+		if lastObservedUID != "" && lastObservedUID != sbUIDBefore {
+			t.Logf("Discovery sandbox was recreated once during recovery (UID changed from %s to %s)", sbUIDBefore, lastObservedUID)
+		} else {
+			t.Logf("Discovery sandbox was preserved (UID %s)", sbUIDBefore)
+		}
+	})
 }
