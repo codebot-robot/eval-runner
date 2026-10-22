@@ -23,6 +23,7 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -110,6 +111,9 @@ type Config struct {
 
 	// ForgeRegistry optionally provides a multi-host forge registry.
 	ForgeRegistry *forge.Registry
+
+	// Consumer optionally provides an explicit Consumer.
+	Consumer *consumer.Consumer
 }
 
 // RawWebhookFlags captures explicit flags passed on the command line.
@@ -355,23 +359,7 @@ func IsRepositoryAllowed(repo string, allowList []string) bool {
 	return false
 }
 
-// IsMultiRepo checks whether a repository allow-list permits more than one repository.
-// It returns true if multiple distinct repositories are listed or if wildcard "*" is configured.
-func IsMultiRepo(allowList []string) bool {
-	distinct := make(map[string]bool)
-	for _, repo := range allowList {
-		trimmed := strings.TrimSpace(strings.ToLower(repo))
-		if trimmed == "*" {
-			return true
-		}
-		if trimmed != "" {
-			distinct[trimmed] = true
-		}
-	}
-	return len(distinct) > 1
-}
-
 // IsMultiRepo reports whether the configuration allows multiple repositories.
 func (cfg Config) IsMultiRepo() bool {
-	return IsMultiRepo(cfg.WebhookRepositories)
+	return consumer.IsMultiRepo(cfg.WebhookRepositories)
 }

@@ -23,7 +23,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
+
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 )
 
 const (
@@ -266,92 +267,34 @@ func ParseOwnerAndName(repo *GitHubRepository) (string, string, error) {
 }
 
 // ShortSHA returns the first 7 characters of a git commit SHA in lowercase.
-// If the SHA is shorter than 7 characters, it is returned trimmed and in lowercase.
 func ShortSHA(sha string) string {
-	s := strings.ToLower(strings.TrimSpace(sha))
-	if len(s) <= 7 {
-		return s
-	}
-	return s[:7]
+	return consumer.ShortSHA(sha)
 }
 
 // RepoHash returns a deterministic 7-character lowercase hexadecimal SHA-256 hash
-// of the normalized repository name (e.g. "owner/repo").
+// of the normalized repository name.
 func RepoHash(repo string) string {
-	norm := strings.ToLower(strings.TrimSpace(repo))
-	h := sha256.Sum256([]byte(norm))
-	return hex.EncodeToString(h[:])[:7]
+	return consumer.RepoHash(repo)
 }
 
 // ComparisonName returns the deterministic Comparison resource name for a PR.
-// If isMultiRepo is true, a 7-character repository hash is included (pr-<repoHash>-<prNum>)
-// to prevent collisions across allow-listed repositories. If false, the single-repo name
-// (pr-<prNum>) is returned for backwards compatibility.
 func ComparisonName(repo string, prNum int, isMultiRepo bool) string {
-	if isMultiRepo && repo != "" {
-		return fmt.Sprintf("pr-%s-%d", RepoHash(repo), prNum)
-	}
-	return fmt.Sprintf("pr-%d", prNum)
+	return consumer.ComparisonName(repo, prNum, isMultiRepo)
 }
 
 // CandidateRunName returns the deterministic candidate Run resource name for a PR and head commit.
-// If isMultiRepo is true, a 7-character repository hash is included (pr-<repoHash>-<prNum>-<headSHA7>)
-// to prevent collisions across allow-listed repositories. If false, the single-repo name
-// (pr-<prNum>-<headSHA7>) is returned for backwards compatibility.
 func CandidateRunName(repo string, prNum int, headSHA string, isMultiRepo bool) string {
-	if isMultiRepo && repo != "" {
-		return fmt.Sprintf("pr-%s-%d-%s", RepoHash(repo), prNum, ShortSHA(headSHA))
-	}
-	return fmt.Sprintf("pr-%d-%s", prNum, ShortSHA(headSHA))
+	return consumer.CandidateRunName(repo, prNum, headSHA, isMultiRepo)
 }
 
 // BaselineRunName returns the deterministic baseline Run resource name for a repository and commit SHA.
-// If isMultiRepo is true, a 7-character repository hash is included (base-<repoHash>-<sha7>)
-// to prevent collisions across allow-listed repositories. If false, the single-repo name
-// (base-<sha7>) is returned for backwards compatibility.
 func BaselineRunName(repo string, commitSHA string, isMultiRepo bool) string {
-	if isMultiRepo && repo != "" {
-		return fmt.Sprintf("base-%s-%s", RepoHash(repo), ShortSHA(commitSHA))
-	}
-	return fmt.Sprintf("base-%s", ShortSHA(commitSHA))
+	return consumer.BaselineRunName(repo, commitSHA, isMultiRepo)
 }
 
-// SanitizeLabelValue converts an arbitrary string (such as "owner/name") into a valid
-// Kubernetes label value:
-// - Max 63 characters
-// - Characters must be [a-zA-Z0-9_.-]
-// - Must start and end with an alphanumeric character ([a-zA-Z0-9])
+// SanitizeLabelValue converts an arbitrary string into a valid Kubernetes label value.
 func SanitizeLabelValue(val string) string {
-	val = strings.TrimSpace(val)
-	if val == "" {
-		return ""
-	}
-
-	var sb strings.Builder
-	for _, r := range val {
-		switch {
-		case r == '/':
-			sb.WriteRune('_')
-		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.' || r == '-':
-			sb.WriteRune(r)
-		default:
-			sb.WriteRune('_')
-		}
-	}
-
-	s := sb.String()
-	// Trim non-alphanumeric from edges
-	s = strings.TrimFunc(s, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
-
-	if len(s) > 63 {
-		s = s[:63]
-		s = strings.TrimFunc(s, func(r rune) bool {
-			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-		})
-	}
-	return s
+	return consumer.SanitizeLabelValue(val)
 }
 
 // ComputeSignature computes the GitHub X-Hub-Signature-256 HMAC-SHA256 header value
