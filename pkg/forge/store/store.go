@@ -670,6 +670,29 @@ func (s *Store) SaveSyncBatch(ctx context.Context, repo forge.RepoRef, batch *Sy
 			}
 		}
 
+		// 6. Endpoint sync metadata (ETags)
+		if len(batch.EndpointSyncs) > 0 {
+			bkt, err := tx.CreateBucketIfNotExists([]byte(BucketSync(rKey)))
+			if err != nil {
+				return err
+			}
+			for epURL, epSync := range batch.EndpointSyncs {
+				if epSync == nil {
+					continue
+				}
+				data, err := json.Marshal(StoredEndpointSync{
+					SchemaVersion: CurrentSchemaVersion,
+					EndpointSync:  epSync,
+				})
+				if err != nil {
+					return err
+				}
+				if err := bkt.Put([]byte("url:"+epURL), data); err != nil {
+					return err
+				}
+			}
+		}
+
 		return nil
 	})
 	if err != nil {
@@ -1073,4 +1096,54 @@ func (s *Store) GetSync(repo forge.RepoRef) (*SyncMeta, error) {
 		return nil
 	})
 	return sm, err
+}
+
+// SaveEndpointSync saves cached ETag and Last-Modified headers for an endpoint URL in the repository's sync bucket.
+func (s *Store) SaveEndpointSync(repo forge.RepoRef, endpoint string, sync *EndpointSync) error {
+	rKey := repoKey(repo)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bkt, err := tx.CreateBucketIfNotExists([]byte(BucketSync(rKey)))
+		if err != nil {
+			return err
+		}
+		data, err := json.Marshal(StoredEndpointSync{
+			SchemaVersion: CurrentSchemaVersion,
+			EndpointSync:  sync,
+		})
+		if err != nil {
+			return err
+		}
+		return bkt.Put([]byte("url:"+endpoint), data)
+	})
+}
+
+// GetEndpointSync retrieves cached ETag and Last-Modified headers for an endpoint URL.
+func (s *Store) GetEndpointSync(repo forge.RepoRef, endpoint string) (*EndpointSync, error) {
+	rKey := repoKey(repo)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var epSync *EndpointSync
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket([]byte(BucketSync(rKey)))
+		if bkt == nil {
+			return ErrNotFound
+		}
+		val := bkt.Get([]byte("url:" + endpoint))
+		if val == nil {
+			return ErrNotFound
+		}
+		var rec StoredEndpointSync
+		if err := json.Unmarshal(val, &rec); err != nil {
+			return err
+		}
+		epSync = rec.EndpointSync
+		return nil
+	})
+	return epSync, err
 }
