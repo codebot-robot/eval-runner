@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -111,12 +112,22 @@ func IsRetryable(err error) bool {
 	return errors.As(err, &se)
 }
 
+// RateLimitInfo contains the latest rate limit status reported by GitHub.
+type RateLimitInfo struct {
+	Limit     int       `json:"limit"`
+	Remaining int       `json:"remaining"`
+	Reset     time.Time `json:"reset"`
+}
+
 // HTTPClientConfig holds configuration for HTTPClient.
 type HTTPClientConfig struct {
-	Token      string
-	AppAuth    *AppTokenProvider
-	BaseURL    string
-	HTTPClient *http.Client
+	Token                 string
+	AppAuth               *AppTokenProvider
+	BaseURL               string
+	HTTPClient            *http.Client
+	RateLimitFloorPercent int
+	OnRateLimit           func(RateLimitInfo)
+	RateLimitLogger       func(format string, args ...any)
 }
 
 // HTTPClient implements Client using the GitHub REST API.
@@ -128,6 +139,15 @@ type HTTPClient struct {
 
 	userMu     sync.Mutex
 	cachedUser string
+
+	rateMu           sync.Mutex
+	rateLimit        RateLimitInfo
+	hasRateLimit     bool
+	lastLoggedRemain int
+	lastLoggedReset  time.Time
+	rateFloorPercent int
+	onRateLimit      func(RateLimitInfo)
+	rateLogger       func(format string, args ...any)
 }
 
 // NewHTTPClient returns a new HTTPClient.
@@ -140,12 +160,146 @@ func NewHTTPClient(cfg HTTPClientConfig) *HTTPClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &HTTPClient{
-		token:      cfg.Token,
-		appAuth:    cfg.AppAuth,
-		baseURL:    baseURL,
-		httpClient: httpClient,
+	floorPct := cfg.RateLimitFloorPercent
+	if floorPct <= 0 {
+		floorPct = 10
 	}
+	logger := cfg.RateLimitLogger
+	if logger == nil {
+		logger = log.Printf
+	}
+	return &HTTPClient{
+		token:            cfg.Token,
+		appAuth:          cfg.AppAuth,
+		baseURL:          baseURL,
+		httpClient:       httpClient,
+		lastLoggedRemain: -1,
+		rateFloorPercent: floorPct,
+		onRateLimit:      cfg.OnRateLimit,
+		rateLogger:       logger,
+	}
+}
+
+// RateLimit returns the latest rate limit info reported by GitHub.
+func (c *HTTPClient) RateLimit() RateLimitInfo {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	return c.rateLimit
+}
+
+// SetRateFloorPercent updates the rate limit floor percentage (default 10%).
+func (c *HTTPClient) SetRateFloorPercent(pct int) {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	if pct <= 0 {
+		pct = 10
+	}
+	c.rateFloorPercent = pct
+}
+
+// SetOnRateLimit sets a callback invoked whenever rate limits are updated.
+func (c *HTTPClient) SetOnRateLimit(fn func(RateLimitInfo)) {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	c.onRateLimit = fn
+}
+
+// SetRateLimitLogger sets a custom logger for rate limit updates.
+func (c *HTTPClient) SetRateLimitLogger(fn func(format string, args ...any)) {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	c.rateLogger = fn
+}
+
+func (c *HTTPClient) isBudgetExhausted(now time.Time) (bool, time.Duration, int, int, time.Time) {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	if !c.hasRateLimit || c.rateLimit.Limit <= 0 {
+		return false, 0, 0, 0, time.Time{}
+	}
+	floor := c.rateLimit.Limit * c.rateFloorPercent / 100
+	if floor <= 0 {
+		floor = 1
+	}
+	if c.rateLimit.Remaining <= floor && now.Before(c.rateLimit.Reset) {
+		return true, c.rateLimit.Reset.Sub(now), c.rateLimit.Remaining, floor, c.rateLimit.Reset
+	}
+	return false, 0, c.rateLimit.Remaining, floor, c.rateLimit.Reset
+}
+
+func (c *HTTPClient) updateRateLimits(headers http.Header) {
+	if headers == nil {
+		return
+	}
+	remStr := headers.Get("X-RateLimit-Remaining")
+	if remStr == "" {
+		return
+	}
+	rem, err := strconv.Atoi(strings.TrimSpace(remStr))
+	if err != nil {
+		return
+	}
+	var lim int
+	if limStr := headers.Get("X-RateLimit-Limit"); limStr != "" {
+		parsedLim, err := strconv.Atoi(strings.TrimSpace(limStr))
+		if err != nil {
+			log.Printf("warning: invalid X-RateLimit-Limit header %q: %v", limStr, err)
+		} else {
+			lim = parsedLim
+		}
+	}
+	var resetTime time.Time
+	if resetStr := headers.Get("X-RateLimit-Reset"); resetStr != "" {
+		resetUnix, err := strconv.ParseInt(strings.TrimSpace(resetStr), 10, 64)
+		if err != nil {
+			log.Printf("warning: invalid X-RateLimit-Reset header %q: %v", resetStr, err)
+		} else if resetUnix > 0 {
+			resetTime = time.Unix(resetUnix, 0)
+		}
+	}
+
+	c.rateMu.Lock()
+	info := RateLimitInfo{
+		Limit:     lim,
+		Remaining: rem,
+		Reset:     resetTime,
+	}
+	c.rateLimit = info
+	c.hasRateLimit = true
+
+	floor := lim * c.rateFloorPercent / 100
+	if floor <= 0 {
+		floor = 1
+	}
+
+	shouldLog := false
+	if c.lastLoggedRemain == -1 {
+		shouldLog = true
+	} else if !c.lastLoggedReset.Equal(resetTime) {
+		shouldLog = true
+	} else if (c.lastLoggedRemain > floor && rem <= floor) || (c.lastLoggedRemain <= floor && rem > floor) {
+		shouldLog = true
+	}
+
+	if shouldLog {
+		c.lastLoggedRemain = rem
+		c.lastLoggedReset = resetTime
+	}
+	cb := c.onRateLimit
+	logger := c.rateLogger
+	c.rateMu.Unlock()
+
+	if shouldLog && logger != nil {
+		logger("github rate limit updated: remaining=%d, limit=%d, reset=%s", rem, lim, resetTime.Format(time.RFC3339))
+	}
+	if cb != nil {
+		cb(info)
+	}
+}
+
+// UpdateRateLimits processes response headers to update tracked rate limits.
+func (c *HTTPClient) UpdateRateLimits(headers http.Header) {
+	c.updateRateLimits(headers)
 }
 
 func (c *HTTPClient) doRequest(ctx context.Context, method, path string, body any, out any) error {
@@ -163,6 +317,12 @@ func (c *HTTPClient) DoRequestHeader(ctx context.Context, method, path string, b
 	return c.doRequestHeader(ctx, method, path, body, out)
 }
 
+// DoRequestConditional performs an HTTP request with optional ETag and Last-Modified headers.
+// If the server returns 304 Not Modified, it returns notModified=true and err=nil.
+func (c *HTTPClient) DoRequestConditional(ctx context.Context, method, path string, body any, out any, etag, lastModified string) (http.Header, bool, error) {
+	return c.doRequestInternal(ctx, method, path, body, out, etag, lastModified)
+}
+
 // BaseURL returns the configured base URL of the client.
 func (c *HTTPClient) BaseURL() string {
 	return c.baseURL
@@ -174,11 +334,24 @@ func (c *HTTPClient) HasCredentials() bool {
 }
 
 func (c *HTTPClient) doRequestHeader(ctx context.Context, method, path string, body any, out any) (http.Header, error) {
+	headers, _, err := c.doRequestInternal(ctx, method, path, body, out, "", "")
+	return headers, err
+}
+
+func (c *HTTPClient) doRequestInternal(ctx context.Context, method, path string, body any, out any, etag, lastModified string) (http.Header, bool, error) {
+	if exhausted, waitTime, rem, floor, reset := c.isBudgetExhausted(time.Now()); exhausted {
+		return nil, false, &RateLimitError{
+			StatusCode: http.StatusTooManyRequests,
+			RetryAfter: waitTime,
+			Message:    fmt.Sprintf("github rate limit budget floor reached (%d remaining <= %d floor of %d); backing off until %s", rem, floor, c.RateLimit().Limit, reset.Format(time.RFC3339)),
+		}
+	}
+
 	var reqBody io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+			return nil, false, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 		reqBody = bytes.NewReader(data)
 	}
@@ -190,14 +363,14 @@ func (c *HTTPClient) doRequestHeader(ctx context.Context, method, path string, b
 
 	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create http request: %w", err)
+		return nil, false, fmt.Errorf("failed to create http request: %w", err)
 	}
 
 	token := c.token
 	if c.appAuth != nil {
 		tok, err := c.appAuth.Token(ctx)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		token = tok
 	}
@@ -207,13 +380,19 @@ func (c *HTTPClient) doRequestHeader(ctx context.Context, method, path string, b
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, &ServerError{StatusCode: 0, Message: fmt.Sprintf("github request failed: %v", err)}
+		return nil, false, &ServerError{StatusCode: 0, Message: fmt.Sprintf("github request failed: %v", err)}
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -221,22 +400,34 @@ func (c *HTTPClient) doRequestHeader(ctx context.Context, method, path string, b
 		}
 	}()
 
+	c.updateRateLimits(resp.Header)
+
+	if resp.StatusCode == http.StatusNotModified {
+		c.rateMu.Lock()
+		logger := c.rateLogger
+		c.rateMu.Unlock()
+		if logger != nil {
+			logger("github: conditional request for %s returned 304 Not Modified (free)", path)
+		}
+		return resp.Header, true, nil
+	}
+
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return resp.Header, fmt.Errorf("failed to read response body: %w", err)
+		return resp.Header, false, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.Header, c.classifyError(resp.StatusCode, resp.Header, string(respBytes))
+		return resp.Header, false, c.classifyError(resp.StatusCode, resp.Header, string(respBytes))
 	}
 
 	if out != nil && len(respBytes) > 0 {
 		if err := json.Unmarshal(respBytes, out); err != nil {
-			return resp.Header, fmt.Errorf("failed to unmarshal response: %w", err)
+			return resp.Header, false, fmt.Errorf("failed to unmarshal response: %w", err)
 		}
 	}
 
-	return resp.Header, nil
+	return resp.Header, false, nil
 }
 
 func (c *HTTPClient) classifyError(status int, headers http.Header, body string) error {

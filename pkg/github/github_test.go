@@ -19,8 +19,10 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -2757,5 +2759,200 @@ func TestReporter_PostUnserviceableNote(t *testing.T) {
 	expected := "Extra samples cannot be run: artifact prefix mismatch."
 	if comments[0].Body != expected {
 		t.Errorf("expected comment body %q, got %q", expected, comments[0].Body)
+	}
+}
+
+func TestHTTPClient_ETagRoundTrip_304ZeroRateLimit(t *testing.T) {
+	requestCount := 0
+	var receivedIfNoneMatch string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		receivedIfNoneMatch = r.Header.Get("If-None-Match")
+
+		if r.Header.Get("If-None-Match") == `"v1-etag"` {
+			// Conditional request matches ETag: return 304 Not Modified
+			w.Header().Set("ETag", `"v1-etag"`)
+			w.Header().Set("X-RateLimit-Limit", "60")
+			w.Header().Set("X-RateLimit-Remaining", "59") // No rate limit consumed!
+			w.Header().Set("X-RateLimit-Reset", "1761138000")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+
+		// Initial request: return 200 OK with ETag
+		w.Header().Set("ETag", `"v1-etag"`)
+		w.Header().Set("X-RateLimit-Limit", "60")
+		w.Header().Set("X-RateLimit-Remaining", "59")
+		w.Header().Set("X-RateLimit-Reset", "1761138000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"message":"hello"}`))
+	}))
+	defer ts.Close()
+
+	client := NewHTTPClient(HTTPClientConfig{
+		BaseURL: ts.URL,
+	})
+
+	ctx := t.Context()
+
+	// 1. Initial request without ETag
+	var out map[string]string
+	headers, notModified, err := client.DoRequestConditional(ctx, http.MethodGet, "/test", nil, &out, "", "")
+	if err != nil {
+		t.Fatalf("initial request failed: %v", err)
+	}
+	if notModified {
+		t.Errorf("expected notModified to be false on 200 OK")
+	}
+	etag := headers.Get("ETag")
+	if etag != `"v1-etag"` {
+		t.Errorf("expected ETag %q, got %q", `"v1-etag"`, etag)
+	}
+	if out["message"] != "hello" {
+		t.Errorf("expected message 'hello', got %q", out["message"])
+	}
+	rl := client.RateLimit()
+	if rl.Remaining != 59 {
+		t.Errorf("expected rate limit remaining 59, got %d", rl.Remaining)
+	}
+
+	// 2. Second request with If-None-Match ETag
+	headers2, notModified2, err := client.DoRequestConditional(ctx, http.MethodGet, "/test", nil, nil, etag, "")
+	if err != nil {
+		t.Fatalf("conditional request failed: %v", err)
+	}
+	if !notModified2 {
+		t.Errorf("expected notModified to be true on 304 Not Modified")
+	}
+	if receivedIfNoneMatch != `"v1-etag"` {
+		t.Errorf("server did not receive If-None-Match header: got %q", receivedIfNoneMatch)
+	}
+	if headers2.Get("ETag") != `"v1-etag"` {
+		t.Errorf("expected response ETag in 304, got %q", headers2.Get("ETag"))
+	}
+
+	// 3. Assert zero rate limit consumption
+	rl2 := client.RateLimit()
+	if rl2.Remaining != 59 {
+		t.Errorf("expected zero rate limit consumption (remaining 59), got %d", rl2.Remaining)
+	}
+}
+
+func TestHTTPClient_RateLimitBudget_BackoffBelowFloor(t *testing.T) {
+	serverHits := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverHits++
+		w.Header().Set("X-RateLimit-Limit", "100")
+		w.Header().Set("X-RateLimit-Remaining", "10") // 10% floor is 10
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(10*time.Minute).Unix()))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+
+	client := NewHTTPClient(HTTPClientConfig{
+		BaseURL:               ts.URL,
+		RateLimitFloorPercent: 10,
+	})
+
+	ctx := t.Context()
+
+	// 1. Initial request sets rate limit: limit 100, remaining 10, reset +10m
+	if err := client.DoRequest(ctx, http.MethodGet, "/test", nil, nil); err != nil {
+		t.Fatalf("initial request failed: %v", err)
+	}
+	if serverHits != 1 {
+		t.Fatalf("expected 1 server hit, got %d", serverHits)
+	}
+
+	// 2. Next request: remaining 10 is <= 10% floor (10), reset in future
+	// Must back off without hitting the server
+	err := client.DoRequest(ctx, http.MethodGet, "/test", nil, nil)
+	if err == nil {
+		t.Fatalf("expected rate limit budget floor error, got nil")
+	}
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("expected *RateLimitError, got %T: %v", err, err)
+	}
+	if serverHits != 1 {
+		t.Errorf("server was hit during backoff! hits=%d", serverHits)
+	}
+	if rle.RetryAfter <= 0 {
+		t.Errorf("expected positive RetryAfter, got %v", rle.RetryAfter)
+	}
+
+	// 3. If reset is in the past, request is allowed through
+	client.rateMu.Lock()
+	client.rateLimit.Reset = time.Now().Add(-1 * time.Second)
+	client.rateMu.Unlock()
+
+	if err := client.DoRequest(ctx, http.MethodGet, "/test", nil, nil); err != nil {
+		t.Fatalf("request after reset failed: %v", err)
+	}
+	if serverHits != 2 {
+		t.Errorf("expected 2 server hits after reset, got %d", serverHits)
+	}
+}
+
+func TestHTTPClient_RateLimitLoggingOncePerChange(t *testing.T) {
+	logMessages := []string{}
+	client := NewHTTPClient(HTTPClientConfig{
+		BaseURL: "http://example.com",
+		RateLimitLogger: func(format string, args ...any) {
+			logMessages = append(logMessages, fmt.Sprintf(format, args...))
+		},
+	})
+
+	// 1. Initial response: remaining 59 -> logs once
+	h1 := http.Header{}
+	h1.Set("X-RateLimit-Limit", "60")
+	h1.Set("X-RateLimit-Remaining", "59")
+	h1.Set("X-RateLimit-Reset", "1761138000")
+	client.updateRateLimits(h1)
+
+	// 2. Same remaining -> does not log
+	client.updateRateLimits(h1)
+
+	// 3. Normal decrement (58, still above 10% floor of 6) -> does NOT log (avoids spam on every API call)
+	h2 := http.Header{}
+	h2.Set("X-RateLimit-Limit", "60")
+	h2.Set("X-RateLimit-Remaining", "58")
+	h2.Set("X-RateLimit-Reset", "1761138000")
+	client.updateRateLimits(h2)
+
+	// 4. Drops below floor (5 remaining <= 6 floor) -> logs once
+	hLow := http.Header{}
+	hLow.Set("X-RateLimit-Limit", "60")
+	hLow.Set("X-RateLimit-Remaining", "5")
+	hLow.Set("X-RateLimit-Reset", "1761138000")
+	client.updateRateLimits(hLow)
+
+	// 5. Still below floor (4 remaining) -> does not log again
+	hLow2 := http.Header{}
+	hLow2.Set("X-RateLimit-Limit", "60")
+	hLow2.Set("X-RateLimit-Remaining", "4")
+	hLow2.Set("X-RateLimit-Reset", "1761138000")
+	client.updateRateLimits(hLow2)
+
+	// 6. Window reset (new reset timestamp) -> logs once
+	hReset := http.Header{}
+	hReset.Set("X-RateLimit-Limit", "60")
+	hReset.Set("X-RateLimit-Remaining", "60")
+	hReset.Set("X-RateLimit-Reset", "1761141600")
+	client.updateRateLimits(hReset)
+
+	if len(logMessages) != 3 {
+		t.Fatalf("expected exactly 3 log messages (initial, floor threshold crossing, window reset), got %d: %v", len(logMessages), logMessages)
+	}
+	if !strings.Contains(logMessages[0], "remaining=59") {
+		t.Errorf("expected log message 0 to contain remaining=59, got %q", logMessages[0])
+	}
+	if !strings.Contains(logMessages[1], "remaining=5") {
+		t.Errorf("expected log message 1 to contain remaining=5, got %q", logMessages[1])
+	}
+	if !strings.Contains(logMessages[2], "remaining=60") {
+		t.Errorf("expected log message 2 to contain remaining=60, got %q", logMessages[2])
 	}
 }
