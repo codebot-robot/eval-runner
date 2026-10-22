@@ -85,6 +85,9 @@ func (h *Harness) Setup() {
 		h.t.Logf("Creating kind cluster %s", h.clusterName)
 		h.runCmd("kind", "create", "cluster", "--name", h.clusterName)
 		h.t.Cleanup(func() {
+			if h.t.Failed() {
+				h.DumpDiagnostics()
+			}
 			if os.Getenv("SKIP_CLEANUP") == "" {
 				h.t.Logf("Deleting kind cluster %s", h.clusterName)
 				h.runCmd("kind", "delete", "cluster", "--name", h.clusterName)
@@ -94,6 +97,11 @@ func (h *Harness) Setup() {
 		})
 	} else {
 		h.t.Logf("Reusing existing kind cluster %s", h.clusterName)
+		h.t.Cleanup(func() {
+			if h.t.Failed() {
+				h.DumpDiagnostics()
+			}
+		})
 	}
 
 	contextName := "kind-" + h.clusterName
@@ -847,4 +855,50 @@ func (h *Harness) runCmd(name string, args ...string) string {
 		h.t.Fatalf("Command %s %v failed: %v\nStdout: %s\nStderr: %s", name, args, err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
+}
+
+// DumpDiagnostics collects kind cluster diagnostics (controller logs,
+// kubectl get runs,comparisons -o yaml, events) into $ARTIFACTS/diagnostics.
+func (h *Harness) DumpDiagnostics() {
+	artifactsDir := os.Getenv("ARTIFACTS")
+	if artifactsDir == "" {
+		artifactsDir = "/tmp/artifacts"
+	}
+	diagDir := filepath.Join(artifactsDir, "diagnostics")
+	if err := os.MkdirAll(diagDir, 0755); err != nil {
+		h.t.Logf("Warning: failed to create diagnostics directory %s: %v", diagDir, err)
+		return
+	}
+
+	h.t.Log("Collecting kind cluster diagnostics...")
+
+	// 1. Controller logs
+	cmd := exec.Command("kubectl", "logs", "--namespace", "eval-runner", "deployment/eval-runner-controller", "--all-containers=true")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Logf("Warning: failed to collect controller logs: %v", err)
+	} else {
+		if err := os.WriteFile(filepath.Join(diagDir, "controller.log"), out, 0644); err != nil {
+			h.t.Logf("Warning: failed to write controller.log: %v", err)
+		}
+	}
+
+	// 2. Runs and comparisons YAML
+	cmd = exec.Command("kubectl", "get", "runs,comparisons", "-A", "-o", "yaml")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Logf("Warning: failed to collect runs,comparisons yaml: %v", err)
+	} else {
+		if err := os.WriteFile(filepath.Join(diagDir, "runs-comparisons.yaml"), out, 0644); err != nil {
+			h.t.Logf("Warning: failed to write runs-comparisons.yaml: %v", err)
+		}
+	}
+
+	// 3. Cluster events
+	cmd = exec.Command("kubectl", "get", "events", "-A", "--sort-by=.lastTimestamp")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Logf("Warning: failed to collect events: %v", err)
+	} else {
+		if err := os.WriteFile(filepath.Join(diagDir, "events.txt"), out, 0644); err != nil {
+			h.t.Logf("Warning: failed to write events.txt: %v", err)
+		}
+	}
 }
