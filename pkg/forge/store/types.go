@@ -98,6 +98,18 @@ type StoredSync struct {
 	SyncMeta      *SyncMeta `json:"syncMeta"`
 }
 
+// EndpointSync represents cached HTTP ETag and Last-Modified headers for an endpoint URL.
+type EndpointSync struct {
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"lastModified,omitempty"`
+}
+
+// StoredEndpointSync represents an endpoint sync record stored in bbolt.
+type StoredEndpointSync struct {
+	SchemaVersion int           `json:"schemaVersion"`
+	EndpointSync  *EndpointSync `json:"endpointSync"`
+}
+
 // SyncBatch contains updates for a repository to be applied atomically in a single write.
 type SyncBatch struct {
 	Repo           *forge.Repository
@@ -106,6 +118,7 @@ type SyncBatch struct {
 	Changes        []forge.ChangeRequest
 	Commits        []*forge.Commit
 	Sync           *SyncMeta
+	EndpointSyncs  map[string]*EndpointSync
 }
 
 // StoreOptions contains configuration options for opening a Store.
