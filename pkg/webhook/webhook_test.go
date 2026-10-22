@@ -20,16 +20,20 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -711,7 +715,7 @@ func TestProcessPullRequest_BaselineCacheReuse(t *testing.T) {
 		BaselineRepo:      "other/other-repo",
 		TargetRepo:        "other/other-repo",
 	}
-	found, err := worker.findCompletedBaselineRun(ctx, "eval-runner", baseSHA, "https://github.com/other/other-repo.git", "mockllm/model")
+	found, err := worker.FindCompletedBaselineRun(ctx, "eval-runner", baseSHA, "https://github.com/other/other-repo.git", "mockllm/model")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2614,19 +2618,19 @@ func TestRepoHashAndNaming(t *testing.T) {
 	}
 
 	// 2. IsMultiRepo
-	if IsMultiRepo(nil) {
+	if consumer.IsMultiRepo(nil) {
 		t.Errorf("expected IsMultiRepo(nil) to be false")
 	}
-	if IsMultiRepo([]string{"gke-labs/eval-runner"}) {
+	if consumer.IsMultiRepo([]string{"gke-labs/eval-runner"}) {
 		t.Errorf("expected single-repo allow-list to not be multi-repo")
 	}
-	if IsMultiRepo([]string{"gke-labs/eval-runner", "gke-labs/eval-runner"}) {
+	if consumer.IsMultiRepo([]string{"gke-labs/eval-runner", "gke-labs/eval-runner"}) {
 		t.Errorf("expected duplicate single-repo to not be multi-repo")
 	}
-	if !IsMultiRepo([]string{"gke-labs/eval-runner", "other/repo"}) {
+	if !consumer.IsMultiRepo([]string{"gke-labs/eval-runner", "other/repo"}) {
 		t.Errorf("expected multiple repos to be multi-repo")
 	}
-	if !IsMultiRepo([]string{"*"}) {
+	if !consumer.IsMultiRepo([]string{"*"}) {
 		t.Errorf("expected wildcard '*' to be multi-repo")
 	}
 
@@ -3349,4 +3353,201 @@ func TestBaselineRuns_CollisionAndReuse(t *testing.T) {
 			t.Fatalf("expected wildcard multi-repo baseline %s to exist: %v", expectedBaseName, err)
 		}
 	})
+}
+
+// TestWebhookAndSyncer_ByteIdenticalObjects verifies requirement 1:
+// the same event sequence through both webhook direct path and syncer->consumer path
+// produces byte-identical Runs and Comparisons (spec, labels, annotations).
+func TestWebhookAndSyncer_ByteIdenticalObjects(t *testing.T) {
+	ctx := t.Context()
+	scheme := newTestScheme()
+
+	repoFullName := "gke-labs/eval-runner"
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	baseSHA := "abcdef1234567890abcdef1234567890abcdef12"
+	headSHA1 := "1111111111111111111111111111111111111111"
+	headSHA2 := "2222222222222222222222222222222222222222"
+	commitTime := "2026-10-22T08:00:00Z"
+	cloneURL := "https://github.com/gke-labs/eval-runner.git"
+	prNum := 7
+
+	// 1. Webhook worker path
+	clWebhook := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Comparison{}, &v1alpha1.Run{}).Build()
+	cfgWebhook := Config{
+		Namespace:                "eval-runner",
+		DefaultModel:             "mockllm/model",
+		DefaultBatchSize:         8,
+		DefaultMaxSamplesPerTask: 64,
+		WebhookRepositories:      []string{repoFullName},
+		Client:                   clWebhook,
+	}
+	worker := NewWorkerPool(cfgWebhook)
+
+	// Webhook: push
+	if err := worker.ProcessPush(ctx, &PushWorkItem{
+		Repo:       repoFullName,
+		Branch:     "main",
+		CommitSHA:  baseSHA,
+		CommitTime: commitTime,
+		CloneURL:   cloneURL,
+	}); err != nil {
+		t.Fatalf("webhook ProcessPush failed: %v", err)
+	}
+
+	// Webhook: PR #7 opened
+	if err := worker.ProcessPullRequest(ctx, &PullRequestWorkItem{
+		PRNumber:          prNum,
+		HeadSHA:           headSHA1,
+		BaseSHA:           baseSHA,
+		CandidateCloneURL: cloneURL,
+		CandidateRepo:     repoFullName,
+		BaselineCloneURL:  cloneURL,
+		BaselineRepo:      repoFullName,
+		TargetRepo:        repoFullName,
+	}); err != nil {
+		t.Fatalf("webhook ProcessPullRequest opened failed: %v", err)
+	}
+
+	// Webhook: PR #7 synchronize
+	if err := worker.ProcessPullRequest(ctx, &PullRequestWorkItem{
+		PRNumber:          prNum,
+		HeadSHA:           headSHA2,
+		BaseSHA:           baseSHA,
+		CandidateCloneURL: cloneURL,
+		CandidateRepo:     repoFullName,
+		BaselineCloneURL:  cloneURL,
+		BaselineRepo:      repoFullName,
+		TargetRepo:        repoFullName,
+	}); err != nil {
+		t.Fatalf("webhook ProcessPullRequest synchronize failed: %v", err)
+	}
+
+	// 2. Syncer Consumer path
+	clConsumer := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Comparison{}, &v1alpha1.Run{}).Build()
+	c := consumer.New(clConsumer, consumer.Config{
+		Namespace:                "eval-runner",
+		DefaultModel:             "mockllm/model",
+		DefaultBatchSize:         8,
+		DefaultMaxSamplesPerTask: 64,
+		TrackedRepos: []consumer.RepoConfig{
+			{Name: repoFullName, Ref: ref, Branches: []string{"main"}},
+		},
+		IsMultiRepo: false,
+	})
+
+	// Consumer: push (BranchAdvanced)
+	if err := c.ConsumeEvent(ctx, consumer.BranchAdvancedEvent{
+		Repo:       ref,
+		Branch:     "main",
+		NewSHA:     baseSHA,
+		CommitTime: commitTime,
+		CloneURL:   cloneURL,
+	}); err != nil {
+		t.Fatalf("consumer BranchAdvanced failed: %v", err)
+	}
+
+	// Consumer: PR #7 opened (ChangeOpened)
+	prChange := forge.ChangeRequest{
+		ID:     forge.ChangeRequestID(strconv.Itoa(prNum)),
+		Number: prNum,
+		Title:  fmt.Sprintf("PR #%d", prNum),
+		State:  "open",
+		Head:   forge.ChangeRequestHead{Ref: repoFullName, SHA: headSHA1, RepoRef: ref},
+		Base:   forge.ChangeRequestBase{Ref: "main", SHA: baseSHA},
+	}
+	if err := c.ConsumeEvent(ctx, consumer.ChangeOpenedEvent{
+		Repo:              ref,
+		Change:            prChange,
+		CandidateCloneURL: cloneURL,
+		BaselineCloneURL:  cloneURL,
+	}); err != nil {
+		t.Fatalf("consumer ChangeOpened failed: %v", err)
+	}
+
+	// Consumer: PR #7 synchronize (ChangeUpdated)
+	prChange.Head.SHA = headSHA2
+	if err := c.ConsumeEvent(ctx, consumer.ChangeUpdatedEvent{
+		Repo:              ref,
+		OldHeadSHA:        headSHA1,
+		Change:            prChange,
+		CandidateCloneURL: cloneURL,
+		BaselineCloneURL:  cloneURL,
+	}); err != nil {
+		t.Fatalf("consumer ChangeUpdated failed: %v", err)
+	}
+
+	// 3. Compare created Runs
+	var runsWebhook, runsConsumer v1alpha1.RunList
+	if err := clWebhook.List(ctx, &runsWebhook, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list webhook runs: %v", err)
+	}
+	if err := clConsumer.List(ctx, &runsConsumer, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list consumer runs: %v", err)
+	}
+
+	if len(runsWebhook.Items) != len(runsConsumer.Items) {
+		t.Fatalf("runs count mismatch: webhook has %d, consumer has %d", len(runsWebhook.Items), len(runsConsumer.Items))
+	}
+
+	runWebhookMap := make(map[string]v1alpha1.Run)
+	for _, r := range runsWebhook.Items {
+		runWebhookMap[r.Name] = r
+	}
+
+	for _, rConsumer := range runsConsumer.Items {
+		rWebhook, ok := runWebhookMap[rConsumer.Name]
+		if !ok {
+			t.Fatalf("run %q exists in consumer but not in webhook", rConsumer.Name)
+		}
+
+		// Normalize TypeMeta and ResourceVersion for JSON comparison
+		rWebhook.TypeMeta = metav1.TypeMeta{}
+		rWebhook.ResourceVersion = ""
+		rConsumer.TypeMeta = metav1.TypeMeta{}
+		rConsumer.ResourceVersion = ""
+
+		wJSON, _ := json.Marshal(rWebhook)
+		cJSON, _ := json.Marshal(rConsumer)
+
+		if string(wJSON) != string(cJSON) {
+			t.Errorf("Run %s JSON mismatch:\nWebhook:  %s\nConsumer: %s", rConsumer.Name, string(wJSON), string(cJSON))
+		}
+	}
+
+	// 4. Compare created Comparisons
+	var compsWebhook, compsConsumer v1alpha1.ComparisonList
+	if err := clWebhook.List(ctx, &compsWebhook, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list webhook comps: %v", err)
+	}
+	if err := clConsumer.List(ctx, &compsConsumer, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list consumer comps: %v", err)
+	}
+
+	if len(compsWebhook.Items) != len(compsConsumer.Items) {
+		t.Fatalf("comparisons count mismatch: webhook has %d, consumer has %d", len(compsWebhook.Items), len(compsConsumer.Items))
+	}
+
+	compWebhookMap := make(map[string]v1alpha1.Comparison)
+	for _, c := range compsWebhook.Items {
+		compWebhookMap[c.Name] = c
+	}
+
+	for _, cConsumer := range compsConsumer.Items {
+		cWebhook, ok := compWebhookMap[cConsumer.Name]
+		if !ok {
+			t.Fatalf("comparison %q exists in consumer but not in webhook", cConsumer.Name)
+		}
+
+		cWebhook.TypeMeta = metav1.TypeMeta{}
+		cWebhook.ResourceVersion = ""
+		cConsumer.TypeMeta = metav1.TypeMeta{}
+		cConsumer.ResourceVersion = ""
+
+		wJSON, _ := json.Marshal(cWebhook)
+		cJSON, _ := json.Marshal(cConsumer)
+
+		if string(wJSON) != string(cJSON) {
+			t.Errorf("Comparison %s JSON mismatch:\nWebhook:  %s\nConsumer: %s", cConsumer.Name, string(wJSON), string(cJSON))
+		}
+	}
 }

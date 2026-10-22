@@ -86,6 +86,8 @@ const (
 	ConfigMapKeyAffinityMode = "affinityMode"
 	// ConfigMapKeySandboxEgressHosts is the ConfigMap key for comma-separated allowed FQDN egress hostnames for sandboxes.
 	ConfigMapKeySandboxEgressHosts = "sandboxEgressHosts"
+	// ConfigMapKeyRepositories is the ConfigMap key for tracked repositories.
+	ConfigMapKeyRepositories = "repositories"
 )
 
 const (

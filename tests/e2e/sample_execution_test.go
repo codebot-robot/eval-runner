@@ -1261,5 +1261,114 @@ spec:
 		} else {
 			t.Logf("Discovery sandbox was preserved (UID %s)", sbUIDBefore)
 		}
+
+		// Clean up sandboxes
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+	})
+
+	t.Run("ControllerRestartMidRunResumesWithoutDuplication", func(t *testing.T) {
+		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
+		shortSHA := commit[:7]
+		baseRunName := fmt.Sprintf("base-%s", shortSHA)
+
+		// 1. Configure repositories in ConfigMap to in-cluster git server
+		configPatch := `{"data":{"defaultModel":"mockllm/model","repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
+		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", configPatch)
+
+		t.Cleanup(func() {
+			// Revert repositories configuration
+			cleanPatch := `{"data":{"repositories":"","defaultModel":"mockllm/model"}}`
+			harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", cleanPatch)
+			harness.runCmd("kubectl", "delete", "run", baseRunName, "-n", "eval-runner", "--ignore-not-found")
+		})
+
+		// 2. Wait for BranchAdvanced to create the baseline Run
+		r := harness.WaitForRunExists("eval-runner", baseRunName, 30*time.Second)
+		if r == nil {
+			t.Fatalf("expected baseline run %s to be created by BranchAdvanced", baseRunName)
+		}
+
+		// 3. Wait until the Run is Running with live progress (task running and samplesDone > 0)
+		t.Logf("Waiting for Run %s to enter Running phase with live progress...", baseRunName)
+		startWaitProgress := time.Now()
+		var observedProgress bool
+		for time.Since(startWaitProgress) < 120*time.Second {
+			out, err := exec.Command("kubectl", "get", "run", baseRunName, "-n", "eval-runner", "-o", "json").CombinedOutput()
+			if err == nil {
+				var runObj v1alpha1.Run
+				if json.Unmarshal(out, &runObj) == nil {
+					if runObj.Status.Phase == v1alpha1.RunPhaseRunning {
+						for _, task := range runObj.Status.Tasks {
+							if task.Phase == v1alpha1.TaskPhaseRunning && task.SamplesDone > 0 {
+								observedProgress = true
+								break
+							}
+						}
+						if observedProgress {
+							break
+						}
+					}
+				}
+			}
+			time.Sleep(1 * time.Second)
+		}
+		if !observedProgress {
+			t.Fatalf("timed out waiting for Run %s to reach Running phase with live progress", baseRunName)
+		}
+
+		// 4. Restart the controller deployment mid-run
+		t.Logf("Restarting eval-runner-controller deployment mid-run...")
+		harness.runCmd("kubectl", "rollout", "restart", "deployment/eval-runner-controller", "-n", "eval-runner")
+		harness.runCmd("kubectl", "rollout", "status", "deployment/eval-runner-controller", "-n", "eval-runner", "--timeout=120s")
+
+		// 5. Wait for the Run to reach Completed
+		harness.WaitForRunPhase("eval-runner", baseRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		// 6. Assert exactly one Run exists with head-sha label
+		out := harness.runCmd("kubectl", "get", "runs", "-n", "eval-runner", "-l", fmt.Sprintf("evalrunner.gke-labs.dev/head-sha=%s", commit), "-o", "jsonpath={.items[*].metadata.name}")
+		names := strings.Fields(out)
+		if len(names) != 1 {
+			t.Fatalf("expected exactly 1 Run with head-sha %s, got %d: %v", commit, len(names), names)
+		}
+		if names[0] != baseRunName {
+			t.Errorf("expected Run name %s, got %s", baseRunName, names[0])
+		}
+
+		// 7. Force a real re-sync by removing and re-adding the repository in ConfigMap
+		emptyPatch := `{"data":{"repositories":""}}`
+		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", emptyPatch)
+		time.Sleep(2 * time.Second)
+
+		reSyncStartTime := time.Now().UTC().Format(time.RFC3339)
+
+		// Re-add repository to trigger immediate SyncRepo in reloader
+		reAddPatch := `{"data":{"repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
+		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", reAddPatch)
+
+		// Wait and verify that the re-sync actually executed
+		var syncVerified bool
+		waitSyncStart := time.Now()
+		for time.Since(waitSyncStart) < 30*time.Second {
+			controllerLogs := harness.runCmd("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", fmt.Sprintf("--since-time=%s", reSyncStartTime))
+			if strings.Contains(controllerLogs, "syncing newly added repository") ||
+				strings.Contains(controllerLogs, "docs-eval.git") {
+				syncVerified = true
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		if !syncVerified {
+			t.Fatalf("expected controller to execute immediate re-sync of re-added repository, but log confirmation was not found")
+		}
+
+		// Assert still exactly one Run and nothing new created after re-sync
+		outAfter := harness.runCmd("kubectl", "get", "runs", "-n", "eval-runner", "-l", fmt.Sprintf("evalrunner.gke-labs.dev/head-sha=%s", commit), "-o", "jsonpath={.items[*].metadata.name}")
+		namesAfter := strings.Fields(outAfter)
+		if len(namesAfter) != 1 {
+			t.Errorf("expected still exactly 1 Run after re-sync, got %d: %v", len(namesAfter), namesAfter)
+		}
+
+		// Clean up sandboxes
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 	})
 }

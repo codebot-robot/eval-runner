@@ -30,8 +30,11 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	consumer "github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	forgegithub "github.com/gke-labs/eval-runner/pkg/forge/github"
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
+	"github.com/gke-labs/eval-runner/pkg/forge/store"
+	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
@@ -141,6 +144,8 @@ func main() {
 	var leaderElect bool
 	flag.BoolVar(&leaderElect, "leader-elect", true, "Enable leader election for controller manager. Enabling this will ensure only one instance of the controller is active.")
 	flag.StringVar(&sandboxEgressHosts, "sandbox-egress-hosts", "", "Comma-separated allow-list of FQDN hostnames for sandbox HTTPS egress")
+	var forgeDBPath string
+	flag.StringVar(&forgeDBPath, "forge-db", "/tmp/forge.db", "Filesystem path to local bbolt database for forge state")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 
 	opts := zap.Options{
@@ -418,6 +423,54 @@ func main() {
 		os.Exit(1)
 	}
 
+	forgeStore, err := store.Open(forgeDBPath)
+	if err != nil {
+		setupLog.Error(err, "unable to open forge database", "path", forgeDBPath)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := forgeStore.Close(); err != nil {
+			setupLog.Error(err, "error closing forge database on shutdown")
+		}
+	}()
+
+	var repoNames []string
+	for _, r := range clusterConfig.Repositories {
+		repoNames = append(repoNames, r.Name)
+	}
+
+	forgeConsumer := consumer.New(mgr.GetClient(), consumer.Config{
+		Namespace:                evalRunnerNamespace,
+		DefaultModel:             clusterConfig.DefaultModel,
+		DefaultCohort:            clusterConfig.DefaultCohort,
+		DefaultBatchSize:         clusterConfig.DefaultBatchSize,
+		DefaultMaxSamplesPerTask: clusterConfig.DefaultMaxSamplesPerTask,
+		DefaultBudgetUSD:         clusterConfig.DefaultBudgetUSD,
+		TrackedRepos:             clusterConfig.Repositories,
+		IsMultiRepo:              consumer.IsMultiRepo(repoNames),
+		Store:                    forgeStore,
+	})
+
+	forgeSyncer := syncer.New(syncer.SyncerOptions{
+		Store:        forgeStore,
+		Registry:     forgeRegistry,
+		Consumer:     forgeConsumer,
+		Repositories: clusterConfig.Repositories,
+	})
+
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		if len(clusterConfig.Repositories) > 0 {
+			if err := forgeSyncer.SyncAll(ctx); err != nil {
+				setupLog.Info("initial forge sync completed with warnings", "error", err)
+			}
+		}
+		<-ctx.Done()
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to add forge syncer runnable")
+		os.Exit(1)
+	}
+
 	fqdnVersion, fqdnSupported, err := discovery.DetectFQDNNetworkPolicyAPIVersion(discoveryClient)
 	if err != nil {
 		setupLog.Info("unable to detect FQDNNetworkPolicy support; skipping FQDN egress narrowing", "error", err)
@@ -456,6 +509,8 @@ func main() {
 		ReloadableSink: reloadableSink,
 		RunReconciler:  reconciler,
 		CompReconciler: comparisonReconciler,
+		Syncer:         forgeSyncer,
+		Consumer:       forgeConsumer,
 		InitialConfig:  &clusterConfig,
 		FQDNSyncFunc:   egressController.SyncHosts,
 	})

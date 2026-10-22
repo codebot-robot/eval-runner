@@ -366,6 +366,18 @@ eval-runner interacts with code hosting environments (such as github.com, GitLab
   - Determines repository default branches via symbolic `HEAD`.
   - Discovers branch heads from `refs/heads/*`, explicitly filtering out tags.
   - Extracts change requests from `refs/pull/N/head` (and `refs/pull/N/merge` when present) for GitHub remotes.
+- `pkg/forge/store`: Local bbolt cache of forge state:
+  - Persists repository metadata, branches, commits, change requests, and sync state in discrete bbolt buckets with schema versioning.
+  - Features page-size-aware sanity checks, moving corrupted files aside (`.corrupted.<timestamp>`) and opening fresh.
+  - Rebuilds in-memory indexes (repos, commits by SHA, branch heads newest-first, open change requests) in milliseconds on open.
+- `pkg/forge/syncer`: Polling and synchronization engine:
+  - Syncs authoritative forge state to the local store using synchronous consume-before-commit delivery.
+  - Diffs branches and change requests, emitting typed events (`BranchAdvanced`, `ChangeOpened`, `ChangeUpdated`, `ChangeClosed`).
+  - Merges out-of-band hints into stored state and records Prometheus metrics (`evalrunner_forge_syncs_total`, `evalrunner_forge_events_total`, `evalrunner_forge_store_bytes`).
+- `pkg/forge/consumer`: Unified object reconciliation:
+  - Reconciles candidate Runs, baseline Runs (with baseline cache reuse), and Comparisons from typed forge events.
+  - Shared across controller and webhook binaries to guarantee byte-identical Kubernetes object generation.
+  - Enforces the single canonical `IsMultiRepo` naming rule and deterministic naming schemes (`ComparisonName`, `CandidateRunName`, `BaselineRunName`).
 
 ---
 
