@@ -1651,209 +1651,6 @@ func seriesXTicks(commitSHAs []string) []SVGTick {
 	return xTicks
 }
 
-// computeSeriesGeometry generates polylines, shaded CI polygons, circles, and observation ticks for series items
-// mapped into [x0, x1] horizontally and [y0, y1] vertically (rate 1.0 at y0, 0.0 at y1).
-func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) (polylines []SVGPolyline, polygons []string, circles []SVGCircle, ticks []SVGObservationTick, hasPoints bool) {
-	return computeSeriesGeometryWithStroke(items, x0, x1, y0, y1, circleR, "")
-}
-
-// computeSeriesGeometryWithStroke generates polylines, shaded CI polygons, circles, and observation ticks.
-// If stroke is non-empty, it overrides the default indigo/delta color for lines, circles, and ticks.
-func computeSeriesGeometryWithStroke(items []SeriesItem, x0, x1, y0, y1, circleR float64, stroke string) (polylines []SVGPolyline, polygons []string, circles []SVGCircle, ticks []SVGObservationTick, hasPoints bool) {
-	if len(items) == 0 {
-		return nil, nil, nil, nil, false
-	}
-	N := len(items)
-
-	type pt2D struct {
-		x float64
-		y float64
-	}
-	type ci2D struct {
-		x      float64
-		yUpper float64
-		yLower float64
-	}
-
-	var curLine []pt2D
-	var curLineStroke string
-	var curCI []ci2D
-
-	flushLine := func() {
-		if len(curLine) >= 2 {
-			var sb strings.Builder
-			for j, p := range curLine {
-				if j > 0 {
-					sb.WriteByte(' ')
-				}
-				sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.y))
-			}
-			s := curLineStroke
-			if s == "" {
-				s = "var(--indigo)"
-			}
-			polylines = append(polylines, SVGPolyline{
-				Points: sb.String(),
-				Stroke: s,
-			})
-		}
-		curLine = nil
-		curLineStroke = ""
-	}
-
-	flushCI := func() {
-		if len(curCI) >= 2 {
-			var sb strings.Builder
-			for j, p := range curCI {
-				if j > 0 {
-					sb.WriteByte(' ')
-				}
-				sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.yUpper))
-			}
-			for j := len(curCI) - 1; j >= 0; j-- {
-				sb.WriteByte(' ')
-				sb.WriteString(fmt.Sprintf("%.1f,%.1f", curCI[j].x, curCI[j].yLower))
-			}
-			polygons = append(polygons, sb.String())
-		} else if len(curCI) == 1 {
-			p := curCI[0]
-			poly := fmt.Sprintf("%.1f,%.1f %.1f,%.1f %.1f,%.1f %.1f,%.1f",
-				p.x-2.0, p.yUpper,
-				p.x+2.0, p.yUpper,
-				p.x+2.0, p.yLower,
-				p.x-2.0, p.yLower,
-			)
-			polygons = append(polygons, poly)
-		}
-		curCI = nil
-	}
-
-	for i, it := range items {
-		cx := x0
-		if N > 1 {
-			cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
-		} else {
-			cx = (x0 + x1) / 2.0
-		}
-
-		if !it.HasPoint || it.SuccessRate == nil {
-			flushLine()
-			flushCI()
-			continue
-		}
-
-		hasPoints = true
-		rate := *it.SuccessRate
-		if rate < 0.0 {
-			rate = 0.0
-		} else if rate > 1.0 {
-			rate = 1.0
-		}
-		cy := y1 - float64(rate*(y1-y0))
-		cx = math.Round(cx*10.0) / 10.0
-		cy = math.Round(cy*10.0) / 10.0
-
-		pt := pt2D{x: cx, y: cy}
-		circleFill := "var(--indigo)"
-		if stroke != "" {
-			circleFill = stroke
-		}
-		circles = append(circles, SVGCircle{CX: cx, CY: cy, R: circleR, Fill: circleFill})
-
-		obsCount := it.ObsCount
-		if obsCount <= 0 {
-			obsCount = 1
-		}
-		yTop := math.Round(math.Max(y0, cy-3.5)*10.0) / 10.0
-		yBottom := math.Round(math.Min(y1, cy+3.5)*10.0) / 10.0
-		tickStroke := "var(--indigo)"
-		if stroke != "" {
-			tickStroke = stroke
-		}
-		if obsCount == 1 {
-			ticks = append(ticks, SVGObservationTick{
-				X1:     cx,
-				Y1:     yTop,
-				X2:     cx,
-				Y2:     yBottom,
-				Stroke: tickStroke,
-			})
-		} else {
-			step := 2.5
-			startX := cx - float64(obsCount-1)*step/2.0
-			for k := 0; k < obsCount; k++ {
-				tx := math.Round((startX+float64(k)*step)*10.0) / 10.0
-				if tx < x0 {
-					tx = x0
-				} else if tx > x1 {
-					tx = x1
-				}
-				ticks = append(ticks, SVGObservationTick{
-					X1:     tx,
-					Y1:     yTop,
-					X2:     tx,
-					Y2:     yBottom,
-					Stroke: tickStroke,
-				})
-			}
-		}
-
-		if len(curLine) == 0 {
-			curLine = append(curLine, pt)
-		} else {
-			segStroke := "var(--indigo)"
-			if stroke != "" {
-				segStroke = stroke
-			} else if it.DeltaPrev != nil {
-				if it.DeltaPrev.CI.Lower > 0 {
-					segStroke = "var(--good)"
-				} else if it.DeltaPrev.CI.Upper < 0 {
-					segStroke = "var(--bad)"
-				}
-			}
-
-			if len(curLine) == 1 {
-				curLineStroke = segStroke
-				curLine = append(curLine, pt)
-			} else if segStroke == curLineStroke {
-				curLine = append(curLine, pt)
-			} else {
-				prevPt := curLine[len(curLine)-1]
-				flushLine()
-				curLine = []pt2D{prevPt, pt}
-				curLineStroke = segStroke
-			}
-		}
-
-		if it.CI != nil {
-			lo := it.CI.Lower
-			if lo < 0.0 {
-				lo = 0.0
-			} else if lo > 1.0 {
-				lo = 1.0
-			}
-			hi := it.CI.Upper
-			if hi < 0.0 {
-				hi = 0.0
-			} else if hi > 1.0 {
-				hi = 1.0
-			}
-			yUpper := y1 - float64(hi*(y1-y0))
-			yLower := y1 - float64(lo*(y1-y0))
-			yUpper = math.Round(yUpper*10.0) / 10.0
-			yLower = math.Round(yLower*10.0) / 10.0
-			curCI = append(curCI, ci2D{x: cx, yUpper: yUpper, yLower: yLower})
-		} else {
-			flushCI()
-		}
-	}
-
-	flushLine()
-	flushCI()
-
-	return polylines, polygons, circles, ticks, hasPoints
-}
-
 // BuildSeriesSVG generates server-side numeric SVG coordinates for success rate vs commit series.
 func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 	const (
@@ -1887,7 +1684,15 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 	}
 	xTicks := seriesXTicks(commitSHAs)
 
-	polylines, polygons, circles, _, _ := computeSeriesGeometry(items, x0, x1, y0, y1, 4.0)
+	lines := []ChartLine{{Items: items}}
+	opts := ChartGeometryOptions{
+		X0:      x0,
+		X1:      x1,
+		Y0:      y0,
+		Y1:      y1,
+		CircleR: 4.0,
+	}
+	res := computeChartGeometry(lines, nil, len(items), opts)
 
 	return SeriesSVG{
 		ViewBox:    viewBox,
@@ -1895,9 +1700,9 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 		Y0:         y0,
 		X1:         x1,
 		Y1:         y1,
-		Polylines:  polylines,
-		Polygons:   polygons,
-		Circles:    circles,
+		Polylines:  res.Polylines,
+		Polygons:   res.Polygons,
+		Circles:    res.Circles,
 		XAxisTicks: xTicks,
 		YAxisTicks: yTicks,
 	}
@@ -1924,14 +1729,41 @@ func BuildSparklineSVG(items []SeriesItem) SparklineSVG {
 		}
 	}
 
-	polylines, polygons, circles, ticks, hasPoints := computeSeriesGeometry(items, x0, x1, y0, y1, circleR)
+	lines := []ChartLine{{Items: items}}
+	ticksAtCommit := make([][]ChartTick, len(items))
+	for i, it := range items {
+		if it.HasPoint && it.SuccessRate != nil {
+			count := it.ObsCount
+			if count <= 0 {
+				count = 1
+			}
+			for k := 0; k < count; k++ {
+				ticksAtCommit[i] = append(ticksAtCommit[i], ChartTick{
+					Rate:   *it.SuccessRate,
+					Stroke: "var(--indigo)",
+				})
+			}
+		}
+	}
+
+	opts := ChartGeometryOptions{
+		X0:             x0,
+		X1:             x1,
+		Y0:             y0,
+		Y1:             y1,
+		CircleR:        circleR,
+		TickHalfHeight: 3.5,
+		TickStep:       2.5,
+	}
+
+	res := computeChartGeometry(lines, ticksAtCommit, len(items), opts)
 	return SparklineSVG{
 		ViewBox:   viewBox,
-		Polylines: polylines,
-		Polygons:  polygons,
-		Circles:   circles,
-		Ticks:     ticks,
-		HasPoints: hasPoints,
+		Polylines: res.Polylines,
+		Polygons:  res.Polygons,
+		Circles:   res.Circles,
+		Ticks:     res.Ticks,
+		HasPoints: res.HasPoints,
 	}
 }
 
@@ -3047,27 +2879,6 @@ func BuildRepoSuiteChartSVG(lines []DimensionLine, allObsForEval []EvalObservati
 	}
 	xTicks := seriesXTicks(commitSHAs)
 
-	var polylines []SVGPolyline
-	var polygons []string
-	var polygonFills []string
-	var circles []SVGCircle
-	hasPoints := false
-
-	N := len(commits)
-
-	for _, line := range lines {
-		pLines, polys, circs, _, lineHasPoints := computeSeriesGeometryWithStroke(line.Items, x0, x1, y0, y1, 4.0, line.Color)
-		polylines = append(polylines, pLines...)
-		polygons = append(polygons, polys...)
-		for range polys {
-			polygonFills = append(polygonFills, line.Color)
-		}
-		circles = append(circles, circs...)
-		if lineHasPoints {
-			hasPoints = true
-		}
-	}
-
 	dimension := DimensionModel
 	if len(dim) > 0 {
 		dimension = dim[0]
@@ -3075,77 +2886,52 @@ func BuildRepoSuiteChartSVG(lines []DimensionLine, allObsForEval []EvalObservati
 
 	// Map line colors by dimension value for tick strokes
 	lineColorMap := make(map[string]string)
-	for _, l := range lines {
+	chartLines := make([]ChartLine, len(lines))
+	for i, l := range lines {
+		chartLines[i] = ChartLine{
+			Color: l.Color,
+			Items: l.Items,
+		}
 		if l.Name != "" {
 			lineColorMap[l.Name] = l.Color
 		}
 	}
 
-	// Ticks for each observation
-	var ticks []SVGObservationTick
+	N := len(commits)
+	ticksAtCommit := make([][]ChartTick, N)
 	for i, c := range commits {
-		var atCommit []EvalObservation
 		for _, o := range allObsForEval {
 			if o.CommitSHA == c.SHA {
-				atCommit = append(atCommit, o)
-			}
-		}
-		M := len(atCommit)
-		if M == 0 {
-			continue
-		}
-
-		cx := x0
-		if N > 1 {
-			cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
-		} else {
-			cx = (x0 + x1) / 2.0
-		}
-		cx = math.Round(cx*10.0) / 10.0
-
-		step := 3.5
-		startX := cx - float64(M-1)*step/2.0
-		for j, o := range atCommit {
-			tx := cx
-			if M > 1 {
-				tx = math.Round((startX+float64(j)*step)*10.0) / 10.0
-				if tx < x0 {
-					tx = x0
-				} else if tx > x1 {
-					tx = x1
+				rate := o.Est.Point
+				if o.SuccessRate != nil {
+					rate = *o.SuccessRate
 				}
+				val := evalDimensionValue(o, dimension)
+				stroke := "var(--indigo)"
+				if len(lines) > 1 && val != "" && lineColorMap[val] != "" {
+					stroke = lineColorMap[val]
+				} else if len(lines) == 1 && lines[0].Color != "" {
+					stroke = lines[0].Color
+				}
+				ticksAtCommit[i] = append(ticksAtCommit[i], ChartTick{
+					Rate:   rate,
+					Stroke: stroke,
+				})
 			}
-
-			rate := o.Est.Point
-			if o.SuccessRate != nil {
-				rate = *o.SuccessRate
-			}
-			if rate < 0.0 {
-				rate = 0.0
-			} else if rate > 1.0 {
-				rate = 1.0
-			}
-			cy := y1 - float64(rate*(y1-y0))
-			yTop := math.Round(math.Max(y0, cy-6.0)*10.0) / 10.0
-			yBottom := math.Round(math.Min(y1, cy+6.0)*10.0) / 10.0
-
-			val := evalDimensionValue(o, dimension)
-			stroke := "var(--indigo)"
-			if len(lines) > 1 && val != "" && lineColorMap[val] != "" {
-				stroke = lineColorMap[val]
-			} else if len(lines) == 1 && lines[0].Color != "" {
-				stroke = lines[0].Color
-			}
-
-			ticks = append(ticks, SVGObservationTick{
-				X1:     tx,
-				Y1:     yTop,
-				X2:     tx,
-				Y2:     yBottom,
-				Stroke: stroke,
-			})
 		}
 	}
+
+	opts := ChartGeometryOptions{
+		X0:             x0,
+		X1:             x1,
+		Y0:             y0,
+		Y1:             y1,
+		CircleR:        4.0,
+		TickHalfHeight: 6.0,
+		TickStep:       3.5,
+	}
+
+	res := computeChartGeometry(chartLines, ticksAtCommit, N, opts)
 
 	return RepoSuiteChartSVG{
 		ViewBox:      viewBox,
@@ -3153,13 +2939,13 @@ func BuildRepoSuiteChartSVG(lines []DimensionLine, allObsForEval []EvalObservati
 		Y0:           y0,
 		X1:           x1,
 		Y1:           y1,
-		Polylines:    polylines,
-		Polygons:     polygons,
-		PolygonFills: polygonFills,
-		Circles:      circles,
-		Ticks:        ticks,
+		Polylines:    res.Polylines,
+		Polygons:     res.Polygons,
+		PolygonFills: res.PolygonFills,
+		Circles:      res.Circles,
+		Ticks:        res.Ticks,
 		XAxisTicks:   xTicks,
 		YAxisTicks:   yTicks,
-		HasPoints:    hasPoints,
+		HasPoints:    res.HasPoints,
 	}
 }
