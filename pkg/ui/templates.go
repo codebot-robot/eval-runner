@@ -271,6 +271,7 @@ const repoHeaderPartial = `{{- define "repo_header" }}
       </div>
       <nav class="nav-links">
         <a href="{{ repoLink .Repo "" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "overview" }}active{{ end }}">Overview</a>
+        <a href="{{ repoLink .Repo "#suites" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "evals" }}active{{ end }}">Evals</a>
         <a href="{{ repoLink .Repo "/runs" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
         <a href="{{ repoLink .Repo "/pulls" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull requests</a>
         <a href="{{ repoLink .Repo "/comparisons" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "comparisons" }}active{{ end }}">Comparisons</a>
@@ -428,7 +429,7 @@ const repoOverviewTemplate = `
     </div>
 
     <!-- 2 & 3. Eval Suites & Evals Table -->
-    <div class="card">
+    <div class="card" id="suites">
       <div class="card-header">
         <h1 class="card-title">Eval Suites</h1>
         <span style="font-size:13px;color:var(--muted)">branch: <span class="mono">{{ .Branch }}</span></span>
@@ -1676,6 +1677,7 @@ var (
 	tmplSeriesDetail     = parseTemplate("series_detail", seriesDetailTemplate)
 	tmplRepoIndex        = parseTemplate("repo_index", repoIndexTemplate)
 	tmplRepoOverview     = parseTemplate("repo_overview", repoOverviewTemplate)
+	tmplRepoSuiteDetail  = parseTemplate("repo_suite_detail", repoSuiteDetailTemplate)
 
 	// TmplComparisonTable is the parsed template for the comparison table sub-template.
 	TmplComparisonTable = tmplComparisonTable
@@ -2174,3 +2176,234 @@ func RenderRepoIndex(w io.Writer, view RepoIndexView) error {
 func RenderRepoOverview(w io.Writer, view RepoOverviewView) error {
 	return tmplRepoOverview.Execute(w, view)
 }
+
+// RenderRepoSuiteDetail renders the eval suite detail template to the given writer.
+func RenderRepoSuiteDetail(w io.Writer, view RepoSuiteDetailView) error {
+	return tmplRepoSuiteDetail.Execute(w, view)
+}
+
+const repoSuiteDetailTemplate = `
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ if .Repo.Name }}{{ .Repo.Name }} · {{ end }}{{ .SuiteName }} · Eval Suite · eval-runner</title>
+  <style>` + baseCSS + `
+.overview-headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 24px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.overview-headline .headline-score {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.overview-headline .headline-ci {
+  font-size: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+.overview-headline .headline-meta {
+  font-size: 14px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.eval-card {
+  margin-bottom: 24px;
+}
+.model-legend {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.model-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.chart-commit-labels {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+  margin-bottom: 16px;
+}
+.eval-trend-svg {
+  display: block;
+  max-width: 640px;
+}
+</style>
+</head>
+<body>
+  {{ template "repo_header" . }}
+
+  <main class="container">
+    <div style="margin-bottom:12px;font-size:13px;color:var(--muted)">
+      <a href="{{ .OverviewLink }}">← Back to Overview</a>
+    </div>
+
+    <!-- 1. Headline Header -->
+    <div class="overview-headline">
+      <div>
+        <span class="headline-score">{{ .SuiteScore }}</span>
+        <span class="headline-ci">{{ .SuiteCI }}</span>
+        {{- if .HasDelta }}
+        <span class="chip {{ .DeltaClass }}" style="margin-left:12px">{{ .DeltaStr }}</span>
+        {{- end }}
+      </div>
+      <div class="headline-meta">
+        <span class="mono" style="font-weight:600;font-size:16px;color:var(--ink)">{{ .SuiteName }}</span>
+        <span style="color:var(--muted)">·</span>
+        <span>{{ .EvalsCount }} {{ if eq .EvalsCount 1 }}eval{{ else }}evals{{ end }}</span>
+        {{- if .CurrentCommitShort }}
+        <span style="color:var(--muted)">·</span>
+        <span>at commit <span class="mono">{{ .CurrentCommitShort }}</span></span>
+        {{- end }}
+      </div>
+    </div>
+
+    <!-- 2 & 3. One section per eval -->
+    {{- range .Evals }}
+    <div class="card eval-card">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+          <h2 class="card-title mono" style="margin:0">{{ .ID }}</h2>
+          <div>
+            <span class="mono" style="font-size:16px;font-weight:600">{{ .ScoreStr }}</span>
+            <span style="font-size:12px;color:var(--muted);margin-left:4px">{{ .CIStr }}</span>
+          </div>
+          {{- if .HasDelta }}
+          <span class="chip {{ .DeltaClass }}">{{ .DeltaStr }}</span>
+          {{- end }}
+        </div>
+      </div>
+      <div class="card-body">
+        {{- if .HasModelBreakdown }}
+        <div class="model-legend">
+          <span style="font-weight:600;color:var(--muted)">Models:</span>
+          {{- range .ModelLegend }}
+          <span class="model-legend-item">
+            <svg width="12" height="12" aria-hidden="true"><rect width="12" height="12" rx="2" fill="{{ .Color }}"/></svg>
+            <span class="mono" style="font-weight:600">{{ .Name }}:</span>
+            <span class="mono">{{ .ScoreStr }}</span>
+            <span style="font-size:11px;color:var(--muted)">{{ .CIStr }}</span>
+          </span>
+          {{- end }}
+        </div>
+        {{- end }}
+
+        {{- $svg := .SVG }}
+        <!-- Trend Chart SVG -->
+        <div style="overflow-x:auto">
+          <svg viewBox="{{ $svg.ViewBox }}" width="100%" height="220" class="eval-trend-svg">
+            <!-- Y-Axis Grid Lines & Labels -->
+            {{ range $svg.YAxisTicks }}
+            <line x1="{{ $svg.X0 }}" y1="{{ .Y1 }}" x2="{{ $svg.X1 }}" y2="{{ .Y1 }}" stroke="var(--line)" stroke-width="1" stroke-dasharray="3,3"/>
+            <text x="{{ .X }}" y="{{ .Y }}" text-anchor="end" font-size="11" fill="var(--muted)" font-family="var(--mono)">{{ .Text }}</text>
+            {{ end }}
+
+            <!-- Axes -->
+            <line x1="{{ $svg.X0 }}" y1="{{ $svg.Y1 }}" x2="{{ $svg.X1 }}" y2="{{ $svg.Y1 }}" stroke="var(--line)" stroke-width="1"/>
+            <line x1="{{ $svg.X0 }}" y1="{{ $svg.Y0 }}" x2="{{ $svg.X0 }}" y2="{{ $svg.Y1 }}" stroke="var(--line)" stroke-width="1"/>
+
+            <!-- Shaded CI Polygons -->
+            {{ range $i, $poly := $svg.Polygons }}
+            <polygon points="{{ $poly }}" fill="{{ if $svg.PolygonFills }}{{ index $svg.PolygonFills $i }}{{ else }}var(--indigo){{ end }}" fill-opacity="0.15" stroke="none"/>
+            {{ end }}
+
+            <!-- Polylines -->
+            {{ range $svg.Polylines }}
+            <polyline points="{{ .Points }}" fill="none" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--indigo){{ end }}" stroke-width="2"/>
+            {{ end }}
+
+            <!-- Data Points -->
+            {{ range $svg.Circles }}
+            <circle cx="{{ .CX }}" cy="{{ .CY }}" r="{{ .R }}" fill="{{ if .Fill }}{{ .Fill }}{{ else }}var(--indigo){{ end }}" stroke="#fff" stroke-width="2"/>
+            {{ end }}
+
+            <!-- Observation Ticks -->
+            {{ range $svg.Ticks }}
+            <line x1="{{ .X1 }}" y1="{{ .Y1 }}" x2="{{ .X2 }}" y2="{{ .Y2 }}" stroke="{{ if .Stroke }}{{ .Stroke }}{{ else }}var(--indigo){{ end }}" stroke-width="1.5" stroke-linecap="round" class="obs-tick"/>
+            {{ end }}
+
+            <!-- X-Axis Commit Ticks -->
+            {{ range $svg.XAxisTicks }}
+            <line x1="{{ .X }}" y1="{{ .Y1 }}" x2="{{ .X }}" y2="{{ .Y2 }}" stroke="var(--line)" stroke-width="1"/>
+            <text x="{{ .X }}" y="{{ .TextY }}" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">{{ .Text }}</text>
+            {{ end }}
+          </svg>
+        </div>
+
+        <!-- Commit Labels in text under chart -->
+        <div class="chart-commit-labels">
+          <span>first: <span class="mono">{{ .FirstCommitShort }}</span></span>
+          <span>last: <span class="mono">{{ .LastCommitShort }}</span></span>
+          <span>newest-changed: <span class="mono">{{ .NewestChangedCommitShort }}</span></span>
+        </div>
+
+        <!-- Observations Table -->
+        <div style="overflow-x:auto;margin-top:16px">
+          <table class="ci">
+            <thead>
+              <tr>
+                <th>Commit</th>
+                <th>Time</th>
+                <th>Model</th>
+                <th>Samples</th>
+                <th>Score (95% CI)</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{ range .Observations }}
+              <tr>
+                <td class="mono">{{ .CommitShort }}</td>
+                <td class="ts" title="{{ .TimeUTC }}">{{ .TimeStr }}</td>
+                <td class="mono">{{ if .Model }}{{ .Model }}{{ else }}—{{ end }}</td>
+                <td class="num">{{ .Samples }}</td>
+                <td>
+                  <span class="mono">{{ .ScoreStr }}</span>
+                  <span style="font-size:12px;color:var(--muted);margin-left:4px">{{ .CIStr }}</span>
+                </td>
+                <td>
+                  {{- if .SamplesLink }}
+                  <a href="{{ .SamplesLink }}" class="mono" style="font-size:13px">view samples →</a>
+                  {{- else }}
+                  <span style="color:var(--muted)">—</span>
+                  {{- end }}
+                </td>
+              </tr>
+              {{ end }}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {{- end }}
+
+    <!-- 4. Footer Note -->
+    <div class="card" style="margin-top:24px">
+      <div style="padding:14px 24px;font-size:12px;color:var(--muted);line-height:1.5">
+        Score at main is the pooled Wilson success rate over the newest completed baseline observations at the current commit. An observation is one completed task result on one Run.
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+`

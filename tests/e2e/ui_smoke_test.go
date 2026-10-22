@@ -164,6 +164,23 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 					t.Errorf("expected eval %q in repo home HTML", taskID)
 				}
 			}
+
+			// 4b. Curl eval suite detail page /{repo}/evals/docs
+			suiteURL := baseURL + repoRef.Path() + "/evals/docs"
+			respSuite, err := http.Get(suiteURL)
+			if err != nil {
+				t.Fatalf("failed to GET %s: %v", suiteURL, err)
+			}
+			bodySuite, _ := io.ReadAll(respSuite.Body)
+			respSuite.Body.Close()
+			if respSuite.StatusCode != http.StatusOK {
+				t.Fatalf("unexpected eval suite page status: %d body=%s", respSuite.StatusCode, string(bodySuite))
+			}
+			for _, taskID := range strings.Fields(taskIDsOut) {
+				if !strings.Contains(string(bodySuite), taskID) {
+					t.Errorf("expected eval %q in eval suite detail HTML", taskID)
+				}
+			}
 		}
 	}
 

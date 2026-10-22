@@ -97,9 +97,9 @@ func TestRepoOverview_SuiteGrouping(t *testing.T) {
 
 	// Verify exactly three suites render: docs, other, solo
 	for _, suite := range []string{
-		`<span class="mono" style="font-weight:600">docs</span>`,
-		`<span class="mono" style="font-weight:600">other</span>`,
-		`<span class="mono" style="font-weight:600">solo</span>`,
+		`<a href="/github.com/gke-labs/eval-runner/evals/docs" class="mono" style="font-weight:600">docs</a>`,
+		`<a href="/github.com/gke-labs/eval-runner/evals/other" class="mono" style="font-weight:600">other</a>`,
+		`<a href="/github.com/gke-labs/eval-runner/evals/solo" class="mono" style="font-weight:600">solo</a>`,
 	} {
 		if !strings.Contains(body, suite) {
 			t.Errorf("expected body to contain suite %q", suite)

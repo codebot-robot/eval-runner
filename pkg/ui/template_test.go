@@ -682,6 +682,7 @@ func sampleRepoOverviewView() RepoOverviewView {
 	suites := []RepoOverviewSuiteRow{
 		{
 			Name:       "triage",
+			SuiteLink:  "/github.com/gke-labs/eval-runner/evals/triage",
 			ScoreStr:   "0.85",
 			CILabel:    "[0.70, 0.94]",
 			EvalsCount: 1,
@@ -2883,6 +2884,287 @@ func TestTemplateRenderingRepoSeriesGolden(t *testing.T) {
 	}
 
 	assertGolden(t, "repo_series.golden.html", buf.String())
+}
+
+func sampleRepoSuiteDetailView() RepoSuiteDetailView {
+	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	t1 := time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
+
+	commits := []CommitEntry{
+		{SHA: "1111111111111111111111111111111111111111", CommitTime: t1},
+		{SHA: "2222222222222222222222222222222222222222", CommitTime: t2},
+	}
+
+	obs := []EvalObservation{
+		{
+			RunName:     "base-1111111",
+			TaskID:      "triage/runbook_lookup",
+			CommitSHA:   commits[0].SHA,
+			CommitTime:  t1,
+			Model:       "gemini-2.5-pro",
+			Samples:     20,
+			Successes:   14,
+			ScoreStr:    "0.70",
+			CIStr:       "[0.48, 0.86]",
+			Est:         stats.PooledWilsonFromTotals(14, 20, 0.95),
+			SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-1111111/tasks/triage%2Frunbook_lookup/samples",
+		},
+		{
+			RunName:     "base-2222222",
+			TaskID:      "triage/runbook_lookup",
+			CommitSHA:   commits[1].SHA,
+			CommitTime:  t2,
+			Model:       "gemini-2.5-pro",
+			Samples:     20,
+			Successes:   17,
+			ScoreStr:    "0.85",
+			CIStr:       "[0.64, 0.95]",
+			Est:         stats.PooledWilsonFromTotals(17, 20, 0.95),
+			SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples",
+		},
+	}
+
+	lines := LinesPerDimension(obs, DimensionModel, commits)
+	chartSVG := BuildRepoSuiteChartSVG(lines, obs, commits)
+
+	evals := []RepoSuiteEvalSection{
+		{
+			ID:                       "triage/runbook_lookup",
+			ScoreStr:                 "0.85",
+			CIStr:                    "[0.64, 0.95]",
+			HasDelta:                 true,
+			DeltaStr:                 "Δ +0.15 [-0.11, +0.41]",
+			DeltaClass:               "neutral",
+			HasModelBreakdown:        false,
+			SVG:                      chartSVG,
+			FirstCommitShort:         "1111111",
+			LastCommitShort:          "2222222",
+			NewestChangedCommitShort: "2222222",
+			Observations: []RepoSuiteObservationRow{
+				{
+					CommitSHA:   commits[1].SHA,
+					CommitShort: "2222222",
+					TimeStr:     "10m",
+					TimeUTC:     t2.Format(time.RFC3339),
+					Model:       "gemini-2.5-pro",
+					Samples:     20,
+					ScoreStr:    "0.85",
+					CIStr:       "[0.64, 0.95]",
+					SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-2222222/tasks/triage%2Frunbook_lookup/samples",
+				},
+				{
+					CommitSHA:   commits[0].SHA,
+					CommitShort: "1111111",
+					TimeStr:     "1h",
+					TimeUTC:     t1.Format(time.RFC3339),
+					Model:       "gemini-2.5-pro",
+					Samples:     20,
+					ScoreStr:    "0.70",
+					CIStr:       "[0.48, 0.86]",
+					SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-1111111/tasks/triage%2Frunbook_lookup/samples",
+				},
+			},
+		},
+	}
+
+	return RepoSuiteDetailView{
+		ActiveTab:          NavTabEvals,
+		Repo:               ref,
+		Namespace:          "eval-runner",
+		SuiteName:          "triage",
+		SuiteScore:         "0.85",
+		SuiteCI:            "[0.64, 0.95]",
+		EvalsCount:         1,
+		HasDelta:           true,
+		DeltaStr:           "Δ +0.15 [-0.11, +0.41]",
+		DeltaClass:         "neutral",
+		CurrentCommitSHA:   commits[1].SHA,
+		CurrentCommitShort: "2222222",
+		Evals:              evals,
+		OverviewLink:       "/github.com/gke-labs/eval-runner",
+	}
+}
+
+func sampleRepoSuiteDetailModelsView() RepoSuiteDetailView {
+	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	t1 := time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
+
+	commits := []CommitEntry{
+		{SHA: "1111111111111111111111111111111111111111", CommitTime: t1},
+		{SHA: "2222222222222222222222222222222222222222", CommitTime: t2},
+	}
+
+	obs := []EvalObservation{
+		{
+			RunName:     "base-flash-1",
+			TaskID:      "triage/runbook_lookup",
+			CommitSHA:   commits[0].SHA,
+			CommitTime:  t1,
+			Model:       "gemini-2.5-flash",
+			Samples:     20,
+			Successes:   10,
+			ScoreStr:    "0.50",
+			CIStr:       "[0.30, 0.70]",
+			Est:         stats.PooledWilsonFromTotals(10, 20, 0.95),
+			SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-flash-1/tasks/triage%2Frunbook_lookup/samples",
+		},
+		{
+			RunName:     "base-pro-1",
+			TaskID:      "triage/runbook_lookup",
+			CommitSHA:   commits[0].SHA,
+			CommitTime:  t1,
+			Model:       "gemini-2.5-pro",
+			Samples:     20,
+			Successes:   14,
+			ScoreStr:    "0.70",
+			CIStr:       "[0.48, 0.86]",
+			Est:         stats.PooledWilsonFromTotals(14, 20, 0.95),
+			SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-pro-1/tasks/triage%2Frunbook_lookup/samples",
+		},
+		{
+			RunName:     "base-flash-2",
+			TaskID:      "triage/runbook_lookup",
+			CommitSHA:   commits[1].SHA,
+			CommitTime:  t2,
+			Model:       "gemini-2.5-flash",
+			Samples:     20,
+			Successes:   12,
+			ScoreStr:    "0.60",
+			CIStr:       "[0.39, 0.78]",
+			Est:         stats.PooledWilsonFromTotals(12, 20, 0.95),
+			SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-flash-2/tasks/triage%2Frunbook_lookup/samples",
+		},
+		{
+			RunName:     "base-pro-2",
+			TaskID:      "triage/runbook_lookup",
+			CommitSHA:   commits[1].SHA,
+			CommitTime:  t2,
+			Model:       "gemini-2.5-pro",
+			Samples:     20,
+			Successes:   17,
+			ScoreStr:    "0.85",
+			CIStr:       "[0.64, 0.95]",
+			Est:         stats.PooledWilsonFromTotals(17, 20, 0.95),
+			SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-pro-2/tasks/triage%2Frunbook_lookup/samples",
+		},
+	}
+
+	lines := LinesPerDimension(obs, DimensionModel, commits)
+	chartSVG := BuildRepoSuiteChartSVG(lines, obs, commits)
+
+	var modelLegend []RepoSuiteModelLegendItem
+	for _, l := range lines {
+		modelLegend = append(modelLegend, RepoSuiteModelLegendItem{
+			Name:     l.Name,
+			Color:    l.Color,
+			ScoreStr: l.ScoreStr,
+			CIStr:    l.CIStr,
+		})
+	}
+
+	evals := []RepoSuiteEvalSection{
+		{
+			ID:                       "triage/runbook_lookup",
+			ScoreStr:                 "0.72",
+			CIStr:                    "[0.57, 0.84]",
+			HasDelta:                 true,
+			DeltaStr:                 "Δ +0.12 [-0.09, +0.33]",
+			DeltaClass:               "neutral",
+			HasModelBreakdown:        true,
+			ModelLegend:              modelLegend,
+			SVG:                      chartSVG,
+			FirstCommitShort:         "1111111",
+			LastCommitShort:          "2222222",
+			NewestChangedCommitShort: "2222222",
+			Observations: []RepoSuiteObservationRow{
+				{
+					CommitSHA:   commits[1].SHA,
+					CommitShort: "2222222",
+					TimeStr:     "10m",
+					TimeUTC:     t2.Format(time.RFC3339),
+					Model:       "gemini-2.5-pro",
+					Samples:     20,
+					ScoreStr:    "0.85",
+					CIStr:       "[0.64, 0.95]",
+					SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-pro-2/tasks/triage%2Frunbook_lookup/samples",
+				},
+				{
+					CommitSHA:   commits[1].SHA,
+					CommitShort: "2222222",
+					TimeStr:     "10m",
+					TimeUTC:     t2.Format(time.RFC3339),
+					Model:       "gemini-2.5-flash",
+					Samples:     20,
+					ScoreStr:    "0.60",
+					CIStr:       "[0.39, 0.78]",
+					SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-flash-2/tasks/triage%2Frunbook_lookup/samples",
+				},
+				{
+					CommitSHA:   commits[0].SHA,
+					CommitShort: "1111111",
+					TimeStr:     "1h",
+					TimeUTC:     t1.Format(time.RFC3339),
+					Model:       "gemini-2.5-pro",
+					Samples:     20,
+					ScoreStr:    "0.70",
+					CIStr:       "[0.48, 0.86]",
+					SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-pro-1/tasks/triage%2Frunbook_lookup/samples",
+				},
+				{
+					CommitSHA:   commits[0].SHA,
+					CommitShort: "1111111",
+					TimeStr:     "1h",
+					TimeUTC:     t1.Format(time.RFC3339),
+					Model:       "gemini-2.5-flash",
+					Samples:     20,
+					ScoreStr:    "0.50",
+					CIStr:       "[0.30, 0.70]",
+					SamplesLink: "/github.com/gke-labs/eval-runner/runs/base-flash-1/tasks/triage%2Frunbook_lookup/samples",
+				},
+			},
+		},
+	}
+
+	return RepoSuiteDetailView{
+		ActiveTab:          NavTabEvals,
+		Repo:               ref,
+		Namespace:          "eval-runner",
+		SuiteName:          "triage",
+		SuiteScore:         "0.72",
+		SuiteCI:            "[0.57, 0.84]",
+		EvalsCount:         1,
+		HasDelta:           true,
+		DeltaStr:           "Δ +0.12 [-0.09, +0.33]",
+		DeltaClass:         "neutral",
+		CurrentCommitSHA:   commits[1].SHA,
+		CurrentCommitShort: "2222222",
+		Evals:              evals,
+		OverviewLink:       "/github.com/gke-labs/eval-runner",
+	}
+}
+
+func TestTemplateRenderingRepoSuiteDetailGolden(t *testing.T) {
+	view := sampleRepoSuiteDetailView()
+
+	var buf bytes.Buffer
+	if err := tmplRepoSuiteDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo suite detail template: %v", err)
+	}
+
+	assertGolden(t, "repo_suite_detail.golden.html", buf.String())
+}
+
+func TestTemplateRenderingRepoSuiteDetailModelsGolden(t *testing.T) {
+	view := sampleRepoSuiteDetailModelsView()
+
+	var buf bytes.Buffer
+	if err := tmplRepoSuiteDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute repo suite detail models template: %v", err)
+	}
+
+	assertGolden(t, "repo_suite_detail_models.golden.html", buf.String())
 }
 func TestFormatLogURL(t *testing.T) {
 	tests := []struct {

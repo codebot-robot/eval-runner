@@ -155,6 +155,10 @@ An observation is conditional on both the model (prompt/weights) and the harness
 - **Kubernetes Labels**: `evalrunner.gke-labs.dev/model`, `evalrunner.gke-labs.dev/harness`, `evalrunner.gke-labs.dev/task`, `evalrunner.gke-labs.dev/commit`. Label values cap at 63 characters and disallow slashes, requiring sanitized slugs (e.g. `google/gemini-2.5-flash-lite` -> `gemini-2.5-flash-lite`).
 - **Artifact Metadata**: Persist `repository, commit, eval, model, harness, sampleRange, score, scoreCI, tokens, costUSD, timestamp` in `summary.json` to power the Continuum view ([docs/concept/functionality.md §10](functionality.md)).
 
+### 4.3 UI Implementation Status: Dimension Breakdown
+
+In the eval suite detail page (`/{host}/{owner}/{repo}/evals/{suite}`), the trendline breakdown is implemented as a unified function `LinesPerDimension(obs, dim, commits)`. Because runs currently do not carry the `evalrunner.gke-labs.dev/harness` label, only the `spec.model` breakdown is currently live. When the harness label is populated on Runs in the future, the harness breakdown can be displayed using the exact same dimension pipeline.
+
 ---
 
 ## 5. Open Questions for Justin

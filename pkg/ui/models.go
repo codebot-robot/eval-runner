@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ type NavTab string
 
 const (
 	NavTabOverview    NavTab = "overview"
+	NavTabEvals       NavTab = "evals"
 	NavTabPulls       NavTab = "pulls"
 	NavTabRuns        NavTab = "runs"
 	NavTabComparisons NavTab = "comparisons"
@@ -1652,6 +1654,12 @@ func seriesXTicks(commitSHAs []string) []SVGTick {
 // computeSeriesGeometry generates polylines, shaded CI polygons, circles, and observation ticks for series items
 // mapped into [x0, x1] horizontally and [y0, y1] vertically (rate 1.0 at y0, 0.0 at y1).
 func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) (polylines []SVGPolyline, polygons []string, circles []SVGCircle, ticks []SVGObservationTick, hasPoints bool) {
+	return computeSeriesGeometryWithStroke(items, x0, x1, y0, y1, circleR, "")
+}
+
+// computeSeriesGeometryWithStroke generates polylines, shaded CI polygons, circles, and observation ticks.
+// If stroke is non-empty, it overrides the default indigo/delta color for lines, circles, and ticks.
+func computeSeriesGeometryWithStroke(items []SeriesItem, x0, x1, y0, y1, circleR float64, stroke string) (polylines []SVGPolyline, polygons []string, circles []SVGCircle, ticks []SVGObservationTick, hasPoints bool) {
 	if len(items) == 0 {
 		return nil, nil, nil, nil, false
 	}
@@ -1680,13 +1688,13 @@ func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) 
 				}
 				sb.WriteString(fmt.Sprintf("%.1f,%.1f", p.x, p.y))
 			}
-			stroke := curLineStroke
-			if stroke == "" {
-				stroke = "var(--indigo)"
+			s := curLineStroke
+			if s == "" {
+				s = "var(--indigo)"
 			}
 			polylines = append(polylines, SVGPolyline{
 				Points: sb.String(),
-				Stroke: stroke,
+				Stroke: s,
 			})
 		}
 		curLine = nil
@@ -1746,7 +1754,11 @@ func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) 
 		cy = math.Round(cy*10.0) / 10.0
 
 		pt := pt2D{x: cx, y: cy}
-		circles = append(circles, SVGCircle{CX: cx, CY: cy, R: circleR})
+		circleFill := "var(--indigo)"
+		if stroke != "" {
+			circleFill = stroke
+		}
+		circles = append(circles, SVGCircle{CX: cx, CY: cy, R: circleR, Fill: circleFill})
 
 		obsCount := it.ObsCount
 		if obsCount <= 0 {
@@ -1754,13 +1766,17 @@ func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) 
 		}
 		yTop := math.Round(math.Max(y0, cy-3.5)*10.0) / 10.0
 		yBottom := math.Round(math.Min(y1, cy+3.5)*10.0) / 10.0
+		tickStroke := "var(--indigo)"
+		if stroke != "" {
+			tickStroke = stroke
+		}
 		if obsCount == 1 {
 			ticks = append(ticks, SVGObservationTick{
 				X1:     cx,
 				Y1:     yTop,
 				X2:     cx,
 				Y2:     yBottom,
-				Stroke: "var(--indigo)",
+				Stroke: tickStroke,
 			})
 		} else {
 			step := 2.5
@@ -1777,7 +1793,7 @@ func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) 
 					Y1:     yTop,
 					X2:     tx,
 					Y2:     yBottom,
-					Stroke: "var(--indigo)",
+					Stroke: tickStroke,
 				})
 			}
 		}
@@ -1786,7 +1802,9 @@ func computeSeriesGeometry(items []SeriesItem, x0, x1, y0, y1, circleR float64) 
 			curLine = append(curLine, pt)
 		} else {
 			segStroke := "var(--indigo)"
-			if it.DeltaPrev != nil {
+			if stroke != "" {
+				segStroke = stroke
+			} else if it.DeltaPrev != nil {
 				if it.DeltaPrev.CI.Lower > 0 {
 					segStroke = "var(--good)"
 				} else if it.DeltaPrev.CI.Upper < 0 {
@@ -2752,4 +2770,396 @@ func BuildTaskSamplesListLink(ns, runName, taskID string) string {
 		runName,
 		url.PathEscape(taskID),
 	)
+}
+
+// CommitEntry represents a commit SHA and its timestamp.
+type CommitEntry struct {
+	SHA        string
+	CommitTime time.Time
+}
+
+// EvalObservation represents a completed task observation from a single Run.
+type EvalObservation struct {
+	RunName     string
+	Run         *v1alpha1.Run
+	TaskID      string
+	CommitSHA   string
+	CommitTime  time.Time
+	Model       string
+	Harness     string
+	Samples     int
+	Successes   int
+	SuccessRate *float64
+	ScoreStr    string
+	CIStr       string
+	Est         stats.Estimate
+	SamplesLink string
+}
+
+// TrendDimension specifies the dimension used to group trend lines.
+// Currently only DimensionModel is live; DimensionHarness is supported by LinesPerDimension
+// and will become active once evalrunner.gke-labs.dev/harness is populated on Runs.
+type TrendDimension string
+
+const (
+	DimensionModel   TrendDimension = "model"
+	DimensionHarness TrendDimension = "harness"
+)
+
+// DimensionLine represents a single line in a trend chart.
+type DimensionLine struct {
+	Name         string
+	Color        string
+	ScoreStr     string
+	CIStr        string
+	Estimate     stats.Estimate
+	HasEstimate  bool
+	Items        []SeriesItem
+	Observations []EvalObservation
+}
+
+// RepoSuiteDetailView is the view model for GET /{host}/{owner}/{repo}/evals/{suite...}.
+type RepoSuiteDetailView struct {
+	ActiveTab          NavTab
+	Repo               RepoRef
+	Namespace          string
+	LinkNamespace      string
+	SuiteName          string
+	SuiteScore         string
+	SuiteCI            string
+	EvalsCount         int
+	HasDelta           bool
+	DeltaStr           string
+	DeltaClass         string
+	CurrentCommitSHA   string
+	CurrentCommitShort string
+	Evals              []RepoSuiteEvalSection
+	OverviewLink       string
+}
+
+// RepoSuiteEvalSection represents an eval section within the suite detail page.
+type RepoSuiteEvalSection struct {
+	ID                       string
+	ScoreStr                 string
+	CIStr                    string
+	HasDelta                 bool
+	DeltaStr                 string
+	DeltaClass               string
+	HasModelBreakdown        bool
+	ModelLegend              []RepoSuiteModelLegendItem
+	SVG                      RepoSuiteChartSVG
+	FirstCommitShort         string
+	LastCommitShort          string
+	NewestChangedCommitShort string
+	Observations             []RepoSuiteObservationRow
+}
+
+// RepoSuiteModelLegendItem represents an entry in the model breakdown legend.
+type RepoSuiteModelLegendItem struct {
+	Name     string
+	Color    string
+	ScoreStr string
+	CIStr    string
+}
+
+// RepoSuiteObservationRow represents a row in the eval observations table.
+type RepoSuiteObservationRow struct {
+	CommitSHA   string
+	CommitShort string
+	TimeStr     string
+	TimeUTC     string
+	Model       string
+	Samples     int
+	ScoreStr    string
+	CIStr       string
+	SamplesLink string
+}
+
+// RepoSuiteChartSVG holds SVG element coordinates for the eval trend chart.
+type RepoSuiteChartSVG struct {
+	ViewBox      string
+	X0           float64
+	Y0           float64
+	X1           float64
+	Y1           float64
+	Polylines    []SVGPolyline
+	Polygons     []string
+	PolygonFills []string
+	Circles      []SVGCircle
+	Ticks        []SVGObservationTick
+	XAxisTicks   []SVGTick
+	YAxisTicks   []SVGTick
+	HasPoints    bool
+}
+
+func evalDimensionValue(o EvalObservation, dim TrendDimension) string {
+	if dim == DimensionHarness {
+		return o.Harness
+	}
+	return o.Model
+}
+
+// LinesPerDimension groups observations by the given dimension.
+// If observations come from more than one distinct dimension value (e.g. spec.model),
+// it returns one line per dimension value with colors assigned from the palette.
+// Otherwise, it returns a single line.
+func LinesPerDimension(obs []EvalObservation, dim TrendDimension, commits []CommitEntry) []DimensionLine {
+	palette := []string{"var(--indigo)", "var(--teal)", "#d97706", "#7c3aed", "#dc2626"}
+
+	valueMap := make(map[string][]EvalObservation)
+	for _, o := range obs {
+		val := evalDimensionValue(o, dim)
+		if val == "" {
+			val = "unknown"
+		}
+		valueMap[val] = append(valueMap[val], o)
+	}
+
+	var keys []string
+	for k := range valueMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	isSingle := len(keys) <= 1
+
+	var lines []DimensionLine
+	for idx, key := range keys {
+		color := "var(--indigo)"
+		if !isSingle {
+			color = palette[idx%len(palette)]
+		}
+		keyObs := valueMap[key]
+
+		var newestKeyObs []EvalObservation
+		for i := len(commits) - 1; i >= 0; i-- {
+			cSHA := commits[i].SHA
+			var atCommit []EvalObservation
+			for _, o := range keyObs {
+				if o.CommitSHA == cSHA {
+					atCommit = append(atCommit, o)
+				}
+			}
+			if len(atCommit) > 0 {
+				newestKeyObs = atCommit
+				break
+			}
+		}
+
+		var scoreStr, ciStr string
+		var est stats.Estimate
+		hasEst := false
+		if len(newestKeyObs) > 0 {
+			var tasks []stats.TaskCounts
+			for _, o := range newestKeyObs {
+				tasks = append(tasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
+			}
+			est = stats.PooledWilson(tasks, 0.95)
+			scoreStr = fmt.Sprintf("%.2f", est.Point)
+			ciStr = fmt.Sprintf("[%.2f, %.2f]", est.CI.Lower, est.CI.Upper)
+			hasEst = true
+		}
+
+		var items []SeriesItem
+		for _, sc := range commits {
+			var matching []EvalObservation
+			for _, o := range keyObs {
+				if o.CommitSHA == sc.SHA {
+					matching = append(matching, o)
+				}
+			}
+			sItem := SeriesItem{
+				CommitSHA:      sc.SHA,
+				CommitSHAShort: ShortCommit(sc.SHA),
+				CommitTime:     sc.CommitTime,
+			}
+			if len(matching) > 0 {
+				var mTasks []stats.TaskCounts
+				for _, o := range matching {
+					mTasks = append(mTasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
+				}
+				cEst := stats.PooledWilson(mTasks, 0.95)
+				p := cEst.Point
+				ci := v1alpha1.ConfidenceInterval{
+					Lower:      cEst.CI.Lower,
+					Upper:      cEst.CI.Upper,
+					Confidence: cEst.Confidence,
+					Method:     cEst.Method,
+				}
+				sItem.HasPoint = true
+				sItem.SuccessRate = &p
+				sItem.CI = &ci
+				sItem.ObsCount = len(matching)
+			}
+			items = append(items, sItem)
+		}
+
+		lineName := key
+		if isSingle {
+			lineName = ""
+		}
+
+		lines = append(lines, DimensionLine{
+			Name:         lineName,
+			Color:        color,
+			ScoreStr:     scoreStr,
+			CIStr:        ciStr,
+			Estimate:     est,
+			HasEstimate:  hasEst,
+			Items:        items,
+			Observations: keyObs,
+		})
+	}
+	return lines
+}
+
+// BuildRepoSuiteChartSVG generates SVG coordinates for an eval trend chart,
+// plotting trendlines, shaded CI bands, data point circles, and observation tick marks.
+func BuildRepoSuiteChartSVG(lines []DimensionLine, allObsForEval []EvalObservation, commits []CommitEntry, dim ...TrendDimension) RepoSuiteChartSVG {
+	const (
+		viewBox = "0 0 640 220"
+		x0      = 60.0
+		x1      = 580.0
+		y0      = 25.0
+		y1      = 175.0
+	)
+
+	yTicks := []SVGTick{
+		{X: x0 - 8.0, Y: y1 + 4.0, Y1: y1, Text: "0.00"},
+		{X: x0 - 8.0, Y: (y0+y1)/2.0 + 4.0, Y1: (y0 + y1) / 2.0, Text: "0.50"},
+		{X: x0 - 8.0, Y: y0 + 4.0, Y1: y0, Text: "1.00"},
+	}
+
+	if len(commits) == 0 {
+		return RepoSuiteChartSVG{
+			ViewBox:    viewBox,
+			X0:         x0,
+			Y0:         y0,
+			X1:         x1,
+			Y1:         y1,
+			YAxisTicks: yTicks,
+		}
+	}
+
+	commitSHAs := make([]string, len(commits))
+	for i, c := range commits {
+		commitSHAs[i] = c.SHA
+	}
+	xTicks := seriesXTicks(commitSHAs)
+
+	var polylines []SVGPolyline
+	var polygons []string
+	var polygonFills []string
+	var circles []SVGCircle
+	hasPoints := false
+
+	N := len(commits)
+
+	for _, line := range lines {
+		pLines, polys, circs, _, lineHasPoints := computeSeriesGeometryWithStroke(line.Items, x0, x1, y0, y1, 4.0, line.Color)
+		polylines = append(polylines, pLines...)
+		polygons = append(polygons, polys...)
+		for range polys {
+			polygonFills = append(polygonFills, line.Color)
+		}
+		circles = append(circles, circs...)
+		if lineHasPoints {
+			hasPoints = true
+		}
+	}
+
+	dimension := DimensionModel
+	if len(dim) > 0 {
+		dimension = dim[0]
+	}
+
+	// Map line colors by dimension value for tick strokes
+	lineColorMap := make(map[string]string)
+	for _, l := range lines {
+		if l.Name != "" {
+			lineColorMap[l.Name] = l.Color
+		}
+	}
+
+	// Ticks for each observation
+	var ticks []SVGObservationTick
+	for i, c := range commits {
+		var atCommit []EvalObservation
+		for _, o := range allObsForEval {
+			if o.CommitSHA == c.SHA {
+				atCommit = append(atCommit, o)
+			}
+		}
+		M := len(atCommit)
+		if M == 0 {
+			continue
+		}
+
+		cx := x0
+		if N > 1 {
+			cx = x0 + (float64(i)/float64(N-1))*(x1-x0)
+		} else {
+			cx = (x0 + x1) / 2.0
+		}
+		cx = math.Round(cx*10.0) / 10.0
+
+		step := 3.5
+		startX := cx - float64(M-1)*step/2.0
+		for j, o := range atCommit {
+			tx := cx
+			if M > 1 {
+				tx = math.Round((startX+float64(j)*step)*10.0) / 10.0
+				if tx < x0 {
+					tx = x0
+				} else if tx > x1 {
+					tx = x1
+				}
+			}
+
+			rate := o.Est.Point
+			if o.SuccessRate != nil {
+				rate = *o.SuccessRate
+			}
+			if rate < 0.0 {
+				rate = 0.0
+			} else if rate > 1.0 {
+				rate = 1.0
+			}
+			cy := y1 - float64(rate*(y1-y0))
+			yTop := math.Round(math.Max(y0, cy-6.0)*10.0) / 10.0
+			yBottom := math.Round(math.Min(y1, cy+6.0)*10.0) / 10.0
+
+			val := evalDimensionValue(o, dimension)
+			stroke := "var(--indigo)"
+			if len(lines) > 1 && val != "" && lineColorMap[val] != "" {
+				stroke = lineColorMap[val]
+			} else if len(lines) == 1 && lines[0].Color != "" {
+				stroke = lines[0].Color
+			}
+
+			ticks = append(ticks, SVGObservationTick{
+				X1:     tx,
+				Y1:     yTop,
+				X2:     tx,
+				Y2:     yBottom,
+				Stroke: stroke,
+			})
+		}
+	}
+
+	return RepoSuiteChartSVG{
+		ViewBox:      viewBox,
+		X0:           x0,
+		Y0:           y0,
+		X1:           x1,
+		Y1:           y1,
+		Polylines:    polylines,
+		Polygons:     polygons,
+		PolygonFills: polygonFills,
+		Circles:      circles,
+		Ticks:        ticks,
+		XAxisTicks:   xTicks,
+		YAxisTicks:   yTicks,
+		HasPoints:    hasPoints,
+	}
 }
