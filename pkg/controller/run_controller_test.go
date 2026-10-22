@@ -1435,6 +1435,553 @@ func TestReconcileDiscovery_NonExecutableEvalsListFails(t *testing.T) {
 	}
 }
 
+func TestReconcileDiscoveringRunRecoversStaleSandboxEndpoint(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-stale-endpoint"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	sb.Status.PodIPs = []string{"10.244.0.5"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
+
+	var dialedIPs []string
+	var dialCount int
+
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				dialCount++
+				if dialCount == 1 {
+					return nil, status.Error(codes.Unavailable, `rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 10.244.0.5:9090: i/o timeout"`)
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || strings.Contains(strings.Join(cfg.Command, " "), "./.evals/list")) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: validManifestJSON}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ManifestBytes: []byte(validManifestJSON),
+	}
+
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		dialedIPs = append(dialedIPs, podIP)
+		return fakeClient, nil
+	})
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run, sb).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if sbList, ok := list.(*sandboxv1beta1.SandboxList); ok {
+					if err := c.List(ctx, sbList, opts...); err != nil {
+						return err
+					}
+					for i := range sbList.Items {
+						sbList.Items[i].Status.PodIPs = []string{"10.244.0.42"}
+					}
+					return nil
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		ClientFactory:    factory,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no RequeueAfter on successful discovery completion, got %v", res.RequeueAfter)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Get updated run error: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase %s, got %s (message: %s)", v1alpha1.RunPhaseDiscovered, updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+
+	if len(dialedIPs) != 2 || dialedIPs[0] != "10.244.0.5" || dialedIPs[1] != "10.244.0.42" {
+		t.Errorf("Expected dialed IPs [10.244.0.5, 10.244.0.42], got %v", dialedIPs)
+	}
+
+	if strings.Contains(updatedRun.Status.Message, "retry") || strings.Contains(updatedRun.Status.Message, "failed") {
+		t.Errorf("Expected no retry or failure message in status.message, got %q", updatedRun.Status.Message)
+	}
+}
+
+func TestReconcileDiscoveringRunUnchangedEndpointRequeuesWithoutCountingAttempt(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-unchanged-endpoint"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	sb.Status.PodIPs = []string{"10.244.0.5"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	var dialCount int
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				dialCount++
+				return nil, status.Error(codes.Unavailable, `rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 10.244.0.5:9090: i/o timeout"`)
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+
+	var dialedIPs []string
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		dialedIPs = append(dialedIPs, podIP)
+		return fakeClient, nil
+	})
+
+	// Pod and Sandbox status remain at 10.244.0.5 (unchanged)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run, sb).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		ClientFactory:    factory,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter when endpoint unchanged, got 0")
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Get updated run error: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovering {
+		t.Errorf("Expected phase %s, got %s", v1alpha1.RunPhaseDiscovering, updatedRun.Status.Phase)
+	}
+
+	// Assert only 1 dial was performed (no re-dialing against identical dead endpoint!)
+	if dialCount != 1 {
+		t.Errorf("Expected exactly 1 clone dial, got %d", dialCount)
+	}
+
+	// Assert attempt was not counted
+	if strings.Contains(updatedRun.Status.Message, "failed") || strings.Contains(updatedRun.Status.Message, "retry") {
+		t.Errorf("Expected no failure or retry message in status.message, got %q", updatedRun.Status.Message)
+	}
+}
+
+func TestReconcileDiscoveringRunMissingSandboxRecreated(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-missing-sb"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	sb.Status.PodIPs = []string{"10.244.0.5"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			return nil, status.Error(codes.Unavailable, `rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 10.244.0.5:9090: i/o timeout"`)
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run, sb).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if sbList, ok := list.(*sandboxv1beta1.SandboxList); ok {
+					sbList.Items = nil
+					return nil
+				}
+				return c.List(ctx, list, opts...)
+			},
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+					return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    fakeClient,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Errorf("Expected RequeueAfter when restarting discovery, got 0")
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Get updated run error: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovering {
+		t.Errorf("Expected phase %s to remain Discovering, got %s", v1alpha1.RunPhaseDiscovering, updatedRun.Status.Phase)
+	}
+}
+
+func TestReconcileDiscoveringRunRecoversStaleEndpointOnCleanRepo(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-stale-clean"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	sb.Status.PodIPs = []string{"10.244.0.5"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
+
+	var dialedIPs []string
+	cleanCalls := 0
+
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "rm" {
+				cleanCalls++
+				if cleanCalls == 1 {
+					return nil, status.Error(codes.Unavailable, `rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 10.244.0.5:9090: i/o timeout"`)
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || strings.Contains(strings.Join(cfg.Command, " "), "./.evals/list")) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: validManifestJSON}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ManifestBytes: []byte(validManifestJSON),
+	}
+
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		dialedIPs = append(dialedIPs, podIP)
+		return fakeClient, nil
+	})
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run, sb).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if sbList, ok := list.(*sandboxv1beta1.SandboxList); ok {
+					if err := c.List(ctx, sbList, opts...); err != nil {
+						return err
+					}
+					for i := range sbList.Items {
+						sbList.Items[i].Status.PodIPs = []string{"10.244.0.42"}
+					}
+					return nil
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		ClientFactory:    factory,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no RequeueAfter on successful discovery completion, got %v", res.RequeueAfter)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Get updated run error: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase %s, got %s (message: %s)", v1alpha1.RunPhaseDiscovered, updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+
+	if len(dialedIPs) != 2 || dialedIPs[0] != "10.244.0.5" || dialedIPs[1] != "10.244.0.42" {
+		t.Errorf("Expected dialed IPs [10.244.0.5, 10.244.0.42], got %v", dialedIPs)
+	}
+}
+
+func TestReconcileDiscoveringRunRebuildsClientWhenPodIPChangesOnSubsequentAttempt(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-rebuild-client"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	sb.Status.PodIPs = []string{"10.244.0.5"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
+
+	var dialedIPs []string
+	var cloneAttempts int
+	var cl client.Client
+
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				cloneAttempts++
+				if cloneAttempts == 1 {
+					// Attempt 1 fails at git level (non-Unavailable)
+					// Update pod IP in informer so before attempt 2 it re-resolves new IP
+					pod.Status.PodIP = "10.244.0.42"
+					_ = cl.Status().Update(ctx, pod)
+					return &sandboxclient.ExecuteResult{ExitCode: 128, Stderr: "fatal: early EOF"}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || strings.Contains(strings.Join(cfg.Command, " "), "./.evals/list")) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: validManifestJSON}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ManifestBytes: []byte(validManifestJSON),
+	}
+
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		dialedIPs = append(dialedIPs, podIP)
+		return fakeClient, nil
+	})
+
+	cl = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run, sb, pod).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:                cl,
+		Scheme:                scheme,
+		ClientFactory:         factory,
+		SandboxNamespace:      "eval-runner-sandbox",
+		DiscoveryRetryBackoff: []time.Duration{time.Millisecond},
+		Sleep:                 func(ctx context.Context, d time.Duration) error { return nil },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no RequeueAfter on completion, got %v", res.RequeueAfter)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Get updated run error: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected phase %s, got %s (message: %s)", v1alpha1.RunPhaseDiscovered, updatedRun.Status.Phase, updatedRun.Status.Message)
+	}
+
+	// Verify that client was rebuilt with 10.244.0.42 before attempt 2
+	if len(dialedIPs) != 2 || dialedIPs[0] != "10.244.0.5" || dialedIPs[1] != "10.244.0.42" {
+		t.Errorf("Expected dialed IPs [10.244.0.5, 10.244.0.42], got %v", dialedIPs)
+	}
+}
+
 func TestReconcilePodNeverReadyPastDeadline(t *testing.T) {
 	scheme := setupScheme(t)
 
