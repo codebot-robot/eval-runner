@@ -1167,6 +1167,13 @@ spec:
 		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 		sbUIDBefore := strings.TrimSpace(harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "-o", "jsonpath={.metadata.uid}"))
 
+		// Wrap scale-to-zero in t.Cleanup restoring replicas to 1 and waiting for rollout,
+		// so a fatal between the two scales does not leave later subtests without a controller.
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "scale", "deployment/eval-runner-controller", "-n", "eval-runner", "--replicas=1")
+			harness.runCmd("kubectl", "rollout", "status", "deployment/eval-runner-controller", "-n", "eval-runner", "--timeout=90s")
+		})
+
 		// Scale down controller deployment to 0 and wait until zero controller pods remain
 		harness.runCmd("kubectl", "scale", "deployment/eval-runner-controller", "-n", "eval-runner", "--replicas=0")
 		harness.runCmd("kubectl", "wait", "--for=delete", "pod", "-l", "app=eval-runner-controller", "-n", "eval-runner", "--timeout=60s")
@@ -1184,12 +1191,24 @@ spec:
 		// Wait for Run to reach Completed, dumping diagnostics on failure
 		var runCompleted *v1alpha1.Run
 		var lastObservedUID string
+		observedUIDs := make(map[string]struct{})
+		if sbUIDBefore != "" {
+			observedUIDs[sbUIDBefore] = struct{}{}
+		}
 		startWait := time.Now()
 		for time.Since(startWait) < 180*time.Second {
 			r := harness.WaitForRunExists("eval-runner", runName, 5*time.Second)
 			if r != nil {
 				if curUID := strings.TrimSpace(harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found", "-o", "jsonpath={.metadata.uid}")); curUID != "" {
 					lastObservedUID = curUID
+					observedUIDs[curUID] = struct{}{}
+					if len(observedUIDs) > 2 {
+						var uids []string
+						for uid := range observedUIDs {
+							uids = append(uids, uid)
+						}
+						t.Fatalf("more than two distinct discovery Sandbox UIDs observed during recovery: %v (one recreate at most)", uids)
+					}
 				}
 				if r.Status.Phase == v1alpha1.RunPhaseCompleted {
 					runCompleted = r
@@ -1219,6 +1238,21 @@ spec:
 			} else {
 				t.Fatalf("Run failed: %s (message: %s)", runCompleted.Status.Phase, runCompleted.Status.Message)
 			}
+		}
+
+		// On success log one grep line from the new controller's log showing whether the requeue path fired
+		controllerLogs := harness.runCmd("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", "--tail=500")
+		var requeueLine string
+		for _, line := range strings.Split(controllerLogs, "\n") {
+			if strings.Contains(line, "requeuing without counting attempt") {
+				requeueLine = line
+				break
+			}
+		}
+		if requeueLine != "" {
+			t.Logf("New controller log (requeue path fired): %s", requeueLine)
+		} else {
+			t.Log("New controller log (requeue path did not fire)")
 		}
 
 		// Compare discovery Sandbox UID before and after (at most one change)
