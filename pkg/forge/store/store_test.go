@@ -17,6 +17,7 @@ package store
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -175,6 +176,49 @@ func TestRoundTripPerBucket(t *testing.T) {
 		}
 		if gotSync.Cursor != "cursor-12345" || gotSync.ETag != "etag-67890" {
 			t.Errorf("unexpected sync metadata: %+v", gotSync)
+		}
+
+		// Endpoint sync cache
+		endpointURL := "/repos/gke-labs/eval-runner/pulls?state=open"
+		epSync := &EndpointSync{
+			ETag:         `"v1-etag-abc"`,
+			LastModified: "Thu, 22 Oct 2026 12:00:00 GMT",
+		}
+		if err := s.SaveEndpointSync(ref, endpointURL, epSync); err != nil {
+			t.Fatalf("SaveEndpointSync failed: %v", err)
+		}
+
+		gotEP, err := s.GetEndpointSync(ref, endpointURL)
+		if err != nil {
+			t.Fatalf("GetEndpointSync failed: %v", err)
+		}
+		if gotEP.ETag != epSync.ETag || gotEP.LastModified != epSync.LastModified {
+			t.Errorf("unexpected endpoint sync: got %+v, want %+v", gotEP, epSync)
+		}
+
+		// Non-existent endpoint returns ErrNotFound
+		if _, err := s.GetEndpointSync(ref, "/non-existent"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("expected ErrNotFound for missing endpoint, got %v", err)
+		}
+
+		// SaveSyncBatch saves EndpointSyncs atomically
+		batchEPURL := "/repos/gke-labs/eval-runner/commits/batch-sha"
+		batchEPSync := &EndpointSync{
+			ETag: `"batch-etag"`,
+		}
+		if err := s.SaveSyncBatch(t.Context(), ref, &SyncBatch{
+			EndpointSyncs: map[string]*EndpointSync{
+				batchEPURL: batchEPSync,
+			},
+		}); err != nil {
+			t.Fatalf("SaveSyncBatch with EndpointSyncs failed: %v", err)
+		}
+		gotBatchEP, err := s.GetEndpointSync(ref, batchEPURL)
+		if err != nil {
+			t.Fatalf("GetEndpointSync for batch-saved endpoint failed: %v", err)
+		}
+		if gotBatchEP.ETag != batchEPSync.ETag {
+			t.Errorf("got batch ETag %q, want %q", gotBatchEP.ETag, batchEPSync.ETag)
 		}
 	})
 }
