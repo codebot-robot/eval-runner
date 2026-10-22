@@ -359,9 +359,9 @@ eval-runner interacts with code hosting environments (such as github.com, GitLab
 - `pkg/forge/github`: GitHub REST API implementation:
   - Wraps `pkg/github.HTTPClient` (supporting unauthenticated reads on public repositories, personal access tokens, and GitHub App installations).
   - Handles Link header pagination across branches and pull requests.
-  - Implements `Reporter` via PR issue comment upsertion (with marker keys) and commit status posting.
+  - Implements PR issue comment upsertion (with marker keys) and check runs via the Reporter.
 - `pkg/forge/gitremote`: Generic Git remote implementation:
-  - Uses `git ls-remote` exclusively without cloning or checking out working tree code (preserving ADR-004 isolation).
+  - Uses ref advertisement through go-git with no clone and no git binary (preserving ADR-004 isolation).
   - Determines repository default branches via symbolic `HEAD`.
   - Discovers branch heads from `refs/heads/*`, explicitly filtering out tags.
   - Extracts change requests from `refs/pull/N/head` (and `refs/pull/N/merge` when present) for GitHub remotes.
