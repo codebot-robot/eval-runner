@@ -389,3 +389,113 @@ func TestGitHubForge_Reporter_UpsertCommentAndSetStatus(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+func TestGitHubForge_Reporter_SetStatus_InProgressAndCompleted(t *testing.T) {
+	var mu sync.Mutex
+	var lastPayload map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer valid-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/user" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"login":"eval-runner-bot"}`)
+			return
+		}
+		if r.URL.Path == "/repos/gke-labs/eval-runner/check-runs" && r.Method == http.MethodPost {
+			var req map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			lastPayload = req
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": int64(501)})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	f := New(WithBaseURL(server.URL), WithToken("valid-token"))
+
+	tests := []struct {
+		name           string
+		input          forge.Status
+		wantStatus     string
+		wantConclusion any
+	}{
+		{
+			name: "explicit in_progress without conclusion",
+			input: forge.Status{
+				Status:      "in_progress",
+				Context:     "eval-runner / evals",
+				Description: "running · 1 of 4 samples",
+			},
+			wantStatus:     "in_progress",
+			wantConclusion: nil,
+		},
+		{
+			name: "explicit completed with conclusion",
+			input: forge.Status{
+				Status:      "completed",
+				Conclusion:  "success",
+				Context:     "eval-runner / evals",
+				Description: "IMPROVED",
+			},
+			wantStatus:     "completed",
+			wantConclusion: "success",
+		},
+		{
+			name: "legacy in_progress via State",
+			input: forge.Status{
+				State:       "in_progress",
+				Context:     "eval-runner / evals",
+				Description: "running",
+			},
+			wantStatus:     "in_progress",
+			wantConclusion: nil,
+		},
+		{
+			name: "legacy completed via State",
+			input: forge.Status{
+				State:       "failure",
+				Context:     "eval-runner / evals",
+				Description: "REGRESSED",
+			},
+			wantStatus:     "completed",
+			wantConclusion: "failure",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			lastPayload = nil
+			mu.Unlock()
+
+			id, err := f.SetStatus(ctx, ref, "abcdef1234", tc.input)
+			if err != nil {
+				t.Fatalf("SetStatus failed: %v", err)
+			}
+			if id != 501 {
+				t.Errorf("SetStatus checkRunID = %d, want 501", id)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if lastPayload == nil {
+				t.Fatal("expected check-runs payload to be recorded")
+			}
+			if lastPayload["status"] != tc.wantStatus {
+				t.Errorf("payload status = %v, want %v", lastPayload["status"], tc.wantStatus)
+			}
+			if lastPayload["conclusion"] != tc.wantConclusion {
+				t.Errorf("payload conclusion = %v, want %v", lastPayload["conclusion"], tc.wantConclusion)
+			}
+		})
+	}
+}

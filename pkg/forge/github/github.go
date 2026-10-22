@@ -381,19 +381,23 @@ func (f *Forge) SetStatus(ctx context.Context, ref forge.RepoRef, sha string, st
 	}
 
 	checkState := gh.CheckRunState{
-		Name:       status.Context,
-		Conclusion: status.State,
-		Title:      status.Description,
-		Summary:    status.Description,
+		Name:    status.Context,
+		Title:   status.Description,
+		Summary: status.Description,
 	}
 	if checkState.Name == "" {
 		checkState.Name = gh.CheckRunName
 	}
-	if status.State == "in_progress" || status.State == "pending" {
+	if status.Status == "in_progress" || status.State == "in_progress" || status.State == "pending" {
 		checkState.Status = "in_progress"
 		checkState.Conclusion = ""
 	} else {
 		checkState.Status = "completed"
+		if status.Conclusion != "" {
+			checkState.Conclusion = status.Conclusion
+		} else {
+			checkState.Conclusion = status.State
+		}
 	}
 
 	if status.CheckRunID != 0 {

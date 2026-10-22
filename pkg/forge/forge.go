@@ -110,7 +110,9 @@ type Commit struct {
 
 // Status represents a commit status check or check run posted back to a forge.
 type Status struct {
-	State       string `json:"state"`
+	Status      string `json:"status,omitempty"`
+	Conclusion  string `json:"conclusion,omitempty"`
+	State       string `json:"state,omitempty"`
 	Context     string `json:"context"`
 	Description string `json:"description"`
 	TargetURL   string `json:"target_url"`
