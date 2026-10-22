@@ -375,6 +375,34 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Aligns the product information architecture with statistical reality. Decoupling the measurement unit (Observation) from the scheduling container (Run) eliminates lockstep execution waste, clarifies that baselines are reusable across PRs, enables multi-dimensional slicing across models and harnesses, and presents users with questions they actually care about: agent capability trends and PR merge decisions.
 
+---
+
+### ADR-033: Forge Abstraction and Git Remote Implementation (#325)
+- **Status**: Decided
+- **Context**:
+  eval-runner was previously tied directly to GitHub REST APIs and webhook payloads for repository information, branch heads, change requests (PRs), and result reporting. To support arbitrary repository hosting platforms (including github.com, GitLab, Gerrit, and bare git repositories) and decouple evaluation pipelines, Runs, Comparisons, and UI from forge-specific APIs or webhook delivery mechanisms, a general forge abstraction is needed.
+- **Decision**:
+  1. **The Forge Abstraction (`pkg/forge`)**:
+     Define a `Forge` interface representing the source of truth for repository and change request metadata:
+     - `Kind() string`: Stable identifier such as `"github.com"` or `"gitremote"`.
+     - `Repository(ctx, RepoRef) (*Repository, error)`: Fetches repository metadata (`Ref`, `DefaultBranch`, `CloneURL`).
+     - `Branches(ctx, RepoRef) ([]Branch, error)`: Lists branch heads (`Name`, `SHA`).
+     - `ChangeRequests(ctx, RepoRef) ([]ChangeRequest, error)`: Lists change requests (`ID`, `Number`, `Title`, `Author`, `Head`, `Base`, `State`, `UpdatedAt`, and optional `MergeSHA`). Forges that discover change requests from refs without access to state APIs (such as `gitremote`) report `State: "unknown"`.
+     - `Commit(ctx, RepoRef, sha string) (*Commit, error)`: Fetches commit metadata (`SHA`, `Parents`, `Time`, `Title`).
+     - Optional `Reporter` interface: Implemented by forges capable of posting evaluation results back, exposing `UpsertComment(ctx, RepoRef, ChangeRequestID, key string, body string) (int64, error)` and `SetStatus(ctx, RepoRef, sha string, Status) (int64, error)`.
+  2. **Canonical RepoRef Types**:
+     Move `RepoRef{Host, Owner, Name}`, URL parsing (`ParseRepoURL`, `RepoRefFromOwnerName`), and validation functions into `pkg/forge`. `pkg/ui` aliases `RepoRef` for backwards compatibility.
+  3. **Implementations**:
+     - `pkg/forge/github`: Wraps `pkg/github.HTTPClient`. Read methods operate without authentication on public repositories; `Reporter` requires token or GitHub App credentials and maps status reporting to check runs (preserving legacy check run conclusion and token-auth fallback behavior).
+     - `pkg/forge/gitremote`: Built using pure Go remote ref advertisement via go-git (`git.NewRemote(memory.NewStorage(), ...).ListContext(...)`). It requires no `git` binary, executes no subcommands, and operates in distroless/static images. It discovers the default branch from symbolic `HEAD`, lists branch heads (`refs/heads/*`), ignores tags, and extracts change requests from `refs/pull/*/head` (reporting `State: "unknown"`) and `refs/pull/*/merge` (recording `MergeSHA`) for GitHub remotes. Does not implement `Reporter`.
+     - `Registry`: Selects the appropriate forge for a `RepoRef` by host name (`github.com` maps to the GitHub forge; all other hosts fall back to `gitremote`).
+  4. **Pure Go Ref Advertisement vs. ADR-004**:
+     ADR-004 mandates strict isolation by ensuring the controller never clones repository code directly. go-git's in-memory remote ref listing performs only the initial ref advertisement protocol handshake over network transport (with a default 30-second timeout); it downloads no commit objects or packfiles, unpacks no blobs, and creates no working tree files. This strictly adheres to ADR-004 while removing the need for a `git` binary in minimal distroless controller images.
+  5. **Non-Goals**:
+     Persistence/storage, background polling loops, GitHub App registration, and UI changes are deferred to subsequent development work.
+- **Rationale**:
+  The forge abstraction cleanly decouples eval-runner from GitHub-specific transports while preserving sandbox isolation, keeping controller images minimal and static, and enabling generic Git server evaluations.
+
 
 
 

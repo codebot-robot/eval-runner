@@ -153,6 +153,26 @@ func (c *HTTPClient) doRequest(ctx context.Context, method, path string, body an
 	return err
 }
 
+// DoRequest performs an HTTP request against GitHub's API.
+func (c *HTTPClient) DoRequest(ctx context.Context, method, path string, body any, out any) error {
+	return c.doRequest(ctx, method, path, body, out)
+}
+
+// DoRequestHeader performs an HTTP request against GitHub's API and returns response headers.
+func (c *HTTPClient) DoRequestHeader(ctx context.Context, method, path string, body any, out any) (http.Header, error) {
+	return c.doRequestHeader(ctx, method, path, body, out)
+}
+
+// BaseURL returns the configured base URL of the client.
+func (c *HTTPClient) BaseURL() string {
+	return c.baseURL
+}
+
+// HasCredentials reports whether the client has an API token or AppAuth configured.
+func (c *HTTPClient) HasCredentials() bool {
+	return c.token != "" || c.appAuth != nil
+}
+
 func (c *HTTPClient) doRequestHeader(ctx context.Context, method, path string, body any, out any) (http.Header, error) {
 	var reqBody io.Reader
 	if body != nil {
@@ -282,7 +302,8 @@ func (c *HTTPClient) CurrentUser(ctx context.Context) (string, error) {
 	return c.cachedUser, nil
 }
 
-func parseNextLink(linkHeader string) string {
+// ParseNextLink extracts the URL from a GitHub Link header with rel="next".
+func ParseNextLink(linkHeader string) string {
 	for _, part := range strings.Split(linkHeader, ",") {
 		section := strings.Split(part, ";")
 		if len(section) < 2 {
@@ -304,6 +325,10 @@ func parseNextLink(linkHeader string) string {
 		}
 	}
 	return ""
+}
+
+func parseNextLink(linkHeader string) string {
+	return ParseNextLink(linkHeader)
 }
 
 func (c *HTTPClient) ListIssueComments(ctx context.Context, owner, repo string, number int) ([]IssueComment, error) {

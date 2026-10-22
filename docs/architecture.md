@@ -344,6 +344,28 @@ When `spec.pullRequest` is configured on a `Comparison`, the controller reports 
   - `REGRESSED`: status `completed`, conclusion `failure`, description `REGRESSED`
 - Descriptions differ from the original concept mockup as listed above. Authentication uses GitHub App credentials (preferred) or a personal access token stored in the controller namespace.
 
+### The Forge Abstraction (`pkg/forge`)
+
+eval-runner interacts with code hosting environments (such as github.com, GitLab, Gerrit, or bare git servers) through the `pkg/forge` abstraction, decoupling repository discovery, branch tracking, change requests, and status reporting from any single hosting vendor or webhook event delivery mechanism (ADR-033).
+
+#### Package Map
+
+- `pkg/forge`: Core interfaces and domain types:
+  - `Forge`: Primary read interface providing `Kind()`, `Repository()`, `Branches()`, `ChangeRequests()`, and `Commit()`.
+  - `Reporter`: Optional write interface providing `UpsertComment()` and `SetStatus()`.
+  - `RepoRef`: Canonical repository reference (`Host`, `Owner`, `Name`) with URL parsing (`ParseRepoURL`, `RepoRefFromOwnerName`) and validation.
+  - `Registry`: Host-based router directing repository references to their target forge (routing `github.com` to the GitHub forge and any other host to `gitremote`).
+  - `FakeForge`: Thread-safe in-memory test implementation of `Forge` and `Reporter`.
+- `pkg/forge/github`: GitHub REST API implementation:
+  - Wraps `pkg/github.HTTPClient` (supporting unauthenticated reads on public repositories, personal access tokens, and GitHub App installations).
+  - Handles Link header pagination across branches and pull requests.
+  - Implements `Reporter` via PR issue comment upsertion (with marker keys) and commit status posting.
+- `pkg/forge/gitremote`: Generic Git remote implementation:
+  - Uses `git ls-remote` exclusively without cloning or checking out working tree code (preserving ADR-004 isolation).
+  - Determines repository default branches via symbolic `HEAD`.
+  - Discovers branch heads from `refs/heads/*`, explicitly filtering out tags.
+  - Extracts change requests from `refs/pull/N/head` (and `refs/pull/N/merge` when present) for GitHub remotes.
+
 ---
 
 ## 2. Sequence Diagram: Run Creation to Discovered

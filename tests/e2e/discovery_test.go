@@ -17,13 +17,17 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 )
 
 func TestRunDiscovery(t *testing.T) {
@@ -393,4 +397,75 @@ spec:
 	t.Run("WebhookSmoke", func(t *testing.T) {
 		runWebhookSmoke(t, harness)
 	})
+
+	t.Run("GitRemoteSmoke", func(t *testing.T) {
+		runGitRemoteSmoke(t, harness, "eval-runner-sandbox")
+	})
+}
+
+func runGitRemoteSmoke(t *testing.T, harness *Harness, sandboxNamespace string) {
+	// Pick an available local port for port-forwarding
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("failed to close listener: %v", err)
+	}
+
+	cmd := exec.Command("kubectl", "port-forward", "-n", sandboxNamespace, "svc/git-server", fmt.Sprintf("%d:9418", port))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start git-server port-forward: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+
+	// Wait for port-forward to be ready
+	ready := false
+	for i := 0; i < 30; i++ {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatalf("port-forward to git-server failed to become ready on port %d", port)
+	}
+
+	ref := forge.RepoRef{
+		Host:  "git-server.eval-runner-sandbox.svc",
+		Owner: "-",
+		Name:  "docs-eval",
+	}
+
+	f := gitremote.New(gitremote.WithURLResolver(func(r forge.RepoRef) string {
+		return fmt.Sprintf("git://127.0.0.1:%d/%s.git", port, r.Name)
+	}))
+
+	branches, err := f.Branches(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("f.Branches() failed: %v", err)
+	}
+
+	foundMain := false
+	for _, b := range branches {
+		if b.Name == "main" {
+			foundMain = true
+			if b.SHA == "" {
+				t.Errorf("expected non-empty SHA for branch main, got %q", b.SHA)
+			}
+			break
+		}
+	}
+	if !foundMain {
+		t.Errorf("expected branches to return 'main', got %+v", branches)
+	}
 }

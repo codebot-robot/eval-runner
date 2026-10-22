@@ -18,175 +18,16 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/forge"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var (
-	hostRegex        = regexp.MustCompile(`^[a-z0-9.-]+$`)
-	repoSegmentRegex = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-)
-
-// IsValidRepoHost checks if a host contains a dot, matches ^[a-z0-9.-]+$, and is not "." or "..".
-func IsValidRepoHost(h string) bool {
-	h = strings.ToLower(strings.TrimSpace(h))
-	if h == "." || h == ".." {
-		return false
-	}
-	if !strings.Contains(h, ".") {
-		return false
-	}
-	return hostRegex.MatchString(h)
-}
-
-// IsValidRepoOwner checks if an owner matches ^[A-Za-z0-9_.-]+$ or is "-", and is not "." or "..".
-func IsValidRepoOwner(o string) bool {
-	o = strings.TrimSpace(o)
-	if o == "." || o == ".." {
-		return false
-	}
-	if o == "-" {
-		return true
-	}
-	return repoSegmentRegex.MatchString(o)
-}
-
-// IsValidRepoName checks if a repository name matches ^[A-Za-z0-9_.-]+$ or is "-", and is not "." or "..".
-func IsValidRepoName(n string) bool {
-	n = strings.TrimSpace(n)
-	if n == "." || n == ".." {
-		return false
-	}
-	if n == "-" {
-		return true
-	}
-	return repoSegmentRegex.MatchString(n)
-}
-
 // RepoRef identifies a repository by host, owner, and repository name.
-type RepoRef struct {
-	Host  string
-	Owner string
-	Name  string
-}
-
-// Path returns the URL path prefix "/host/owner/name" for this repository.
-func (r RepoRef) Path() string {
-	return fmt.Sprintf("/%s/%s/%s", r.Host, r.Owner, r.Name)
-}
-
-// String returns "host/owner/name" for this repository.
-func (r RepoRef) String() string {
-	return fmt.Sprintf("%s/%s/%s", r.Host, r.Owner, r.Name)
-}
-
-// Equal performs a case-insensitive equality comparison against another RepoRef.
-func (r RepoRef) Equal(other RepoRef) bool {
-	return strings.EqualFold(r.Host, other.Host) &&
-		strings.EqualFold(r.Owner, other.Owner) &&
-		strings.EqualFold(r.Name, other.Name)
-}
-
-// IsZero reports whether the RepoRef is empty.
-func (r RepoRef) IsZero() bool {
-	return r.Host == "" && r.Owner == "" && r.Name == ""
-}
-
-// IsValid reports whether all segments of the RepoRef pass validation.
-func (r RepoRef) IsValid() bool {
-	return IsValidRepoHost(r.Host) && IsValidRepoOwner(r.Owner) && IsValidRepoName(r.Name)
-}
-
-// ParseRepoURL parses a repository clone URL or scp-style address into a RepoRef.
-// It accepts any URL scheme (https, ssh, git protocol, etc.) as well as scp-style
-// addresses (e.g. user@host:owner/name.git). Hosts with ports have their port
-// stripped. Trailing slashes and .git extensions are trimmed. Single-segment
-// clone URLs receive the reserved placeholder owner "-" (a single hyphen).
-func ParseRepoURL(rawURL string) (RepoRef, bool) {
-	s := strings.TrimSpace(rawURL)
-	if s == "" {
-		return RepoRef{}, false
-	}
-
-	var host, path string
-
-	if strings.Contains(s, "://") {
-		u, err := url.Parse(s)
-		if err != nil {
-			return RepoRef{}, false
-		}
-		host = u.Hostname()
-		path = u.Path
-	} else if colonIdx := strings.Index(s, ":"); colonIdx != -1 {
-		// SCP-style syntax: [user@]host:path
-		beforeColon := s[:colonIdx]
-		path = s[colonIdx+1:]
-		if atIdx := strings.LastIndex(beforeColon, "@"); atIdx != -1 {
-			host = beforeColon[atIdx+1:]
-		} else {
-			host = beforeColon
-		}
-	} else {
-		return RepoRef{}, false
-	}
-
-	host = strings.ToLower(strings.TrimSpace(host))
-
-	// Clean path: trim leading/trailing slashes and .git
-	path = strings.Trim(path, "/")
-	path = strings.TrimSuffix(path, ".git")
-	path = strings.Trim(path, "/")
-	if path == "" {
-		return RepoRef{}, false
-	}
-
-	parts := strings.Split(path, "/")
-	var owner, name string
-	if len(parts) == 1 {
-		owner = "-"
-		name = parts[0]
-	} else if len(parts) == 2 {
-		owner = parts[0]
-		name = parts[1]
-	} else {
-		return RepoRef{}, false
-	}
-
-	owner = strings.TrimSpace(owner)
-	name = strings.TrimSpace(name)
-
-	ref := RepoRef{Host: host, Owner: owner, Name: name}
-	if !ref.IsValid() {
-		return RepoRef{}, false
-	}
-	return ref, true
-}
-
-// RepoRefFromOwnerName creates a RepoRef assuming github.com host for an "owner/name" string.
-func RepoRefFromOwnerName(ownerName string) (RepoRef, bool) {
-	s := strings.TrimSpace(ownerName)
-	s = strings.Trim(s, "/")
-	s = strings.TrimSuffix(s, ".git")
-	s = strings.Trim(s, "/")
-	parts := strings.Split(s, "/")
-	if len(parts) != 2 {
-		return RepoRef{}, false
-	}
-	owner := strings.TrimSpace(parts[0])
-	name := strings.TrimSpace(parts[1])
-	ref := RepoRef{
-		Host:  "github.com",
-		Owner: owner,
-		Name:  name,
-	}
-	if !ref.IsValid() {
-		return RepoRef{}, false
-	}
-	return ref, true
-}
+// Moved to pkg/forge and aliased here for backwards compatibility.
+type RepoRef = forge.RepoRef
 
 // repoLink returns a URL path for the repository with the given suffix, appending
 // "?namespace=" when linkNS is non-empty.
@@ -236,16 +77,16 @@ func runRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
 		return RepoRef{}, false
 	}
 	if run.Spec.Repo.URL != "" {
-		if ref, ok := ParseRepoURL(run.Spec.Repo.URL); ok {
+		if ref, ok := forge.ParseRepoURL(run.Spec.Repo.URL); ok {
 			return ref, true
 		}
-		if ref, ok := RepoRefFromOwnerName(run.Spec.Repo.URL); ok {
+		if ref, ok := forge.RepoRefFromOwnerName(run.Spec.Repo.URL); ok {
 			return ref, true
 		}
 	}
 	if labelVal, ok := run.Labels["evalrunner.gke-labs.dev/repo"]; ok && labelVal != "" {
 		ownerName := strings.ReplaceAll(labelVal, "_", "/")
-		if ref, ok := RepoRefFromOwnerName(ownerName); ok {
+		if ref, ok := forge.RepoRefFromOwnerName(ownerName); ok {
 			return ref, true
 		}
 	}
@@ -255,10 +96,10 @@ func runRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
 // pullRequestRepoRef parses a repository string from a PullRequestSpec.
 // It tries RepoRefFromOwnerName first (for "owner/repo" format), falling back to ParseRepoURL.
 func pullRequestRepoRef(repo string) (RepoRef, bool) {
-	if ref, ok := RepoRefFromOwnerName(repo); ok {
+	if ref, ok := forge.RepoRefFromOwnerName(repo); ok {
 		return ref, true
 	}
-	return ParseRepoURL(repo)
+	return forge.ParseRepoURL(repo)
 }
 
 // comparisonRepoRef resolves the RepoRef of a Comparison via spec.pullRequest.repository,

@@ -37,6 +37,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/forge"
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
@@ -16932,6 +16933,150 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 		}
 		if compWithExtra.Status.ExtraSamplesApplied != 4 {
 			t.Errorf("Expected extraSamplesApplied 4, got %d", compWithExtra.Status.ExtraSamplesApplied)
+		}
+	})
+}
+
+func TestComparisonReconciler_FakeForgeReporting(t *testing.T) {
+	ctx := t.Context()
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	repoRef := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	t.Run("successful comment upsert and status setting on fake forge", func(t *testing.T) {
+		ff := forge.NewFakeForge("github.com")
+		reg := forge.NewRegistry(ff)
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "comp-forge-test",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Number:     42,
+					Repository: "gke-labs/eval-runner",
+					HeadSHA:    "cand-sha-1234",
+					BaseSHA:    "base-sha-5678",
+				},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"},
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			},
+			Status: v1alpha1.ComparisonStatus{
+				Phase:   v1alpha1.ComparisonPhaseCompleted,
+				Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			},
+		}
+
+		candRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "https://github.com/gke-labs/eval-runner.git", Commit: "cand-sha-1234"},
+				Model: "gemini-pro",
+			},
+			Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseCompleted},
+		}
+
+		baseRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "https://github.com/gke-labs/eval-runner.git", Commit: "base-sha-5678"},
+				Model: "gemini-pro",
+			},
+			Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseCompleted},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp, candRun, baseRun).Build()
+
+		r := &ComparisonReconciler{
+			Client:        cl,
+			Scheme:        scheme,
+			ForgeRegistry: reg,
+			Now:           time.Now,
+		}
+
+		err := r.reportToGitHub(ctx, comp, baseRun, candRun)
+		if err != nil {
+			t.Fatalf("reportToGitHub failed: %v", err)
+		}
+
+		if comp.Status.Reporting == nil || comp.Status.Reporting.CommentID == 0 {
+			t.Errorf("expected non-zero CommentID, got %+v", comp.Status.Reporting)
+		}
+		if comp.Status.Reporting.CheckRunID == 0 {
+			t.Errorf("expected non-zero CheckRunID, got %+v", comp.Status.Reporting)
+		}
+
+		calls := ff.GetUpsertCalls()
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 UpsertComment call, got %d", len(calls))
+		}
+		if calls[0].ID != "42" || !calls[0].Ref.Equal(repoRef) {
+			t.Errorf("call = %+v", calls[0])
+		}
+
+		statusCalls := ff.GetSetStatusCalls()
+		if len(statusCalls) != 1 {
+			t.Fatalf("expected 1 SetStatus call, got %d", len(statusCalls))
+		}
+		if statusCalls[0].SHA != "cand-sha-1234" {
+			t.Errorf("statusCall = %+v", statusCalls[0])
+		}
+	})
+
+	t.Run("postUnserviceableCommandNote uses forge with empty key", func(t *testing.T) {
+		ff := forge.NewFakeForge("github.com")
+		reg := forge.NewRegistry(ff)
+
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "comp-unserviceable",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Number:     101,
+					Repository: "gke-labs/eval-runner",
+				},
+			},
+		}
+
+		r := &ComparisonReconciler{
+			ForgeRegistry: reg,
+		}
+
+		if err := r.postUnserviceableCommandNote(ctx, comp, "budget exceeded"); err != nil {
+			t.Fatalf("postUnserviceableCommandNote failed: %v", err)
+		}
+
+		calls := ff.GetUpsertCalls()
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 UpsertComment call, got %d", len(calls))
+		}
+		if calls[0].ID != "101" || !strings.Contains(calls[0].Body, "budget exceeded") {
+			t.Errorf("call = %+v", calls[0])
+		}
+		if calls[0].Key != "" {
+			t.Errorf("expected empty key for plain unserviceable note, got %q", calls[0].Key)
+		}
+	})
+
+	t.Run("forge without Reporter disables reporting cleanly", func(t *testing.T) {
+		reg := forge.NewDefaultRegistry(nil, nil)
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-no-reporter", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{Number: 10, Repository: "gke-labs/eval-runner"},
+			},
+		}
+		r := &ComparisonReconciler{ForgeRegistry: reg, Now: time.Now}
+		if err := r.reportToGitHub(ctx, comp, nil, nil); err != nil {
+			t.Fatalf("expected nil error when reporter is missing, got: %v", err)
+		}
+		if comp.Status.Reporting == nil || comp.Status.Reporting.Message != "disabled" {
+			t.Errorf("expected reporting message 'disabled', got %+v", comp.Status.Reporting)
 		}
 	})
 }

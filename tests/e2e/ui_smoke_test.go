@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
-	"github.com/gke-labs/eval-runner/pkg/ui"
+	"github.com/gke-labs/eval-runner/pkg/forge"
 )
 
 type uiSmokeLogger interface {
@@ -84,7 +84,7 @@ func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples b
 
 	// 2. Curl legacy Run page without redirect following to assert 308 and Location
 	repoURLOut := harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "jsonpath={.spec.repo.url}")
-	repoRef, ok := ui.ParseRepoURL(strings.TrimSpace(repoURLOut))
+	repoRef, ok := forge.ParseRepoURL(strings.TrimSpace(repoURLOut))
 	if !ok {
 		t.Fatalf("failed to parse repo URL %q for run %s", repoURLOut, runName)
 	}

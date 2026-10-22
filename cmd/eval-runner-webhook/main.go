@@ -27,6 +27,9 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/forge"
+	forgegithub "github.com/gke-labs/eval-runner/pkg/forge/github"
+	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 	"github.com/gke-labs/eval-runner/pkg/version"
 	"github.com/gke-labs/eval-runner/pkg/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -148,6 +151,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
+	cfg.ForgeRegistry = forge.NewDefaultRegistry(forgegithub.New(), gitremote.New())
 
 	if len(cfg.WebhookRepositories) == 0 {
 		log.Println("warning: webhookRepositories allow-list is empty; all repositories will be rejected (set to '*' to allow all)")
