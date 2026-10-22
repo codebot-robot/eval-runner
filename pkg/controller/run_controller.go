@@ -62,6 +62,10 @@ const (
 	// DefaultMaxDiscoveryAttempts is the default maximum number of discovery attempts for clone retries.
 	DefaultMaxDiscoveryAttempts = 5
 
+	// DefaultMaxUncountedRequeuesPerAttempt is the default maximum number of uncounted requeues
+	// for an unchanged endpoint before counting one attempt against MaxDiscoveryAttempts.
+	DefaultMaxUncountedRequeuesPerAttempt = 6
+
 	// DefaultDiscoveryDeadline is the default overall deadline for discovery to complete.
 	DefaultDiscoveryDeadline = 10 * time.Minute
 
@@ -203,6 +207,11 @@ type RunReconciler struct {
 	// Defaults to DefaultMaxDiscoveryAttempts (5) if <= 0.
 	MaxDiscoveryAttempts int
 
+	// MaxUncountedRequeuesPerAttempt is the cap on uncounted requeues for an unchanged endpoint
+	// before counting one attempt against MaxDiscoveryAttempts.
+	// Defaults to DefaultMaxUncountedRequeuesPerAttempt (6) if <= 0.
+	MaxUncountedRequeuesPerAttempt int
+
 	// DiscoveryRetryBackoff defines the backoff schedule between clone retry attempts.
 	// Defaults to DefaultDiscoveryRetryBackoff if empty.
 	DiscoveryRetryBackoff []time.Duration
@@ -236,6 +245,9 @@ type RunReconciler struct {
 
 	manifestCacheLock sync.RWMutex
 	manifestCache     map[string]*v1alpha1.Manifest
+
+	discoveryTrackerMu sync.Mutex
+	discoveryTrackers  map[types.NamespacedName]*discoveryAttemptTracker
 
 	mu     sync.RWMutex
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
@@ -708,11 +720,45 @@ func (r *RunReconciler) getOrLoadManifest(ctx context.Context, run *v1alpha1.Run
 	return manifest, nil
 }
 
+type discoveryAttemptTracker struct {
+	uncountedRequeues int
+	countedAttempts   int
+}
+
 func (r *RunReconciler) maxDiscoveryAttempts() int {
 	if r.MaxDiscoveryAttempts > 0 {
 		return r.MaxDiscoveryAttempts
 	}
 	return DefaultMaxDiscoveryAttempts
+}
+
+func (r *RunReconciler) maxUncountedRequeuesPerAttempt() int {
+	if r.MaxUncountedRequeuesPerAttempt > 0 {
+		return r.MaxUncountedRequeuesPerAttempt
+	}
+	return DefaultMaxUncountedRequeuesPerAttempt
+}
+
+func (r *RunReconciler) getDiscoveryTracker(key types.NamespacedName) *discoveryAttemptTracker {
+	r.discoveryTrackerMu.Lock()
+	defer r.discoveryTrackerMu.Unlock()
+	if r.discoveryTrackers == nil {
+		r.discoveryTrackers = make(map[types.NamespacedName]*discoveryAttemptTracker)
+	}
+	t, ok := r.discoveryTrackers[key]
+	if !ok {
+		t = &discoveryAttemptTracker{}
+		r.discoveryTrackers[key] = t
+	}
+	return t
+}
+
+func (r *RunReconciler) clearDiscoveryTracker(key types.NamespacedName) {
+	r.discoveryTrackerMu.Lock()
+	defer r.discoveryTrackerMu.Unlock()
+	if r.discoveryTrackers != nil {
+		delete(r.discoveryTrackers, key)
+	}
 }
 
 func (r *RunReconciler) requeueDelay(deadline *metav1.Time) time.Duration {
@@ -776,6 +822,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// Deletion lifecycle: Run is marked for deletion. Clean up all sandboxes and remove finalizer.
 	if !run.DeletionTimestamp.IsZero() {
+		r.clearDiscoveryTracker(req.NamespacedName)
 		r.evictCachedManifest(run.Namespace + "/" + run.Name)
 		if controllerutil.ContainsFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox) {
 			logger.Info("Run is being deleted; cleaning up sandboxes", "run", run.Name)
@@ -1075,17 +1122,17 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	var cloneAttempts int
 	var uncountedRetried bool
 
-	handleUnavailable := func(dialErr error) (retried bool, res ctrl.Result, err error) {
+	handleUnavailable := func(dialErr error) (retried bool, handled bool, res ctrl.Result, err error) {
 		logger.Info("Discovery step failed with Unavailable; checking sandbox status", "error", dialErr, "run", run.Name, "endpoint", currentEndpoint)
 
 		foundSB, sbErr := r.findDiscoverySandbox(ctx, &run)
 		if sbErr != nil {
-			return false, ctrl.Result{}, sbErr
+			return false, true, ctrl.Result{}, sbErr
 		}
 		if foundSB == nil {
 			logger.Info(logMsgRecreatingSandbox, "run", run.Name, "sandbox", sandboxName)
 			if err := r.recreateDiscoverySandbox(ctx, &run); err != nil {
-				return false, ctrl.Result{}, err
+				return false, true, ctrl.Result{}, err
 			}
 			if updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 				status.Phase = v1alpha1.RunPhaseDiscovering
@@ -1100,19 +1147,50 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}); updateErr != nil {
 				logger.Error(updateErr, "failed to update run status after recreating sandbox")
 			}
-			return false, ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
+			return false, true, ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 		}
 
-		newEndpoint := r.resolveFreshSandboxEndpoint(ctx, foundSB, currentEndpoint)
+		newEndpoint := r.resolveFreshSandboxEndpoint(ctx, foundSB)
 		if newEndpoint == "" || newEndpoint == currentEndpoint {
+			tracker := r.getDiscoveryTracker(req.NamespacedName)
+			tracker.uncountedRequeues++
+
+			// Carry the last dial error into status.message on each requeue
+			boundedErr := truncateMessage(dialErr.Error(), r.maxMessageBytes())
+			if updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Message = boundedErr
+			}); updateErr != nil {
+				logger.Error(updateErr, "failed to update run status message on unavailable requeue")
+			}
+
+			if tracker.uncountedRequeues >= r.maxUncountedRequeuesPerAttempt() {
+				tracker.uncountedRequeues = 0
+				tracker.countedAttempts++
+				maxAttempts := r.maxDiscoveryAttempts()
+				logger.Info("Uncounted requeue cap reached; counting attempt",
+					"run", run.Name, "countedAttempts", tracker.countedAttempts, "maxAttempts", maxAttempts)
+
+				if tracker.countedAttempts >= maxAttempts {
+					r.clearDiscoveryTracker(req.NamespacedName)
+					msg := fmt.Sprintf("step git clone failed after %s: %v", formatAttemptCount(maxAttempts), dialErr)
+					failRes, failErr := r.failRun(ctx, &run, foundSB, msg)
+					return false, true, failRes, failErr
+				}
+			}
+
 			logger.Info("Sandbox endpoint unchanged or not yet ready after Unavailable failure; requeuing without counting attempt",
-				"run", run.Name, "endpoint", currentEndpoint, "resolved", newEndpoint)
-			return false, ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
+				"run", run.Name, "endpoint", currentEndpoint, "resolved", newEndpoint,
+				"uncountedRequeues", tracker.uncountedRequeues, "countedAttempts", tracker.countedAttempts)
+			return false, true, ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 		}
+
+		// Reset uncounted requeues on endpoint change
+		tracker := r.getDiscoveryTracker(req.NamespacedName)
+		tracker.uncountedRequeues = 0
 
 		newClient, clientErr := r.createSandboxClient(ctx, &run, foundSB.Name, foundSB.Namespace, newEndpoint)
 		if clientErr != nil {
-			return false, ctrl.Result{}, fmt.Errorf("failed to create sandbox client for recovered endpoint %s: %w", newEndpoint, clientErr)
+			return false, true, ctrl.Result{}, fmt.Errorf("failed to create sandbox client for recovered endpoint %s: %w", newEndpoint, clientErr)
 		}
 		if sbClient != nil && sbClient != r.SandboxClient {
 			if closeErr := sbClient.Close(); closeErr != nil {
@@ -1121,7 +1199,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		sbClient = newClient
 		currentEndpoint = newEndpoint
-		return true, ctrl.Result{}, nil
+		return true, false, ctrl.Result{}, nil
 	}
 
 	executeCleanAndClone := func() (*sandboxclient.ExecuteResult, error) {
@@ -1164,16 +1242,16 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 		if isUnavailableOrDialTimeout(cloneErr) && !uncountedRetried {
 			uncountedRetried = true
-			recovered, res, err := handleUnavailable(cloneErr)
-			if err != nil || !res.IsZero() {
+			recovered, handled, res, err := handleUnavailable(cloneErr)
+			if handled {
 				return res, err
 			}
 			if recovered {
 				cloneRes, cloneErr = executeCleanAndClone()
 			}
 		} else if isUnavailableOrDialTimeout(cloneErr) {
-			_, res, err := handleUnavailable(cloneErr)
-			if err != nil || !res.IsZero() {
+			_, handled, res, err := handleUnavailable(cloneErr)
+			if handled {
 				return res, err
 			}
 		}
@@ -1452,16 +1530,22 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	r.setCachedManifest(run.Namespace+"/"+run.Name, manifest)
 
 	// Step 5: Success -> update Run to Discovered (or Running if spec.model is set), then cleanup sandbox
+	totalCloneAttempts := cloneAttempts
+	if tracker := r.getDiscoveryTracker(req.NamespacedName); tracker.countedAttempts > 0 {
+		totalCloneAttempts += tracker.countedAttempts
+	}
+	r.clearDiscoveryTracker(req.NamespacedName)
+
 	successMsg := ""
 	condMsg := fmt.Sprintf("Discovered %d tasks", len(manifest.Tasks))
-	if cloneAttempts > 1 {
-		successMsg = fmt.Sprintf("Discovered after %s", formatAttemptCount(cloneAttempts))
-		condMsg = fmt.Sprintf("%s after %s", condMsg, formatAttemptCount(cloneAttempts))
+	if totalCloneAttempts > 1 {
+		successMsg = fmt.Sprintf("Discovered after %s", formatAttemptCount(totalCloneAttempts))
+		condMsg = fmt.Sprintf("%s after %s", condMsg, formatAttemptCount(totalCloneAttempts))
 	}
 
 	logger.Info("Discovery successful; recording discovery status and cleaning up sandbox",
 		"tasks", len(manifest.Tasks),
-		"cloneAttempts", cloneAttempts,
+		"cloneAttempts", totalCloneAttempts,
 		"manifestURI", manifestURI,
 	)
 
@@ -1605,44 +1689,33 @@ func (r *RunReconciler) findDiscoverySandbox(ctx context.Context, run *v1alpha1.
 }
 
 func (r *RunReconciler) resolveSandboxEndpoint(ctx context.Context, sb *sandboxv1beta1.Sandbox) string {
-	return r.resolveEndpointWithReader(ctx, r.Client, sb, "")
+	return r.resolveEndpointWithReader(ctx, r.Client, sb)
 }
 
-func (r *RunReconciler) resolveFreshSandboxEndpoint(ctx context.Context, sb *sandboxv1beta1.Sandbox, failedEndpoint string) string {
+func (r *RunReconciler) resolveFreshSandboxEndpoint(ctx context.Context, sb *sandboxv1beta1.Sandbox) string {
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
-	return r.resolveEndpointWithReader(ctx, reader, sb, failedEndpoint)
+	return r.resolveEndpointWithReader(ctx, reader, sb)
 }
 
-func (r *RunReconciler) resolveEndpointWithReader(ctx context.Context, reader client.Reader, sb *sandboxv1beta1.Sandbox, failedEndpoint string) string {
+func (r *RunReconciler) resolveEndpointWithReader(ctx context.Context, reader client.Reader, sb *sandboxv1beta1.Sandbox) string {
 	podName := sb.Name
 	if name, ok := sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
 		podName = name
 	}
 	var pod corev1.Pod
 	podKey := types.NamespacedName{Namespace: sb.Namespace, Name: podName}
-	var podIP string
-	if err := reader.Get(ctx, podKey, &pod); err == nil && pod.Status.PodIP != "" {
-		podIP = pod.Status.PodIP
+	err := reader.Get(ctx, podKey, &pod)
+	if err == nil {
+		return pod.Status.PodIP
 	}
-	var sbIP string
-	if len(sb.Status.PodIPs) > 0 && sb.Status.PodIPs[0] != "" {
-		sbIP = sb.Status.PodIPs[0]
+	if !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).V(1).Info("failed to get pod for endpoint resolution", "pod", podKey, "error", err)
 	}
-
-	if podIP != "" && podIP != failedEndpoint {
-		return podIP
-	}
-	if sbIP != "" && sbIP != failedEndpoint {
-		return sbIP
-	}
-	if podIP != "" {
-		return podIP
-	}
-	if sbIP != "" {
-		return sbIP
+	if len(sb.Status.PodIPs) > 0 {
+		return sb.Status.PodIPs[0]
 	}
 	return ""
 }
@@ -2953,9 +3026,10 @@ func (r *RunReconciler) updateRunStatus(ctx context.Context, key types.Namespace
 }
 
 func (r *RunReconciler) failRun(ctx context.Context, run *v1alpha1.Run, sandbox *sandboxv1beta1.Sandbox, message string) (ctrl.Result, error) {
+	key := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}
+	r.clearDiscoveryTracker(key)
 	r.evictCachedManifest(run.Namespace + "/" + run.Name)
 	boundedMessage := truncateMessage(message, r.maxMessageBytes())
-	key := types.NamespacedName{Namespace: run.Namespace, Name: run.Name}
 	err := r.updateRunStatus(ctx, key, func(status *v1alpha1.RunStatus, gen int64) {
 		status.Phase = v1alpha1.RunPhaseFailed
 		status.Message = boundedMessage
