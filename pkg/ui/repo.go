@@ -42,11 +42,16 @@ func repoLink(ref RepoRef, suffix string, linkNS string) string {
 		}
 	}
 	if linkNS != "" {
+		frag := ""
+		if idx := strings.Index(base, "#"); idx != -1 {
+			frag = base[idx:]
+			base = base[:idx]
+		}
 		sep := "?"
 		if strings.Contains(base, "?") {
 			sep = "&"
 		}
-		base += sep + "namespace=" + url.QueryEscape(linkNS)
+		base = base + sep + "namespace=" + url.QueryEscape(linkNS) + frag
 	}
 	return base
 }

@@ -323,6 +323,7 @@ func (s *Server) routes() {
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series", s.handleRepoSeries)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{$}", s.handleRepoSeries)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{branch...}", s.handleRepoSeries)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/evals/{suite...}", s.handleRepoEvalSuiteDetail)
 }
 
 func (s *Server) handleRepoScoped(w http.ResponseWriter, r *http.Request) {
@@ -806,7 +807,7 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 	}
 
 	// Link to suite detail page when the route exists; false until suite page is registered
-	const suiteRouteExists = false
+	const suiteRouteExists = true
 
 	// Collect distinct commits in chronological order
 	type commitEntry struct {
@@ -1306,6 +1307,404 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 	if err := RenderRepoOverview(w, view); err != nil {
 		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
 	}
+}
+
+func (s *Server) handleRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.parseRouteRepo(r)
+	if !ok {
+		httpError(w, http.StatusNotFound, "not found", "invalid repo route params", nil)
+		return
+	}
+	ns, err := s.namespaceFor(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid namespace", "invalid namespace query param", err)
+		return
+	}
+	suiteParam := strings.Trim(r.PathValue("suite"), "/")
+	if suiteParam == "" {
+		httpError(w, http.StatusNotFound, "suite not found", "empty suite param", nil)
+		return
+	}
+	s.renderRepoEvalSuiteDetail(w, r, ns, ref, suiteParam)
+}
+
+func (s *Server) renderRepoEvalSuiteDetail(w http.ResponseWriter, r *http.Request, ns string, ref RepoRef, suiteName string) {
+	ctx := r.Context()
+	linkNS := s.linkNamespace(ns)
+
+	// Single list call for Runs in namespace
+	var allRuns v1alpha1.RunList
+	if err := s.readerFor(ns).List(ctx, &allRuns, client.InNamespace(ns)); err != nil {
+		if apierrors.IsForbidden(err) {
+			httpError(w, http.StatusForbidden, "forbidden: access to namespace denied", fmt.Sprintf("access to namespace %q denied", ns), err)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, "failed to list runs", "k8s list runs failed", err)
+		return
+	}
+
+	matched := collectSeries(allRuns.Items, ref, "main", "")
+	if len(matched) == 0 {
+		httpError(w, http.StatusNotFound, "suite not found", fmt.Sprintf("no runs for repo %s branch main in namespace %s", ref.String(), ns), nil)
+		return
+	}
+
+	var orderedCommits []CommitEntry
+	seenCommits := make(map[string]bool)
+	for _, sr := range matched {
+		c := runCommitSHA(sr.run)
+		if c == "" {
+			continue
+		}
+		if !seenCommits[c] {
+			seenCommits[c] = true
+			orderedCommits = append(orderedCommits, CommitEntry{
+				SHA:        c,
+				CommitTime: sr.commitTime,
+			})
+		}
+	}
+
+	chartCommits := orderedCommits
+	if len(chartCommits) > 20 {
+		chartCommits = chartCommits[len(chartCommits)-20:]
+	}
+
+	evalObsByCommit := make(map[string]map[string][]EvalObservation)
+	evalAllObs := make(map[string][]EvalObservation)
+	evalSet := make(map[string]bool)
+
+	for _, sr := range matched {
+		run := sr.run
+		commit := runCommitSHA(run)
+		if commit == "" {
+			continue
+		}
+		for idx := range run.Status.Tasks {
+			t := &run.Status.Tasks[idx]
+			if t.ID == "" {
+				continue
+			}
+			if t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
+				if SuiteOf(t.ID) != suiteName {
+					continue
+				}
+				evalSet[t.ID] = true
+				samples := t.Samples
+				succ := t.Successes
+				if succ == 0 && t.SuccessRate != nil && *t.SuccessRate > 0 {
+					succ = int(math.Round(*t.SuccessRate * float64(samples)))
+				}
+				est := stats.PooledWilsonFromTotals(succ, samples, 0.95)
+				scoreStr := fmt.Sprintf("%.2f", est.Point)
+				ciStr := fmt.Sprintf("[%.2f, %.2f]", est.CI.Lower, est.CI.Upper)
+
+				samplesLink := ""
+				if t.LogPath != "" && s.hasArtifactStorage() {
+					samplesLink = repoLink(ref, fmt.Sprintf("/runs/%s/tasks/%s/samples", run.Name, url.PathEscape(t.ID)), linkNS)
+				}
+
+				obs := EvalObservation{
+					RunName:     run.Name,
+					Run:         run,
+					TaskID:      t.ID,
+					CommitSHA:   commit,
+					CommitTime:  sr.commitTime,
+					Model:       run.Spec.Model,
+					Harness:     run.Labels["evalrunner.gke-labs.dev/harness"],
+					Samples:     samples,
+					Successes:   succ,
+					SuccessRate: t.SuccessRate,
+					ScoreStr:    scoreStr,
+					CIStr:       ciStr,
+					Est:         est,
+					SamplesLink: samplesLink,
+				}
+
+				if evalObsByCommit[t.ID] == nil {
+					evalObsByCommit[t.ID] = make(map[string][]EvalObservation)
+				}
+				evalObsByCommit[t.ID][commit] = append(evalObsByCommit[t.ID][commit], obs)
+				evalAllObs[t.ID] = append(evalAllObs[t.ID], obs)
+			}
+		}
+	}
+
+	if len(evalSet) == 0 {
+		httpError(w, http.StatusNotFound, "suite not found", fmt.Sprintf("suite %s has no completed observations in repo %s", suiteName, ref.String()), nil)
+		return
+	}
+
+	var evalIDs []string
+	for eID := range evalSet {
+		evalIDs = append(evalIDs, eID)
+	}
+	sort.Strings(evalIDs)
+
+	type evalMainResult struct {
+		point       float64
+		est         stats.Estimate
+		newestTasks []stats.TaskCounts
+	}
+	evalMainResults := make(map[string]evalMainResult)
+
+	for _, eID := range evalIDs {
+		var eCommits []CommitEntry
+		for _, c := range orderedCommits {
+			if len(evalObsByCommit[eID][c.SHA]) > 0 {
+				eCommits = append(eCommits, c)
+			}
+		}
+		if len(eCommits) == 0 {
+			continue
+		}
+		newestCommit := eCommits[len(eCommits)-1]
+		newestObs := evalObsByCommit[eID][newestCommit.SHA]
+		var tasks []stats.TaskCounts
+		for _, o := range newestObs {
+			tasks = append(tasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
+		}
+		est := stats.PooledWilson(tasks, 0.95)
+		evalMainResults[eID] = evalMainResult{
+			point:       est.Point,
+			est:         est,
+			newestTasks: tasks,
+		}
+	}
+
+	var sumEvalScores float64
+	var suiteTasks []stats.TaskCounts
+	for _, eID := range evalIDs {
+		res := evalMainResults[eID]
+		sumEvalScores += res.point
+		suiteTasks = append(suiteTasks, res.newestTasks...)
+	}
+	suiteScorePoint := sumEvalScores / float64(len(evalIDs))
+	suitePooledEst := stats.PooledWilson(suiteTasks, 0.95)
+	suiteScoreStr := fmt.Sprintf("%.2f", suiteScorePoint)
+	suiteCIStr := fmt.Sprintf("[%.2f, %.2f]", suitePooledEst.CI.Lower, suitePooledEst.CI.Upper)
+
+	var suiteCommits []CommitEntry
+	for _, c := range orderedCommits {
+		hasObs := false
+		for _, eID := range evalIDs {
+			if len(evalObsByCommit[eID][c.SHA]) > 0 {
+				hasObs = true
+				break
+			}
+		}
+		if hasObs {
+			suiteCommits = append(suiteCommits, c)
+		}
+	}
+
+	var suiteDeltaStr string = "—"
+	var suiteDeltaClass string
+	var suiteHasDelta bool
+	if len(suiteCommits) > 1 {
+		prevCommit := suiteCommits[len(suiteCommits)-2]
+		var prevEvalScores []float64
+		var prevSuiteTasks []stats.TaskCounts
+		for _, eID := range evalIDs {
+			eObs := evalObsByCommit[eID][prevCommit.SHA]
+			if len(eObs) > 0 {
+				var eTasks []stats.TaskCounts
+				for _, o := range eObs {
+					eTasks = append(eTasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
+					prevSuiteTasks = append(prevSuiteTasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
+				}
+				eEst := stats.PooledWilson(eTasks, 0.95)
+				prevEvalScores = append(prevEvalScores, eEst.Point)
+			}
+		}
+		if len(prevEvalScores) > 0 {
+			var prevSum float64
+			for _, s := range prevEvalScores {
+				prevSum += s
+			}
+			prevSuitePoint := prevSum / float64(len(prevEvalScores))
+			prevSuitePooled := stats.PooledWilson(prevSuiteTasks, 0.95)
+
+			curSuiteEst := stats.Estimate{
+				Point:  suiteScorePoint,
+				CI:     suitePooledEst.CI,
+				N:      suitePooledEst.N,
+				Method: "pooled-wilson",
+			}
+			prevSuiteEst := stats.Estimate{
+				Point:  prevSuitePoint,
+				CI:     prevSuitePooled.CI,
+				N:      prevSuitePooled.N,
+				Method: "pooled-wilson",
+			}
+			delta := stats.DifferenceUnpaired(curSuiteEst, prevSuiteEst, 0.95)
+			suiteDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
+			suiteDeltaClass = DeltaChipClass(delta.CI)
+			suiteHasDelta = true
+		}
+	}
+
+	var evalSections []RepoSuiteEvalSection
+	for _, eID := range evalIDs {
+		obs := evalAllObs[eID]
+		eMain := evalMainResults[eID]
+
+		var evalCommits []CommitEntry
+		for _, c := range orderedCommits {
+			if len(evalObsByCommit[eID][c.SHA]) > 0 {
+				evalCommits = append(evalCommits, c)
+			}
+		}
+
+		var evalDeltaStr string = "—"
+		var evalDeltaClass string
+		var evalHasDelta bool
+		if len(evalCommits) > 1 {
+			prevCommit := evalCommits[len(evalCommits)-2]
+			prevObs := evalObsByCommit[eID][prevCommit.SHA]
+			var prevTasks []stats.TaskCounts
+			for _, o := range prevObs {
+				prevTasks = append(prevTasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
+			}
+			prevEst := stats.PooledWilson(prevTasks, 0.95)
+			delta := stats.DifferenceUnpaired(eMain.est, prevEst, 0.95)
+			evalDeltaStr = FormatDeltaCI(delta.Delta, delta.CI.Lower, delta.CI.Upper)
+			evalDeltaClass = DeltaChipClass(delta.CI)
+			evalHasDelta = true
+		}
+
+		lines := LinesPerDimension(obs, DimensionModel, chartCommits)
+		hasModelBreakdown := len(lines) > 1
+
+		var modelLegend []RepoSuiteModelLegendItem
+		if hasModelBreakdown {
+			for _, l := range lines {
+				modelLegend = append(modelLegend, RepoSuiteModelLegendItem{
+					Name:     l.Name,
+					Color:    l.Color,
+					ScoreStr: l.ScoreStr,
+					CIStr:    l.CIStr,
+				})
+			}
+		}
+
+		chartSVG := BuildRepoSuiteChartSVG(lines, obs, chartCommits, DimensionModel)
+
+		firstCommit := ""
+		lastCommit := ""
+		if len(chartCommits) > 0 {
+			firstCommit = ShortCommit(chartCommits[0].SHA)
+			lastCommit = ShortCommit(chartCommits[len(chartCommits)-1].SHA)
+		}
+
+		newestChanged := newestChangedCommit(chartCommits, evalObsByCommit[eID])
+
+		var obsRows []RepoSuiteObservationRow
+		for i := len(obs) - 1; i >= 0; i-- {
+			o := obs[i]
+			tStr := ""
+			tUTC := ""
+			if !o.CommitTime.IsZero() {
+				tStr = FormatAge(metav1.Time{Time: o.CommitTime})
+				tUTC = o.CommitTime.UTC().Format(time.RFC3339)
+			} else if o.Run != nil {
+				tStr = FormatAge(o.Run.CreationTimestamp)
+				tUTC = o.Run.CreationTimestamp.UTC().Format(time.RFC3339)
+			}
+			obsRows = append(obsRows, RepoSuiteObservationRow{
+				CommitSHA:   o.CommitSHA,
+				CommitShort: ShortCommit(o.CommitSHA),
+				TimeStr:     tStr,
+				TimeUTC:     tUTC,
+				Model:       o.Model,
+				Samples:     o.Samples,
+				ScoreStr:    o.ScoreStr,
+				CIStr:       o.CIStr,
+				SamplesLink: o.SamplesLink,
+			})
+		}
+
+		evalSections = append(evalSections, RepoSuiteEvalSection{
+			ID:                       eID,
+			ScoreStr:                 fmt.Sprintf("%.2f", eMain.point),
+			CIStr:                    fmt.Sprintf("[%.2f, %.2f]", eMain.est.CI.Lower, eMain.est.CI.Upper),
+			HasDelta:                 evalHasDelta,
+			DeltaStr:                 evalDeltaStr,
+			DeltaClass:               evalDeltaClass,
+			HasModelBreakdown:        hasModelBreakdown,
+			ModelLegend:              modelLegend,
+			SVG:                      chartSVG,
+			FirstCommitShort:         firstCommit,
+			LastCommitShort:          lastCommit,
+			NewestChangedCommitShort: newestChanged,
+			Observations:             obsRows,
+		})
+	}
+
+	currentCommit := ""
+	currentShort := ""
+	if len(suiteCommits) > 0 {
+		currentCommit = suiteCommits[len(suiteCommits)-1].SHA
+		currentShort = ShortCommit(currentCommit)
+	}
+
+	view := RepoSuiteDetailView{
+		ActiveTab:          NavTabEvals,
+		Repo:               ref,
+		Namespace:          ns,
+		LinkNamespace:      linkNS,
+		SuiteName:          suiteName,
+		SuiteScore:         suiteScoreStr,
+		SuiteCI:            suiteCIStr,
+		EvalsCount:         len(evalIDs),
+		HasDelta:           suiteHasDelta,
+		DeltaStr:           suiteDeltaStr,
+		DeltaClass:         suiteDeltaClass,
+		CurrentCommitSHA:   currentCommit,
+		CurrentCommitShort: currentShort,
+		Evals:              evalSections,
+		OverviewLink:       repoLink(ref, "", linkNS),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := RenderRepoSuiteDetail(w, view); err != nil {
+		httpError(w, http.StatusInternalServerError, "template render error", "template render error", err)
+	}
+}
+
+func newestChangedCommit(commits []CommitEntry, obsByCommit map[string][]EvalObservation) string {
+	if len(commits) == 0 {
+		return ""
+	}
+	type commitScore struct {
+		sha   string
+		point float64
+	}
+	var scoredCommits []commitScore
+	for _, c := range commits {
+		obs := obsByCommit[c.SHA]
+		if len(obs) == 0 {
+			continue
+		}
+		var tasks []stats.TaskCounts
+		for _, o := range obs {
+			tasks = append(tasks, stats.TaskCounts{Successes: o.Successes, Samples: o.Samples})
+		}
+		est := stats.PooledWilson(tasks, 0.95)
+		scoredCommits = append(scoredCommits, commitScore{sha: c.SHA, point: est.Point})
+	}
+	if len(scoredCommits) == 0 {
+		return ShortCommit(commits[len(commits)-1].SHA)
+	}
+	if len(scoredCommits) == 1 {
+		return ShortCommit(scoredCommits[0].sha)
+	}
+	for j := len(scoredCommits) - 1; j >= 1; j-- {
+		if math.Abs(scoredCommits[j].point-scoredCommits[j-1].point) > 1e-6 {
+			return ShortCommit(scoredCommits[j].sha)
+		}
+	}
+	return ShortCommit(scoredCommits[len(scoredCommits)-1].sha)
 }
 
 func (s *Server) handleRepoRunsList(w http.ResponseWriter, r *http.Request) {
