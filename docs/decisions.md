@@ -403,6 +403,45 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   The forge abstraction cleanly decouples eval-runner from GitHub-specific transports while preserving sandbox isolation, keeping controller images minimal and static, and enabling generic Git server evaluations.
 
+---
+
+### ADR-034: Local bbolt Store of Forge Data with In-Memory Indexes and Event Syncer (#326)
+- **Status**: Decided
+- **Context**:
+  eval-runner requires a persistent local view of repositories, branches, commits, and change requests so that it survives controller restarts, rebuilds in-memory state cheaply, and eliminates the need to re-query the forge on every reconcile. Previously, Runs and Comparisons were created ad-hoc directly inside the webhook worker, tightly coupling the evaluation pipeline to webhook delivery and bypassing polling-based forge discovery.
+- **Decision**:
+  1. **Storage Engine: bbolt over SQLite and CRDs**:
+     Use `go.etcd.io/bbolt` as the local embedded database format stored at `--forge-db` (defaulting to `/tmp/forge.db`).
+     - *Single writer, embedded, no CGO*: bbolt is pure Go, runs without CGO, and compiles into static controller binaries without external database dependencies or daemon management.
+     - *CRDs remain pointers*: Per existing architectural decisions, Kubernetes CRDs (Runs, Comparisons) are declarative orchestration pointers, not unbounded database records. Forge commits and metadata belong in an embedded database.
+     - *Sub-second cheap rebuild*: The database file can be rebuilt from scratch from the forge; losing the file costs only a re-sync.
+  2. **Authoritative State vs. Local Cache**:
+     The remote Forge (GitHub, Git remote, etc.) is the sole authority. The local bbolt store functions as a local cache with sync timestamps, cursors, and ETags.
+  3. **Bucket Hierarchy and Data Model**:
+     Store records in dedicated bbolt buckets:
+     - `repos`: Keyed by repository reference (`host/owner/name`), value `StoredRepo`.
+     - `branches/<repo>`: Keyed by branch name, value `StoredBranch`. Vanished branches are purged on full sync.
+     - `commits/<repo>`: Keyed by commit SHA, value `StoredCommit`.
+     - `changes/<repo>`: Keyed by change number or ID, value `StoredChangeRequest`.
+     - `sync/<repo>`: Cursors, ETags, and last polled timestamps, value `StoredSync`.
+     - `meta`: Store metadata including `schemaVersion`.
+     All stored JSON values contain a top-level `schemaVersion` (CurrentSchemaVersion = 1). Writes are batched per sync operation in a single bbolt transaction to minimize fsync overhead.
+  4. **Schema Mismatch, Corruption Recovery, and In-Memory Index Rebuild**:
+     In-memory indexes (`by repo -> open change requests`, `by sha -> commits`, `newest-first branch heads`) are rebuilt from disk at startup and updated on every write.
+     - *Corruption & Truncation Recovery*: Before calling `bolt.Open`, file size and meta pages (pages 0 and 1) are validated against page size and `pgid`. Truncated or corrupted files, as well as `bolt.ErrInvalid`/`bolt.ErrChecksum`, are safely moved aside with a `.corrupted.<timestamp>` suffix, logged, and initialized fresh without causing runtime panics or fatal faults.
+     - *Schema mismatch*: If a schema version mismatch is encountered in the metadata bucket or record headers, the store automatically drops outdated data, resets buckets, and triggers a clean rebuild/re-sync from the forge. Benchmark tests guarantee 10k commits rebuild in well under a second (measured at ~20ms).
+  5. **Syncer, Typed Events, and Consume-Before-Commit**:
+     `Syncer` pulls branches, change requests, and missing commits from the forge into the store and emits typed events: `BranchAdvanced`, `ChangeOpened`, `ChangeUpdated`, `ChangeClosed`.
+     - *Delivery Model: Consume Before Commit*: The syncer invokes the consumer synchronously for each event before committing the bbolt sync batch to disk. Only after the consumer has succeeded (or logged a permanent error) is the transaction committed. This eliminates event drops and guarantees at-least-once processing across crashes.
+     - *Closure detection*: The disappearance pass for closed change requests runs strictly when `ChangeRequests` succeeded for that repository; forge fetch errors never infer closure.
+  6. **Single Consumer and Webhook Separation**:
+     A single `Consumer` processes typed store events in the controller and reconciles Runs and Comparisons with strict replay idempotency. The webhook receiver pod does not open a bbolt store or run a syncer; it creates objects directly through the shared `Consumer` logic (sharing identical naming and `IsMultiRepo` rules), producing byte-identical objects to polling reconciliation.
+  7. **File Lifecycle & Backup Stance**:
+     The file at `/tmp/forge.db` resides on an `emptyDir` volume in `k8s/runner-deployment.yaml`. Consequently, the local store is lost whenever the controller pod is restarted or rescheduled. A restart costs exactly one full re-sync across configured repositories: for N repositories with M open PRs, this requires 1 repository query, 1 branch listing, 1 change request listing, and missing commit queries per repo. Because all object creation is idempotent, this re-sync safely regenerates the store and indexes without duplicating Runs or Comparisons. Dedicated backups are unnecessary.
+- **Rationale**:
+  Embedded bbolt provides fast, robust, and zero-dependency local caching. Isolating forge sync into typed events with consume-before-commit and a single consumer unifies webhook and polling workflows, guarantees deterministic resource generation, and ensures controller restarts recover cleanly without duplicate runs.
+
+
 
 
 

@@ -31,6 +31,8 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/forge"
 	forgegithub "github.com/gke-labs/eval-runner/pkg/forge/github"
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
+	"github.com/gke-labs/eval-runner/pkg/forge/store"
+	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
@@ -104,10 +106,12 @@ func main() {
 	var pollProgressInterval time.Duration
 	var affinityMode string
 	var sandboxEgressHosts string
+	var forgeDBPath string
 	var showVersion bool
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
 	flag.StringVar(&sandboxNamespace, "sandbox-namespace", discovery.DefaultSandboxNamespace, "Namespace in which sandboxes are spawned")
+	flag.StringVar(&forgeDBPath, "forge-db", "/tmp/forge.db", "Path to bbolt database file for forge metadata and cursors (losing the file only costs a re-sync)")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.DurationVar(&discoveryDeadline, "discovery-deadline", controller.DefaultDiscoveryDeadline, "Overall deadline for discovery to complete")
 	flag.DurationVar(&executionDeadline, "execution-deadline", controller.DefaultExecutionDeadline, "Overall deadline for sample execution to complete")
@@ -392,6 +396,54 @@ func main() {
 		os.Exit(1)
 	}
 
+	forgeStore, err := store.Open(forgeDBPath)
+	if err != nil {
+		setupLog.Error(err, "unable to open forge database", "path", forgeDBPath)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := forgeStore.Close(); err != nil {
+			setupLog.Error(err, "error closing forge database on shutdown")
+		}
+	}()
+
+	forgeSyncer, err := syncer.New(syncer.SyncerOptions{
+		Store:        forgeStore,
+		Registry:     forgeRegistry,
+		Repositories: clusterConfig.Repositories,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create forge syncer")
+		os.Exit(1)
+	}
+
+	forgeConsumer := syncer.NewConsumer(mgr.GetClient(), syncer.ConsumerConfig{
+		Namespace:                evalRunnerNamespace,
+		DefaultModel:             clusterConfig.DefaultModel,
+		DefaultCohort:            clusterConfig.DefaultCohort,
+		DefaultBatchSize:         clusterConfig.DefaultBatchSize,
+		DefaultMaxSamplesPerTask: clusterConfig.DefaultMaxSamplesPerTask,
+		DefaultBudgetUSD:         clusterConfig.DefaultBudgetUSD,
+		TrackedRepos:             clusterConfig.Repositories,
+		IsMultiRepo:              len(clusterConfig.Repositories) > 1,
+		Store:                    forgeStore,
+	})
+
+	forgeSyncer.SetConsumer(forgeConsumer)
+
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		if len(clusterConfig.Repositories) > 0 {
+			if err := forgeSyncer.SyncAll(ctx); err != nil {
+				setupLog.Info("initial forge sync completed with warnings", "error", err)
+			}
+		}
+		<-ctx.Done()
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to add forge syncer runnable")
+		os.Exit(1)
+	}
+
 	fqdnVersion, fqdnSupported, err := discovery.DetectFQDNNetworkPolicyAPIVersion(discoveryClient)
 	if err != nil {
 		setupLog.Info("unable to detect FQDNNetworkPolicy support; skipping FQDN egress narrowing", "error", err)
@@ -429,6 +481,8 @@ func main() {
 		ReloadableSink: reloadableSink,
 		RunReconciler:  reconciler,
 		CompReconciler: comparisonReconciler,
+		Syncer:         forgeSyncer,
+		Consumer:       forgeConsumer,
 		InitialConfig:  &clusterConfig,
 		FQDNSyncFunc:   egressController.SyncHosts,
 	})

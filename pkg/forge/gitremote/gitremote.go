@@ -85,13 +85,17 @@ func defaultRefLister(ctx context.Context, url string) ([]*plumbing.Reference, e
 }
 
 func defaultURLResolver(ref forge.RepoRef) string {
+	scheme := "https"
+	if strings.Contains(ref.Host, "git-server") {
+		scheme = "git"
+	}
 	if strings.EqualFold(ref.Host, "github.com") {
 		return fmt.Sprintf("https://github.com/%s/%s.git", ref.Owner, ref.Name)
 	}
 	if ref.Owner == "-" {
-		return fmt.Sprintf("https://%s/%s.git", ref.Host, ref.Name)
+		return fmt.Sprintf("%s://%s/%s.git", scheme, ref.Host, ref.Name)
 	}
-	return fmt.Sprintf("https://%s/%s/%s.git", ref.Host, ref.Owner, ref.Name)
+	return fmt.Sprintf("%s://%s/%s/%s.git", scheme, ref.Host, ref.Owner, ref.Name)
 }
 
 // New creates a new gitremote Forge.

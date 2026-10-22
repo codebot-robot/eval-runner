@@ -365,6 +365,17 @@ eval-runner interacts with code hosting environments (such as github.com, GitLab
   - Determines repository default branches via symbolic `HEAD`.
   - Discovers branch heads from `refs/heads/*`, explicitly filtering out tags.
   - Extracts change requests from `refs/pull/N/head` (and `refs/pull/N/merge` when present) for GitHub remotes.
+- `pkg/forge/store`: Local persistent cache backed by `go.etcd.io/bbolt` (`--forge-db`, ADR-034):
+  - Buckets per kind: `repos`, `branches/<repo>`, `commits/<repo>`, `changes/<repo>`, `sync/<repo>`, `meta`.
+  - Values stored as JSON with a `schemaVersion`; schema version mismatches or file corruption safely drop old data and trigger a clean rebuild.
+  - In-memory indexes updated on write and rebuilt at startup in milliseconds: open change requests by repo, commits by SHA, and branch heads sorted newest-first by commit time.
+  - Writes are batched per sync operation in a single bbolt transaction.
+- `pkg/forge/syncer`: Synchronizes configured repositories from the forge into the store:
+  - Pulls branches, change requests, and missing commits from the forge.
+  - Emits typed events: `BranchAdvanced`, `ChangeOpened`, `ChangeUpdated`, `ChangeClosed`.
+  - Consume-before-commit delivery model: events are processed synchronously by the `Consumer` before the bbolt batch is committed to disk, preventing event drops.
+  - Single `Consumer` in the controller turns store events into Runs and Comparisons using unified creation logic (moved out of the webhook worker), ensuring webhook and polling paths produce identical objects, idempotent on replay. The webhook pod uses the shared `Consumer` logic directly without opening a local store.
+  - Prometheus `/metrics` counters for sync attempts (`evalrunner_forge_syncs_total`), events (`evalrunner_forge_events_total`), and database file size (`evalrunner_forge_store_bytes`).
 
 ---
 

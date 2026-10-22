@@ -32,6 +32,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -86,6 +87,8 @@ const (
 	ConfigMapKeyAffinityMode = configkeys.ConfigMapKeyAffinityMode
 	// ConfigMapKeySandboxEgressHosts is the ConfigMap key for comma-separated allowed FQDN egress hostnames for sandboxes.
 	ConfigMapKeySandboxEgressHosts = configkeys.ConfigMapKeySandboxEgressHosts
+	// ConfigMapKeyRepositories is the ConfigMap key for tracked repositories.
+	ConfigMapKeyRepositories = configkeys.ConfigMapKeyRepositories
 )
 
 const (
@@ -130,6 +133,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyCommandUsers:             {},
 	configkeys.ConfigMapKeyAffinityMode:             {},
 	configkeys.ConfigMapKeySandboxEgressHosts:       {},
+	configkeys.ConfigMapKeyRepositories:             {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -160,27 +164,33 @@ type ModelPrice struct {
 // ClusterConfig holds the effective cluster-wide settings resolved with precedence:
 // explicit flag > ConfigMap key > built-in default.
 type ClusterConfig struct {
-	ArtifactBucket         string
-	ArtifactDir            string
-	ArtifactMaxUploadBytes int64
-	DiscoveryDeadline      time.Duration
-	ExecutionDeadline      time.Duration
-	GitHubTokenSecret      string
-	GitHubAppSecret        string
-	InconclusivePolicy     string
-	MaxParallelTasks       int
-	ModelSecret            string
-	ModelPrices            map[string]ModelPrice
-	ModelPriceSources      map[string]v1alpha1.CostSource
-	ModelPricesDisabled    bool
-	PollProgressInterval   time.Duration
-	SandboxdImage          string
-	TaskGracePeriod        time.Duration
-	UIBaseURL              string
-	ComparisonTTL          time.Duration
-	CommandUsers           []string
-	AffinityMode           string
-	SandboxEgressHosts     []string
+	ArtifactBucket           string
+	ArtifactDir              string
+	ArtifactMaxUploadBytes   int64
+	DiscoveryDeadline        time.Duration
+	ExecutionDeadline        time.Duration
+	GitHubTokenSecret        string
+	GitHubAppSecret          string
+	InconclusivePolicy       string
+	MaxParallelTasks         int
+	ModelSecret              string
+	ModelPrices              map[string]ModelPrice
+	ModelPriceSources        map[string]v1alpha1.CostSource
+	ModelPricesDisabled      bool
+	PollProgressInterval     time.Duration
+	SandboxdImage            string
+	TaskGracePeriod          time.Duration
+	UIBaseURL                string
+	ComparisonTTL            time.Duration
+	CommandUsers             []string
+	AffinityMode             string
+	SandboxEgressHosts       []string
+	Repositories             []syncer.RepoConfig
+	DefaultModel             string
+	DefaultCohort            string
+	DefaultBatchSize         int
+	DefaultMaxSamplesPerTask int
+	DefaultBudgetUSD         *float64
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -218,26 +228,30 @@ func (f RawFlags) IsExplicit(name string) bool {
 // DefaultClusterConfig returns a ClusterConfig populated with built-in defaults.
 func DefaultClusterConfig() ClusterConfig {
 	return ClusterConfig{
-		ArtifactBucket:         "",
-		ArtifactDir:            "",
-		ArtifactMaxUploadBytes: gcs.DefaultMaxUploadBytes,
-		DiscoveryDeadline:      DefaultDiscoveryDeadline,
-		ExecutionDeadline:      DefaultExecutionDeadline,
-		GitHubTokenSecret:      DefaultGitHubTokenSecret,
-		GitHubAppSecret:        "",
-		InconclusivePolicy:     DefaultInconclusivePolicy,
-		MaxParallelTasks:       DefaultMaxParallelTasks,
-		ModelSecret:            DefaultModelSecret,
-		ModelPrices:            DefaultModelPrices(),
-		ModelPriceSources:      DefaultModelPriceSources(),
-		PollProgressInterval:   DefaultPollProgressInterval,
-		SandboxdImage:          discovery.SandboxdImage,
-		TaskGracePeriod:        DefaultTaskGracePeriod,
-		UIBaseURL:              "",
-		ComparisonTTL:          0,
-		CommandUsers:           nil,
-		AffinityMode:           configkeys.AffinityModeOrder,
-		SandboxEgressHosts:     discovery.CloneSandboxEgressHosts(discovery.DefaultSandboxEgressHosts),
+		ArtifactBucket:           "",
+		ArtifactDir:              "",
+		ArtifactMaxUploadBytes:   gcs.DefaultMaxUploadBytes,
+		DiscoveryDeadline:        DefaultDiscoveryDeadline,
+		ExecutionDeadline:        DefaultExecutionDeadline,
+		GitHubTokenSecret:        DefaultGitHubTokenSecret,
+		GitHubAppSecret:          "",
+		InconclusivePolicy:       DefaultInconclusivePolicy,
+		MaxParallelTasks:         DefaultMaxParallelTasks,
+		ModelSecret:              DefaultModelSecret,
+		ModelPrices:              DefaultModelPrices(),
+		ModelPriceSources:        DefaultModelPriceSources(),
+		PollProgressInterval:     DefaultPollProgressInterval,
+		SandboxdImage:            discovery.SandboxdImage,
+		TaskGracePeriod:          DefaultTaskGracePeriod,
+		UIBaseURL:                "",
+		ComparisonTTL:            0,
+		CommandUsers:             nil,
+		AffinityMode:             configkeys.AffinityModeOrder,
+		SandboxEgressHosts:       discovery.CloneSandboxEgressHosts(discovery.DefaultSandboxEgressHosts),
+		DefaultModel:             "",
+		DefaultCohort:            "default",
+		DefaultBatchSize:         8,
+		DefaultMaxSamplesPerTask: 64,
 	}
 }
 
@@ -591,6 +605,47 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				}
 			}
 		}
+
+		// 17. repositories
+		if val, ok := cm.Data[ConfigMapKeyRepositories]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				repos, err := syncer.ParseRepoConfigList(val)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: %w", ConfigMapKeyRepositories, ns, name, err)
+				}
+				cfg.Repositories = repos
+			}
+		}
+
+		// Defaults for syncer/consumer
+		if val, ok := cm.Data[configkeys.ConfigMapKeyDefaultModel]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				cfg.DefaultModel = trimmed
+			}
+		}
+		if val, ok := cm.Data[configkeys.ConfigMapKeyDefaultCohort]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				cfg.DefaultCohort = trimmed
+			}
+		}
+		if val, ok := cm.Data[configkeys.ConfigMapKeyDefaultBatchSize]; ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 {
+				cfg.DefaultBatchSize = n
+			}
+		}
+		if val, ok := cm.Data[configkeys.ConfigMapKeyDefaultMaxSamplesPerTask]; ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 {
+				cfg.DefaultMaxSamplesPerTask = n
+			}
+		}
+		if val, ok := cm.Data[configkeys.ConfigMapKeyDefaultBudgetUSD]; ok {
+			if f, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil && f >= 0 {
+				cfg.DefaultBudgetUSD = &f
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -817,6 +872,8 @@ type ConfigReloaderOptions struct {
 	ReloadableSink *artifacts.ReloadableSink
 	RunReconciler  *RunReconciler
 	CompReconciler *ComparisonReconciler
+	Syncer         *syncer.Syncer
+	Consumer       *syncer.Consumer
 	InitialConfig  *ClusterConfig
 	FQDNSyncFunc   func(ctx context.Context, hosts []string) error
 }
@@ -830,6 +887,8 @@ type ConfigReloader struct {
 	reloadableSink *artifacts.ReloadableSink
 	runReconciler  *RunReconciler
 	compReconciler *ComparisonReconciler
+	syncer         *syncer.Syncer
+	consumer       *syncer.Consumer
 	fqdnSyncFunc   func(ctx context.Context, hosts []string) error
 	lastConfig     *ClusterConfig
 }
@@ -847,6 +906,8 @@ func NewConfigReloader(opts ConfigReloaderOptions) *ConfigReloader {
 		reloadableSink: opts.ReloadableSink,
 		runReconciler:  opts.RunReconciler,
 		compReconciler: opts.CompReconciler,
+		syncer:         opts.Syncer,
+		consumer:       opts.Consumer,
 		fqdnSyncFunc:   opts.FQDNSyncFunc,
 	}
 	if opts.InitialConfig != nil {
@@ -926,6 +987,33 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 	}
 	if r.compReconciler != nil {
 		r.compReconciler.UpdateConfig(resolved)
+	}
+	if r.consumer != nil {
+		r.consumer.UpdateConfig(syncer.ConsumerConfig{
+			DefaultModel:             resolved.DefaultModel,
+			DefaultCohort:            resolved.DefaultCohort,
+			DefaultBatchSize:         resolved.DefaultBatchSize,
+			DefaultMaxSamplesPerTask: resolved.DefaultMaxSamplesPerTask,
+			DefaultBudgetUSD:         resolved.DefaultBudgetUSD,
+			TrackedRepos:             resolved.Repositories,
+			IsMultiRepo:              len(resolved.Repositories) > 1,
+		})
+	}
+	if r.syncer != nil {
+		oldRepos := make(map[string]bool)
+		if r.lastConfig != nil {
+			for _, repo := range r.lastConfig.Repositories {
+				oldRepos[repo.Ref.String()] = true
+			}
+		}
+		r.syncer.UpdateRepositories(resolved.Repositories)
+		for _, repo := range resolved.Repositories {
+			if !oldRepos[repo.Ref.String()] && !repo.Ref.IsZero() {
+				if err := r.syncer.SyncRepo(ctx, repo.Ref); err != nil {
+					r.logger.Error(err, "error syncing newly added repository", "repo", repo.Ref.String())
+				}
+			}
+		}
 	}
 
 	fqdnChanged := r.lastConfig == nil || !reflect.DeepEqual(r.lastConfig.SandboxEgressHosts, resolved.SandboxEgressHosts)
