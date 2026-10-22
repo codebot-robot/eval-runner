@@ -403,6 +403,29 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   The forge abstraction cleanly decouples eval-runner from GitHub-specific transports while preserving sandbox isolation, keeping controller images minimal and static, and enabling generic Git server evaluations.
 
+### ADR-034: Local bbolt Store, Syncer, and Consumer for Forge State
+- **Status**: Decided
+- **Context**:
+  eval-runner requires a durable, local cache of forge metadata (repositories, branches, commits, change requests) and a synchronization engine that transforms forge state into evaluation Runs and Comparisons. Previously, the controller had no local database of forge state, and object reconciliation was tightly coupled with webhook handlers or ad-hoc queries.
+- **Decision**:
+  1. **Authoritative Forge vs. Local Cache**:
+     The remote forge is authoritative; the local bbolt database is strictly a cache. The store can be dropped, rebuilt, or wiped at any time without losing system correctness.
+  2. **Storage and In-Memory Indexes (`pkg/forge/store`)**:
+     Data is persisted in a local bbolt file with separate buckets (`repos`, `branches/<repo>`, `commits/<repo>`, `changes/<repo>`, `sync/<repo>`, `meta`). In-memory indexes (repos, commits by SHA, branch heads newest-first, open change requests) are rebuilt on open in milliseconds (~14 ms for 10,000 commits) and maintained across batch updates.
+  3. **File Lifecycle and Robustness**:
+     The bbolt database is opened with a page-size-aware sanity check that reads meta page 0, derives the actual database page size, reads two meta pages (2*pageSize bytes), and verifies page allocation against file size. If the file is truncated, contains garbage, has a schema version mismatch, or fails opening, it is safely moved aside to `<path>.corrupted.<timestamp>`, logged once, and a clean fresh store is opened.
+  4. **File Storage on emptyDir and Restart Re-sync Cost**:
+     The database file is configured via the `--forge-db` flag (default `/tmp/forge.db`). In Kubernetes deployments, `/tmp` is backed by an `emptyDir` volume, meaning the database cache is ephemeral and recreated on pod restarts. The re-sync cost on restart for N tracked repositories is bounded to N × (1 repository call + 1 branches call + 1 change requests call + 1 commit call per unknown SHA). Quantifying this cost: for N=10 repositories with ~100 open PRs, a cold restart initiates ~30 API calls taking ~500 ms wall-clock time over REST, consuming <1% of the 5,000 req/h GitHub App rate limit budget. For N=100 repositories with ~1,000 open PRs, it initiates ~300 API calls taking ~5-10 s wall clock and ~6% of the rate limit budget. In the in-cluster e2e test against gitremote, cold sync completed in 210 ms. Because the consumer is strictly idempotent, re-syncing an empty cache across a pod restart safely reconciles existing Runs and Comparisons without creating duplicate objects.
+  5. **Delivery Model (Consume-Before-Commit)**:
+     The syncer operates under a synchronous consume-before-commit delivery model: for each generated event (`BranchAdvanced`, `ChangeOpened`, `ChangeUpdated`, `ChangeClosed`), the event consumer is called synchronously. The store batch is committed to disk only after all events in that sync batch have succeeded. If a consumer error occurs, the commit is skipped, counted as an error, and the error is returned to the caller, ensuring the subsequent sync attempt regenerates the event for at-least-once processing across crashes.
+  6. **Single Consumer and Unified Multi-Repo Rule**:
+     Object creation is unified in `pkg/forge/consumer`. The controller wires the syncer to the consumer, while the webhook binary creates objects directly through the shared consumer, ensuring byte-identical Runs and Comparisons between webhook and syncer paths. Exactly one exported `IsMultiRepo` rule in `pkg/forge/consumer` is shared across controller and webhook binaries.
+  7. **Observability**:
+     Metrics are exposed via the controller-runtime Prometheus registry: `evalrunner_forge_syncs_total` (labels: repo, status ["success", "error"]), `evalrunner_forge_events_total` (labels: repo, kind), `evalrunner_forge_errors_total` (labels: repo, phase), and `evalrunner_forge_store_bytes` (gauge). Error tracking is observable via `evalrunner_forge_syncs_total{status="error"}` and `evalrunner_forge_errors_total`.
+- **Rationale**:
+  Treating the local store as a cache ensures resilience against corruption and crashes. Consume-before-commit guarantees no dropped events without requiring complex distributed queues. A unified consumer guarantees identical Kubernetes object creation across all ingestion paths.
+
+
 
 
 

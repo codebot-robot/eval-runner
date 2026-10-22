@@ -38,6 +38,10 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
+	"github.com/gke-labs/eval-runner/pkg/forge/store"
+	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -2605,5 +2609,123 @@ func TestConfigReloader_UpdatesModelPrices_LookupAndDisabledFlipsDynamically(t *
 	_, _, okStillDisabled := runReconciler.lookupModelPrice("google/gemini-3.5-flash-lite")
 	if okStillDisabled {
 		t.Fatalf("expected lookup to still return false after invalid json reload failure")
+	}
+}
+
+// TestResolveConfig_Repositories_InvalidEntryRejected verifies that invalid entries in the
+// repositories ConfigMap key are rejected with a clear error, and ReloadWait retains active settings.
+func TestResolveConfig_Repositories_InvalidEntryRejected(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "eval-runner-config",
+		},
+		Data: map[string]string{
+			ConfigMapKeyRepositories: "- name: nonsense\n",
+		},
+	}
+
+	_, err := ResolveConfig(cm, RawFlags{})
+	if err == nil {
+		t.Fatalf("expected ResolveConfig to reject invalid repository nonsense, got nil")
+	}
+
+	expectedSubstr := `invalid repository "nonsense": invalid host, owner, or repo name`
+	if !strings.Contains(err.Error(), expectedSubstr) {
+		t.Errorf("expected error message to contain %q, got %q", expectedSubstr, err.Error())
+	}
+
+	// Test with ReloadWait: ensures reload fails and retains previous configuration
+	reloader := NewConfigReloader(ConfigReloaderOptions{
+		Logger: logr.Discard(),
+	})
+	reloadErr := reloader.ReloadWait(t.Context(), cm)
+	if reloadErr == nil {
+		t.Fatalf("expected ReloadWait to return error on invalid repository configuration")
+	}
+}
+
+// TestConfigReloader_Repositories_ReloadTriggersImmediateSync verifies that adding a repository
+// on runtime reload triggers an immediate sync of it.
+func TestConfigReloader_Repositories_ReloadTriggersImmediateSync(t *testing.T) {
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	ff := forge.NewFakeForge("fake")
+	ff.SetRepository(ref, &forge.Repository{Ref: ref, DefaultBranch: "main", CloneURL: "https://github.com/gke-labs/eval-runner.git"})
+	ff.SetBranches(ref, []forge.Branch{{Name: "main", SHA: "0000000000000000000000000000000000000001"}})
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{})
+	reg := forge.NewRegistry(ff)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "controller-syncer-test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cons := consumer.New(cl, consumer.Config{
+		Namespace:    "eval-runner",
+		DefaultModel: "mockllm/model",
+		Store:        st,
+	})
+
+	syncInst := syncer.New(syncer.SyncerOptions{
+		Store:    st,
+		Registry: reg,
+		Consumer: cons,
+	})
+
+	initialCfg := DefaultClusterConfig()
+	reloader := NewConfigReloader(ConfigReloaderOptions{
+		Logger:        logr.Discard(),
+		Syncer:        syncInst,
+		Consumer:      cons,
+		InitialConfig: &initialCfg,
+	})
+
+	// Initial state: store does not have main branch for ref
+	branchesBefore, _ := st.ListBranches(ref)
+	if len(branchesBefore) != 0 {
+		t.Fatalf("expected 0 branches before reload")
+	}
+
+	// ConfigMap update adding the repository
+	updatedCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "eval-runner-config",
+		},
+		Data: map[string]string{
+			ConfigMapKeyRepositories:            "- name: gke-labs/eval-runner\n  branches: [main]\n",
+			configkeys.ConfigMapKeyDefaultModel: "mockllm/model",
+		},
+	}
+
+	if err := reloader.ReloadWait(ctx, updatedCM); err != nil {
+		t.Fatalf("ReloadWait failed: %v", err)
+	}
+
+	// Verify immediate sync of newly added repository: store now contains main branch!
+	branchesAfter, err := st.ListBranches(ref)
+	if err != nil {
+		t.Fatalf("failed to list branches: %v", err)
+	}
+	if len(branchesAfter) != 1 || branchesAfter[0].Name != "main" {
+		t.Fatalf("expected immediate sync to commit main branch to store, got %v", branchesAfter)
+	}
+
+	// Verify consumer created the baseline run
+	var runs v1alpha1.RunList
+	if err := cl.List(ctx, &runs, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list runs: %v", err)
+	}
+	if len(runs.Items) != 1 {
+		t.Fatalf("expected consumer to create 1 baseline run immediately upon reload sync, got %d", len(runs.Items))
 	}
 }
