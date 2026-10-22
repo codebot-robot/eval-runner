@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -51,6 +52,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+)
+
+const (
+	defaultLeaderElectionID = "eval-runner-leader-election"
 )
 
 var (
@@ -131,6 +136,10 @@ func main() {
 	flag.Int64Var(&artifactMaxUploadBytes, "artifact-max-upload-bytes", gcs.DefaultMaxUploadBytes, "Maximum size in bytes of an uploaded Inspect log before truncation (sets capped in summary.json if exceeded)")
 	flag.DurationVar(&comparisonTTL, "comparison-ttl", 0, "TTL duration for retaining Completed Comparisons (default 0 = disabled)")
 	flag.StringVar(&affinityMode, "affinity-mode", configkeys.AffinityModeOrder, "Changed-file task affinity mode (\"order\" or \"prune\")")
+	var probeTCP string
+	flag.StringVar(&probeTCP, "probe-tcp", "", "Internal e2e diagnostic probe TCP connection to host:port and exit 0 on success, 1 on error")
+	var leaderElect bool
+	flag.BoolVar(&leaderElect, "leader-elect", true, "Enable leader election for controller manager. Enabling this will ensure only one instance of the controller is active.")
 	flag.StringVar(&sandboxEgressHosts, "sandbox-egress-hosts", "", "Comma-separated allow-list of FQDN hostnames for sandbox HTTPS egress")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 
@@ -139,6 +148,19 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if probeTCP != "" {
+		conn, err := net.DialTimeout("tcp", probeTCP, 5*time.Second)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "probe failed: %v\n", err)
+			os.Exit(1)
+		}
+		if closeErr := conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "close error: %v\n", closeErr)
+		}
+		fmt.Printf("probe connected to %s successfully\n", probeTCP)
+		os.Exit(0)
+	}
 
 	if showVersion {
 		fmt.Println(version.String())
@@ -272,8 +294,11 @@ func main() {
 				},
 			},
 		},
-		LeaderElection:         false,
-		HealthProbeBindAddress: probeAddr,
+		LeaderElection:                leaderElect,
+		LeaderElectionID:              defaultLeaderElectionID,
+		LeaderElectionNamespace:       evalRunnerNamespace,
+		LeaderElectionReleaseOnCancel: true,
+		HealthProbeBindAddress:        probeAddr,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -316,6 +341,7 @@ func main() {
 	pkiManager := pki.NewManager(mgr.GetClient(), evalRunnerNamespace, sandboxNamespace)
 	pkiCtx, pkiCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer pkiCancel()
+	// Ensure CA certificate secret is created; intentionally not leader-gated as EnsureCA is idempotent across rolling pods.
 	if _, err := pkiManager.EnsureCA(pkiCtx); err != nil {
 		setupLog.Error(err, "unable to bootstrap sandbox CA")
 		os.Exit(1)
@@ -419,6 +445,7 @@ func main() {
 
 	egressCtx, egressCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer egressCancel()
+	// Initial egress reconcile runs before mgr.Start; intentionally not leader-gated as reconcile is create-or-update.
 	if err := egressController.Reconcile(egressCtx); err != nil {
 		setupLog.Error(err, "failed initial reconcile of sandbox egress network policies; continuing")
 	}
