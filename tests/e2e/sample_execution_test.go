@@ -15,6 +15,8 @@
 package e2e
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -945,5 +947,193 @@ spec:
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", cand1RunName, 30*time.Second)
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", cand2RunName, 30*time.Second)
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+	})
+
+	t.Run("RollingRestartDuringDiscovery", func(t *testing.T) {
+		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval-slow.git")
+		runName := "rolling-restart-slow-discovery-run"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/docs-eval-slow.git
+    commit: %s
+  model: mockllm/model
+  limit: 2
+`, runName, commit)
+
+		harness.KubectlApplyContent(manifest)
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+		})
+
+		// Wait until the Run enters Discovering
+		harness.WaitForRunPhase("eval-runner", runName, "Discovering", 30*time.Second)
+
+		// Record initial discovery sandbox UID
+		sandboxName := discovery.SandboxNameForRun(runName)
+		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+		sbUIDBefore := strings.TrimSpace(harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "-o", "jsonpath={.metadata.uid}"))
+		if sbUIDBefore == "" {
+			t.Fatalf("expected non-empty sandbox UID before rollout restart")
+		}
+
+		// Record old controller pod before rolling restart
+		oldPods := strings.Fields(harness.runCmd("kubectl", "get", "pods", "-n", "eval-runner", "-l", "app=eval-runner-controller", "-o", "jsonpath={.items[*].metadata.name}"))
+		if len(oldPods) == 0 {
+			t.Fatalf("expected at least one old controller pod before rollout restart")
+		}
+		oldPod := oldPods[0]
+
+		// Stream logs from the old controller pod into a buffer before rollout restart
+		var oldPodLogs bytes.Buffer
+		logCtx, cancelLogStream := context.WithCancel(t.Context())
+		defer cancelLogStream()
+		logCmd := exec.CommandContext(logCtx, "kubectl", "logs", "-f", "-n", "eval-runner", oldPod)
+		logCmd.Stdout = &oldPodLogs
+		logCmd.Stderr = &oldPodLogs
+		if err := logCmd.Start(); err != nil {
+			t.Fatalf("failed to start log streaming for old controller pod %s: %v", oldPod, err)
+		}
+
+		// Perform rolling restart while the Run is in the slow-discovery fixture window
+		harness.runCmd("kubectl", "rollout", "restart", "deployment/eval-runner-controller", "-n", "eval-runner")
+		harness.runCmd("kubectl", "rollout", "status", "deployment/eval-runner-controller", "-n", "eval-runner", "--timeout=120s")
+
+		// Identify new controller pod
+		currentPods := strings.Fields(harness.runCmd("kubectl", "get", "pods", "-n", "eval-runner", "-l", "app=eval-runner-controller", "--field-selector=status.phase=Running", "-o", "jsonpath={.items[*].metadata.name}"))
+		var newPod string
+		for _, p := range currentPods {
+			if p != oldPod {
+				newPod = p
+				break
+			}
+		}
+		if newPod == "" && len(currentPods) > 0 {
+			newPod = currentPods[0]
+		}
+		if newPod == "" {
+			t.Fatalf("expected running new controller pod after rollout restart")
+		}
+
+		// Assert that the lease holder identity starts with the new pod's name
+		var leaseHolder string
+		startLeaseWait := time.Now()
+		for time.Since(startLeaseWait) < 30*time.Second {
+			leaseHolder = strings.TrimSpace(harness.runCmd("kubectl", "get", "lease", "eval-runner-leader-election", "-n", "eval-runner", "-o", "jsonpath={.spec.holderIdentity}"))
+			if strings.HasPrefix(leaseHolder, newPod) {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !strings.HasPrefix(leaseHolder, newPod) {
+			t.Fatalf("expected lease holderIdentity to start with new pod name %q, got %q", newPod, leaseHolder)
+		}
+
+		// Poll until Completed, asserting sandbox UID is unchanged throughout
+		var runCompleted *v1alpha1.Run
+		var uidChanged bool
+		startWait := time.Now()
+		for time.Since(startWait) < 240*time.Second {
+			r := harness.WaitForRunExists("eval-runner", runName, 5*time.Second)
+			curUID := strings.TrimSpace(harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found", "-o", "jsonpath={.metadata.uid}"))
+			if curUID != "" && curUID != sbUIDBefore {
+				uidChanged = true
+			}
+			if r.Status.Phase == v1alpha1.RunPhaseCompleted || r.Status.Phase == v1alpha1.RunPhaseFailed {
+				runCompleted = r
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+
+		if runCompleted == nil || runCompleted.Status.Phase != v1alpha1.RunPhaseCompleted || uidChanged {
+			t.Log("=== E2E FAILURE DIAGNOSTICS DUMP ===")
+			// 1. Print old pod's streamed logs
+			t.Logf("Old controller pod %s streamed logs:\n%s", oldPod, oldPodLogs.String())
+
+			// 2. Fetch logs for all controller pods using non-fatal CombinedOutput
+			allPodsOut, _ := exec.Command("kubectl", "get", "pods", "-n", "eval-runner", "-l", "app=eval-runner-controller", "-o", "jsonpath={.items[*].metadata.name}").CombinedOutput()
+			allPods := strings.Fields(string(allPodsOut))
+			for _, p := range allPods {
+				podLogs, _ := exec.Command("kubectl", "logs", "-n", "eval-runner", p, "--all-containers=true").CombinedOutput()
+				t.Logf("Controller pod %s logs:\n%s", p, string(podLogs))
+				prevLogs, _ := exec.Command("kubectl", "logs", "-n", "eval-runner", p, "--previous=true").CombinedOutput()
+				if len(bytes.TrimSpace(prevLogs)) > 0 {
+					t.Logf("Controller pod %s previous logs:\n%s", p, string(prevLogs))
+				}
+			}
+			deployLogs, _ := exec.Command("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", "--tail=200").CombinedOutput()
+			t.Logf("Controller deployment logs:\n%s", string(deployLogs))
+
+			// 3. Wide listing of sandboxes and pods in eval-runner-sandbox
+			sbPodsOut, _ := exec.Command("kubectl", "get", "sandbox,pods", "-o", "wide", "-n", "eval-runner-sandbox").CombinedOutput()
+			t.Logf("kubectl get sandbox,pods -o wide -n eval-runner-sandbox:\n%s", string(sbPodsOut))
+
+			// 4. TCP probe from new controller pod to sandbox
+			sbIPOut, _ := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found", "-o", "jsonpath={.status.podIP}").CombinedOutput()
+			sbIP := strings.TrimSpace(string(sbIPOut))
+			probePod := newPod
+			if probePod == "" && len(allPods) > 0 {
+				probePod = allPods[0]
+			}
+			if probePod != "" && sbIP != "" {
+				probeOut, probeErr := exec.Command("kubectl", "exec", "-n", "eval-runner", probePod, "--", "/eval-runner", fmt.Sprintf("--probe-tcp=%s:9090", sbIP)).CombinedOutput()
+				t.Logf("TCP probe to sandbox %s:9090 from %s: err=%v output:\n%s", sbIP, probePod, probeErr, string(probeOut))
+			}
+			t.Log("=== END E2E FAILURE DIAGNOSTICS DUMP ===")
+
+			if runCompleted == nil {
+				t.Fatalf("Timeout waiting for Run %s to complete", runName)
+			}
+			if runCompleted.Status.Phase != v1alpha1.RunPhaseCompleted {
+				t.Fatalf("Run %s failed with phase %s: %s", runName, runCompleted.Status.Phase, runCompleted.Status.Message)
+			}
+			if uidChanged {
+				t.Fatalf("Sandbox UID changed during rolling restart: expected %s", sbUIDBefore)
+			}
+		}
+
+		cancelLogStream()
+		_ = logCmd.Wait()
+
+		// (b) Assert that new pod logged lease acquisition and old pod did not reconcile after leader stop
+		newPodLogsOut, err := exec.Command("kubectl", "logs", "-n", "eval-runner", newPod).CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to fetch new pod %s logs: %v", newPod, err)
+		}
+		newPodLogs := string(newPodLogsOut)
+		if !strings.Contains(strings.ToLower(newPodLogs), "successfully acquired lease") ||
+			!strings.Contains(newPodLogs, "eval-runner/eval-runner-leader-election") {
+			t.Fatalf("expected new pod %s to log successful lease acquisition for eval-runner/eval-runner-leader-election, got:\n%s", newPod, newPodLogs)
+		}
+
+		oldLogLines := strings.Split(oldPodLogs.String(), "\n")
+		stopIdx := -1
+		for i, line := range oldLogLines {
+			if strings.Contains(line, "Stopping and waiting for leader election runnables") ||
+				strings.Contains(line, "leader election lost") ||
+				strings.Contains(line, "stopped leading") {
+				stopIdx = i
+				break
+			}
+		}
+		if stopIdx != -1 {
+			for i := stopIdx + 1; i < len(oldLogLines); i++ {
+				line := oldLogLines[i]
+				if strings.Contains(line, "Reconciling Run") ||
+					strings.Contains(line, "starting step") ||
+					strings.Contains(line, "step ./.evals/list") {
+					t.Fatalf("old controller pod %s logged reconcile/step after leader stop at line %d: %s", oldPod, i+1, line)
+				}
+			}
+		}
+
+		// Clean up sandboxes
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
 	})
 }
