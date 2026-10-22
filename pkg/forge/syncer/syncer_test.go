@@ -1,0 +1,529 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package syncer
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
+	"github.com/gke-labs/eval-runner/pkg/forge/store"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+)
+
+type recordingConsumer struct {
+	mu        sync.Mutex
+	events    []consumer.Event
+	onConsume func(ev consumer.Event) error
+}
+
+func (r *recordingConsumer) ConsumeEvent(ctx context.Context, ev consumer.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.onConsume != nil {
+		if err := r.onConsume(ev); err != nil {
+			return err
+		}
+	}
+	r.events = append(r.events, ev)
+	return nil
+}
+
+func (r *recordingConsumer) getAndClearEvents() []consumer.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	evs := r.events
+	r.events = nil
+	return evs
+}
+
+func newTestSyncer(t *testing.T, ff *forge.FakeForge, cons EventHandler) (*Syncer, *store.Store) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "syncer-test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = st.Close()
+	})
+
+	reg := forge.NewRegistry(ff)
+
+	s := New(SyncerOptions{
+		Store:    st,
+		Registry: reg,
+		Consumer: cons,
+	})
+	return s, st
+}
+
+// TestSyncer_Sequence_OpenUpdateClose tests syncer sequences:
+// open -> update -> close; re-sync emits nothing.
+func TestSyncer_Sequence_OpenUpdateClose(t *testing.T) {
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	ff := forge.NewFakeForge("fake")
+	ff.SetRepository(ref, &forge.Repository{
+		Ref:           ref,
+		DefaultBranch: "main",
+	})
+	ff.SetBranches(ref, []forge.Branch{
+		{Name: "main", SHA: "0000000000000000000000000000000000000001"},
+	})
+
+	sha1 := "1111111111111111111111111111111111111111"
+	sha2 := "2222222222222222222222222222222222222222"
+	baseSHA := "0000000000000000000000000000000000000001"
+
+	// 1. Initial State: Open PR #1
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{
+		{
+			ID:     "1",
+			Number: 1,
+			Title:  "feat: initial pr",
+			State:  "open",
+			Head:   forge.ChangeRequestHead{Ref: "feat", SHA: sha1},
+			Base:   forge.ChangeRequestBase{Ref: "main", SHA: baseSHA},
+		},
+	})
+
+	cons := &recordingConsumer{}
+	s, st := newTestSyncer(t, ff, cons)
+
+	// First sync -> BranchAdvanced + ChangeOpened
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("first SyncRepo failed: %v", err)
+	}
+
+	evs := cons.getAndClearEvents()
+	var kinds []consumer.EventKind
+	for _, e := range evs {
+		kinds = append(kinds, e.EventKind())
+	}
+	if len(kinds) != 2 || kinds[0] != consumer.EventBranchAdvanced || kinds[1] != consumer.EventChangeOpened {
+		t.Fatalf("expected [BranchAdvanced, ChangeOpened], got %v", kinds)
+	}
+
+	// Re-sync emits nothing
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("re-sync failed: %v", err)
+	}
+	evs = cons.getAndClearEvents()
+	if len(evs) != 0 {
+		t.Fatalf("expected re-sync to emit nothing, got %v", evs)
+	}
+
+	// 2. Update PR #1: new head SHA2
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{
+		{
+			ID:     "1",
+			Number: 1,
+			Title:  "feat: initial pr updated",
+			State:  "open",
+			Head:   forge.ChangeRequestHead{Ref: "feat", SHA: sha2},
+			Base:   forge.ChangeRequestBase{Ref: "main", SHA: baseSHA},
+		},
+	})
+
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("update SyncRepo failed: %v", err)
+	}
+	evs = cons.getAndClearEvents()
+	if len(evs) != 1 || evs[0].EventKind() != consumer.EventChangeUpdated {
+		t.Fatalf("expected [ChangeUpdated], got %v", evs)
+	}
+
+	// Re-sync emits nothing
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("re-sync after update failed: %v", err)
+	}
+	evs = cons.getAndClearEvents()
+	if len(evs) != 0 {
+		t.Fatalf("expected re-sync to emit nothing, got %v", evs)
+	}
+
+	// 3. Advance main branch
+	newMainSHA := "0000000000000000000000000000000000000002"
+	ff.SetBranches(ref, []forge.Branch{
+		{Name: "main", SHA: newMainSHA},
+	})
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("main advance SyncRepo failed: %v", err)
+	}
+	evs = cons.getAndClearEvents()
+	if len(evs) != 1 || evs[0].EventKind() != consumer.EventBranchAdvanced {
+		t.Fatalf("expected [BranchAdvanced], got %v", evs)
+	}
+
+	// 4. Close PR #1
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{
+		{
+			ID:     "1",
+			Number: 1,
+			Title:  "feat: initial pr updated",
+			State:  "closed",
+			Head:   forge.ChangeRequestHead{Ref: "feat", SHA: sha2},
+			Base:   forge.ChangeRequestBase{Ref: "main", SHA: baseSHA},
+		},
+	})
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("close SyncRepo failed: %v", err)
+	}
+	evs = cons.getAndClearEvents()
+	if len(evs) != 1 || evs[0].EventKind() != consumer.EventChangeClosed {
+		t.Fatalf("expected [ChangeClosed], got %v", evs)
+	}
+
+	// Verify store has 0 open change requests
+	openCRs := st.GetOpenChangeRequests(ref)
+	if len(openCRs) != 0 {
+		t.Fatalf("expected 0 open change requests in store after close, got %+v", openCRs)
+	}
+
+	// Re-sync emits nothing
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("re-sync after close failed: %v", err)
+	}
+	evs = cons.getAndClearEvents()
+	if len(evs) != 0 {
+		t.Fatalf("expected re-sync after close to emit nothing, got %v", evs)
+	}
+}
+
+// TestSyncer_ConsumeBeforeCommit pins the consume-before-commit order:
+// the test reads the store from inside the consumer and asserts commit has not happened yet.
+// If the consumer fails, commit is skipped and the error is returned.
+func TestSyncer_ConsumeBeforeCommit(t *testing.T) {
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	ff := forge.NewFakeForge("fake")
+	ff.SetBranches(ref, []forge.Branch{
+		{Name: "main", SHA: "0000000000000000000000000000000000000001"},
+	})
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{})
+
+	var insideConsumerStoreChecked bool
+	failConsumer := true
+
+	var stRef *store.Store
+	cons := &recordingConsumer{
+		onConsume: func(ev consumer.Event) error {
+			// Read the store from inside the consumer: commit must NOT have happened yet!
+			branches, err := stRef.ListBranches(ref)
+			if err != nil {
+				t.Fatalf("error listing branches from store inside consumer: %v", err)
+			}
+			if len(branches) > 0 {
+				t.Fatalf("CRITICAL: store batch was already committed before consumer finished! (branches: %v)", branches)
+			}
+			insideConsumerStoreChecked = true
+
+			if failConsumer {
+				return errors.New("transient consumer apiserver error")
+			}
+			return nil
+		},
+	}
+
+	s, st := newTestSyncer(t, ff, cons)
+	stRef = st
+
+	// 1. Sync while consumer fails: must skip commit and return error
+	err := s.SyncRepo(ctx, ref)
+	if err == nil {
+		t.Fatalf("expected SyncRepo to fail when consumer fails, but got nil")
+	}
+	if !insideConsumerStoreChecked {
+		t.Fatalf("consumer onConsume was never called")
+	}
+
+	// Verify store still has NOT committed the branch
+	branchesAfterFail, _ := st.ListBranches(ref)
+	if len(branchesAfterFail) != 0 {
+		t.Fatalf("expected store to be empty after consumer failure, got %v", branchesAfterFail)
+	}
+
+	// 2. Next sync with healthy consumer: regenerates the event, succeeds and commits
+	failConsumer = false
+	insideConsumerStoreChecked = false
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("SyncRepo failed with healthy consumer: %v", err)
+	}
+	if !insideConsumerStoreChecked {
+		t.Fatalf("consumer was not called on retry")
+	}
+
+	// Verify store has now committed the branch
+	branchesAfterSuccess, _ := st.ListBranches(ref)
+	if len(branchesAfterSuccess) != 1 || branchesAfterSuccess[0].Name != "main" {
+		t.Fatalf("expected store to have committed main branch after success, got %v", branchesAfterSuccess)
+	}
+}
+
+// TestSyncer_Hinted503_EmitsNothingAndCountsError verifies that forge errors during
+// a hinted sync are returned and counted as errors, and no spurious ChangeClosed is emitted.
+func TestSyncer_Hinted503_EmitsNothingAndCountsError(t *testing.T) {
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	ff := forge.NewFakeForge("fake")
+	ff.SetBranches(ref, []forge.Branch{
+		{Name: "main", SHA: "0000000000000000000000000000000000000001"},
+	})
+
+	// Pre-populate open PR #1..#5
+	var initialCRs []forge.ChangeRequest
+	for i := 1; i <= 5; i++ {
+		initialCRs = append(initialCRs, forge.ChangeRequest{
+			ID:     forge.ChangeRequestID(fmt.Sprintf("%d", i)),
+			Number: i,
+			Title:  "open pr",
+			State:  "open",
+			Head:   forge.ChangeRequestHead{Ref: "branch", SHA: "head-sha"},
+			Base:   forge.ChangeRequestBase{Ref: "main", SHA: "0000000000000000000000000000000000000001"},
+		})
+	}
+	ff.SetChangeRequests(ref, initialCRs)
+
+	cons := &recordingConsumer{}
+	s, st := newTestSyncer(t, ff, cons)
+
+	// Initial sync to store PR #1..#5
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	cons.getAndClearEvents()
+	if len(st.GetOpenChangeRequests(ref)) != 5 {
+		t.Fatalf("expected 5 open change requests in store")
+	}
+
+	// Now forge starts returning 503 error on ChangeRequests
+	err503 := errors.New("503 Service Unavailable")
+	ff.ChangeReqsErr = err503
+
+	initialErrors := testutil.ToFloat64(SyncsTotal.WithLabelValues(ref.String(), "error"))
+
+	hintPR := forge.ChangeRequest{
+		ID:     "6",
+		Number: 6,
+		Title:  "hint pr",
+		State:  "open",
+		Head:   forge.ChangeRequestHead{Ref: "hint", SHA: "hint-sha"},
+		Base:   forge.ChangeRequestBase{Ref: "main", SHA: "0000000000000000000000000000000000000001"},
+	}
+	hint := &Hint{
+		ChangeRequest: &hintPR,
+	}
+
+	err := s.SyncRepoWithHint(ctx, ref, hint)
+	if err == nil {
+		t.Fatalf("expected error on hinted 503 sync, got nil")
+	}
+
+	// Error counter must have incremented
+	currentErrors := testutil.ToFloat64(SyncsTotal.WithLabelValues(ref.String(), "error"))
+	if currentErrors <= initialErrors {
+		t.Errorf("expected error counter to increment on 503, went from %f to %f", initialErrors, currentErrors)
+	}
+
+	// Assert NO ChangeClosed events emitted for PR #1..#5
+	evs := cons.getAndClearEvents()
+	for _, ev := range evs {
+		if ev.EventKind() == consumer.EventChangeClosed {
+			t.Fatalf("spurious ChangeClosed event emitted during 503 error: %v", ev)
+		}
+	}
+
+	// Open changes in store must remain unchanged
+	if len(st.GetOpenChangeRequests(ref)) != 5 {
+		t.Errorf("expected store to retain 5 open change requests, got %d", len(st.GetOpenChangeRequests(ref)))
+	}
+}
+
+// TestSyncer_ChangeRequests_ErrNotFound_ReturnsErrorAndPreservesStore verifies that
+// forge.ErrNotFound from ChangeRequests is treated as an error (e.g. GitHub 404 on lost token access),
+// increments error counter, never emits ChangeClosed, and preserves stored change requests.
+func TestSyncer_ChangeRequests_ErrNotFound_ReturnsErrorAndPreservesStore(t *testing.T) {
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	ff := forge.NewFakeForge("fake")
+	ff.SetBranches(ref, []forge.Branch{
+		{Name: "main", SHA: "0000000000000000000000000000000000000001"},
+	})
+
+	initialCRs := []forge.ChangeRequest{
+		{ID: "1", Number: 1, Title: "open pr 1", State: "open", Head: forge.ChangeRequestHead{SHA: "h1"}, Base: forge.ChangeRequestBase{SHA: "0001"}},
+		{ID: "2", Number: 2, Title: "open pr 2", State: "open", Head: forge.ChangeRequestHead{SHA: "h2"}, Base: forge.ChangeRequestBase{SHA: "0001"}},
+	}
+	ff.SetChangeRequests(ref, initialCRs)
+
+	cons := &recordingConsumer{}
+	s, st := newTestSyncer(t, ff, cons)
+
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	cons.getAndClearEvents()
+	if len(st.GetOpenChangeRequests(ref)) != 2 {
+		t.Fatalf("expected 2 open change requests in store")
+	}
+
+	// ChangeRequests now fails with ErrNotFound (e.g. 404 from lost permissions)
+	ff.ChangeReqsErr = forge.ErrNotFound
+
+	initialErrors := testutil.ToFloat64(SyncsTotal.WithLabelValues(ref.String(), "error"))
+
+	err := s.SyncRepo(ctx, ref)
+	if err == nil {
+		t.Fatalf("expected error when ChangeRequests returns ErrNotFound, got nil")
+	}
+
+	currentErrors := testutil.ToFloat64(SyncsTotal.WithLabelValues(ref.String(), "error"))
+	if currentErrors <= initialErrors {
+		t.Errorf("expected error counter to increment on ErrNotFound, went from %f to %f", initialErrors, currentErrors)
+	}
+
+	evs := cons.getAndClearEvents()
+	for _, ev := range evs {
+		if ev.EventKind() == consumer.EventChangeClosed {
+			t.Fatalf("spurious ChangeClosed emitted on ErrNotFound: %v", ev)
+		}
+	}
+
+	if len(st.GetOpenChangeRequests(ref)) != 2 {
+		t.Errorf("expected store to preserve 2 open change requests, got %d", len(st.GetOpenChangeRequests(ref)))
+	}
+}
+
+// TestSyncer_DisappearedChangeRequests verifies that absent change requests emit ChangeClosed
+// only when ChangeRequests succeeded.
+func TestSyncer_DisappearedChangeRequests(t *testing.T) {
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	ff := forge.NewFakeForge("fake")
+	ff.SetBranches(ref, []forge.Branch{{Name: "main", SHA: "0001"}})
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{
+		{ID: "1", Number: 1, State: "open", Head: forge.ChangeRequestHead{SHA: "h1"}, Base: forge.ChangeRequestBase{SHA: "0001"}},
+		{ID: "2", Number: 2, State: "open", Head: forge.ChangeRequestHead{SHA: "h2"}, Base: forge.ChangeRequestBase{SHA: "0001"}},
+	})
+
+	cons := &recordingConsumer{}
+	s, st := newTestSyncer(t, ff, cons)
+
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	cons.getAndClearEvents()
+
+	// PR #2 disappears from forge list (only PR #1 returned)
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{
+		{ID: "1", Number: 1, State: "open", Head: forge.ChangeRequestHead{SHA: "h1"}, Base: forge.ChangeRequestBase{SHA: "0001"}},
+	})
+
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("second sync failed: %v", err)
+	}
+	evs := cons.getAndClearEvents()
+	if len(evs) != 1 || evs[0].EventKind() != consumer.EventChangeClosed {
+		t.Fatalf("expected [ChangeClosed] for disappeared PR #2, got %v", evs)
+	}
+	closedEv := evs[0].(consumer.ChangeClosedEvent)
+	if closedEv.Change.Number != 2 {
+		t.Errorf("expected ChangeClosed for PR #2, got #%d", closedEv.Change.Number)
+	}
+
+	// PR #1 also disappears (empty list from forge is a real empty list)
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{})
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("third sync failed: %v", err)
+	}
+	evs = cons.getAndClearEvents()
+	if len(evs) != 1 || evs[0].EventKind() != consumer.EventChangeClosed {
+		t.Fatalf("expected [ChangeClosed] for disappeared PR #1, got %v", evs)
+	}
+
+	if len(st.GetOpenChangeRequests(ref)) != 0 {
+		t.Errorf("expected 0 open change requests in store")
+	}
+}
+
+// TestParseRepoConfigList verifies YAML list parsing, clone URL preservation, and invalid entry rejection.
+func TestParseRepoConfigList(t *testing.T) {
+	t.Run("ValidYAML", func(t *testing.T) {
+		yamlInput := `
+- name: gke-labs/eval-runner
+  branches: [main, dev]
+- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+  branches: [main]
+`
+		repos, err := ParseRepoConfigList(yamlInput)
+		if err != nil {
+			t.Fatalf("ParseRepoConfigList failed: %v", err)
+		}
+		if len(repos) != 2 {
+			t.Fatalf("expected 2 repos, got %d", len(repos))
+		}
+		if repos[0].Ref.Owner != "gke-labs" || repos[0].Ref.Name != "eval-runner" {
+			t.Errorf("unexpected ref: %+v", repos[0].Ref)
+		}
+		if repos[1].CloneURL != "git://git-server.eval-runner-sandbox.svc/docs-eval.git" {
+			t.Errorf("expected clone URL preserved, got %q", repos[1].CloneURL)
+		}
+		if repos[1].Ref.Name != "docs-eval" {
+			t.Errorf("unexpected ref for URL repo: %+v", repos[1].Ref)
+		}
+	})
+
+	t.Run("CommaList_RejectedWithClearError", func(t *testing.T) {
+		_, err := ParseRepoConfigList("gke-labs/eval-runner,other/repo")
+		if err == nil {
+			t.Fatalf("expected error for comma list, got nil")
+		}
+		if !strings.Contains(err.Error(), "expected a YAML list of {name, branches}") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("InvalidEntry_Nonsense_Rejected", func(t *testing.T) {
+		yamlInput := `
+- name: nonsense
+`
+		_, err := ParseRepoConfigList(yamlInput)
+		if err == nil {
+			t.Fatalf("expected error for nonsense repo name, got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid repository \"nonsense\": invalid host, owner, or repo name") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("EmptyString_ReturnsNil", func(t *testing.T) {
+		repos, err := ParseRepoConfigList("   \n  ")
+		if err != nil || repos != nil {
+			t.Errorf("expected nil, nil for empty string, got %v, %v", repos, err)
+		}
+	})
+}

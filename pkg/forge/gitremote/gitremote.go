@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/forge"
@@ -42,8 +43,10 @@ type URLResolver func(ref forge.RepoRef) string
 // Forge implements forge.Forge backed by pure-Go remote ref advertisement via go-git.
 // It executes no subcommands, requires no git binary, and performs no clones or working tree checkouts.
 type Forge struct {
+	mu       sync.RWMutex
 	lister   RefLister
 	resolver URLResolver
+	urls     map[string]string
 }
 
 // Option configures a gitremote Forge.
@@ -123,7 +126,30 @@ func New(opts ...Option) *Forge {
 	return &Forge{
 		lister:   lister,
 		resolver: resolver,
+		urls:     make(map[string]string),
 	}
+}
+
+// RegisterURL associates a specific clone URL with a repository reference.
+func (f *Forge) RegisterURL(ref forge.RepoRef, cloneURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.urls == nil {
+		f.urls = make(map[string]string)
+	}
+	f.urls[strings.ToLower(ref.String())] = cloneURL
+}
+
+func (f *Forge) resolveURL(ref forge.RepoRef) string {
+	f.mu.RLock()
+	if f.urls != nil {
+		if u, ok := f.urls[strings.ToLower(ref.String())]; ok && u != "" {
+			f.mu.RUnlock()
+			return u
+		}
+	}
+	f.mu.RUnlock()
+	return f.resolver(ref)
 }
 
 // Kind returns "gitremote".
@@ -135,7 +161,7 @@ func (f *Forge) listRefs(ctx context.Context, ref forge.RepoRef) ([]*plumbing.Re
 	if !ref.IsValid() {
 		return nil, "", fmt.Errorf("invalid repository reference: %v", ref)
 	}
-	cloneURL := f.resolver(ref)
+	cloneURL := f.resolveURL(ref)
 
 	// Default to 30s timeout if context has no deadline
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
