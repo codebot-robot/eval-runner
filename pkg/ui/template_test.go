@@ -573,32 +573,6 @@ func TestTemplateRenderingRunDetailGolden(t *testing.T) {
 	assertGolden(t, "run_detail.golden.html", buf.String())
 }
 
-func TestTemplateRenderingRunDetail_InspectScanNote(t *testing.T) {
-	view := sampleRunDetailView()
-	view.ManifestSource = v1alpha1.ManifestSourceInspectScan
-
-	var buf bytes.Buffer
-	if err := tmplRunDetail.Execute(&buf, view); err != nil {
-		t.Fatalf("failed to execute run detail template: %v", err)
-	}
-
-	rendered := buf.String()
-	expectedNote := "Tasks discovered via Inspect scan fallback (.evals/list absent)"
-	if !strings.Contains(rendered, expectedNote) {
-		t.Errorf("Expected run detail page to contain inspect-scan note %q, got rendered HTML:\n%s", expectedNote, rendered)
-	}
-
-	// When ManifestSource is list, note should not appear
-	view.ManifestSource = v1alpha1.ManifestSourceList
-	buf.Reset()
-	if err := tmplRunDetail.Execute(&buf, view); err != nil {
-		t.Fatalf("failed to execute run detail template: %v", err)
-	}
-	if strings.Contains(buf.String(), expectedNote) {
-		t.Errorf("Run detail page must NOT contain inspect-scan note when manifestSource is list")
-	}
-}
-
 func TestTemplateRenderingComparisonDetailGolden(t *testing.T) {
 	view := sampleComparisonDetailView()
 

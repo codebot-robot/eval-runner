@@ -49,27 +49,6 @@ const (
 
 	// DiscoveryCommand is the shell command used to discover tasks and write the manifest file.
 	DiscoveryCommand = "mkdir -p /workspace/out && ./.evals/list > /workspace/out/manifest.json"
-
-	// DiscoveryTestEvalsListCommand is the command executed in the sandbox to check if .evals/list exists.
-	DiscoveryTestEvalsListCommand = "test -f .evals/list"
-
-	// DiscoveryScanFilename is the filename of the archive containing Python files for task scanning.
-	DiscoveryScanFilename = "scan.tar"
-
-	// DiscoveryScanWritePath is the path inside the sandbox where scan.tar is written.
-	DiscoveryScanWritePath = "/workspace/out/scan.tar"
-
-	// DiscoveryScanReadPath is the relative path from sandboxd root-dir (/workspace) used by ReadFile.
-	DiscoveryScanReadPath = "/out/scan.tar"
-
-	// DiscoveryScanCommand is the shell command used to archive Python files for task scanning.
-	DiscoveryScanCommand = "mkdir -p /workspace/out && if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git ls-files -z -- '*.py'; else find . -type d \\( -name .git -o -name .venv -o -name node_modules -o -name vendor \\) -prune -o -type f -name '*.py' -print | head -n 5000; fi | (tar -cf /workspace/out/scan.tar -T - 2>/dev/null || : > /workspace/out/scan.tar)"
-
-	// MaxScanFiles is the maximum number of Python files scanned for Inspect tasks.
-	MaxScanFiles = 5000
-
-	// MaxScanTasks is the maximum number of Inspect tasks synthesized from scanning.
-	MaxScanTasks = 200
 )
 
 // ParseManifest unmarshals raw JSON bytes into a Manifest.

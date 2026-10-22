@@ -95,18 +95,7 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 
 ### 2.3 Fallback when `.evals/list` is absent
 
-```
-$ test -x .evals/list || uv run inspect list tasks
-evals/runbook_lookup.py@runbook_lookup
-evals/escalation.py@escalation_policy
-evals/summary.py@summary_quality
-```
-
-If there is no executable `.evals/list`, eval-runner falls back to Inspect task discovery and
-synthesises an equivalent manifest (one task per listed spec, `id` derived from the spec,
-no extra resources). Any other framework is supported by writing a `.evals/list` that prints its tasks.
-
-*(Decided in ADR-031)*: Rather than executing Python or `uv` directly in the discovery sandbox, eval-runner uses a hybrid model: candidate Python files are archived in the sandbox via `git ls-files -z -- '*.py'` (falling back to `find` excluding `.git`, `.venv`, `node_modules`, and `vendor` bounded to 5,000 files when not a git checkout) into `scan.tar`, fetched via bounded `sandboxd.ReadFile` (capped at 1 MiB), and safely scanned in Go using quote-aware line parsing for `@task`, `@task(`, and `@inspect_ai.task` decorators at column 0. Synthesized tasks assign `id = <relative-dir>/<function>` (disambiguated deterministically to `<dir>/<file-stem>/<function>` on collision), `workdir = <dir of file>`, `spec = <file>@<function>`, `paths = [<dir>/**]` (or `**` if root), default cohort, and no resources, capped at 5,000 files and 200 tasks. Provenance is tracked via `Run.status.manifestSource: inspect-scan`.
+An executable `.evals/list` is required today. A repository without an executable `.evals/list` fails discovery with an explicit error message (`.evals/list not found or not executable; see docs/concept/functionality.md §2.3`). Auto-running a Python list with `uv` is planned for zero-manifest setup.
 
 ### 2.4 Inspect compatibility
 
