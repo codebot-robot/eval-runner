@@ -2680,6 +2680,9 @@ func TestConfigReloader_Repositories_ReloadTriggersImmediateSync(t *testing.T) {
 		Registry: reg,
 		Consumer: cons,
 	})
+	go func() {
+		_ = syncInst.Start(ctx)
+	}()
 
 	initialCfg := DefaultClusterConfig()
 	reloader := NewConfigReloader(ConfigReloaderOptions{
@@ -2712,9 +2715,14 @@ func TestConfigReloader_Repositories_ReloadTriggersImmediateSync(t *testing.T) {
 	}
 
 	// Verify immediate sync of newly added repository: store now contains main branch!
-	branchesAfter, err := st.ListBranches(ref)
-	if err != nil {
-		t.Fatalf("failed to list branches: %v", err)
+	var branchesAfter []forge.Branch
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		branchesAfter, _ = st.ListBranches(ref)
+		if len(branchesAfter) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if len(branchesAfter) != 1 || branchesAfter[0].Name != "main" {
 		t.Fatalf("expected immediate sync to commit main branch to store, got %v", branchesAfter)
@@ -2727,5 +2735,67 @@ func TestConfigReloader_Repositories_ReloadTriggersImmediateSync(t *testing.T) {
 	}
 	if len(runs.Items) != 1 {
 		t.Fatalf("expected consumer to create 1 baseline run immediately upon reload sync, got %d", len(runs.Items))
+	}
+}
+
+func TestResolveConfig_CadenceIntervalsAndRateLimitFloor(t *testing.T) {
+	// 1. Defaults
+	defCfg, err := ResolveConfig(&corev1.ConfigMap{}, RawFlags{})
+	if err != nil {
+		t.Fatalf("ResolveConfig default failed: %v", err)
+	}
+	if defCfg.LsRemoteInterval != syncer.DefaultLsRemoteInterval {
+		t.Errorf("LsRemoteInterval default = %v, want %v", defCfg.LsRemoteInterval, syncer.DefaultLsRemoteInterval)
+	}
+	if defCfg.FullReconcileInterval != syncer.DefaultFullReconcileInterval {
+		t.Errorf("FullReconcileInterval default = %v, want %v", defCfg.FullReconcileInterval, syncer.DefaultFullReconcileInterval)
+	}
+	if defCfg.RateLimitFloorPercent != syncer.DefaultRateFloorPercent {
+		t.Errorf("RateLimitFloorPercent default = %v, want %v", defCfg.RateLimitFloorPercent, syncer.DefaultRateFloorPercent)
+	}
+
+	// 2. Custom ConfigMap values
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "eval-runner-config",
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyLsRemoteInterval:      "45s",
+			configkeys.ConfigMapKeyFullReconcileInterval: "2h",
+			configkeys.ConfigMapKeyRateLimitFloorPercent: "20",
+		},
+	}
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("ResolveConfig with custom intervals failed: %v", err)
+	}
+	if cfg.LsRemoteInterval != 45*time.Second {
+		t.Errorf("LsRemoteInterval = %v, want 45s", cfg.LsRemoteInterval)
+	}
+	if cfg.FullReconcileInterval != 2*time.Hour {
+		t.Errorf("FullReconcileInterval = %v, want 2h", cfg.FullReconcileInterval)
+	}
+	if cfg.RateLimitFloorPercent != 20 {
+		t.Errorf("RateLimitFloorPercent = %v, want 20", cfg.RateLimitFloorPercent)
+	}
+
+	// 3. Invalid values rejected
+	badCM := &corev1.ConfigMap{
+		Data: map[string]string{
+			configkeys.ConfigMapKeyLsRemoteInterval: "not-a-duration",
+		},
+	}
+	if _, err := ResolveConfig(badCM, RawFlags{}); err == nil {
+		t.Errorf("expected error for invalid lsRemoteInterval, got nil")
+	}
+
+	badFloorCM := &corev1.ConfigMap{
+		Data: map[string]string{
+			configkeys.ConfigMapKeyRateLimitFloorPercent: "not-an-int",
+		},
+	}
+	if _, err := ResolveConfig(badFloorCM, RawFlags{}); err == nil {
+		t.Errorf("expected error for invalid rateLimitFloorPercent, got nil")
 	}
 }

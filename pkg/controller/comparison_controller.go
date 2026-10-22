@@ -110,6 +110,7 @@ type ComparisonReconciler struct {
 	ModelPriceSources      map[string]v1alpha1.CostSource
 	ModelPricesDisabled    bool
 	ForgeRegistry          *forge.Registry
+	GitHubClient           github.Client
 
 	cachedAppMu   sync.Mutex
 	cachedAppKey  string
@@ -368,6 +369,10 @@ func (r *ComparisonReconciler) getOrCreateAppAuth(secret *corev1.Secret, appID, 
 }
 
 func (r *ComparisonReconciler) getGitHubClient(ctx context.Context) (github.Client, error) {
+	if r.GitHubClient != nil {
+		return r.GitHubClient, nil
+	}
+
 	secretNames := []string{}
 	appSec := r.gitHubAppSecret()
 	tokSec := r.gitHubTokenSecret()
@@ -778,33 +783,44 @@ func (r *ComparisonReconciler) reportToGitHub(
 		return nil
 	}
 
-	// If using the github forge, attach the authenticated HTTP client if available
+	// If using the github forge, verify client has credentials
 	if ghForge, ok := f.(*forgegithub.Forge); ok {
-		ghClient, err := r.getGitHubClient(ctx)
-		if err != nil {
-			if github.IsPermanent(err) {
+		client := ghForge.Client()
+		if client == nil || !client.HasCredentials() {
+			ghClient, err := r.getGitHubClient(ctx)
+			if err != nil {
+				if github.IsPermanent(err) {
+					if comp.Status.Reporting == nil {
+						comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+					}
+					comp.Status.Reporting.Message = err.Error()
+					comp.Status.Reporting.NextAttemptAt = nil
+					return nil
+				}
+				if !isTerminalComparisonPhase(comp.Status.Phase) {
+					return err
+				}
+				return r.handleTransientReportingError(comp, err)
+			}
+			if ghClient == nil {
 				if comp.Status.Reporting == nil {
 					comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
 				}
-				comp.Status.Reporting.Message = err.Error()
+				comp.Status.Reporting.Message = "disabled"
 				comp.Status.Reporting.NextAttemptAt = nil
 				return nil
 			}
-			if !isTerminalComparisonPhase(comp.Status.Phase) {
-				return err
+			if hc, ok := ghClient.(*github.HTTPClient); ok {
+				if !hc.HasCredentials() {
+					if comp.Status.Reporting == nil {
+						comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+					}
+					comp.Status.Reporting.Message = "disabled"
+					comp.Status.Reporting.NextAttemptAt = nil
+					return nil
+				}
+				f = forgegithub.New(forgegithub.WithClient(hc))
 			}
-			return r.handleTransientReportingError(comp, err)
-		}
-		if ghClient == nil {
-			if comp.Status.Reporting == nil {
-				comp.Status.Reporting = &v1alpha1.ComparisonReportingStatus{}
-			}
-			comp.Status.Reporting.Message = "disabled"
-			comp.Status.Reporting.NextAttemptAt = nil
-			return nil
-		}
-		if hc, ok := ghClient.(*github.HTTPClient); ok {
-			ghForge.SetClient(hc)
 		}
 	}
 
@@ -944,15 +960,21 @@ func (r *ComparisonReconciler) postUnserviceableCommandNote(ctx context.Context,
 		return nil
 	}
 	if ghForge, ok := f.(*forgegithub.Forge); ok {
-		ghClient, err := r.getGitHubClient(ctx)
-		if err != nil {
-			return err
-		}
-		if ghClient == nil {
-			return nil
-		}
-		if hc, ok := ghClient.(*github.HTTPClient); ok {
-			ghForge.SetClient(hc)
+		client := ghForge.Client()
+		if client == nil || !client.HasCredentials() {
+			ghClient, err := r.getGitHubClient(ctx)
+			if err != nil {
+				return err
+			}
+			if ghClient == nil {
+				return nil
+			}
+			if hc, ok := ghClient.(*github.HTTPClient); ok {
+				if !hc.HasCredentials() {
+					return nil
+				}
+				f = forgegithub.New(forgegithub.WithClient(hc))
+			}
 		}
 	}
 	rep, ok := f.(forge.Reporter)
