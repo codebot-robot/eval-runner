@@ -88,6 +88,12 @@ const (
 	ConfigMapKeySandboxEgressHosts = "sandboxEgressHosts"
 	// ConfigMapKeyRepositories is the ConfigMap key for tracked repositories.
 	ConfigMapKeyRepositories = "repositories"
+	// ConfigMapKeyLsRemoteInterval is the ConfigMap key for forge ls-remote polling interval (default "60s").
+	ConfigMapKeyLsRemoteInterval = "lsRemoteInterval"
+	// ConfigMapKeyFullReconcileInterval is the ConfigMap key for forge full reconcile interval (default "1h").
+	ConfigMapKeyFullReconcileInterval = "fullReconcileInterval"
+	// ConfigMapKeyRateLimitFloorPercent is the ConfigMap key for GitHub rate limit floor percentage (default "10").
+	ConfigMapKeyRateLimitFloorPercent = "rateLimitFloorPercent"
 )
 
 const (

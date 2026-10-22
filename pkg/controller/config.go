@@ -34,6 +34,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
+	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -135,6 +136,9 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyAffinityMode:             {},
 	configkeys.ConfigMapKeySandboxEgressHosts:       {},
 	configkeys.ConfigMapKeyRepositories:             {},
+	configkeys.ConfigMapKeyLsRemoteInterval:         {},
+	configkeys.ConfigMapKeyFullReconcileInterval:    {},
+	configkeys.ConfigMapKeyRateLimitFloorPercent:    {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -192,6 +196,9 @@ type ClusterConfig struct {
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
 	DefaultBudgetUSD         *float64
+	LsRemoteInterval         time.Duration
+	FullReconcileInterval    time.Duration
+	RateLimitFloorPercent    int
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -253,6 +260,9 @@ func DefaultClusterConfig() ClusterConfig {
 		DefaultCohort:            "default",
 		DefaultBatchSize:         8,
 		DefaultMaxSamplesPerTask: 64,
+		LsRemoteInterval:         syncer.DefaultLsRemoteInterval,
+		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
+		RateLimitFloorPercent:    syncer.DefaultRateFloorPercent,
 	}
 }
 
@@ -647,6 +657,42 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.DefaultBudgetUSD = &f
 			}
 		}
+
+		// 18. lsRemoteInterval
+		if val, ok := cm.Data[configkeys.ConfigMapKeyLsRemoteInterval]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				d, err := time.ParseDuration(trimmed)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: %w", configkeys.ConfigMapKeyLsRemoteInterval, ns, name, err)
+				}
+				cfg.LsRemoteInterval = d
+			}
+		}
+
+		// 19. fullReconcileInterval
+		if val, ok := cm.Data[configkeys.ConfigMapKeyFullReconcileInterval]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				d, err := time.ParseDuration(trimmed)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: %w", configkeys.ConfigMapKeyFullReconcileInterval, ns, name, err)
+				}
+				cfg.FullReconcileInterval = d
+			}
+		}
+
+		// 21. rateLimitFloorPercent
+		if val, ok := cm.Data[configkeys.ConfigMapKeyRateLimitFloorPercent]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				pct, err := strconv.Atoi(trimmed)
+				if err != nil || pct <= 0 {
+					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: must be a positive integer", configkeys.ConfigMapKeyRateLimitFloorPercent, ns, name)
+				}
+				cfg.RateLimitFloorPercent = pct
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -877,6 +923,7 @@ type ConfigReloaderOptions struct {
 	Consumer       *consumer.Consumer
 	InitialConfig  *ClusterConfig
 	FQDNSyncFunc   func(ctx context.Context, hosts []string) error
+	GitHubClient   *github.HTTPClient
 }
 
 // ConfigReloader dynamically applies eval-runner-config updates at runtime.
@@ -891,6 +938,7 @@ type ConfigReloader struct {
 	syncer         *syncer.Syncer
 	consumer       *consumer.Consumer
 	fqdnSyncFunc   func(ctx context.Context, hosts []string) error
+	gitHubClient   *github.HTTPClient
 	lastConfig     *ClusterConfig
 }
 
@@ -910,6 +958,7 @@ func NewConfigReloader(opts ConfigReloaderOptions) *ConfigReloader {
 		syncer:         opts.Syncer,
 		consumer:       opts.Consumer,
 		fqdnSyncFunc:   opts.FQDNSyncFunc,
+		gitHubClient:   opts.GitHubClient,
 	}
 	if opts.InitialConfig != nil {
 		copied := *opts.InitialConfig
@@ -1004,22 +1053,11 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 			IsMultiRepo:              consumer.IsMultiRepo(repoNames),
 		})
 	}
+	if r.gitHubClient != nil && resolved.RateLimitFloorPercent > 0 {
+		r.gitHubClient.SetRateFloorPercent(resolved.RateLimitFloorPercent)
+	}
 	if r.syncer != nil {
-		oldRepos := make(map[string]bool)
-		if r.lastConfig != nil {
-			for _, repo := range r.lastConfig.Repositories {
-				oldRepos[repo.Ref.String()] = true
-			}
-		}
-		r.syncer.UpdateRepositories(resolved.Repositories)
-		for _, repo := range resolved.Repositories {
-			if !oldRepos[repo.Ref.String()] && !repo.Ref.IsZero() {
-				r.logger.Info("syncing newly added repository", "repo", repo.Ref.String())
-				if err := r.syncer.SyncRepo(ctx, repo.Ref); err != nil {
-					r.logger.Error(err, "error syncing newly added repository", "repo", repo.Ref.String())
-				}
-			}
-		}
+		r.syncer.UpdateConfig(resolved.Repositories, resolved.LsRemoteInterval, resolved.FullReconcileInterval, resolved.RateLimitFloorPercent)
 	}
 
 	fqdnChanged := r.lastConfig == nil || !reflect.DeepEqual(r.lastConfig.SandboxEgressHosts, resolved.SandboxEgressHosts)
