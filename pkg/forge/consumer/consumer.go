@@ -280,9 +280,35 @@ func (c *Consumer) processChangeOpenedOrUpdated(ctx context.Context, cfg Config,
 	sanitizedTargetRepo := SanitizeLabelValue(targetRepo)
 
 	// Check if a Comparison already exists for this PR
-	existingComp, err := FindComparisonForPR(ctx, c.client, cfg.Namespace, targetRepo, prNum)
+	existingComps, err := FindComparisonsForPR(ctx, c.client, cfg.Namespace, targetRepo, prNum)
 	if err != nil {
-		return fmt.Errorf("failed looking up comparison for PR #%d: %w", prNum, err)
+		return fmt.Errorf("failed looking up comparisons for PR #%d: %w", prNum, err)
+	}
+
+	var existingComp *v1alpha1.Comparison
+	if len(existingComps) > 0 {
+		// Prefer the newest comparison if multiple match
+		var best *v1alpha1.Comparison
+		for i := range existingComps {
+			if best == nil || existingComps[i].CreationTimestamp.After(best.CreationTimestamp.Time) {
+				best = &existingComps[i]
+			}
+		}
+		existingComp = best
+
+		// On reopen (or re-eval of open PR), ensure existing comparisons have pr-state=open
+		for i := range existingComps {
+			ec := &existingComps[i]
+			if ec.Labels == nil {
+				ec.Labels = make(map[string]string)
+			}
+			if ec.Labels[LabelPRState] != StateOpen {
+				ec.Labels[LabelPRState] = StateOpen
+				if err := c.client.Update(ctx, ec); err != nil {
+					return fmt.Errorf("failed to update comparison %s/%s to open: %w", ec.Namespace, ec.Name, err)
+				}
+			}
+		}
 	}
 
 	var compName string
@@ -379,6 +405,7 @@ func (c *Consumer) processChangeOpenedOrUpdated(ctx context.Context, cfg Config,
 				LabelPR:      strconv.Itoa(prNum),
 				LabelRepo:    sanitizedTargetRepo,
 				LabelHeadSHA: headSHA,
+				LabelPRState: StateOpen,
 			},
 		},
 		Spec: v1alpha1.ComparisonSpec{
@@ -420,23 +447,25 @@ func (c *Consumer) processChangeClosed(ctx context.Context, cfg Config, repo for
 		return fmt.Errorf("failed to list comparisons for PR #%d in %q: %w", prNum, targetRepo, err)
 	}
 
-	candRunNames := make(map[string]bool)
-	deletedComparisonNames := make(map[string]bool)
-	var deletedComparisons int
-	for i := range compList {
-		comp := &compList[i]
-		if comp.Spec.Candidate.Run != "" {
-			candRunNames[comp.Spec.Candidate.Run] = true
-		}
-
-		if err := c.client.Delete(ctx, comp, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete comparison %s/%s for PR #%d: %w", comp.Namespace, comp.Name, prNum, err)
-		}
-		deletedComparisonNames[comp.Name] = true
-		deletedComparisons++
+	targetState := StateClosed
+	if cr.Merged || strings.EqualFold(strings.TrimSpace(cr.State), StateMerged) {
+		targetState = StateMerged
 	}
 
-	survivingBaselineRuns := make(map[string]bool)
+	for i := range compList {
+		comp := &compList[i]
+		if comp.Labels == nil {
+			comp.Labels = make(map[string]string)
+		}
+		if comp.Labels[LabelPRState] != targetState {
+			comp.Labels[LabelPRState] = targetState
+			if err := c.client.Update(ctx, comp); err != nil {
+				return fmt.Errorf("failed to update comparison %s/%s state to %s for PR #%d: %w", comp.Namespace, comp.Name, targetState, prNum, err)
+			}
+		}
+	}
+
+	referencedRuns := make(map[string]bool)
 	var allComps v1alpha1.ComparisonList
 	var compListOpts []client.ListOption
 	if cfg.Namespace != "" {
@@ -447,8 +476,11 @@ func (c *Consumer) processChangeClosed(ctx context.Context, cfg Config, repo for
 	}
 	for i := range allComps.Items {
 		comp := &allComps.Items[i]
-		if !deletedComparisonNames[comp.Name] && comp.Spec.Baseline.Run != "" {
-			survivingBaselineRuns[comp.Spec.Baseline.Run] = true
+		if comp.Spec.Candidate.Run != "" {
+			referencedRuns[comp.Spec.Candidate.Run] = true
+		}
+		if comp.Spec.Baseline.Run != "" {
+			referencedRuns[comp.Spec.Baseline.Run] = true
 		}
 	}
 
@@ -470,21 +502,27 @@ func (c *Consumer) processChangeClosed(ctx context.Context, cfg Config, repo for
 	var deletedRuns int
 	for i := range runList.Items {
 		run := &runList.Items[i]
-		isMatch := candRunNames[run.Name] ||
-			(sanitizedTargetRepo != "" && run.Labels[LabelRepo] == sanitizedTargetRepo) ||
+		isMatch := (sanitizedTargetRepo != "" && run.Labels[LabelRepo] == sanitizedTargetRepo) ||
 			(sanitizedCandRepo != "" && run.Labels[LabelRepo] == sanitizedCandRepo)
 
 		if !isMatch {
 			continue
 		}
 
-		if survivingBaselineRuns[run.Name] {
-			log.Printf("consumer: preserving seed run %s/%s: referenced as baseline by surviving comparison", run.Namespace, run.Name)
+		// Never touch baseline Runs
+		if run.Labels[LabelBranch] != "" {
 			continue
 		}
+
+		// Keep any Run referenced by a retained Comparison as candidate or baseline
+		if referencedRuns[run.Name] {
+			log.Printf("consumer: preserving seed run %s/%s: referenced by comparison", run.Namespace, run.Name)
+			continue
+		}
+
 		var ownedBySurvivingComp bool
 		for _, ref := range run.OwnerReferences {
-			if (ref.Kind == "Comparison" || ref.Kind == "") && !deletedComparisonNames[ref.Name] {
+			if ref.Kind == "Comparison" || ref.Kind == "" {
 				ownedBySurvivingComp = true
 				break
 			}
@@ -500,7 +538,7 @@ func (c *Consumer) processChangeClosed(ctx context.Context, cfg Config, repo for
 		deletedRuns++
 	}
 
-	log.Printf("consumer: closed PR #%d for %s: deleted %d comparison(s) and %d seed run(s)", prNum, targetRepo, deletedComparisons, deletedRuns)
+	log.Printf("consumer: closed PR #%d for %s: labeled %d comparison(s) as %s and deleted %d orphaned seed run(s)", prNum, targetRepo, len(compList), targetState, deletedRuns)
 	return nil
 }
 

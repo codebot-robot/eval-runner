@@ -342,6 +342,8 @@ type PullRequestListItem struct {
 	Repository     string
 	RepoHash       string
 	Number         int
+	State          string // "Open", "Merged", "Closed"
+	StateChip      string // "open", "merged", "closed"
 	GitHubURL      string
 	HeadSHA        string
 	HeadSHAShort   string
@@ -376,6 +378,12 @@ type PullRequestsListView struct {
 	HasPrev       bool
 	PrevLink      string
 	ShowingRange  string
+	State         string // "all", "open", "closed"
+	OpenCount     int
+	ClosedCount   int
+	OpenLink      string
+	ClosedLink    string
+	AllLink       string
 }
 
 // PullRequestHistoryItem represents one Comparison in a pull request's history.

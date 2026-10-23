@@ -2784,16 +2784,19 @@ func TestHandler_PullRequest_Closed(t *testing.T) {
 		t.Fatalf("expected 200 OK for closed PR, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// Poll until Comparison pr-105 is deleted
+	// Poll until Comparison pr-105 is labeled closed
 	pollUntil(t, 2*time.Second, func() bool {
 		var c v1alpha1.Comparison
-		return apierrors.IsNotFound(cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-105"}, &c))
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-105"}, &c); err == nil {
+			return c.Labels[consumer.LabelPRState] == consumer.StateClosed
+		}
+		return false
 	})
 
-	// Verify candidate run pr-105-aaaaaaa is deleted
+	// Verify candidate run pr-105-aaaaaaa is preserved (referenced by comparison)
 	var cand v1alpha1.Run
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-105-aaaaaaa"}, &cand); !apierrors.IsNotFound(err) {
-		t.Errorf("expected candidate run pr-105-aaaaaaa to be deleted, got err: %v", err)
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-105-aaaaaaa"}, &cand); err != nil {
+		t.Errorf("expected candidate run pr-105-aaaaaaa to be preserved, got err: %v", err)
 	}
 
 	// Verify baseline run base-bbbbbbb is preserved
@@ -2820,6 +2823,112 @@ func TestHandler_PullRequest_Closed(t *testing.T) {
 	var candOther v1alpha1.Run
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-105-other-cand"}, &candOther); err != nil {
 		t.Errorf("expected other repo PR 105 candidate run to be preserved, got err: %v", err)
+	}
+}
+
+func TestHandler_PullRequest_Closed_Merged(t *testing.T) {
+	secretKey := []byte("secret")
+	scheme := newTestScheme()
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-106",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:               "106",
+				LabelRepo:             "gke-labs_eval-runner",
+				consumer.LabelPRState: consumer.StateOpen,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "pr-106-aaaaaaa"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-bbbbbbb"},
+		},
+	}
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-106-aaaaaaa",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:   "106",
+				LabelRepo: "gke-labs_eval-runner",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(comp, candRun).
+		Build()
+
+	cfg := Config{
+		Namespace:           "eval-runner",
+		StaticWebhookSecret: secretKey,
+		WebhookRepositories: []string{"gke-labs/eval-runner"},
+		Client:              cl,
+	}
+
+	server := NewServer(cfg)
+	server.Start()
+	defer server.Stop()
+
+	closedPayload := []byte(`{
+		"action": "closed",
+		"number": 106,
+		"pull_request": {
+			"number": 106,
+			"state": "closed",
+			"merged": true,
+			"head": {
+				"sha": "aaaaaaa111111122222223333333444444455555",
+				"ref": "feature",
+				"repo": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			},
+			"base": {
+				"sha": "bbbbbbb111111122222223333333444444455555",
+				"ref": "main",
+				"repo": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+
+	sig := ComputeSignature(closedPayload, secretKey)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(closedPayload))
+	req.Header.Set(HeaderGitHubEvent, EventPullRequest)
+	req.Header.Set(HeaderHubSignature256, sig)
+	rr := httptest.NewRecorder()
+
+	server.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for closed PR, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Poll until Comparison pr-106 is labeled merged
+	pollUntil(t, 2*time.Second, func() bool {
+		var c v1alpha1.Comparison
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-106"}, &c); err == nil {
+			return c.Labels[consumer.LabelPRState] == consumer.StateMerged
+		}
+		return false
+	})
+
+	// Candidate run pr-106-aaaaaaa preserved
+	var cand v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-106-aaaaaaa"}, &cand); err != nil {
+		t.Errorf("expected candidate run pr-106-aaaaaaa to be preserved, got err: %v", err)
 	}
 }
 
@@ -2886,19 +2995,21 @@ func TestProcessPullRequestClosed_ForkAndIdempotent(t *testing.T) {
 		TargetRepo:    "gke-labs/eval-runner",
 	}
 
-	// First call deletes comparison and fork seed run
+	// First call labels comparison as closed and preserves referenced fork seed run
 	if err := wp.ProcessPullRequestClosed(t.Context(), item); err != nil {
 		t.Fatalf("ProcessPullRequestClosed failed: %v", err)
 	}
 
 	var checkComp v1alpha1.Comparison
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-55"}, &checkComp); !apierrors.IsNotFound(err) {
-		t.Errorf("expected comparison to be deleted, got err: %v", err)
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-55"}, &checkComp); err != nil {
+		t.Errorf("expected comparison to be retained, got err: %v", err)
+	} else if checkComp.Labels[consumer.LabelPRState] != consumer.StateClosed {
+		t.Errorf("expected comparison pr-state=%s, got %q", consumer.StateClosed, checkComp.Labels[consumer.LabelPRState])
 	}
 
 	var checkForkRun v1alpha1.Run
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-55-fork123"}, &checkForkRun); !apierrors.IsNotFound(err) {
-		t.Errorf("expected fork candidate run to be deleted, got err: %v", err)
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-55-fork123"}, &checkForkRun); err != nil {
+		t.Errorf("expected fork candidate run to be preserved, got err: %v", err)
 	}
 
 	var checkBaseRun v1alpha1.Run
@@ -3109,10 +3220,12 @@ func TestProcessPullRequestClosed_PreservesSeedRunReusedBySurvivingComparison(t 
 		t.Fatalf("ProcessPullRequestClosed failed: %v", err)
 	}
 
-	// comp7 must be deleted
+	// comp7 must be retained with pr-state=closed
 	var checkComp7 v1alpha1.Comparison
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-7"}, &checkComp7); !apierrors.IsNotFound(err) {
-		t.Errorf("expected comparison pr-7 to be deleted, got err: %v", err)
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: "pr-7"}, &checkComp7); err != nil {
+		t.Errorf("expected comparison pr-7 to be retained, got err: %v", err)
+	} else if checkComp7.Labels[consumer.LabelPRState] != consumer.StateClosed {
+		t.Errorf("expected comparison pr-7 pr-state=%s, got %q", consumer.StateClosed, checkComp7.Labels[consumer.LabelPRState])
 	}
 
 	// unreusedRun must be deleted
@@ -3460,12 +3573,15 @@ func TestMultiRepo_SamePRNumber_DistinctObjectsAndCommentIsolation(t *testing.T)
 		t.Fatalf("expected 200 OK for close, got %d: %s", rrClose.Code, rrClose.Body.String())
 	}
 
-	// comp1 and cand1 must be deleted
+	// comp1 is retained with pr-state=closed, cand1 is preserved
 	pollUntil(t, 2*time.Second, func() bool {
-		return apierrors.IsNotFound(cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp1Name}, &comp1))
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedComp1Name}, &comp1); err == nil {
+			return comp1.Labels[consumer.LabelPRState] == consumer.StateClosed
+		}
+		return false
 	})
-	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand1Name}, &cand1); !apierrors.IsNotFound(err) {
-		t.Errorf("expected cand1 %s to be deleted, got err: %v", expectedCand1Name, err)
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: expectedCand1Name}, &cand1); err != nil {
+		t.Errorf("expected cand1 %s to be preserved, got err: %v", expectedCand1Name, err)
 	}
 
 	// comp2 and cand2 must be preserved!

@@ -38,6 +38,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -7202,6 +7203,256 @@ func TestServerRepoPullsUnit(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestServerPullsStateFilter(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+
+	compOpen := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-pr-1",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels: map[string]string{
+				consumer.LabelPR:      "1",
+				consumer.LabelRepo:    "org-a_repo-a",
+				consumer.LabelPRState: consumer.StateOpen,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-a/repo-a",
+				Number:     1,
+				HeadSHA:    "1111111111111111111111111111111111111111",
+			},
+		},
+	}
+
+	compUnlabeled := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-pr-2",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute)),
+			Labels: map[string]string{
+				consumer.LabelPR:   "2",
+				consumer.LabelRepo: "org-a_repo-a",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-a/repo-a",
+				Number:     2,
+				HeadSHA:    "2222222222222222222222222222222222222222",
+			},
+		},
+	}
+
+	compMerged := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-pr-3",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-3 * time.Minute)),
+			Labels: map[string]string{
+				consumer.LabelPR:      "3",
+				consumer.LabelRepo:    "org-a_repo-a",
+				consumer.LabelPRState: consumer.StateMerged,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-a/repo-a",
+				Number:     3,
+				HeadSHA:    "3333333333333333333333333333333333333333",
+			},
+		},
+	}
+
+	compClosed := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "comp-pr-4",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-4 * time.Minute)),
+			Labels: map[string]string{
+				consumer.LabelPR:      "4",
+				consumer.LabelRepo:    "org-a_repo-a",
+				consumer.LabelPRState: consumer.StateClosed,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "org-a/repo-a",
+				Number:     4,
+				HeadSHA:    "4444444444444444444444444444444444444444",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(compOpen, compUnlabeled, compMerged, compClosed).Build()
+	server := NewServer(Config{Client: cl, DefaultNamespace: "eval-runner"})
+
+	endpoints := []string{
+		"/github.com/org-a/repo-a/pulls",
+		"/pulls",
+	}
+
+	for _, ep := range endpoints {
+		t.Run("Default_"+ep, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep, nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", w.Code)
+			}
+			body := w.Body.String()
+
+			// All 4 PRs present
+			for _, pr := range []string{">#1<", ">#2<", ">#3<", ">#4<"} {
+				if !strings.Contains(body, pr) {
+					t.Errorf("expected %s in body", pr)
+				}
+			}
+
+			// Filter links: All active, Open 2, Closed 2
+			if !strings.Contains(body, `Open 2`) {
+				t.Errorf("expected 'Open 2' in header")
+			}
+			if !strings.Contains(body, `Closed 2`) {
+				t.Errorf("expected 'Closed 2' in header")
+			}
+			if !strings.Contains(body, `state-filter active">All<`) {
+				t.Errorf("expected All filter to be active by default")
+			}
+
+			// State chips on rows
+			if !strings.Contains(body, `<span class="chip open"><span class="dot"></span>Open</span>`) {
+				t.Errorf("expected Open state chip")
+			}
+			if !strings.Contains(body, `<span class="chip merged"><span class="dot"></span>Merged</span>`) {
+				t.Errorf("expected Merged state chip")
+			}
+			if !strings.Contains(body, `<span class="chip closed"><span class="dot"></span>Closed</span>`) {
+				t.Errorf("expected Closed state chip")
+			}
+		})
+
+		t.Run("StateOpen_"+ep, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep+"?state=open", nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", w.Code)
+			}
+			body := w.Body.String()
+
+			// PR 1 and 2 present, 3 and 4 excluded
+			if !strings.Contains(body, ">#1<") || !strings.Contains(body, ">#2<") {
+				t.Errorf("expected PR 1 and 2 in open filter")
+			}
+			if strings.Contains(body, ">#3<") || strings.Contains(body, ">#4<") {
+				t.Errorf("did not expect PR 3 or 4 in open filter")
+			}
+
+			// Open filter active
+			if !strings.Contains(body, `state-filter active">Open 2<`) {
+				t.Errorf("expected Open 2 filter to be active")
+			}
+		})
+
+		t.Run("StateClosed_"+ep, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep+"?state=closed", nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", w.Code)
+			}
+			body := w.Body.String()
+
+			// PR 3 (merged) and PR 4 (closed) present, 1 and 2 excluded
+			if !strings.Contains(body, ">#3<") || !strings.Contains(body, ">#4<") {
+				t.Errorf("expected PR 3 and 4 in closed filter")
+			}
+			if strings.Contains(body, ">#1<") || strings.Contains(body, ">#2<") {
+				t.Errorf("did not expect PR 1 or 2 in closed filter")
+			}
+
+			// Closed filter active (includes merged)
+			if !strings.Contains(body, `state-filter active">Closed 2<`) {
+				t.Errorf("expected Closed 2 filter to be active")
+			}
+		})
+
+		t.Run("StateAll_"+ep, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep+"?state=all", nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", w.Code)
+			}
+			body := w.Body.String()
+
+			for _, pr := range []string{">#1<", ">#2<", ">#3<", ">#4<"} {
+				if !strings.Contains(body, pr) {
+					t.Errorf("expected %s in all filter", pr)
+				}
+			}
+			if !strings.Contains(body, `state-filter active">All<`) {
+				t.Errorf("expected All filter to be active")
+			}
+		})
+
+		t.Run("InvalidState_"+ep, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep+"?state=unknown", nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", w.Code)
+			}
+			body := w.Body.String()
+
+			// Invalid values behave as all
+			for _, pr := range []string{">#1<", ">#2<", ">#3<", ">#4<"} {
+				if !strings.Contains(body, pr) {
+					t.Errorf("expected %s when state is invalid", pr)
+				}
+			}
+			if !strings.Contains(body, `state-filter active">All<`) {
+				t.Errorf("expected All filter to be active for invalid state")
+			}
+		})
+
+		t.Run("PaginationPreservesState_"+ep, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep+"?state=open&limit=1&offset=0", nil)
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", w.Code)
+			}
+			body := w.Body.String()
+
+			if !strings.Contains(body, "More →") {
+				t.Fatalf("expected More → link on page 1")
+			}
+			if !strings.Contains(body, "state=open") {
+				t.Errorf("expected More link to preserve state=open: %s", body)
+			}
+
+			// Follow to page 2
+			reqP2 := httptest.NewRequest(http.MethodGet, ep+"?state=open&limit=1&offset=1", nil)
+			wP2 := httptest.NewRecorder()
+			server.ServeHTTP(wP2, reqP2)
+			if wP2.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", wP2.Code)
+			}
+			bodyP2 := wP2.Body.String()
+			if !strings.Contains(bodyP2, "← Previous") {
+				t.Fatalf("expected ← Previous link on page 2")
+			}
+			if !strings.Contains(bodyP2, "state=open") {
+				t.Errorf("expected Previous link to preserve state=open: %s", bodyP2)
+			}
+		})
+	}
 }
 
 func TestServerRepoSeries(t *testing.T) {

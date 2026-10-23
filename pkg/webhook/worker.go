@@ -172,7 +172,7 @@ func (wp *WorkerPool) ProcessItem(ctx context.Context, item WorkItem) error {
 	return nil
 }
 
-// ProcessPullRequestClosed cleans up Comparisons and seed Runs when a pull request closes.
+// ProcessPullRequestClosed retains Comparisons and cleans up orphaned seed Runs when a pull request closes.
 func (wp *WorkerPool) ProcessPullRequestClosed(ctx context.Context, item *PullRequestWorkItem) error {
 	if item == nil || wp.cfg.Client == nil {
 		return nil
@@ -187,6 +187,7 @@ func (wp *WorkerPool) ProcessPullRequestClosed(ctx context.Context, item *PullRe
 		Change: forge.ChangeRequest{
 			Number: item.PRNumber,
 			State:  "closed",
+			Merged: item.Merged,
 			Head: forge.ChangeRequestHead{
 				RepoRef:  candRef,
 				CloneURL: item.CandidateCloneURL,

@@ -26,6 +26,7 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/forge"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -336,12 +337,25 @@ func TestConsumer_LifecycleAndReplay(t *testing.T) {
 		t.Fatalf("ChangeClosed failed: %v", err)
 	}
 
-	// Verify comparison deleted
+	// Verify comparison retained and labeled closed
 	if err := cl.List(t.Context(), &comps, client.InNamespace("eval-runner")); err != nil {
 		t.Fatalf("failed to list comparisons: %v", err)
 	}
-	if len(comps.Items) != 0 {
-		t.Fatalf("expected 0 comparisons after close, got %d", len(comps.Items))
+	if len(comps.Items) != 1 {
+		t.Fatalf("expected 1 comparison after close, got %d", len(comps.Items))
+	}
+	if comps.Items[0].Labels[LabelPRState] != StateClosed {
+		t.Errorf("expected comparison pr-state=%s, got %q", StateClosed, comps.Items[0].Labels[LabelPRState])
+	}
+
+	// Verify candidate run for head2 is retained, orphaned candidate run for head1 is deleted
+	var survivingCandRun v1alpha1.Run
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-7-ccccccc"}, &survivingCandRun); err != nil {
+		t.Errorf("expected candidate run pr-7-ccccccc to be retained, got err: %v", err)
+	}
+	var orphanRun v1alpha1.Run
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-7-bbbbbbb"}, &orphanRun); !apierrors.IsNotFound(err) {
+		t.Errorf("expected orphaned run pr-7-bbbbbbb to be deleted, got err: %v", err)
 	}
 
 	// Verify baseline run preserved
@@ -869,19 +883,25 @@ func TestConsumer_ReconcileClusterState(t *testing.T) {
 		t.Fatalf("ReconcileClusterState failed: %v", err)
 	}
 
-	// comp10 and run10 must be deleted
+	// comp10 and run10 must be retained with pr-state=merged
 	var checkComp10 v1alpha1.Comparison
-	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-10"}, &checkComp10); err == nil {
-		t.Errorf("expected comparison pr-10 to be deleted, but it still exists")
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-10"}, &checkComp10); err != nil {
+		t.Errorf("expected comparison pr-10 to be retained, got err: %v", err)
+	} else if checkComp10.Labels[LabelPRState] != StateMerged {
+		t.Errorf("expected pr-10 label %s=%s, got %q", LabelPRState, StateMerged, checkComp10.Labels[LabelPRState])
+	}
+	var checkRun10 v1alpha1.Run
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-10-run"}, &checkRun10); err != nil {
+		t.Errorf("expected run pr-10-run to be preserved, got err: %v", err)
 	}
 
-	// comp20 must still exist
+	// comp20 must still exist with pr-state=open
 	var checkComp20 v1alpha1.Comparison
 	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-20"}, &checkComp20); err != nil {
 		t.Errorf("expected comparison pr-20 to be preserved, got err: %v", err)
 	}
 
-	// comp30 must still exist
+	// comp30 must still exist with pr-state=closed
 	var checkComp30 v1alpha1.Comparison
 	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-30"}, &checkComp30); err != nil {
 		t.Errorf("expected comparison pr-30 to be preserved, got err: %v", err)
@@ -890,5 +910,146 @@ func TestConsumer_ReconcileClusterState(t *testing.T) {
 	// Idempotency: second call succeeds without error and changes nothing
 	if err := c.ReconcileClusterState(t.Context(), ref); err != nil {
 		t.Fatalf("second ReconcileClusterState failed: %v", err)
+	}
+}
+
+func TestConsumer_CloseRetain_OrphanDelete_ReopenOpen(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+	ref := forge.RepoRef{
+		Host:  "github.com",
+		Owner: "gke-labs",
+		Name:  "eval-runner",
+	}
+
+	c := New(cl, Config{
+		Namespace:    "eval-runner",
+		DefaultModel: "mockllm/model",
+	})
+
+	baseSHA := "1111111111111111111111111111111111111111"
+	head1SHA := "2222222222222222222222222222222222222222"
+	head2SHA := "3333333333333333333333333333333333333333"
+
+	// 1. Open PR 77 at head1
+	err := c.ConsumeEvent(t.Context(), ChangeOpenedEvent{
+		Repo: ref,
+		Change: forge.ChangeRequest{
+			Number: 77,
+			State:  "open",
+			Head:   forge.ChangeRequestHead{SHA: head1SHA, RepoRef: ref},
+			Base:   forge.ChangeRequestBase{SHA: baseSHA},
+		},
+		CandidateCloneURL: "https://github.com/gke-labs/eval-runner.git",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+	})
+	if err != nil {
+		t.Fatalf("ChangeOpened failed: %v", err)
+	}
+
+	var comp77 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-77"}, &comp77); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if comp77.Labels[LabelPRState] != StateOpen {
+		t.Errorf("expected comparison to have pr-state=%s, got %q", StateOpen, comp77.Labels[LabelPRState])
+	}
+
+	// 2. Update PR 77 to head2
+	err = c.ConsumeEvent(t.Context(), ChangeUpdatedEvent{
+		Repo: ref,
+		Change: forge.ChangeRequest{
+			Number: 77,
+			State:  "open",
+			Head:   forge.ChangeRequestHead{SHA: head2SHA, RepoRef: ref},
+			Base:   forge.ChangeRequestBase{SHA: baseSHA},
+		},
+		CandidateCloneURL: "https://github.com/gke-labs/eval-runner.git",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+	})
+	if err != nil {
+		t.Fatalf("ChangeUpdated failed: %v", err)
+	}
+
+	cand1Name := CandidateRunName("github.com/gke-labs/eval-runner", 77, head1SHA, false)
+	cand2Name := CandidateRunName("github.com/gke-labs/eval-runner", 77, head2SHA, false)
+
+	// Both runs exist before close
+	var r1, r2 v1alpha1.Run
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: cand1Name}, &r1); err != nil {
+		t.Fatalf("expected cand1 to exist: %v", err)
+	}
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: cand2Name}, &r2); err != nil {
+		t.Fatalf("expected cand2 to exist: %v", err)
+	}
+
+	// 3. Close PR 77
+	err = c.ConsumeEvent(t.Context(), ChangeClosedEvent{
+		Repo: ref,
+		Change: forge.ChangeRequest{
+			Number: 77,
+			State:  "closed",
+			Head:   forge.ChangeRequestHead{RepoRef: ref},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChangeClosed failed: %v", err)
+	}
+
+	// Comparison retained with pr-state=closed
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-77"}, &comp77); err != nil {
+		t.Fatalf("comparison should be retained on close: %v", err)
+	}
+	if comp77.Labels[LabelPRState] != StateClosed {
+		t.Errorf("expected comparison pr-state=%s, got %q", StateClosed, comp77.Labels[LabelPRState])
+	}
+
+	// Candidate 2 (referenced) retained, Candidate 1 (orphan) deleted
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: cand2Name}, &r2); err != nil {
+		t.Errorf("expected referenced candidate run %s to be retained, got: %v", cand2Name, err)
+	}
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: cand1Name}, &r1); !apierrors.IsNotFound(err) {
+		t.Errorf("expected orphan run %s to be deleted, got: %v", cand1Name, err)
+	}
+
+	// 4. Close with Merged: true
+	err = c.ConsumeEvent(t.Context(), ChangeClosedEvent{
+		Repo: ref,
+		Change: forge.ChangeRequest{
+			Number: 77,
+			State:  "closed",
+			Merged: true,
+			Head:   forge.ChangeRequestHead{RepoRef: ref},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChangeClosed (merged) failed: %v", err)
+	}
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-77"}, &comp77); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if comp77.Labels[LabelPRState] != StateMerged {
+		t.Errorf("expected comparison pr-state=%s, got %q", StateMerged, comp77.Labels[LabelPRState])
+	}
+
+	// 5. Reopen PR 77
+	err = c.ConsumeEvent(t.Context(), ChangeOpenedEvent{
+		Repo: ref,
+		Change: forge.ChangeRequest{
+			Number: 77,
+			State:  "open",
+			Head:   forge.ChangeRequestHead{SHA: head2SHA, RepoRef: ref},
+			Base:   forge.ChangeRequestBase{SHA: baseSHA},
+		},
+		CandidateCloneURL: "https://github.com/gke-labs/eval-runner.git",
+		BaselineCloneURL:  "https://github.com/gke-labs/eval-runner.git",
+	})
+	if err != nil {
+		t.Fatalf("ChangeOpened (reopen) failed: %v", err)
+	}
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-77"}, &comp77); err != nil {
+		t.Fatalf("failed to get comparison: %v", err)
+	}
+	if comp77.Labels[LabelPRState] != StateOpen {
+		t.Errorf("expected comparison pr-state=%s after reopen, got %q", StateOpen, comp77.Labels[LabelPRState])
 	}
 }
