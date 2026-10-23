@@ -1117,6 +1117,130 @@ func TestSyncer_RateLimitBudgetFloor_BackoffAndOneLogPerStateTransition(t *testi
 	if len(logs) != 2 || !strings.Contains(logs[1], "budget recovered") {
 		t.Fatalf("expected exactly 2 state transition logs total, got: %v", logs)
 	}
+	if !strings.Contains(logs[1], "80 remaining > 10 floor of 100") {
+		t.Errorf("expected recovery log to contain '80 remaining > 10 floor of 100', got: %q", logs[1])
+	}
+	logMu.Unlock()
+}
+
+// TestSyncer_RateLimitBudgetRecovery_WindowResetPassed verifies that when rate limit suppression
+// ends because the reset window has passed, the recovery log reports "window reset passed at <reset>"
+// rather than printing a stale pre-reset remaining count.
+func TestSyncer_RateLimitBudgetRecovery_WindowResetPassed(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "rate-limit-reset.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	currentRefs := []*plumbing.Reference{
+		plumbing.NewReferenceFromStrings("refs/heads/main", "1111111111111111111111111111111111111111"),
+	}
+
+	gr := gitremote.New(gitremote.WithRefLister(func(ctx context.Context, url string) ([]*plumbing.Reference, error) {
+		return currentRefs, nil
+	}))
+
+	resetTime := time.Date(2026, 10, 23, 3, 24, 0, 0, time.UTC)
+	fake := &countingFakeForge{
+		branches: []forge.Branch{{Name: "main", SHA: "1111111111111111111111111111111111111111"}},
+		rateLimit: gh.RateLimitInfo{
+			Limit:     60,
+			Remaining: 50,
+			Reset:     time.Now().Add(1 * time.Hour),
+		},
+	}
+
+	reg := forge.NewRegistry(fake)
+	reg.Register("github.com", fake)
+
+	var logMu sync.Mutex
+	var logs []string
+	logger := func(format string, args ...any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	s := New(SyncerOptions{
+		Store:                 st,
+		Registry:              reg,
+		GitRemoteForge:        gr,
+		Repositories:          []RepoConfig{{Ref: ref}},
+		RateLimitFloorPercent: 10, // floor = 10% of 60 = 6
+		LsRemoteInterval:      60 * time.Second,
+		FullReconcileInterval: 1 * time.Hour,
+		Logger:                logger,
+	})
+
+	ctx := t.Context()
+
+	// 1. Initial sync to populate store
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	_ = fake.getAndClearCalls()
+
+	// 2. Ref changes: branch advances to 2222...
+	currentRefs = []*plumbing.Reference{
+		plumbing.NewReferenceFromStrings("refs/heads/main", "2222222222222222222222222222222222222222"),
+	}
+
+	// Drop rate limit below floor: 5 <= 6, reset in the future
+	futureReset := time.Now().Add(30 * time.Minute)
+	fake.mu.Lock()
+	fake.rateLimit = gh.RateLimitInfo{
+		Limit:     60,
+		Remaining: 5,
+		Reset:     futureReset,
+	}
+	fake.mu.Unlock()
+
+	// Tick 2: API calls must be suppressed, 1 floor reached log emitted
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("sync during suppression returned error: %v", err)
+	}
+	if calls := fake.getAndClearCalls(); len(calls) != 0 {
+		t.Errorf("expected API calls to be suppressed, got %v", calls)
+	}
+
+	logMu.Lock()
+	if len(logs) != 1 || !strings.Contains(logs[0], "budget floor reached") {
+		t.Fatalf("expected 1 log line for floor reached, got: %v", logs)
+	}
+	logMu.Unlock()
+
+	// Tick 3: Window reset passes (reset time now in the past), but remaining is still 5 (stale pre-reset count <= 6)
+	fake.mu.Lock()
+	fake.rateLimit = gh.RateLimitInfo{
+		Limit:     60,
+		Remaining: 5,
+		Reset:     resetTime,
+	}
+	fake.mu.Unlock()
+
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("sync after reset passed returned error: %v", err)
+	}
+	if calls := fake.getAndClearCalls(); len(calls) == 0 {
+		t.Errorf("expected API calls to resume after window reset passed, got 0")
+	}
+
+	logMu.Lock()
+	if len(logs) != 2 || !strings.Contains(logs[1], "budget recovered") {
+		t.Fatalf("expected exactly 2 state transition logs total, got: %v", logs)
+	}
+	expectedMsg := fmt.Sprintf("forge rate limit budget recovered for %s: window reset passed at %s; resuming API calls", ref.String(), resetTime.Format(time.RFC3339))
+	if logs[1] != expectedMsg {
+		t.Errorf("expected recovery log %q, got %q", expectedMsg, logs[1])
+	}
+	if strings.Contains(logs[1], "remaining >") {
+		t.Errorf("recovery log should not mention 'remaining >', got: %q", logs[1])
+	}
 	logMu.Unlock()
 }
 
