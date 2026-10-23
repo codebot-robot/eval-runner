@@ -656,6 +656,7 @@ data:
 ```
 
 Supported ConfigMap keys include:
+- `allowedCloneHosts`: Comma-separated allow-list of clone URL hosts for webhook-received pull requests and pushes (default `github.com`; an empty list defaults to `github.com`; wildcards are not supported).
 - `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
 - `artifactDir`: Local filesystem directory for storing evaluation artifacts.
 - `artifactMaxUploadBytes`: Maximum size in bytes of an uploaded Inspect log before truncation (default `10485760`, 10 MiB).
@@ -692,7 +693,7 @@ Both the controller and UI watch `eval-runner-config` and dynamically apply conf
 Settings that bind to host interfaces, define process identity, or configure webhook startup cannot change at runtime and require restarting the corresponding Deployment or pod:
 - **Listen and Probe Addresses**: Controller and UI bind addresses (e.g. `--health-probe-bind-address`, `--listen-addr`).
 - **Namespaces**: Target Kubernetes namespaces (e.g. `--namespace`, `--sandbox-namespace`).
-- **Webhook Settings**: Keys consumed by `eval-runner-webhook` (`githubWebhookSecret`, `webhookRepositories`, `defaultBatchSize`, `defaultMaxSamplesPerTask`, `defaultModel`) are read once at webhook startup and remain restart-only.
+- **Webhook Settings**: Keys consumed by `eval-runner-webhook` (`githubWebhookSecret`, `webhookRepositories`, `allowedCloneHosts`, `defaultBatchSize`, `defaultMaxSamplesPerTask`, `defaultModel`) are read once at webhook startup and remain restart-only.
 
 ### Empty-Value Semantics and Feature Disabling
 

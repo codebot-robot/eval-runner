@@ -22,6 +22,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/forge"
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	corev1 "k8s.io/api/core/v1"
@@ -83,6 +84,7 @@ const (
 	ConfigMapKeyWebhookRepositories = configkeys.ConfigMapKeyWebhookRepositories
 
 	// ConfigMapKeyAllowedCloneHosts is the ConfigMap key for clone URL host allow-list.
+	// An empty list defaults to "github.com".
 	ConfigMapKeyAllowedCloneHosts = configkeys.ConfigMapKeyAllowedCloneHosts
 
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
@@ -294,13 +296,11 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 			cfg.WebhookRepositories = ParseRepositoryList(val)
 		}
 		if val, ok := cm.Data[ConfigMapKeyAllowedCloneHosts]; ok {
-			trimmed := strings.TrimSpace(val)
-			if trimmed != "" {
-				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.AllowedCloneHosts = nil
-				} else {
-					cfg.AllowedCloneHosts = ParseHostList(val)
-				}
+			hosts := discovery.ParseHostList(val)
+			if len(hosts) > 0 {
+				cfg.AllowedCloneHosts = hosts
+			} else {
+				cfg.AllowedCloneHosts = []string{DefaultAllowedCloneHosts}
 			}
 		}
 	}
@@ -342,36 +342,21 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 	if flags.IsExplicit("webhook-repositories") {
 		cfg.WebhookRepositories = ParseRepositoryList(flags.WebhookRepositories)
 	}
-	if flags.IsExplicit("allowed-clone-hosts") || flags.IsExplicit("allowed-clone-host") {
-		trimmed := strings.TrimSpace(flags.AllowedCloneHosts)
-		if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-			cfg.AllowedCloneHosts = nil
+	if flags.IsExplicit("allowed-clone-hosts") {
+		hosts := discovery.ParseHostList(flags.AllowedCloneHosts)
+		if len(hosts) > 0 {
+			cfg.AllowedCloneHosts = hosts
 		} else {
-			cfg.AllowedCloneHosts = ParseHostList(flags.AllowedCloneHosts)
+			cfg.AllowedCloneHosts = []string{DefaultAllowedCloneHosts}
 		}
 	}
 
 	return cfg, nil
 }
 
-// ParseHostList parses a comma-separated list of hostnames, trimming whitespace,
-// dropping empty items, and deduplicating while preserving order.
-func ParseHostList(s string) []string {
-	var hosts []string
-	seen := make(map[string]bool)
-	for _, h := range strings.Split(s, ",") {
-		trimmed := strings.TrimSpace(h)
-		if trimmed != "" && !seen[trimmed] {
-			seen[trimmed] = true
-			hosts = append(hosts, trimmed)
-		}
-	}
-	return hosts
-}
-
-// IsHostAllowed checks whether host (e.g. "github.com") is in allowList.
+// IsHostAllowed checks whether host (e.g. "github.com") is in allowList using exact,
+// case-insensitive comparison. Wildcards are not supported.
 // If allowList is empty, all hosts are rejected (fail-closed).
-// An entry of "*" allows all hosts.
 func IsHostAllowed(host string, allowList []string) bool {
 	if len(allowList) == 0 {
 		return false
@@ -382,14 +367,8 @@ func IsHostAllowed(host string, allowList []string) bool {
 	}
 	for _, allowed := range allowList {
 		trimmed := strings.ToLower(strings.TrimSpace(allowed))
-		if trimmed == "*" || trimmed == normalized {
+		if trimmed == normalized {
 			return true
-		}
-		if strings.HasPrefix(trimmed, "*.") {
-			domain := trimmed[2:]
-			if normalized == domain || strings.HasSuffix(normalized, "."+domain) {
-				return true
-			}
 		}
 	}
 	return false
