@@ -53,7 +53,7 @@ type Server struct {
 
 // NewServer creates a new webhook Server and initializes endpoints.
 func NewServer(cfg Config) *Server {
-	if cfg.AllowedCloneHosts == nil {
+	if len(cfg.AllowedCloneHosts) == 0 {
 		cfg.AllowedCloneHosts = []string{DefaultAllowedCloneHosts}
 	}
 	s := &Server{
@@ -585,24 +585,11 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 // validateCloneURL validates that a repository clone URL parses, that its host
 // is within the allow-list, and that its owner and name match unconditionally.
 func (s *Server) validateCloneURL(raw, owner, name string) error {
-	return validateCloneURL(raw, owner, name, s.cfg.AllowedCloneHosts)
-}
-
-// validateCloneURL validates that a repository clone URL parses, that its host
-// is in the provided allow-list (or DefaultAllowedCloneHosts if omitted), and
-// that its owner and name match unconditionally.
-func validateCloneURL(raw, owner, name string, allowedHosts ...[]string) error {
-	var hosts []string
-	if len(allowedHosts) > 0 {
-		hosts = allowedHosts[0]
-	} else {
-		hosts = []string{DefaultAllowedCloneHosts}
-	}
 	parsed, ok := forge.ParseRepoURL(raw)
 	if !ok {
 		return fmt.Errorf("failed to parse clone URL")
 	}
-	if !IsHostAllowed(parsed.Host, hosts) {
+	if !IsHostAllowed(parsed.Host, s.cfg.AllowedCloneHosts) {
 		return fmt.Errorf("host %q is not in the allowed-clone-hosts list", parsed.Host)
 	}
 	if !strings.EqualFold(parsed.Owner, owner) || !strings.EqualFold(parsed.Name, name) {

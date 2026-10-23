@@ -79,8 +79,7 @@ func main() {
 	flag.IntVar(&defaultMaxSamplesPerTask, "default-max-samples-per-task", webhook.DefaultMaxSamplesPerTask, "Default maximum samples per task across batches")
 	flag.Float64Var(&defaultBudgetUSD, "default-budget-usd", 0.0, "Default comparison budget in USD across all tasks and batches (0 = unlimited)")
 	flag.StringVar(&webhookRepositories, "webhook-repositories", "", "Comma-separated allow-list of repositories (owner/repo)")
-	flag.StringVar(&allowedCloneHosts, "allowed-clone-hosts", webhook.DefaultAllowedCloneHosts, "Comma-separated allow-list of clone URL hosts")
-	flag.StringVar(&allowedCloneHosts, "allowed-clone-host", webhook.DefaultAllowedCloneHosts, "Comma-separated allow-list of clone URL hosts (alias for -allowed-clone-hosts)")
+	flag.StringVar(&allowedCloneHosts, "allowed-clone-hosts", webhook.DefaultAllowedCloneHosts, "Comma-separated allow-list of clone URL hosts (empty defaults to github.com)")
 	flag.IntVar(&workers, "workers", webhook.DefaultWorkers, "Number of concurrent worker goroutines")
 	flag.IntVar(&queueSize, "queue-size", webhook.DefaultQueueSize, "Queue buffer size for incoming webhook events")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
@@ -163,11 +162,7 @@ func main() {
 		log.Printf("webhookRepositories allow-list configured: %v", cfg.WebhookRepositories)
 	}
 
-	if len(cfg.AllowedCloneHosts) == 0 {
-		log.Println("warning: allowedCloneHosts allow-list is empty; all clone URLs will be rejected")
-	} else {
-		log.Printf("allowedCloneHosts allow-list configured: %v", cfg.AllowedCloneHosts)
-	}
+	log.Printf("allowedCloneHosts allow-list configured: %v", cfg.AllowedCloneHosts)
 
 	server := webhook.NewServer(cfg)
 	server.Start()

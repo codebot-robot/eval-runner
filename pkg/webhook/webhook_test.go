@@ -1651,6 +1651,121 @@ func TestResolveWebhookConfig_DefaultBudgetUSD(t *testing.T) {
 	}
 }
 
+func TestIsHostAllowed(t *testing.T) {
+	tests := []struct {
+		name      string
+		host      string
+		allowList []string
+		expected  bool
+	}{
+		{
+			name:      "exact match",
+			host:      "github.com",
+			allowList: []string{"github.com"},
+			expected:  true,
+		},
+		{
+			name:      "case-insensitive match host uppercase",
+			host:      "GITHUB.COM",
+			allowList: []string{"github.com"},
+			expected:  true,
+		},
+		{
+			name:      "case-insensitive match allow-list uppercase",
+			host:      "github.com",
+			allowList: []string{"GITHUB.COM"},
+			expected:  true,
+		},
+		{
+			name:      "whitespace trimming",
+			host:      "  github.com  ",
+			allowList: []string{" github.com "},
+			expected:  true,
+		},
+		{
+			name:      "unmatched host",
+			host:      "evil.example.com",
+			allowList: []string{"github.com"},
+			expected:  false,
+		},
+		{
+			name:      "empty allow-list fails closed",
+			host:      "github.com",
+			allowList: nil,
+			expected:  false,
+		},
+		{
+			name:      "empty allow-list slice fails closed",
+			host:      "github.com",
+			allowList: []string{},
+			expected:  false,
+		},
+		{
+			name:      "empty host fails closed",
+			host:      "",
+			allowList: []string{"github.com"},
+			expected:  false,
+		},
+		{
+			name:      "whitespace host fails closed",
+			host:      "   ",
+			allowList: []string{"github.com"},
+			expected:  false,
+		},
+		{
+			name:      "wildcard * entry does not match host",
+			host:      "github.com",
+			allowList: []string{"*"},
+			expected:  false,
+		},
+		{
+			name:      "wildcard * entry does not match arbitrary host",
+			host:      "evil.example.com",
+			allowList: []string{"*"},
+			expected:  false,
+		},
+		{
+			name:      "wildcard domain *.github.com does not match apex domain",
+			host:      "github.com",
+			allowList: []string{"*.github.com"},
+			expected:  false,
+		},
+		{
+			name:      "wildcard domain *.github.com does not match subdomain",
+			host:      "sub.github.com",
+			allowList: []string{"*.github.com"},
+			expected:  false,
+		},
+		{
+			name:      "wildcard domain *.github.com does not match foreign host",
+			host:      "evil.example.com",
+			allowList: []string{"*.github.com"},
+			expected:  false,
+		},
+		{
+			name:      "mixed allow-list matches exact entry only",
+			host:      "github.com",
+			allowList: []string{"*", "*.gitlab.com", "github.com"},
+			expected:  true,
+		},
+		{
+			name:      "mixed allow-list does not match wildcard entry",
+			host:      "sub.gitlab.com",
+			allowList: []string{"*", "*.gitlab.com", "github.com"},
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsHostAllowed(tt.host, tt.allowList)
+			if got != tt.expected {
+				t.Errorf("IsHostAllowed(%q, %v) = %v, expected %v", tt.host, tt.allowList, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestResolveWebhookConfig_AllowedCloneHosts(t *testing.T) {
 	// 1. Default when unset
 	cfgDef, err := ResolveWebhookConfig(nil, RawWebhookFlags{}, nil)
@@ -1676,18 +1791,18 @@ func TestResolveWebhookConfig_AllowedCloneHosts(t *testing.T) {
 		t.Errorf("expected AllowedCloneHosts %v, got %v", expectedCM, cfgCM.AllowedCloneHosts)
 	}
 
-	// 3. Sentinel "none" in ConfigMap disables allowed clone hosts
-	cmNone := &corev1.ConfigMap{
+	// 3. Empty ConfigMap value defaults to github.com
+	cmEmpty := &corev1.ConfigMap{
 		Data: map[string]string{
-			ConfigMapKeyAllowedCloneHosts: "none",
+			ConfigMapKeyAllowedCloneHosts: "",
 		},
 	}
-	cfgNone, err := ResolveWebhookConfig(cmNone, RawWebhookFlags{}, nil)
+	cfgEmpty, err := ResolveWebhookConfig(cmEmpty, RawWebhookFlags{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfgNone.AllowedCloneHosts != nil {
-		t.Errorf("expected nil AllowedCloneHosts for 'none', got %v", cfgNone.AllowedCloneHosts)
+	if !reflect.DeepEqual(cfgEmpty.AllowedCloneHosts, []string{"github.com"}) {
+		t.Errorf("expected default AllowedCloneHosts [github.com] for empty ConfigMap value, got %v", cfgEmpty.AllowedCloneHosts)
 	}
 
 	// 4. Explicit flag overrides ConfigMap
@@ -1706,20 +1821,19 @@ func TestResolveWebhookConfig_AllowedCloneHosts(t *testing.T) {
 		t.Errorf("expected explicit flag to override AllowedCloneHosts, got %v", cfgFlag.AllowedCloneHosts)
 	}
 
-	// 5. Explicit alias flag -allowed-clone-host overrides ConfigMap
-	flagsAlias := RawWebhookFlags{
-		AllowedCloneHosts: "git-server.eval-runner-sandbox.svc",
+	// 5. Explicit empty flag defaults to github.com even when ConfigMap is set
+	flagsEmpty := RawWebhookFlags{
+		AllowedCloneHosts: "",
 		Explicit: map[string]bool{
-			"allowed-clone-host": true,
+			"allowed-clone-hosts": true,
 		},
 	}
-	cfgAlias, err := ResolveWebhookConfig(cm, flagsAlias, nil)
+	cfgFlagEmpty, err := ResolveWebhookConfig(cm, flagsEmpty, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expectedAlias := []string{"git-server.eval-runner-sandbox.svc"}
-	if !reflect.DeepEqual(cfgAlias.AllowedCloneHosts, expectedAlias) {
-		t.Errorf("expected explicit alias flag to override AllowedCloneHosts, got %v", cfgAlias.AllowedCloneHosts)
+	if !reflect.DeepEqual(cfgFlagEmpty.AllowedCloneHosts, []string{"github.com"}) {
+		t.Errorf("expected default AllowedCloneHosts [github.com] for empty flag value, got %v", cfgFlagEmpty.AllowedCloneHosts)
 	}
 }
 
@@ -1797,15 +1911,35 @@ func TestValidateCloneURL(t *testing.T) {
 		t.Errorf("expected validateCloneURL(%q) to fail on unparseable URL, but succeeded", unparseableURL)
 	}
 
-	// 7. Package-level function validateCloneURL works directly
-	if err := validateCloneURL(validHTTPS, "fork", "eval-runner"); err != nil {
-		t.Errorf("expected validateCloneURL package helper to succeed, got: %v", err)
+	// 7. Server initialized with empty config uses default allow-list (github.com)
+	sDefault := NewServer(Config{})
+	if err := sDefault.validateCloneURL(validHTTPS, "fork", "eval-runner"); err != nil {
+		t.Errorf("expected default server validateCloneURL to succeed, got: %v", err)
 	}
-	if err := validateCloneURL(foreignHostURL, "fork", "eval-runner"); err == nil {
-		t.Errorf("expected validateCloneURL package helper to fail for foreign host, but succeeded")
+	if err := sDefault.validateCloneURL(foreignHostURL, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected default server validateCloneURL to fail for foreign host, but succeeded")
 	}
-	if err := validateCloneURL(foreignHostURL, "fork", "eval-runner", []string{"evil.example.com"}); err != nil {
-		t.Errorf("expected validateCloneURL package helper with custom allowList to succeed, got: %v", err)
+
+	// 8. Wildcard entries in Server allow-list do not match anything
+	sWildcardAll := &Server{
+		cfg: Config{
+			AllowedCloneHosts: []string{"*"},
+		},
+	}
+	if err := sWildcardAll.validateCloneURL(validHTTPS, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected server with '*' allow-list to reject %q, but succeeded", validHTTPS)
+	}
+	sWildcardDomain := &Server{
+		cfg: Config{
+			AllowedCloneHosts: []string{"*.github.com"},
+		},
+	}
+	subdomainHTTPS := "https://sub.github.com/fork/eval-runner.git"
+	if err := sWildcardDomain.validateCloneURL(subdomainHTTPS, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected server with '*.github.com' allow-list to reject %q, but succeeded", subdomainHTTPS)
+	}
+	if err := sWildcardDomain.validateCloneURL(validHTTPS, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected server with '*.github.com' allow-list to reject apex %q, but succeeded", validHTTPS)
 	}
 }
 
