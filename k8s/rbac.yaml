@@ -38,6 +38,7 @@ rules:
   - create
   - update
   - patch
+  - delete
 - apiGroups:
   - evalrunner.gke-labs.dev
   resources:
@@ -57,6 +58,7 @@ rules:
   - get
   - list
   - watch
+  - create
   - update
   - patch
   - delete
