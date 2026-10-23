@@ -1987,7 +1987,9 @@ const seriesDetailTemplate = `
       <div class="card-header">
         <div>
           <h1 class="card-title">
+            {{- if not .Repo.Host }}
             <span>{{ .Repository }}</span>
+            {{- end }}
             <span class="mono" style="font-size:16px;color:var(--muted);font-weight:normal">({{ .Branch }})</span>
           </h1>
           <div style="font-size:13px;color:var(--muted);margin-top:4px"><a href="{{ .BackLink }}">← Back to Series</a></div>
@@ -2150,7 +2152,9 @@ const seriesDetailTemplate = `
         {{- end }}
       </div>
       <div class="card-footer">
+        {{- if not .Repo.Host }}
         <span><b>Repository:</b> {{ .Repository }}</span>
+        {{- end }}
         <span><b>Branch:</b> {{ .Branch }}</span>
         <span><b>Total Runs:</b> {{ .TotalRuns }}</span>
         {{- if .Version }}

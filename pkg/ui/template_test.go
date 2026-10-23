@@ -2974,6 +2974,40 @@ func TestTemplateRenderingRepoSeriesGolden(t *testing.T) {
 	assertGolden(t, "repo_series.golden.html", buf.String())
 }
 
+func TestTemplateRenderingSeriesDetail_RepoScopedVsLegacy(t *testing.T) {
+	t.Run("RepoScoped", func(t *testing.T) {
+		ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+		view := sampleSeriesDetailView()
+		view.Repo = ref
+		var buf bytes.Buffer
+		if err := tmplSeriesDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute series detail template: %v", err)
+		}
+		body := buf.String()
+		if strings.Contains(body, "<span>gke-labs/eval-runner</span>") {
+			t.Errorf("expected repo-scoped series detail card title not to contain repository name")
+		}
+		if strings.Contains(body, "<span><b>Repository:</b>") {
+			t.Errorf("expected repo-scoped series detail footer not to contain Repository")
+		}
+	})
+
+	t.Run("LegacyGlobal", func(t *testing.T) {
+		view := sampleSeriesDetailView()
+		var buf bytes.Buffer
+		if err := tmplSeriesDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute series detail template: %v", err)
+		}
+		body := buf.String()
+		if !strings.Contains(body, "<span>gke-labs/eval-runner</span>") {
+			t.Errorf("expected legacy global series detail card title to contain repository name")
+		}
+		if !strings.Contains(body, "<span><b>Repository:</b> gke-labs/eval-runner</span>") {
+			t.Errorf("expected legacy global series detail footer to contain Repository")
+		}
+	})
+}
+
 func sampleRepoSuiteDetailView() RepoSuiteDetailView {
 	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
 	t1 := time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC)
