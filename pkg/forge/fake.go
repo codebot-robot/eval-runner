@@ -43,6 +43,7 @@ type FakeForge struct {
 	Repositories   map[string]*Repository
 	BranchMap      map[string][]Branch
 	ChangeReqs     map[string][]ChangeRequest
+	PullReqs       map[string]map[int]*ChangeRequest
 	CommitMap      map[string]*Commit
 	Comments       map[string]string // key: repoKey/id/markerKey -> body
 	Statuses       map[string]Status // key: repoKey/sha/context -> status
@@ -70,6 +71,7 @@ func NewFakeForge(kind string) *FakeForge {
 		Repositories:   make(map[string]*Repository),
 		BranchMap:      make(map[string][]Branch),
 		ChangeReqs:     make(map[string][]ChangeRequest),
+		PullReqs:       make(map[string]map[int]*ChangeRequest),
 		CommitMap:      make(map[string]*Commit),
 		Comments:       make(map[string]string),
 		Statuses:       make(map[string]Status),
@@ -146,6 +148,46 @@ func (f *FakeForge) ChangeRequests(ctx context.Context, ref RepoRef) ([]ChangeRe
 	}
 	if crs, ok := f.ChangeReqs[repoKey(ref)]; ok {
 		return crs, nil
+	}
+	return nil, ErrNotFound
+}
+
+// SetPullRequest configures a specific change request for a RepoRef, useful for closed/merged PRs
+// that are not returned in the open ChangeRequests list.
+func (f *FakeForge) SetPullRequest(ref RepoRef, cr ChangeRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.PullReqs == nil {
+		f.PullReqs = make(map[string]map[int]*ChangeRequest)
+	}
+	k := repoKey(ref)
+	if f.PullReqs[k] == nil {
+		f.PullReqs[k] = make(map[int]*ChangeRequest)
+	}
+	f.PullReqs[k][cr.Number] = &cr
+}
+
+// PullRequest returns a change request by number, or ErrNotFound if not found.
+func (f *FakeForge) PullRequest(ctx context.Context, ref RepoRef, number int) (*ChangeRequest, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.ChangeReqsErr != nil {
+		return nil, f.ChangeReqsErr
+	}
+	k := repoKey(ref)
+	if f.PullReqs != nil && f.PullReqs[k] != nil {
+		if cr, ok := f.PullReqs[k][number]; ok && cr != nil {
+			crCopy := *cr
+			return &crCopy, nil
+		}
+	}
+	if crs, ok := f.ChangeReqs[k]; ok {
+		for _, cr := range crs {
+			if cr.Number == number {
+				crCopy := cr
+				return &crCopy, nil
+			}
+		}
 	}
 	return nil, ErrNotFound
 }

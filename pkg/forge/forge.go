@@ -97,6 +97,7 @@ type ChangeRequest struct {
 	Head      ChangeRequestHead `json:"head"`
 	Base      ChangeRequestBase `json:"base"`
 	State     string            `json:"state"`
+	Merged    bool              `json:"merged,omitempty"`
 	UpdatedAt time.Time         `json:"updated_at"`
 	MergeSHA  string            `json:"merge_sha,omitempty"`
 }
