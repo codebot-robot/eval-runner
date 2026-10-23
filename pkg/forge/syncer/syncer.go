@@ -47,6 +47,16 @@ type PullRequestGetter interface {
 	PullRequest(ctx context.Context, ref forge.RepoRef, number int) (*forge.ChangeRequest, error)
 }
 
+// LivePRFinder is optionally implemented by event handlers that track live pull requests in the cluster.
+type LivePRFinder interface {
+	LivePRNumbers(ctx context.Context, repo forge.RepoRef) (map[int]bool, error)
+}
+
+// ClusterReconciler is optionally implemented by event handlers that reconcile cluster state against the forge store.
+type ClusterReconciler interface {
+	ReconcileClusterState(ctx context.Context, repo forge.RepoRef) error
+}
+
 // RateLimitProvider is optionally implemented by forges with rate-limiting clients.
 type RateLimitProvider interface {
 	RateLimit() gh.RateLimitInfo
@@ -917,6 +927,19 @@ func (s *Syncer) syncFullReconcile(
 		defaultBranch = repoMeta.DefaultBranch
 	}
 
+	var livePRs map[int]bool
+	c := s.getConsumer()
+	if finder, ok := c.(LivePRFinder); ok {
+		l, err := finder.LivePRNumbers(ctx, ref)
+		if err != nil {
+			recordError(ref, "live_prs")
+			s.log("syncer: failed to list live PR numbers for %s: %v", ref.String(), err)
+		} else {
+			livePRs = l
+		}
+	}
+	prGetter, _ := f.(PullRequestGetter)
+
 	var seededCRs []forge.ChangeRequest
 	for _, r := range remoteRefs {
 		if r == nil {
@@ -929,28 +952,101 @@ func (s *Syncer) syncFullReconcile(
 			if len(parts) == 2 && parts[1] == "head" {
 				if num, err := strconv.Atoi(parts[0]); err == nil && num > 0 {
 					if !openCRNums[num] && !storedCRNums[num] {
-						placeholder := forge.ChangeRequest{
-							ID:     forge.ChangeRequestID(strconv.Itoa(num)),
-							Number: num,
-							Title:  fmt.Sprintf("Pull request #%d", num),
-							State:  "closed",
-							Head: forge.ChangeRequestHead{
-								Ref:     fmt.Sprintf("refs/pull/%d/head", num),
-								SHA:     r.Hash().String(),
-								RepoRef: ref,
-							},
-							Base: forge.ChangeRequestBase{
-								Ref: defaultBranch,
-							},
+						var cr *forge.ChangeRequest
+						if livePRs[num] && prGetter != nil {
+							fetched, err := prGetter.PullRequest(ctx, ref, num)
+							if err != nil {
+								recordError(ref, "fetch_pr")
+								s.log("syncer: failed to fetch PR #%d for %s: %v", num, ref.String(), err)
+							} else if fetched != nil {
+								cr = fetched
+							}
 						}
-						seededCRs = append(seededCRs, placeholder)
+						if cr == nil {
+							placeholder := forge.ChangeRequest{
+								ID:     forge.ChangeRequestID(strconv.Itoa(num)),
+								Number: num,
+								Title:  fmt.Sprintf("Pull request #%d", num),
+								State:  "closed",
+								Head: forge.ChangeRequestHead{
+									Ref:     fmt.Sprintf("refs/pull/%d/head", num),
+									SHA:     r.Hash().String(),
+									RepoRef: ref,
+								},
+								Base: forge.ChangeRequestBase{
+									Ref: defaultBranch,
+								},
+							}
+							cr = &placeholder
+						}
+						seededCRs = append(seededCRs, *cr)
 					}
 				}
 			}
 		}
 	}
 
+	// For any PR with a live Comparison not returned as open:
+	// If it was not advertised in remoteRefs, ensure it is still seeded.
+	if len(livePRs) > 0 {
+		seededNums := make(map[int]bool)
+		for _, scr := range seededCRs {
+			seededNums[scr.Number] = true
+		}
+		for num := range livePRs {
+			if !openCRNums[num] && !storedCRNums[num] && !seededNums[num] {
+				var cr *forge.ChangeRequest
+				if prGetter != nil {
+					fetched, err := prGetter.PullRequest(ctx, ref, num)
+					if err != nil {
+						recordError(ref, "fetch_pr")
+						s.log("syncer: failed to fetch PR #%d for %s: %v", num, ref.String(), err)
+					} else if fetched != nil {
+						cr = fetched
+					}
+				}
+				if cr == nil {
+					placeholder := forge.ChangeRequest{
+						ID:     forge.ChangeRequestID(strconv.Itoa(num)),
+						Number: num,
+						Title:  fmt.Sprintf("Pull request #%d", num),
+						State:  "closed",
+						Head: forge.ChangeRequestHead{
+							Ref:     fmt.Sprintf("refs/pull/%d/head", num),
+							RepoRef: ref,
+						},
+						Base: forge.ChangeRequestBase{
+							Ref: defaultBranch,
+						},
+					}
+					cr = &placeholder
+				}
+				seededCRs = append(seededCRs, *cr)
+			}
+		}
+	}
+
 	allCRs := append(openCRs, seededCRs...)
+
+	// If a live PR was already stored as closed but without merged status, fetch it to set merged correctly.
+	if len(livePRs) > 0 && prGetter != nil {
+		for num := range livePRs {
+			if storedCRNums[num] && !openCRNums[num] {
+				for _, sc := range storedCRs {
+					if sc.Number == num && !sc.Merged && !isCROpen(sc) {
+						fetched, err := prGetter.PullRequest(ctx, ref, num)
+						if err != nil {
+							recordError(ref, "fetch_pr")
+							s.log("syncer: failed to fetch PR #%d for %s: %v", num, ref.String(), err)
+						} else if fetched != nil {
+							allCRs = append(allCRs, *fetched)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
 
 	var commits []*forge.Commit
 	for _, b := range branches {
@@ -1037,7 +1133,7 @@ func (s *Syncer) syncFullReconcile(
 	}
 
 	// Synchronous consume-before-commit: abort on consumer failure
-	c := s.getConsumer()
+	c = s.getConsumer()
 	for _, ev := range events {
 		if c != nil {
 			if err := c.ConsumeEvent(ctx, ev); err != nil {
@@ -1068,6 +1164,13 @@ func (s *Syncer) syncFullReconcile(
 		if err := s.store.SaveSyncBatch(ctx, ref, batch); err != nil {
 			recordError(ref, "store_write")
 			return fmt.Errorf("save sync batch for %s: %w", ref.String(), err)
+		}
+	}
+
+	if reconciler, ok := c.(ClusterReconciler); ok {
+		if err := reconciler.ReconcileClusterState(ctx, ref); err != nil {
+			recordError(ref, "cluster_reconcile")
+			return fmt.Errorf("reconcile cluster state for %s: %w", ref.String(), err)
 		}
 	}
 
@@ -1109,7 +1212,7 @@ func candidateCloneURL(cr forge.ChangeRequest, defaultCloneURL string) string {
 }
 
 func isCROpen(cr forge.ChangeRequest) bool {
-	return strings.EqualFold(cr.State, "open")
+	return strings.EqualFold(cr.State, "open") && !cr.Merged
 }
 
 func applyBranchDiff(stored []forge.Branch, diff RefDiff) []forge.Branch {
