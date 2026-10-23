@@ -7884,3 +7884,285 @@ func TestServerLegacyRedirect_NonDefaultNamespacePropagation(t *testing.T) {
 		t.Errorf("expected ?namespace=eval-runner when ns != DefaultNamespace, got Location %q", loc)
 	}
 }
+
+func TestServerPullsStateFilter(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+
+	// PR 1: explicit open label
+	comp1 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-1",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-4 * time.Minute)),
+			Labels: map[string]string{
+				LabelPRState: "open",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     1,
+				HeadSHA:    "1111111111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{Verdict: v1alpha1.ComparisonVerdictImproved},
+	}
+
+	// PR 2: merged label
+	comp2 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-2",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-3 * time.Minute)),
+			Labels: map[string]string{
+				LabelPRState: "merged",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     2,
+				HeadSHA:    "2222222222222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{Verdict: v1alpha1.ComparisonVerdictImproved},
+	}
+
+	// PR 3: closed label
+	comp3 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-3",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute)),
+			Labels: map[string]string{
+				LabelPRState: "closed",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     3,
+				HeadSHA:    "3333333333333333333333333333333333333333",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{Verdict: v1alpha1.ComparisonVerdictInconclusive},
+	}
+
+	// PR 4: no pr-state label (created before this change -> counts as open)
+	comp4 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pr-4",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     4,
+				HeadSHA:    "4444444444444444444444444444444444444444",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{Verdict: v1alpha1.ComparisonVerdictRegressed},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp1, comp2, comp3, comp4).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	t.Run("DefaultShowsAll", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/pulls", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		// Filter bar has Open 2, Closed 2, and All is active
+		if !strings.Contains(body, "Open 2") {
+			t.Errorf("expected 'Open 2' in header, got body:\n%s", body)
+		}
+		if !strings.Contains(body, "Closed 2") {
+			t.Errorf("expected 'Closed 2' in header")
+		}
+		if !strings.Contains(body, `class="state-filter-link active">All</a>`) {
+			t.Errorf("expected All filter link to be active by default")
+		}
+
+		// All 4 PRs present
+		for _, prNum := range []string{">#1<", ">#2<", ">#3<", ">#4<"} {
+			if !strings.Contains(body, prNum) {
+				t.Errorf("expected PR %s in default all view", prNum)
+			}
+		}
+
+		// State chips
+		if !strings.Contains(body, `<span class="chip open"><span class="dot"></span>Open</span>`) {
+			t.Errorf("expected Open state chip")
+		}
+		if !strings.Contains(body, `<span class="chip merged"><span class="dot"></span>Merged</span>`) {
+			t.Errorf("expected Merged state chip")
+		}
+		if !strings.Contains(body, `<span class="chip closed"><span class="dot"></span>Closed</span>`) {
+			t.Errorf("expected Closed state chip")
+		}
+	})
+
+	t.Run("StateAllExplicit", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/pulls?state=all", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		if !strings.Contains(body, `class="state-filter-link active">All</a>`) {
+			t.Errorf("expected All filter link to be active for ?state=all")
+		}
+		for _, prNum := range []string{">#1<", ">#2<", ">#3<", ">#4<"} {
+			if !strings.Contains(body, prNum) {
+				t.Errorf("expected PR %s in state=all view", prNum)
+			}
+		}
+	})
+
+	t.Run("StateOpen", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/pulls?state=open", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		if !strings.Contains(body, `class="state-filter-link active">Open 2</a>`) {
+			t.Errorf("expected Open filter link to be active for ?state=open")
+		}
+		// Open PRs (#1 and unlabelled #4) present
+		if !strings.Contains(body, ">#1<") || !strings.Contains(body, ">#4<") {
+			t.Errorf("expected PR #1 and #4 in state=open view")
+		}
+		// Closed PRs (#2 merged, #3 closed) excluded
+		if strings.Contains(body, ">#2<") || strings.Contains(body, ">#3<") {
+			t.Errorf("did not expect PR #2 or #3 in state=open view")
+		}
+	})
+
+	t.Run("StateClosed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/pulls?state=closed", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+
+		if !strings.Contains(body, `class="state-filter-link active">Closed 2</a>`) {
+			t.Errorf("expected Closed filter link to be active for ?state=closed")
+		}
+		// Closed PRs (#2 merged, #3 closed) present
+		if !strings.Contains(body, ">#2<") || !strings.Contains(body, ">#3<") {
+			t.Errorf("expected PR #2 and #3 in state=closed view")
+		}
+		// Open PRs excluded
+		if strings.Contains(body, ">#1<") || strings.Contains(body, ">#4<") {
+			t.Errorf("did not expect PR #1 or #4 in state=closed view")
+		}
+	})
+
+	t.Run("LegacyPullsPageFilters", func(t *testing.T) {
+		// Test legacy /pulls page with ?state=open
+		req := httptest.NewRequest(http.MethodGet, "/pulls?state=open", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `class="state-filter-link active">Open 2</a>`) {
+			t.Errorf("expected Open active on /pulls?state=open")
+		}
+		if !strings.Contains(body, ">#1<") || strings.Contains(body, ">#2<") {
+			t.Errorf("expected PR 1 and not PR 2 in /pulls?state=open")
+		}
+	})
+}
+
+func TestServerPullsStatePagination(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().Truncate(time.Second)
+
+	// Create 3 closed PRs to paginate with limit=1
+	var comps []client.Object
+	for i := 1; i <= 3; i++ {
+		comp := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              fmt.Sprintf("pr-%d", i),
+				Namespace:         "eval-runner",
+				CreationTimestamp: metav1.NewTime(now.Add(time.Duration(i) * time.Minute)),
+				Labels: map[string]string{
+					LabelPRState: "closed",
+				},
+			},
+			Spec: v1alpha1.ComparisonSpec{
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     i,
+					HeadSHA:    fmt.Sprintf("%d111111111111111111111111111111111111111", i),
+				},
+			},
+			Status: v1alpha1.ComparisonStatus{Verdict: v1alpha1.ComparisonVerdictImproved},
+		}
+		comps = append(comps, comp)
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comps...).Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	// Page 1: ?state=closed&limit=1&offset=0
+	req1 := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/pulls?state=closed&limit=1&offset=0", nil)
+	w1 := httptest.NewRecorder()
+	server.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w1.Code)
+	}
+	body1 := w1.Body.String()
+	if !strings.Contains(body1, "More →") {
+		t.Errorf("expected More link on page 1")
+	}
+	// Pagination link must preserve state=closed
+	if !strings.Contains(body1, "state=closed") {
+		t.Errorf("expected state=closed preserved in pagination links, got body:\n%s", body1)
+	}
+	if !strings.Contains(body1, "offset=1") {
+		t.Errorf("expected offset=1 in next link")
+	}
+
+	// Page 2: ?state=closed&limit=1&offset=1
+	req2 := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/pulls?state=closed&limit=1&offset=1", nil)
+	w2 := httptest.NewRecorder()
+	server.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w2.Code)
+	}
+	body2 := w2.Body.String()
+	if !strings.Contains(body2, "← Previous") || !strings.Contains(body2, "More →") {
+		t.Errorf("expected both Previous and More links on page 2")
+	}
+	if !strings.Contains(body2, "offset=2") {
+		t.Errorf("expected offset=2 in next link on page 2")
+	}
+
+	// Legacy /pulls page preserves state in pagination
+	reqLegacy := httptest.NewRequest(http.MethodGet, "/pulls?state=closed&limit=1&offset=0", nil)
+	wLegacy := httptest.NewRecorder()
+	server.ServeHTTP(wLegacy, reqLegacy)
+	if wLegacy.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", wLegacy.Code)
+	}
+	bodyLegacy := wLegacy.Body.String()
+	if !strings.Contains(bodyLegacy, "state=closed") {
+		t.Errorf("expected state=closed preserved in legacy /pulls pagination links")
+	}
+}

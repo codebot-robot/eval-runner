@@ -464,15 +464,23 @@ func sampleComparisonsListGroupedView() ComparisonsListView {
 
 func samplePullRequestsListView() PullRequestsListView {
 	return PullRequestsListView{
-		ActiveTab: NavTabPulls,
-		Repo:      RepoRef{},
-		Namespace: "eval-runner",
+		ActiveTab:     NavTabPulls,
+		Repo:          RepoRef{},
+		Namespace:     "eval-runner",
+		SelectedState: "all",
+		OpenCount:     1,
+		ClosedCount:   0,
+		OpenLink:      "/pulls?state=open",
+		ClosedLink:    "/pulls?state=closed",
+		AllLink:       "/pulls?state=all",
 		Pulls: []PullRequestListItem{
 			{
 				Repository:     "gke-labs/eval-runner",
 				RepoHash:       RepoHash("gke-labs/eval-runner"),
 				Number:         42,
 				GitHubURL:      "https://github.com/gke-labs/eval-runner/pull/42",
+				State:          "Open",
+				StateChip:      "open",
 				HeadSHA:        "05ce4d8222222222222222222222222222222222",
 				HeadSHAShort:   "05ce4d8",
 				BaseSHA:        "a81d0c4111111111111111111111111111111111",
@@ -503,6 +511,9 @@ func samplePullRequestsListView() PullRequestsListView {
 func sampleRepoPullRequestsListView() PullRequestsListView {
 	v := samplePullRequestsListView()
 	v.Repo = RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	v.OpenLink = "/github.com/gke-labs/eval-runner/pulls?state=open"
+	v.ClosedLink = "/github.com/gke-labs/eval-runner/pulls?state=closed"
+	v.AllLink = "/github.com/gke-labs/eval-runner/pulls?state=all"
 	return v
 }
 

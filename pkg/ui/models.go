@@ -347,6 +347,8 @@ type PullRequestListItem struct {
 	HeadSHAShort   string
 	BaseSHA        string
 	BaseSHAShort   string
+	State          string // "Open", "Merged", "Closed"
+	StateChip      string // "open", "merged", "closed"
 	Verdict        v1alpha1.ComparisonVerdict
 	VerdictChip    string
 	PImprovement   string
@@ -376,6 +378,14 @@ type PullRequestsListView struct {
 	HasPrev       bool
 	PrevLink      string
 	ShowingRange  string
+
+	// State filter fields
+	SelectedState string // "all", "open", "closed"
+	OpenCount     int
+	ClosedCount   int
+	OpenLink      string
+	ClosedLink    string
+	AllLink       string
 }
 
 // PullRequestHistoryItem represents one Comparison in a pull request's history.

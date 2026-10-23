@@ -1690,7 +1690,14 @@ const pullsListTemplate = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pull Requests · eval-runner</title>
-  <style>` + baseCSS + `</style>
+  <style>` + baseCSS + `
+.chip.open { background: var(--good-soft); color: var(--good); }
+.chip.merged { background: #F3E8FF; color: #8250DF; }
+.chip.closed { background: var(--neutral-soft); color: var(--neutral); }
+.state-filter-link { color: var(--muted); text-decoration: none; font-weight: 500; }
+.state-filter-link:hover { color: var(--ink); text-decoration: none; }
+.state-filter-link.active { color: var(--ink); font-weight: 600; }
+</style>
 </head>
 <body>
   {{ template "repo_header" . }}
@@ -1699,7 +1706,13 @@ const pullsListTemplate = `
     <div class="card">
       <div class="card-header">
         <h1 class="card-title">Pull Requests</h1>
-        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
+        <div class="state-filter" style="display:flex;align-items:center;gap:8px;font-size:14px">
+          <a href="{{ .OpenLink }}" class="state-filter-link{{ if eq .SelectedState "open" }} active{{ end }}">Open {{ .OpenCount }}</a>
+          <span style="color:var(--muted)">·</span>
+          <a href="{{ .ClosedLink }}" class="state-filter-link{{ if eq .SelectedState "closed" }} active{{ end }}">Closed {{ .ClosedCount }}</a>
+          <span style="color:var(--muted)">·</span>
+          <a href="{{ .AllLink }}" class="state-filter-link{{ if or (eq .SelectedState "all") (eq .SelectedState "") }} active{{ end }}">All</a>
+        </div>
       </div>
       <div style="overflow-x:auto">
         <table class="ci">
@@ -1707,6 +1720,7 @@ const pullsListTemplate = `
             <tr>
               <th>Repository</th>
               <th>PR</th>
+              <th>State</th>
               <th>Base → Head</th>
               <th>Verdict</th>
               <th>Samples</th>
@@ -1721,6 +1735,7 @@ const pullsListTemplate = `
             <tr>
               <td><a href="{{ .RepoLink }}" style="font-weight:600">{{ .Repository }}</a></td>
               <td><a href="{{ .HistoryLink }}" style="font-weight:600">#{{ .Number }}</a> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener" style="font-size:12px;color:var(--muted);margin-left:4px">GitHub ↗</a></td>
+              <td><span class="chip {{ .StateChip }}"><span class="dot"></span>{{ .State }}</span></td>
               <td><span class="mono" style="font-size:13px">{{ if .BaseSHAShort }}{{ .BaseSHAShort }} → {{ end }}{{ .HeadSHAShort }}</span></td>
               <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span>{{ if ne .PImprovement "—" }} <span class="mono" style="font-size:12px;color:var(--muted)">(P={{ .PImprovement }})</span>{{ end }}</td>
               <td class="num">{{ .SamplesRun }}</td>
@@ -1731,7 +1746,7 @@ const pullsListTemplate = `
             </tr>
             {{ else }}
             <tr>
-              <td colspan="9" class="empty-state">No pull requests found.</td>
+              <td colspan="10" class="empty-state">No pull requests found.</td>
             </tr>
             {{ end }}
           </tbody>

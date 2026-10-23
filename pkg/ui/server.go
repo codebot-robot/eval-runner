@@ -2058,6 +2058,113 @@ func groupPullRequests(comps []v1alpha1.Comparison, filter *RepoRef) []prGroup {
 	return groups
 }
 
+// LabelPRState is the label key for pull request state on Comparisons.
+const LabelPRState = "evalrunner.gke-labs.dev/pr-state"
+
+// PRStateFilter represents the ?state= filter for pull requests.
+type PRStateFilter string
+
+const (
+	PRStateFilterAll    PRStateFilter = "all"
+	PRStateFilterOpen   PRStateFilter = "open"
+	PRStateFilterClosed PRStateFilter = "closed"
+)
+
+// ParsePRStateFilter maps the value of the ?state= query parameter to a PRStateFilter.
+// Defaults to PRStateFilterAll for unrecognized or empty values.
+func ParsePRStateFilter(s string) PRStateFilter {
+	switch PRStateFilter(strings.ToLower(strings.TrimSpace(s))) {
+	case PRStateFilterOpen:
+		return PRStateFilterOpen
+	case PRStateFilterClosed:
+		return PRStateFilterClosed
+	default:
+		return PRStateFilterAll
+	}
+}
+
+// prComparisonState returns the PR state ("open", "merged", "closed") for a Comparison.
+// Comparisons without the label count as "open".
+func prComparisonState(comp *v1alpha1.Comparison) string {
+	if comp != nil && comp.Labels != nil {
+		if v, ok := comp.Labels[LabelPRState]; ok && v != "" {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "merged":
+				return "merged"
+			case "closed":
+				return "closed"
+			case "open":
+				return "open"
+			}
+		}
+	}
+	return "open"
+}
+
+// prGroupState returns the state of a prGroup based on its latest Comparison.
+func prGroupState(grp prGroup) string {
+	if len(grp.comparisons) == 0 {
+		return "open"
+	}
+	return prComparisonState(&grp.comparisons[0])
+}
+
+// prStateDisplayAndChip returns the display string ("Open", "Merged", "Closed") and CSS chip class.
+func prStateDisplayAndChip(st string) (display, chip string) {
+	switch st {
+	case "merged":
+		return "Merged", "merged"
+	case "closed":
+		return "Closed", "closed"
+	default:
+		return "Open", "open"
+	}
+}
+
+// buildPullsStateURL builds a link for the PR state filter tabs.
+// It preserves namespace and limit, sets state, and drops offset.
+func buildPullsStateURL(basePath string, query url.Values, state PRStateFilter) string {
+	q := make(url.Values)
+	for _, key := range []string{"namespace", "limit"} {
+		if v := query.Get(key); v != "" {
+			q.Set(key, v)
+		}
+	}
+	if state != "" {
+		q.Set("state", string(state))
+	}
+	encoded := q.Encode()
+	if encoded == "" {
+		return basePath
+	}
+	return basePath + "?" + encoded
+}
+
+// filterPullRequests filters prGroups by the given state filter and calculates total open and closed counts across all groups.
+func filterPullRequests(groups []prGroup, filter PRStateFilter) (filtered []prGroup, openCount, closedCount int) {
+	for _, grp := range groups {
+		st := prGroupState(grp)
+		if st == "open" {
+			openCount++
+		} else {
+			closedCount++
+		}
+		switch filter {
+		case PRStateFilterOpen:
+			if st == "open" {
+				filtered = append(filtered, grp)
+			}
+		case PRStateFilterClosed:
+			if st == "closed" || st == "merged" {
+				filtered = append(filtered, grp)
+			}
+		default:
+			filtered = append(filtered, grp)
+		}
+	}
+	return filtered, openCount, closedCount
+}
+
 func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
@@ -2102,8 +2209,10 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	groups := groupPullRequests(compList.Items, nil)
+	stateFilter := ParsePRStateFilter(r.URL.Query().Get("state"))
+	filteredGroups, openCount, closedCount := filterPullRequests(groups, stateFilter)
 
-	totalCount := len(groups)
+	totalCount := len(filteredGroups)
 	start := offset
 	if start > totalCount {
 		start = totalCount
@@ -2114,7 +2223,7 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	linkNS := s.linkNamespace(ns)
-	pageGroups := groups[start:end]
+	pageGroups := filteredGroups[start:end]
 	items := make([]PullRequestListItem, 0, len(pageGroups))
 	for _, grp := range pageGroups {
 		latest := grp.comparisons[0]
@@ -2144,6 +2253,9 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		st := prGroupState(grp)
+		stDisplay, stChip := prStateDisplayAndChip(st)
+
 		items = append(items, PullRequestListItem{
 			Repository:     grp.repository,
 			RepoHash:       grp.repoHash,
@@ -2153,6 +2265,8 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 			HeadSHAShort:   ShortCommit(headSHA),
 			BaseSHA:        baseSHA,
 			BaseSHAShort:   ShortCommit(baseSHA),
+			State:          stDisplay,
+			StateChip:      stChip,
 			Verdict:        latest.Status.Verdict,
 			VerdictChip:    verdictChipClass(latest.Status.Verdict),
 			PImprovement:   pImp,
@@ -2188,6 +2302,10 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalCount)
 	}
 
+	openLink := buildPullsStateURL("/pulls", r.URL.Query(), PRStateFilterOpen)
+	closedLink := buildPullsStateURL("/pulls", r.URL.Query(), PRStateFilterClosed)
+	allLink := buildPullsStateURL("/pulls", r.URL.Query(), PRStateFilterAll)
+
 	view := PullRequestsListView{
 		ActiveTab:     NavTabPulls,
 		Namespace:     ns,
@@ -2201,6 +2319,12 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 		HasPrev:       hasPrev,
 		PrevLink:      prevLink,
 		ShowingRange:  showingRange,
+		SelectedState: string(stateFilter),
+		OpenCount:     openCount,
+		ClosedCount:   closedCount,
+		OpenLink:      openLink,
+		ClosedLink:    closedLink,
+		AllLink:       allLink,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2237,8 +2361,10 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	groups := groupPullRequests(compList.Items, &ref)
+	stateFilter := ParsePRStateFilter(r.URL.Query().Get("state"))
+	filteredGroups, openCount, closedCount := filterPullRequests(groups, stateFilter)
 
-	totalCount := len(groups)
+	totalCount := len(filteredGroups)
 	start := offset
 	if start > totalCount {
 		start = totalCount
@@ -2249,7 +2375,7 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	linkNS := s.linkNamespace(ns)
-	pageGroups := groups[start:end]
+	pageGroups := filteredGroups[start:end]
 	items := make([]PullRequestListItem, 0, len(pageGroups))
 	for _, grp := range pageGroups {
 		latest := grp.comparisons[0]
@@ -2265,6 +2391,9 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 			baseSHA = latest.Spec.PullRequest.BaseSHA
 		}
 
+		st := prGroupState(grp)
+		stDisplay, stChip := prStateDisplayAndChip(st)
+
 		items = append(items, PullRequestListItem{
 			Repository:     ref.Owner + "/" + ref.Name,
 			RepoHash:       RepoHash(ref.Owner + "/" + ref.Name),
@@ -2274,6 +2403,8 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 			HeadSHAShort:   ShortCommit(headSHA),
 			BaseSHA:        baseSHA,
 			BaseSHAShort:   ShortCommit(baseSHA),
+			State:          stDisplay,
+			StateChip:      stChip,
 			Verdict:        latest.Status.Verdict,
 			VerdictChip:    verdictChipClass(latest.Status.Verdict),
 			PImprovement:   pImp,
@@ -2310,6 +2441,10 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 		showingRange = fmt.Sprintf("Showing %d–%d of %d", start+1, end, totalCount)
 	}
 
+	openLink := buildPullsStateURL(basePath, r.URL.Query(), PRStateFilterOpen)
+	closedLink := buildPullsStateURL(basePath, r.URL.Query(), PRStateFilterClosed)
+	allLink := buildPullsStateURL(basePath, r.URL.Query(), PRStateFilterAll)
+
 	view := PullRequestsListView{
 		ActiveTab:     NavTabPulls,
 		Repo:          ref,
@@ -2324,6 +2459,12 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 		HasPrev:       hasPrev,
 		PrevLink:      prevLink,
 		ShowingRange:  showingRange,
+		SelectedState: string(stateFilter),
+		OpenCount:     openCount,
+		ClosedCount:   closedCount,
+		OpenLink:      openLink,
+		ClosedLink:    closedLink,
+		AllLink:       allLink,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
