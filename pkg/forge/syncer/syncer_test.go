@@ -1157,7 +1157,7 @@ func TestSyncer_RateLimitBudgetRecovery_WindowResetPassed(t *testing.T) {
 		return currentRefs, nil
 	}))
 
-	resetTime := time.Date(2026, 10, 23, 3, 24, 0, 0, time.UTC)
+	resetTime := time.Now().Add(-time.Minute).Truncate(time.Second)
 	fake := &countingFakeForge{
 		branches: []forge.Branch{{Name: "main", SHA: "1111111111111111111111111111111111111111"}},
 		rateLimit: gh.RateLimitInfo{
