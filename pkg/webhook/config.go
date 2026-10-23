@@ -55,6 +55,9 @@ const (
 	// DefaultMaxSamplesPerTask is the default maximum samples per task across batches.
 	DefaultMaxSamplesPerTask = v1alpha1.DefaultMaxSamplesPerTask
 
+	// DefaultAllowedCloneHosts is the default comma-separated allow-list of clone URL hosts.
+	DefaultAllowedCloneHosts = "github.com"
+
 	// ConfigMapKeyDefaultModel is the ConfigMap key for the default model.
 	ConfigMapKeyDefaultModel = configkeys.ConfigMapKeyDefaultModel
 
@@ -79,6 +82,9 @@ const (
 	// ConfigMapKeyWebhookRepositories is the ConfigMap key for repository allow-list.
 	ConfigMapKeyWebhookRepositories = configkeys.ConfigMapKeyWebhookRepositories
 
+	// ConfigMapKeyAllowedCloneHosts is the ConfigMap key for clone URL host allow-list.
+	ConfigMapKeyAllowedCloneHosts = configkeys.ConfigMapKeyAllowedCloneHosts
+
 	// ConfigSentinelDisabled is the sentinel value used in ConfigMap or CLI flags to explicitly disable
 	// a credential or feature that otherwise has a non-empty built-in default.
 	ConfigSentinelDisabled = configkeys.ConfigSentinelDisabled
@@ -97,6 +103,7 @@ type Config struct {
 	DefaultMaxSamplesPerTask int
 	DefaultBudgetUSD         *float64
 	WebhookRepositories      []string
+	AllowedCloneHosts        []string
 	Workers                  int
 	QueueSize                int
 
@@ -129,6 +136,7 @@ type RawWebhookFlags struct {
 	DefaultMaxSamplesPerTask *int
 	DefaultBudgetUSD         *float64
 	WebhookRepositories      string
+	AllowedCloneHosts        string
 	Workers                  int
 	QueueSize                int
 	Explicit                 map[string]bool
@@ -155,6 +163,7 @@ func DefaultConfig() Config {
 		DefaultBatchSize:         DefaultBatchSize,
 		DefaultMaxSamplesPerTask: DefaultMaxSamplesPerTask,
 		WebhookRepositories:      nil,
+		AllowedCloneHosts:        []string{DefaultAllowedCloneHosts},
 		Workers:                  DefaultWorkers,
 		QueueSize:                DefaultQueueSize,
 	}
@@ -284,6 +293,16 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 		if val, ok := cm.Data[ConfigMapKeyWebhookRepositories]; ok {
 			cfg.WebhookRepositories = ParseRepositoryList(val)
 		}
+		if val, ok := cm.Data[ConfigMapKeyAllowedCloneHosts]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.AllowedCloneHosts = nil
+				} else {
+					cfg.AllowedCloneHosts = ParseHostList(val)
+				}
+			}
+		}
 	}
 
 	// 2. Apply explicit flags (highest precedence)
@@ -323,8 +342,57 @@ func ResolveWebhookConfig(cm *corev1.ConfigMap, flags RawWebhookFlags, cl client
 	if flags.IsExplicit("webhook-repositories") {
 		cfg.WebhookRepositories = ParseRepositoryList(flags.WebhookRepositories)
 	}
+	if flags.IsExplicit("allowed-clone-hosts") || flags.IsExplicit("allowed-clone-host") {
+		trimmed := strings.TrimSpace(flags.AllowedCloneHosts)
+		if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+			cfg.AllowedCloneHosts = nil
+		} else {
+			cfg.AllowedCloneHosts = ParseHostList(flags.AllowedCloneHosts)
+		}
+	}
 
 	return cfg, nil
+}
+
+// ParseHostList parses a comma-separated list of hostnames, trimming whitespace,
+// dropping empty items, and deduplicating while preserving order.
+func ParseHostList(s string) []string {
+	var hosts []string
+	seen := make(map[string]bool)
+	for _, h := range strings.Split(s, ",") {
+		trimmed := strings.TrimSpace(h)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			hosts = append(hosts, trimmed)
+		}
+	}
+	return hosts
+}
+
+// IsHostAllowed checks whether host (e.g. "github.com") is in allowList.
+// If allowList is empty, all hosts are rejected (fail-closed).
+// An entry of "*" allows all hosts.
+func IsHostAllowed(host string, allowList []string) bool {
+	if len(allowList) == 0 {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(host))
+	if normalized == "" {
+		return false
+	}
+	for _, allowed := range allowList {
+		trimmed := strings.ToLower(strings.TrimSpace(allowed))
+		if trimmed == "*" || trimmed == normalized {
+			return true
+		}
+		if strings.HasPrefix(trimmed, "*.") {
+			domain := trimmed[2:]
+			if normalized == domain || strings.HasSuffix(normalized, "."+domain) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ParseRepositoryList parses a comma-separated list of repository names ("owner/repo").

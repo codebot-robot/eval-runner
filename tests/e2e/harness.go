@@ -282,6 +282,12 @@ stringData:
 		"image: eval-runner-webhook:e2e\n        imagePullPolicy: Never",
 		1,
 	)
+	modifiedWebhookDeploy = strings.Replace(
+		modifiedWebhookDeploy,
+		"- --listen-addr=:8080",
+		"- --listen-addr=:8080\n        - --allowed-clone-hosts=github.com,git-server.eval-runner-sandbox.svc",
+		1,
+	)
 	h.KubectlApplyContent(modifiedWebhookDeploy)
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-webhook", "--timeout=60s")
