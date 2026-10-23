@@ -1057,6 +1057,17 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 		r.gitHubClient.SetRateFloorPercent(resolved.RateLimitFloorPercent)
 	}
 	if r.syncer != nil {
+		oldRepos := make(map[string]bool)
+		if r.lastConfig != nil {
+			for _, repo := range r.lastConfig.Repositories {
+				oldRepos[repo.Ref.String()] = true
+			}
+		}
+		for _, repo := range resolved.Repositories {
+			if !oldRepos[repo.Ref.String()] && !repo.Ref.IsZero() {
+				r.logger.Info("syncing newly added repository", "repo", repo.Ref.String())
+			}
+		}
 		r.syncer.UpdateConfig(resolved.Repositories, resolved.LsRemoteInterval, resolved.FullReconcileInterval, resolved.RateLimitFloorPercent)
 	}
 

@@ -2685,8 +2685,9 @@ func TestConfigReloader_Repositories_ReloadTriggersImmediateSync(t *testing.T) {
 	}()
 
 	initialCfg := DefaultClusterConfig()
+	testSink := &testLogSink{}
 	reloader := NewConfigReloader(ConfigReloaderOptions{
-		Logger:        logr.Discard(),
+		Logger:        logr.New(testSink),
 		Syncer:        syncInst,
 		Consumer:      cons,
 		InitialConfig: &initialCfg,
@@ -2712,6 +2713,18 @@ func TestConfigReloader_Repositories_ReloadTriggersImmediateSync(t *testing.T) {
 
 	if err := reloader.ReloadWait(ctx, updatedCM); err != nil {
 		t.Fatalf("ReloadWait failed: %v", err)
+	}
+
+	// Verify that 'syncing newly added repository' was logged
+	var logFound bool
+	for _, entry := range testSink.entries {
+		if strings.Contains(entry, "syncing newly added repository") && strings.Contains(entry, ref.String()) {
+			logFound = true
+			break
+		}
+	}
+	if !logFound {
+		t.Errorf("expected 'syncing newly added repository' log line for %s, got log entries: %v", ref.String(), testSink.entries)
 	}
 
 	// Verify immediate sync of newly added repository: store now contains main branch!
