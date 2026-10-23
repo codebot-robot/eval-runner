@@ -26,6 +26,8 @@ spec:
       app: eval-runner-controller
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         app: eval-runner-controller
     spec:
