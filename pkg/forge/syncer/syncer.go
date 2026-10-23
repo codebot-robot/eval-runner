@@ -440,7 +440,11 @@ func (s *Syncer) checkRateLimit(ref forge.RepoRef, f forge.Forge, snap syncerCon
 	} else if !isBelow && wasSuppressed {
 		s.suppressed[rKey] = false
 		s.mu.Unlock()
-		s.log("forge rate limit budget recovered for %s: %d remaining > %d floor of %d; resuming API calls", ref.String(), rl.Remaining, floor, rl.Limit)
+		if rl.Remaining > floor {
+			s.log("forge rate limit budget recovered for %s: %d remaining > %d floor of %d; resuming API calls", ref.String(), rl.Remaining, floor, rl.Limit)
+		} else {
+			s.log("forge rate limit budget recovered for %s: window reset passed at %s; resuming API calls", ref.String(), rl.Reset.Format(time.RFC3339))
+		}
 		return true
 	}
 	s.mu.Unlock()
