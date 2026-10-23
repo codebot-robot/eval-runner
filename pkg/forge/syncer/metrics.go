@@ -59,6 +59,33 @@ var (
 		},
 		[]string{"path"},
 	)
+
+	// RateLimitRemaining tracks the remaining rate limit quota for a forge repository.
+	RateLimitRemaining = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "evalrunner_forge_ratelimit_remaining",
+			Help: "Current remaining rate limit quota for a forge.",
+		},
+		[]string{"repo"},
+	)
+
+	// RateLimitLimit tracks the total rate limit budget for a forge repository.
+	RateLimitLimit = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "evalrunner_forge_ratelimit_limit",
+			Help: "Total rate limit budget for a forge.",
+		},
+		[]string{"repo"},
+	)
+
+	// RateLimitResetTimestamp tracks the rate limit reset timestamp for a forge repository.
+	RateLimitResetTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "evalrunner_forge_ratelimit_reset_seconds",
+			Help: "Rate limit reset Unix timestamp for a forge.",
+		},
+		[]string{"repo"},
+	)
 )
 
 func initMetrics() {
@@ -68,6 +95,9 @@ func initMetrics() {
 			EventsTotal,
 			ErrorsTotal,
 			StoreSizeBytes,
+			RateLimitRemaining,
+			RateLimitLimit,
+			RateLimitResetTimestamp,
 		)
 	})
 }

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -35,6 +36,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 	"github.com/gke-labs/eval-runner/pkg/forge/store"
 	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
+	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
@@ -398,7 +400,81 @@ func main() {
 		os.Exit(1)
 	}
 
-	forgeRegistry := forge.NewDefaultRegistry(forgegithub.New(), gitremote.New())
+	// Precedence: App installation token > plain token > unauthenticated;
+	// polling uses them; never fail a poll for lack of a token.
+	var ghClient *github.HTTPClient
+	credCtx, credCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer credCancel()
+
+	if clusterConfig.GitHubAppSecret != "" {
+		sec, err := kubeClient.CoreV1().Secrets(evalRunnerNamespace).Get(credCtx, clusterConfig.GitHubAppSecret, metav1.GetOptions{})
+		if err == nil && sec != nil {
+			appIDStr := string(sec.Data["app-id"])
+			instIDStr := string(sec.Data["installation-id"])
+			privKey := sec.Data["private-key"]
+			slug := string(sec.Data["app-slug"])
+			if strings.TrimSpace(appIDStr) != "" && strings.TrimSpace(instIDStr) != "" && len(privKey) > 0 {
+				appAuth, err := github.NewAppTokenProvider(github.AppConfig{
+					AppID:          strings.TrimSpace(appIDStr),
+					InstallationID: strings.TrimSpace(instIDStr),
+					PrivateKeyPEM:  privKey,
+					AppSlug:        strings.TrimSpace(slug),
+				})
+				if err == nil {
+					ghClient = github.NewHTTPClient(github.HTTPClientConfig{
+						AppAuth:               appAuth,
+						RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
+					})
+					setupLog.Info("resolved GitHub App installation token credentials at startup", "appID", appIDStr, "installationID", instIDStr)
+				} else {
+					setupLog.Info("failed to initialize GitHub App token provider at startup; checking fallback", "error", err)
+				}
+			}
+		} else {
+			setupLog.Info("GitHub App secret not found at startup; checking fallback", "secret", clusterConfig.GitHubAppSecret)
+		}
+	}
+
+	if ghClient == nil && clusterConfig.GitHubTokenSecret != "" {
+		sec, err := kubeClient.CoreV1().Secrets(evalRunnerNamespace).Get(credCtx, clusterConfig.GitHubTokenSecret, metav1.GetOptions{})
+		if err == nil && sec != nil {
+			tok := string(sec.Data["token"])
+			if strings.TrimSpace(tok) != "" {
+				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
+					Token:                 strings.TrimSpace(tok),
+					RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
+				})
+				setupLog.Info("resolved GitHub plain token credentials at startup", "secret", clusterConfig.GitHubTokenSecret)
+			}
+		} else {
+			setupLog.Info("GitHub token secret not found at startup; checking fallback", "secret", clusterConfig.GitHubTokenSecret)
+		}
+	}
+
+	if ghClient == nil {
+		ghClient = github.NewHTTPClient(github.HTTPClientConfig{
+			RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
+		})
+		setupLog.Info("no GitHub credentials configured; operating unauthenticated within 60/h rate limit")
+	}
+
+	forgeStore, err := store.Open(forgeDBPath)
+	if err != nil {
+		setupLog.Error(err, "unable to open forge database", "path", forgeDBPath)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := forgeStore.Close(); err != nil {
+			setupLog.Error(err, "error closing forge database on shutdown")
+		}
+	}()
+
+	gitRemoteForge := gitremote.New()
+	ghForge := forgegithub.New(
+		forgegithub.WithClient(ghClient),
+		forgegithub.WithStore(forgeStore),
+	)
+	forgeRegistry := forge.NewDefaultRegistry(ghForge, gitRemoteForge)
 
 	comparisonReconciler := &controller.ComparisonReconciler{
 		Client:              mgr.GetClient(),
@@ -416,23 +492,13 @@ func main() {
 		CommandUsers:        clusterConfig.CommandUsers,
 		AffinityMode:        clusterConfig.AffinityMode,
 		ForgeRegistry:       forgeRegistry,
+		GitHubClient:        ghClient,
 	}
 
 	if err = comparisonReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Comparison")
 		os.Exit(1)
 	}
-
-	forgeStore, err := store.Open(forgeDBPath)
-	if err != nil {
-		setupLog.Error(err, "unable to open forge database", "path", forgeDBPath)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := forgeStore.Close(); err != nil {
-			setupLog.Error(err, "error closing forge database on shutdown")
-		}
-	}()
 
 	var repoNames []string
 	for _, r := range clusterConfig.Repositories {
@@ -452,21 +518,17 @@ func main() {
 	})
 
 	forgeSyncer := syncer.New(syncer.SyncerOptions{
-		Store:        forgeStore,
-		Registry:     forgeRegistry,
-		Consumer:     forgeConsumer,
-		Repositories: clusterConfig.Repositories,
+		Store:                 forgeStore,
+		Registry:              forgeRegistry,
+		GitRemoteForge:        gitRemoteForge,
+		Consumer:              forgeConsumer,
+		Repositories:          clusterConfig.Repositories,
+		LsRemoteInterval:      clusterConfig.LsRemoteInterval,
+		FullReconcileInterval: clusterConfig.FullReconcileInterval,
+		RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
 	})
 
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		if len(clusterConfig.Repositories) > 0 {
-			if err := forgeSyncer.SyncAll(ctx); err != nil {
-				setupLog.Info("initial forge sync completed with warnings", "error", err)
-			}
-		}
-		<-ctx.Done()
-		return nil
-	})); err != nil {
+	if err := mgr.Add(forgeSyncer); err != nil {
 		setupLog.Error(err, "unable to add forge syncer runnable")
 		os.Exit(1)
 	}
@@ -513,6 +575,7 @@ func main() {
 		Consumer:       forgeConsumer,
 		InitialConfig:  &clusterConfig,
 		FQDNSyncFunc:   egressController.SyncHosts,
+		GitHubClient:   ghClient,
 	})
 
 	if err := mgr.Add(egressController); err != nil {

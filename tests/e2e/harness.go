@@ -64,6 +64,9 @@ func (h *Harness) Setup() {
 			}
 		}
 	}
+	if err := os.Setenv("DOCKER_BUILDKIT", "1"); err != nil {
+		h.t.Fatalf("Failed to set DOCKER_BUILDKIT: %v", err)
+	}
 
 	if _, err := exec.LookPath("kind"); err != nil {
 		h.t.Fatalf("kind not found on PATH: %v (run ./dev/tasks/test-e2e to install)", err)
@@ -310,6 +313,28 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+      - name: init-git
+        image: git-server:e2e
+        imagePullPolicy: Never
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          runAsGroup: 65534
+          seccompProfile:
+            type: RuntimeDefault
+        command:
+        - sh
+        - -c
+        - "cp -a /git-baked/. /git/"
+        volumeMounts:
+        - name: git-data
+          mountPath: /git
       containers:
       - name: git-server
         image: git-server:e2e
@@ -321,10 +346,18 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
           runAsNonRoot: true
+          runAsUser: 65534
+          runAsGroup: 65534
           seccompProfile:
             type: RuntimeDefault
         ports:
         - containerPort: 9418
+        volumeMounts:
+        - name: git-data
+          mountPath: /git
+      volumes:
+      - name: git-data
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

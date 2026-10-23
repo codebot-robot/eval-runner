@@ -374,6 +374,39 @@ eval-runner interacts with code hosting environments (such as github.com, GitLab
   - Syncs authoritative forge state to the local store using synchronous consume-before-commit delivery.
   - Diffs branches and change requests, emitting typed events (`BranchAdvanced`, `ChangeOpened`, `ChangeUpdated`, `ChangeClosed`).
   - Merges out-of-band hints into stored state and records Prometheus metrics (`evalrunner_forge_syncs_total`, `evalrunner_forge_events_total`, `evalrunner_forge_store_bytes`).
+  - Enforces three-tier polling (ADR-035): free `git ls-remote` polling every 60s with ±20% jitter, fill-in REST API calls only for changed refs, and hourly full reconciliation with conditional headers.
+  - Protects rate budget floors with automatic suppression when remaining quota drops below configurable threshold (default 10%).
+
+#### Operator Note: Sizing GitHub API Usage for N Repositories
+
+The polling engine uses three tiers to balance responsiveness against GitHub REST API rate limits:
+1. **Free Ref Discovery (`git ls-remote`)**: Every 60s per repository (with ±20% jitter), the syncer queries advertised refs over git network transport. This operation performs pure-Go ref advertisement handshakes without downloading blobs or packfiles and is completely unmetered by the GitHub REST API quota.
+2. **Fill-In API Calls**: Triggered only when advertised refs differ from local bbolt cache state. Fetches only changed items (new commits or single pull requests).
+3. **Periodic Full Reconcile**: Runs once per hour per repository using conditional HTTP requests (`If-None-Match`, `If-Modified-Since`).
+
+##### Operating with an Authenticated Token or GitHub App (5,000 requests/hour budget)
+- **Hourly Reconcile**: Makes 3 conditional calls per repository per hour (`Repository`, `Branches`, `ChangeRequests`). When unchanged, the server returns 304 Not Modified, which does not consume authenticated rate limit quota.
+- **Event-Driven Fill-Ins**:
+  - Pushing to an existing branch: 1 call (`Commit`).
+  - Creating a new branch: 1 call (`Commit`).
+  - Opening a pull request: 2 calls (`PullRequest`, `Commit`).
+  - Synchronizing (updating) a pull request: 2 calls (`PullRequest`, `Commit`).
+  - Deleting a branch or closing a pull request: 0 API calls.
+- **Capacity Sizing**:
+  For $N$ tracked repositories with moderate activity (e.g., each repo experiencing 5 branch/PR updates per hour):
+  $$\text{Hourly Usage} = N \times (3 \text{ conditional calls} + 5 \times 2 \text{ fill-in calls}) = 13 \times N \text{ requests/hour}$$
+  Even with $N = 100$ active repositories, usage is $\approx 1,300$ requests/hour, safely below the 5,000/hour ceiling. A cluster tracking 20 repositories consumes $\approx 60\text{--}260$ requests/hour ($<5\%$ of budget).
+
+##### Operating Without a Token (Unauthenticated, 60 requests/hour budget)
+- **Measured Behavior**: Unauthenticated conditional requests still count against the 60 requests/hour IP budget (remaining quota was measured decrementing 59 → 58 → 57 across 200/304/304 responses). Conditional 304 responses are NOT free when unauthenticated.
+- **Zero-Call Polling Lever**: Because unauthenticated 304s consume budget, `git ls-remote` is the primary unmetered lever. On ticks where advertised refs are unchanged, exactly 0 REST API calls are made.
+- **Closed-Head Seeding**: GitHub retains `refs/pull/N/head` for historical closed PRs indefinitely. The initial full reconcile seeds placeholder records for all advertised pull heads not returned as open. Consequently, historical pull heads never trigger spurious API calls.
+- **Seeding & Restart Costs**:
+  - Seeding cost formula: $3 + B + P$ ($3$ conditional calls for `Repository`, `Branches`, `ChangeRequests` + $1$ `Commit` per branch $B$ + $1$ `Commit` per open PR $P$). For a 1-branch repo with 0 open PRs, this is 4 calls; for a repo with 3 branches and 1 open PR, it is 7 calls. An unauthenticated repository with 50 branches costs $3 + 50 = 53$ calls and approaches the 60/h budget on its initial seeding tick alone.
+  - Restart cost: Because `hasEverSynced` is stored in memory, every controller pod restart causes the first tick to execute a full conditional reconcile costing 3 calls per repository (`Repository`, `Branches`, `ChangeRequests`), which count against unauthenticated rate limits.
+- **Capacity Sizing**:
+  Because seeding and active pushes consume quota, unauthenticated operation is intended only for small deployments tracking 1–3 repositories with low commit frequency and few branches.
+- **Budget Floor Protection**: The controller monitors rate limits on every response. If remaining quota falls to or below the configurable floor (default 10%, or 6 requests remaining), all API calls are automatically suppressed until the hourly reset window passes, while `git ls-remote` polling continues uninterrupted.
 - `pkg/forge/consumer`: Unified object reconciliation:
   - Reconciles candidate Runs, baseline Runs (with baseline cache reuse), and Comparisons from typed forge events.
   - Shared across controller and webhook binaries to guarantee byte-identical Kubernetes object generation.

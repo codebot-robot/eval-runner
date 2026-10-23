@@ -335,6 +335,9 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Changed files cap | `MaxPullRequestFiles` | `300` | Maximum changed files retrieved from GitHub; exceeding cap treats all tasks declaring paths as matched. |
 | Affinity mode | `--affinity-mode` / ConfigMap `affinityMode` | `"order"` | Changed-file task affinity scheduling mode: `"order"` (matched/always tasks scheduled first, unmatched second) or `"prune"` (unmatched tasks dropped from batches and reported as skipped). |
 | Comparison TTL | `--comparison-ttl` / ConfigMap `comparisonTTL` | `0` (disabled) | Duration after which `Completed` Comparisons are deleted by the controller as a safety net; defaults to `0` (disabled). Owned batch Runs are deleted via Kubernetes owner references. Baseline Runs are preserved. |
+| ls-remote interval | ConfigMap `lsRemoteInterval` | `60s` | Interval between `git ls-remote` reference advertisement checks per repository; randomized with ±20% jitter. |
+| Full reconcile interval | ConfigMap `fullReconcileInterval` | `1h` | Cadence for full reconciliation of branches and change requests using HTTP conditional headers. |
+| Rate limit floor percent | ConfigMap `rateLimitFloorPercent` | `10` | Minimum percentage of GitHub rate limit quota remaining before REST API calls are suppressed until reset. |
 
 ---
 

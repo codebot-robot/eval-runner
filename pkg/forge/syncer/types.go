@@ -34,15 +34,6 @@ type EventHandler interface {
 	ConsumeEvent(ctx context.Context, ev consumer.Event) error
 }
 
-// Hint provides out-of-band updates (such as webhook notifications) to be applied during a sync.
-type Hint struct {
-	Branch            *forge.Branch
-	ChangeRequest     *forge.ChangeRequest
-	CloneURL          string
-	CandidateCloneURL string
-	BaselineCloneURL  string
-}
-
 // ParseRepoConfigList parses the YAML list of repositories from the repositories ConfigMap key.
 // Invalid entries are rejected with a clear error.
 func ParseRepoConfigList(raw string) ([]RepoConfig, error) {

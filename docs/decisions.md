@@ -425,6 +425,43 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Treating the local store as a cache ensures resilience against corruption and crashes. Consume-before-commit guarantees no dropped events without requiring complex distributed queues. A unified consumer guarantees identical Kubernetes object creation across all ingestion paths.
 
+### ADR-035: GitHub Polling Strategy Without Webhooks, Closed-Head Seeding, and Rate Budget Floor (#354)
+- **Status**: Decided
+- **Context**:
+  eval-runner must support monitoring repositories on github.com without requiring inbound webhook connectivity, operating reliably within GitHub REST API rate limits. On October 22, 2026, measurements of the GitHub API and git remote transport revealed crucial properties that govern effective polling:
+  1. **Unauthenticated Rate Limits and Conditional Requests**:
+     Unauthenticated conditional requests to `api.github.com` still count against the 60 requests/hour IP budget (empirically measured: rate limit remaining decremented 59 → 58 → 57 across responses returning 200, 304, and 304). Conditional requests save rate limit budget only when authenticated with a token or GitHub App (which has a 5,000 req/h budget). Without an authenticated token, `git ls-remote` (pure-Go ref advertisement) is the only free, unmetered lever available.
+  2. **Surviving Pull Request Head Advertisements**:
+     `github.com` advertises and preserves `refs/pull/N/head` indefinitely over git transport, including for closed and merged pull requests. In production repositories, hundreds of historical pull heads remain advertised (e.g. 163 advertised pull heads in an evaluation repository with only 1 open PR). Naive ref diffing would perceive all historical closed pull heads as newly opened PRs on every tick, triggering catastrophic rate limit exhaustion.
+- **Decision**:
+  1. **Three-Tier Polling Engine**:
+     - **Free Ref Discovery (`git ls-remote`)**: Every 60s per repository (randomized with ±20% symmetric jitter), the syncer queries advertised remote refs using go-git's pure-Go ref advertisement transport over git/https. This protocol download requires no blobs or commit objects (ADR-004, ADR-033) and consumes zero REST API rate limit quota.
+     - **Fill-In API Queries**: REST API calls are executed only when advertised refs differ from locally stored state. On fill-in ticks, the syncer fetches only changed refs (new commits or specific PRs via `GET /repos/:owner/:repo/pulls/:number`). `Repository()` metadata and the full `/pulls` list are never fetched on fill-in ticks.
+     - **Hourly Full Reconcile**: Periodic full reconciliation runs once per hour (configurable via `fullReconcileInterval`), querying repository metadata, branches, and open pull requests using conditional HTTP headers (`If-None-Match` and `If-Modified-Since`).
+  2. **Closed-Head Seeding and Ref Diffing**:
+     - Remote advertised refs are diffed against all stored state in the local bbolt store, keyed by PR number and head SHA. Tags (`refs/tags/*`), `HEAD`, and merge refs (`refs/pull/*/merge`) are ignored.
+     - On the initial full reconcile, the syncer seeds placeholder closed change requests for all advertised `refs/pull/N/head` references that were not returned in the open pull request list. Because all historical closed PRs are recorded in the store with their current head SHAs, subsequent ticks compare against the full set and trigger zero API calls when refs are unchanged.
+  3. **Batch-Coupled Validator Persistence**:
+     HTTP cache validators (ETag and Last-Modified) travel with the sync batch. The forge stages pending validators during API requests, returning them to the syncer only when the batch is assembled. The syncer writes validators to the bbolt sync bucket (`url:<endpoint>`) atomically within `SaveSyncBatch` only after the event consumer has successfully processed all batch events. If the consumer fails, pending validators are cleared, the store is not updated, and the subsequent tick refetches fully without conditional 304 skipping.
+  4. **Rate Limit Budget Floor Protection**:
+     `X-RateLimit-Remaining`, `X-RateLimit-Limit`, and `X-RateLimit-Reset` headers are parsed on every HTTP response, including 304 Not Modified. If the remaining quota drops below a configurable floor percentage (default 10%, configured via `rateLimitFloorPercent`), API calls are suppressed until the reset window passes, while `git ls-remote` polling continues uninterrupted. State transitions between normal and suppressed states are logged exactly once per transition, and gauges are published to Prometheus (`evalrunner_forge_ratelimit_remaining`, `evalrunner_forge_ratelimit_limit`, `evalrunner_forge_ratelimit_reset_seconds`).
+  5. **Startup Credential Resolution and Reporter Client Accessor**:
+     Credentials in `cmd/eval-runner` are resolved once at startup with strict precedence: GitHub App installation token > plain personal access token > unauthenticated. Polling uses these credentials from startup and never fails for lack of a token. The shared forge instance is immutable; the comparison reporter accesses the underlying HTTP client via the forge's `Client()` accessor rather than mutating the forge with `SetClient`. Hot-reloaded configuration snapshots interval and floor fields under a read lock (`s.mu.RLock()`), ensuring clean thread safety under `go test -race`.
+  6. **Empirically Asserted API Call Counts and Sizing Formula**:
+     The unit test suite (`TestSyncer_ExactAPICallSequencePerScenario`) empirically asserts the exact sequence of REST API calls per scenario:
+     - **Seeding tick (first sync)**: $3 + B + P$ calls ($3$ for `Repository`, `Branches`, `ChangeRequests`, plus $1$ `Commit` per branch $B$, plus $1$ `Commit` per open PR $P$). For a 1-branch repo with 0 open PRs, this is 4 calls (`[Repository, Branches, ChangeRequests, Commit(mainSHA)]`); for a repo with 3 branches and 1 open PR, it is 7 calls.
+     - **Unchanged tick**: 0 calls (`[]`)
+     - **Branch push**: 1 call (`Commit(newSHA)`)
+     - **New branch**: 1 call (`Commit(branchSHA)`)
+     - **Branch deleted**: 0 calls (`[]`)
+     - **PR opened**: 2 calls (`PullRequest(number)`, `Commit(headSHA)`)
+     - **PR synchronised**: 2 calls (`PullRequest(number)`, `Commit(headSHA)`)
+     - **Closed PR head moved**: 2 calls (`PullRequest(number)`, `Commit(headSHA)`) / 0 events (`[PullRequest, Commit]`, head SHA updated in store without events)
+     - **Hourly reconcile**: 3 calls (`Repository`, `Branches`, `ChangeRequests`, returning 304s when unchanged)
+     - **Restart cost**: Because `hasEverSynced` is maintained in-memory, the first tick after a controller restart performs a full conditional reconcile costing 3 calls per repository (`Repository`, `Branches`, `ChangeRequests`), which count against unauthenticated rate limits.
+- **Rationale**:
+  Diffing against all stored change requests with closed-head seeding eliminates false-positive API churn from GitHub's permanent pull-head advertisements. Free `git ls-remote` polling permits responsive change detection (60s) without risking rate limit exhaustion. Sizing rate limit floors and coupling validators atomically with event consumption ensures resilience across crashes and transient network failures.
+
 
 
 
