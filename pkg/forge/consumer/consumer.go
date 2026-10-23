@@ -739,6 +739,35 @@ func SanitizeLabelValue(val string) string {
 	return res
 }
 
+func isRepoMatch(comp *v1alpha1.Comparison, repo string) bool {
+	if repo == "" {
+		return true
+	}
+	repoNoHost := strings.TrimPrefix(repo, "github.com/")
+	repoWithHost := repo
+	if !strings.HasPrefix(repo, "github.com/") {
+		repoWithHost = "github.com/" + repo
+	}
+
+	sanitized := SanitizeLabelValue(repo)
+	sanitizedNoHost := SanitizeLabelValue(repoNoHost)
+	sanitizedWithHost := SanitizeLabelValue(repoWithHost)
+
+	if comp.Labels != nil {
+		l := comp.Labels[LabelRepo]
+		if l == sanitized || l == sanitizedNoHost || l == sanitizedWithHost {
+			return true
+		}
+	}
+	if comp.Spec.PullRequest != nil {
+		r := comp.Spec.PullRequest.Repository
+		if strings.EqualFold(r, repo) || strings.EqualFold(r, repoNoHost) || strings.EqualFold(r, repoWithHost) {
+			return true
+		}
+	}
+	return false
+}
+
 // FindComparisonsForPR finds all Comparisons for a pull request number and repository.
 func FindComparisonsForPR(ctx context.Context, cl client.Reader, namespace, repo string, prNum int) ([]v1alpha1.Comparison, error) {
 	if cl == nil || prNum <= 0 {
@@ -757,18 +786,13 @@ func FindComparisonsForPR(ctx context.Context, cl client.Reader, namespace, repo
 		return nil, fmt.Errorf("failed to list comparisons for PR #%d: %w", prNum, err)
 	}
 
-	sanitizedRepo := SanitizeLabelValue(repo)
 	var matches []v1alpha1.Comparison
 	for _, comp := range compList.Items {
 		if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Number != prNum {
 			continue
 		}
-		if repo != "" {
-			isMatch := (comp.Labels != nil && comp.Labels[LabelRepo] == sanitizedRepo) ||
-				(comp.Spec.PullRequest != nil && strings.EqualFold(comp.Spec.PullRequest.Repository, repo))
-			if !isMatch {
-				continue
-			}
+		if !isRepoMatch(&comp, repo) {
+			continue
 		}
 		matches = append(matches, comp)
 	}
@@ -799,12 +823,8 @@ func FindComparisonsForPR(ctx context.Context, cl client.Reader, namespace, repo
 		if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Number != prNum {
 			continue
 		}
-		if repo != "" {
-			isMatch := (comp.Labels != nil && comp.Labels[LabelRepo] == sanitizedRepo) ||
-				(comp.Spec.PullRequest != nil && strings.EqualFold(comp.Spec.PullRequest.Repository, repo))
-			if !isMatch {
-				continue
-			}
+		if !isRepoMatch(&comp, repo) {
+			continue
 		}
 		matches = append(matches, comp)
 	}
@@ -822,4 +842,137 @@ func FindComparisonForPR(ctx context.Context, cl client.Reader, namespace, repo 
 		return nil, nil
 	}
 	return &matches[0], nil
+}
+
+func isComparisonOpen(comp *v1alpha1.Comparison) bool {
+	if comp == nil || comp.Labels == nil {
+		return true
+	}
+	st := strings.ToLower(strings.TrimSpace(comp.Labels[LabelPRState]))
+	return st != StateClosed && st != StateMerged
+}
+
+func comparisonMatchesRepo(comp *v1alpha1.Comparison, repo forge.RepoRef) bool {
+	return isRepoMatch(comp, repoIdentifier(repo))
+}
+
+func comparisonPRNumber(comp *v1alpha1.Comparison) int {
+	if comp.Labels != nil && comp.Labels[LabelPR] != "" {
+		if n, err := strconv.Atoi(comp.Labels[LabelPR]); err == nil && n > 0 {
+			return n
+		}
+	}
+	if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Number > 0 {
+		return comp.Spec.PullRequest.Number
+	}
+	if strings.HasPrefix(comp.Name, "pr-") {
+		parts := strings.Split(comp.Name, "-")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil && n > 0 {
+				return n
+			}
+		} else if len(parts) == 3 {
+			if n, err := strconv.Atoi(parts[2]); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// LivePRNumbers returns the set of PR numbers for which there is at least one live (open)
+// Comparison in the cluster matching the given repository.
+func (c *Consumer) LivePRNumbers(ctx context.Context, repo forge.RepoRef) (map[int]bool, error) {
+	if c.client == nil {
+		return nil, nil
+	}
+
+	c.mu.Lock()
+	ns := c.cfg.Namespace
+	c.mu.Unlock()
+
+	var compList v1alpha1.ComparisonList
+	var listOpts []client.ListOption
+	if ns != "" {
+		listOpts = append(listOpts, client.InNamespace(ns))
+	}
+	if err := c.client.List(ctx, &compList, listOpts...); err != nil {
+		return nil, fmt.Errorf("failed to list comparisons for %s: %w", repoIdentifier(repo), err)
+	}
+
+	live := make(map[int]bool)
+	for i := range compList.Items {
+		comp := &compList.Items[i]
+		if !comparisonMatchesRepo(comp, repo) {
+			continue
+		}
+		if !isComparisonOpen(comp) {
+			continue
+		}
+		prNum := comparisonPRNumber(comp)
+		if prNum > 0 {
+			live[prNum] = true
+		}
+	}
+
+	return live, nil
+}
+
+// ReconcileClusterState lists Comparisons for repo, looks up each PR's state in the store,
+// and for any PR the store says is closed while the Comparison is still treated as open,
+// runs the same close handling as a ChangeClosedEvent.
+func (c *Consumer) ReconcileClusterState(ctx context.Context, repo forge.RepoRef) error {
+	if c.client == nil {
+		return nil
+	}
+
+	c.mu.Lock()
+	cfg := c.cfg
+	c.mu.Unlock()
+
+	crGetter, ok := c.store.(ChangeRequestGetter)
+	if !ok || crGetter == nil {
+		return nil
+	}
+
+	var compList v1alpha1.ComparisonList
+	var listOpts []client.ListOption
+	if cfg.Namespace != "" {
+		listOpts = append(listOpts, client.InNamespace(cfg.Namespace))
+	}
+	targetRepo := repoIdentifier(repo)
+	if err := c.client.List(ctx, &compList, listOpts...); err != nil {
+		return fmt.Errorf("failed to list comparisons for cluster reconciliation of %s: %w", targetRepo, err)
+	}
+
+	closedPRs := make(map[int]bool)
+	for i := range compList.Items {
+		comp := &compList.Items[i]
+		if !comparisonMatchesRepo(comp, repo) {
+			continue
+		}
+		if !isComparisonOpen(comp) {
+			continue
+		}
+		prNum := comparisonPRNumber(comp)
+		if prNum <= 0 || closedPRs[prNum] {
+			continue
+		}
+
+		cr, err := crGetter.GetChangeRequest(repo, strconv.Itoa(prNum))
+		if err != nil || cr == nil {
+			continue
+		}
+
+		st := strings.ToLower(strings.TrimSpace(cr.State))
+		isClosed := st == "closed" || st == "merged" || cr.Merged
+		if isClosed {
+			if err := c.processChangeClosed(ctx, cfg, repo, *cr); err != nil {
+				return fmt.Errorf("failed to close PR #%d during cluster reconciliation of %s: %w", prNum, targetRepo, err)
+			}
+			closedPRs[prNum] = true
+		}
+	}
+
+	return nil
 }

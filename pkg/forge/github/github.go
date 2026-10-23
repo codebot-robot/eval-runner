@@ -329,8 +329,10 @@ type pullResponse struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	} `json:"base"`
-	State     string    `json:"state"`
-	UpdatedAt time.Time `json:"updated_at"`
+	State     string     `json:"state"`
+	Merged    bool       `json:"merged,omitempty"`
+	MergedAt  *time.Time `json:"merged_at,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest {
@@ -353,6 +355,12 @@ func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest
 		}
 	}
 
+	isMerged := pr.Merged || pr.MergedAt != nil
+	state := pr.State
+	if isMerged && (state == "" || state == "closed") {
+		state = "closed"
+	}
+
 	return forge.ChangeRequest{
 		ID:     forge.ChangeRequestID(strconv.Itoa(pr.Number)),
 		Number: pr.Number,
@@ -368,7 +376,8 @@ func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest
 			Ref: pr.Base.Ref,
 			SHA: pr.Base.SHA,
 		},
-		State:     pr.State,
+		State:     state,
+		Merged:    isMerged,
 		UpdatedAt: pr.UpdatedAt,
 	}
 }

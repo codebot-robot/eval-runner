@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/forge"
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
@@ -31,6 +32,10 @@ import (
 	gh "github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakek8s "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 type recordingConsumer struct {
@@ -525,6 +530,7 @@ type countingFakeForge struct {
 	calls        []string
 	branches     []forge.Branch
 	changes      []forge.ChangeRequest
+	pullRequests map[int]*forge.ChangeRequest
 	commits      map[string]*forge.Commit
 	rateLimit    gh.RateLimitInfo
 	pendingSyncs map[string]*store.EndpointSync
@@ -593,6 +599,12 @@ func (f *countingFakeForge) PullRequest(ctx context.Context, ref forge.RepoRef, 
 	f.recordCall(fmt.Sprintf("PullRequest(%d)", number))
 	f.stageSyncLocked(ref, fmt.Sprintf("/repos/%s/%s/pulls/%d", ref.Owner, ref.Name, number), fmt.Sprintf(`"pr-%d-etag"`, number))
 	defer f.mu.Unlock()
+	if f.pullRequests != nil {
+		if cr, ok := f.pullRequests[number]; ok && cr != nil {
+			crCopy := *cr
+			return &crCopy, nil
+		}
+	}
 	for _, cr := range f.changes {
 		if cr.Number == number {
 			return &cr, nil
@@ -1553,5 +1565,329 @@ func TestSyncer_ForkChangeRequest_CandidateCloneURL(t *testing.T) {
 	}
 	if updateEv.BaselineCloneURL != baseURL {
 		t.Errorf("ChangeUpdatedEvent BaselineCloneURL = %q, want base URL %q", updateEv.BaselineCloneURL, baseURL)
+	}
+}
+
+// TestSyncer_Consumer_EmptyStore_PRClosedInForge_GetsClosed verifies:
+// Syncer+consumer test that starts with an empty store, a Comparison for PR N,
+// and a forge reporting N not open -> N gets closed.
+// Also verifies closed-head seeding only calls PullRequest for PRs with live Comparisons.
+func TestSyncer_Consumer_EmptyStore_PRClosedInForge_GetsClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "empty-store.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	targetRepo := "github.com/gke-labs/eval-runner"
+	sanitizedRepo := consumer.SanitizeLabelValue(targetRepo)
+
+	// Pre-create Comparison for PR #42 in the cluster (e.g. from earlier pod)
+	comp42 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-42",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelPR:   "42",
+				consumer.LabelRepo: sanitizedRepo,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "pr-42-candidate"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     42,
+			},
+		},
+	}
+	candRun42 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-42-candidate",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelPR:   "42",
+				consumer.LabelRepo: sanitizedRepo,
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add v1alpha1 scheme: %v", err)
+	}
+	cl := fakek8s.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(comp42, candRun42).
+		Build()
+
+	cons := consumer.New(cl, consumer.Config{
+		Namespace:    "eval-runner",
+		DefaultModel: "mockllm/model",
+		Store:        st,
+	})
+
+	// Remote refs advertise main head, pull/42/head, and pull/99/head (another closed PR without live comparison)
+	remoteRefs := []*plumbing.Reference{
+		plumbing.NewReferenceFromStrings("refs/heads/main", "1111111111111111111111111111111111111111"),
+		plumbing.NewReferenceFromStrings("refs/pull/42/head", "4444444444444444444444444444444444444444"),
+		plumbing.NewReferenceFromStrings("refs/pull/99/head", "9999999999999999999999999999999999999999"),
+	}
+	gr := gitremote.New(gitremote.WithRefLister(func(ctx context.Context, url string) ([]*plumbing.Reference, error) {
+		return remoteRefs, nil
+	}))
+
+	// Forge reports PR 42 and 99 NOT open (fake.changes is empty)
+	fake := &countingFakeForge{
+		branches: []forge.Branch{
+			{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+		},
+		changes: []forge.ChangeRequest{}, // no open PRs
+		pullRequests: map[int]*forge.ChangeRequest{
+			42: {
+				ID:     "42",
+				Number: 42,
+				Title:  "feat: merged PR 42",
+				State:  "closed",
+				Merged: true,
+				Head: forge.ChangeRequestHead{
+					Ref: "feat-42",
+					SHA: "4444444444444444444444444444444444444444",
+				},
+				Base: forge.ChangeRequestBase{
+					Ref: "main",
+					SHA: "1111111111111111111111111111111111111111",
+				},
+			},
+		},
+	}
+
+	reg := forge.NewRegistry(fake)
+	reg.Register("github.com", fake)
+
+	s := New(SyncerOptions{
+		Store:                 st,
+		Registry:              reg,
+		GitRemoteForge:        gr,
+		Consumer:              cons,
+		Repositories:          []RepoConfig{{Ref: ref}},
+		LsRemoteInterval:      1 * time.Minute,
+		FullReconcileInterval: 1 * time.Hour,
+	})
+
+	ctx := t.Context()
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("SyncRepo failed: %v", err)
+	}
+
+	// 1. Verify PR 42 Comparison and candidate run were closed (deleted)
+	var checkComp v1alpha1.Comparison
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-42"}, &checkComp); err == nil {
+		t.Errorf("expected comparison pr-42 to be deleted on PR close, but it still exists")
+	}
+
+	// 2. Verify PullRequest(42) was called to set merged correctly
+	// but PullRequest(99) was NOT called because it had no live Comparison
+	calls := fake.getAndClearCalls()
+	var calledPR42, calledPR99 bool
+	for _, call := range calls {
+		if call == "PullRequest(42)" {
+			calledPR42 = true
+		}
+		if call == "PullRequest(99)" {
+			calledPR99 = true
+		}
+	}
+	if !calledPR42 {
+		t.Errorf("expected PullRequest(42) to be called for live Comparison, calls were: %v", calls)
+	}
+	if calledPR99 {
+		t.Errorf("expected PullRequest(99) NOT to be called (placeholder only), calls were: %v", calls)
+	}
+
+	// 3. Verify store contents
+	cr42, err := st.GetChangeRequest(ref, "42")
+	if err != nil || cr42 == nil {
+		t.Fatalf("expected PR 42 to be in store, err: %v", err)
+	}
+	if cr42.State != "closed" || !cr42.Merged {
+		t.Errorf("expected PR 42 to be closed and merged, got state=%q merged=%v", cr42.State, cr42.Merged)
+	}
+
+	cr99, err := st.GetChangeRequest(ref, "99")
+	if err != nil || cr99 == nil {
+		t.Fatalf("expected PR 99 placeholder in store, err: %v", err)
+	}
+	if cr99.State != "closed" || cr99.Merged {
+		t.Errorf("expected PR 99 to be closed placeholder (merged=false), got state=%q merged=%v", cr99.State, cr99.Merged)
+	}
+}
+
+// TestSyncer_Consumer_HourlyReconcile_ClosesOlderPodComparison verifies:
+// A second test that the hourly full reconcile also closes a PR whose Comparison was created by an older pod.
+func TestSyncer_Consumer_HourlyReconcile_ClosesOlderPodComparison(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "hourly-reconcile.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	targetRepo := "github.com/gke-labs/eval-runner"
+	sanitizedRepo := consumer.SanitizeLabelValue(targetRepo)
+
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add v1alpha1 scheme: %v", err)
+	}
+	cl := fakek8s.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	cons := consumer.New(cl, consumer.Config{
+		Namespace:    "eval-runner",
+		DefaultModel: "mockllm/model",
+		Store:        st,
+	})
+
+	remoteRefs := []*plumbing.Reference{
+		plumbing.NewReferenceFromStrings("refs/heads/main", "1111111111111111111111111111111111111111"),
+		plumbing.NewReferenceFromStrings("refs/pull/50/head", "5050505050505050505050505050505050505050"),
+	}
+	gr := gitremote.New(gitremote.WithRefLister(func(ctx context.Context, url string) ([]*plumbing.Reference, error) {
+		return remoteRefs, nil
+	}))
+
+	fake := &countingFakeForge{
+		branches: []forge.Branch{
+			{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+		},
+		changes: []forge.ChangeRequest{
+			{
+				ID:     "50",
+				Number: 50,
+				Title:  "feat: open PR 50",
+				State:  "open",
+				Head: forge.ChangeRequestHead{
+					Ref: "feat-50",
+					SHA: "5050505050505050505050505050505050505050",
+				},
+				Base: forge.ChangeRequestBase{Ref: "main", SHA: "1111111111111111111111111111111111111111"},
+			},
+		},
+		pullRequests: map[int]*forge.ChangeRequest{
+			50: {
+				ID:     "50",
+				Number: 50,
+				Title:  "feat: open PR 50",
+				State:  "open",
+				Head: forge.ChangeRequestHead{
+					Ref: "feat-50",
+					SHA: "5050505050505050505050505050505050505050",
+				},
+				Base: forge.ChangeRequestBase{Ref: "main", SHA: "1111111111111111111111111111111111111111"},
+			},
+		},
+	}
+
+	reg := forge.NewRegistry(fake)
+	reg.Register("github.com", fake)
+
+	s := New(SyncerOptions{
+		Store:                 st,
+		Registry:              reg,
+		GitRemoteForge:        gr,
+		Consumer:              cons,
+		Repositories:          []RepoConfig{{Ref: ref}},
+		LsRemoteInterval:      1 * time.Minute,
+		FullReconcileInterval: 1 * time.Hour,
+	})
+
+	ctx := t.Context()
+
+	// 1. First sync: PR 50 is open, comparison is created by consumer
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("first SyncRepo failed: %v", err)
+	}
+
+	var comp50 v1alpha1.Comparison
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-50"}, &comp50); err != nil {
+		t.Fatalf("expected comparison pr-50 to be created on first sync: %v", err)
+	}
+
+	// 2. PR 50 merges on the forge
+	fake.mu.Lock()
+	fake.changes = nil // no open PRs
+	fake.pullRequests[50] = &forge.ChangeRequest{
+		ID:     "50",
+		Number: 50,
+		Title:  "feat: open PR 50",
+		State:  "closed",
+		Merged: true,
+		Head: forge.ChangeRequestHead{
+			Ref: "feat-50",
+			SHA: "5050505050505050505050505050505050505050",
+		},
+		Base: forge.ChangeRequestBase{Ref: "main", SHA: "1111111111111111111111111111111111111111"},
+	}
+	fake.mu.Unlock()
+
+	// Pre-create another Comparison created by an older pod for PR 55
+	comp55 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-55",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelPR:   "55",
+				consumer.LabelRepo: sanitizedRepo,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     55,
+			},
+		},
+	}
+	if err := cl.Create(ctx, comp55); err != nil {
+		t.Fatalf("failed to create comp55: %v", err)
+	}
+	remoteRefs = append(remoteRefs, plumbing.NewReferenceFromStrings("refs/pull/55/head", "5555555555555555555555555555555555555555"))
+	fake.mu.Lock()
+	fake.pullRequests[55] = &forge.ChangeRequest{
+		ID:     "55",
+		Number: 55,
+		Title:  "feat: closed PR 55 from older pod",
+		State:  "closed",
+		Merged: true,
+		Head: forge.ChangeRequestHead{
+			Ref: "feat-55",
+			SHA: "5555555555555555555555555555555555555555",
+		},
+		Base: forge.ChangeRequestBase{Ref: "main", SHA: "1111111111111111111111111111111111111111"},
+	}
+	fake.mu.Unlock()
+
+	// Simulate 1 hour passing so next tick triggers a full reconcile
+	s.mu.Lock()
+	s.lastFullReconcile[strings.ToLower(ref.String())] = time.Now().Add(-2 * time.Hour)
+	s.mu.Unlock()
+
+	// 3. Hourly full reconcile runs
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("second (hourly full reconcile) SyncRepo failed: %v", err)
+	}
+
+	// Verify both PR 50 and PR 55 comparisons are closed/deleted
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-50"}, &comp50); err == nil {
+		t.Errorf("expected comparison pr-50 to be deleted on hourly reconcile")
+	}
+	var checkComp55 v1alpha1.Comparison
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-55"}, &checkComp55); err == nil {
+		t.Errorf("expected comparison pr-55 (from older pod) to be deleted on hourly reconcile")
 	}
 }

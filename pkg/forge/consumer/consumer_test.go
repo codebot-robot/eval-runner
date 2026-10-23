@@ -34,7 +34,8 @@ import (
 )
 
 type fakeStore struct {
-	repos map[string]*forge.Repository
+	repos   map[string]*forge.Repository
+	changes map[string]map[string]*forge.ChangeRequest
 }
 
 func (f *fakeStore) GetRepository(repo forge.RepoRef) (*forge.Repository, bool) {
@@ -43,6 +44,22 @@ func (f *fakeStore) GetRepository(repo forge.RepoRef) (*forge.Repository, bool) 
 	}
 	r, ok := f.repos[strings.ToLower(repo.String())]
 	return r, ok
+}
+
+func (f *fakeStore) GetChangeRequest(repo forge.RepoRef, numberOrID string) (*forge.ChangeRequest, error) {
+	if f.changes == nil {
+		return nil, forge.ErrNotFound
+	}
+	m := f.changes[strings.ToLower(repo.String())]
+	if m == nil {
+		return nil, forge.ErrNotFound
+	}
+	cr, ok := m[numberOrID]
+	if !ok || cr == nil {
+		return nil, forge.ErrNotFound
+	}
+	crCopy := *cr
+	return &crCopy, nil
 }
 
 func newTestScheme(t *testing.T) *runtime.Scheme {
@@ -638,5 +655,240 @@ func TestConsumer_ForkPullRequest_CloneURLs(t *testing.T) {
 	}
 	if cand2Run.Spec.Repo.Commit != forkSHA2 {
 		t.Errorf("updated candidate run spec.repo.commit = %q, want %q", cand2Run.Spec.Repo.Commit, forkSHA2)
+	}
+}
+
+func TestConsumer_LivePRNumbers(t *testing.T) {
+	scheme := newTestScheme(t)
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	targetRepo := repoIdentifier(ref)
+	sanitizedRepo := SanitizeLabelValue(targetRepo)
+
+	compOpen := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-10",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:      "10",
+				LabelRepo:    sanitizedRepo,
+				LabelPRState: StateOpen,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     10,
+			},
+		},
+	}
+	compUnlabeled := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-20",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:   "20",
+				LabelRepo: sanitizedRepo,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     20,
+			},
+		},
+	}
+	compClosed := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-30",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:      "30",
+				LabelRepo:    sanitizedRepo,
+				LabelPRState: StateClosed,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     30,
+			},
+		},
+	}
+	compOtherRepo := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-40",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:   "40",
+				LabelRepo: "other_repo",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "other/repo",
+				Number:     40,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(compOpen, compUnlabeled, compClosed, compOtherRepo).
+		Build()
+
+	c := New(cl, Config{
+		Namespace: "eval-runner",
+	})
+
+	live, err := c.LivePRNumbers(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("LivePRNumbers failed: %v", err)
+	}
+
+	if !live[10] {
+		t.Errorf("expected PR #10 to be live")
+	}
+	if !live[20] {
+		t.Errorf("expected PR #20 (unlabeled) to be live")
+	}
+	if live[30] {
+		t.Errorf("expected PR #30 (closed) not to be live")
+	}
+	if live[40] {
+		t.Errorf("expected PR #40 (other repo) not to be live")
+	}
+}
+
+func TestConsumer_ReconcileClusterState(t *testing.T) {
+	scheme := newTestScheme(t)
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	targetRepo := repoIdentifier(ref)
+	sanitizedRepo := SanitizeLabelValue(targetRepo)
+
+	// PR #10: open comparison in cluster, but closed in store -> should be closed
+	comp10 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-10",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:   "10",
+				LabelRepo: sanitizedRepo,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "pr-10-run"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     10,
+			},
+		},
+	}
+	run10 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-10-run",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:   "10",
+				LabelRepo: sanitizedRepo,
+			},
+		},
+	}
+
+	// PR #20: open comparison in cluster, open in store -> preserved
+	comp20 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-20",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:   "20",
+				LabelRepo: sanitizedRepo,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     20,
+			},
+		},
+	}
+
+	// PR #30: already closed in cluster -> ignored
+	comp30 := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-30",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelPR:      "30",
+				LabelRepo:    sanitizedRepo,
+				LabelPRState: StateClosed,
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: targetRepo,
+				Number:     30,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(comp10, run10, comp20, comp30).
+		Build()
+
+	st := &fakeStore{
+		repos: map[string]*forge.Repository{
+			strings.ToLower(ref.String()): {Ref: ref},
+		},
+		changes: map[string]map[string]*forge.ChangeRequest{
+			strings.ToLower(ref.String()): {
+				"10": {
+					Number: 10,
+					State:  "closed",
+					Merged: true,
+				},
+				"20": {
+					Number: 20,
+					State:  "open",
+				},
+				"30": {
+					Number: 30,
+					State:  "closed",
+				},
+			},
+		},
+	}
+
+	c := New(cl, Config{
+		Namespace: "eval-runner",
+		Store:     st,
+	})
+
+	// Reconcile cluster state
+	if err := c.ReconcileClusterState(t.Context(), ref); err != nil {
+		t.Fatalf("ReconcileClusterState failed: %v", err)
+	}
+
+	// comp10 and run10 must be deleted
+	var checkComp10 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-10"}, &checkComp10); err == nil {
+		t.Errorf("expected comparison pr-10 to be deleted, but it still exists")
+	}
+
+	// comp20 must still exist
+	var checkComp20 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-20"}, &checkComp20); err != nil {
+		t.Errorf("expected comparison pr-20 to be preserved, got err: %v", err)
+	}
+
+	// comp30 must still exist
+	var checkComp30 v1alpha1.Comparison
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: "pr-30"}, &checkComp30); err != nil {
+		t.Errorf("expected comparison pr-30 to be preserved, got err: %v", err)
+	}
+
+	// Idempotency: second call succeeds without error and changes nothing
+	if err := c.ReconcileClusterState(t.Context(), ref); err != nil {
+		t.Fatalf("second ReconcileClusterState failed: %v", err)
 	}
 }
