@@ -1322,3 +1322,112 @@ func TestSyncer_ClosedPRHeadMoved_EmitsNoEvent(t *testing.T) {
 		t.Fatalf("expected 1 ChangeOpenedEvent when closed PR is re-opened, got %d: %v", len(evsReopen), evsReopen)
 	}
 }
+
+// TestSyncer_ForkChangeRequest_CandidateCloneURL verifies that when a change request is from a fork
+// (with Head.CloneURL set), the syncer emits events whose CandidateCloneURL is the fork's clone URL,
+// while BaselineCloneURL is the base repository's clone URL.
+func TestSyncer_ForkChangeRequest_CandidateCloneURL(t *testing.T) {
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	forkRef := forge.RepoRef{Host: "github.com", Owner: "codebot-robot", Name: "eval-runner"}
+	baseURL := "https://github.com/gke-labs/eval-runner.git"
+	forkURL := "https://github.com/codebot-robot/eval-runner.git"
+
+	ff := forge.NewFakeForge("fake")
+	ff.SetRepository(ref, &forge.Repository{
+		Ref:           ref,
+		DefaultBranch: "main",
+		CloneURL:      baseURL,
+	})
+	ff.SetBranches(ref, []forge.Branch{
+		{Name: "main", SHA: "0000000000000000000000000000000000000001"},
+	})
+
+	forkSHA1 := "1111111111111111111111111111111111111111"
+	forkSHA2 := "2222222222222222222222222222222222222222"
+	baseSHA := "0000000000000000000000000000000000000001"
+
+	// 1. Initial State: Open Fork PR #363
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{
+		{
+			ID:     "363",
+			Number: 363,
+			Title:  "feat: fork PR",
+			State:  "open",
+			Head: forge.ChangeRequestHead{
+				Ref:      "my-branch",
+				SHA:      forkSHA1,
+				RepoRef:  forkRef,
+				CloneURL: forkURL,
+			},
+			Base: forge.ChangeRequestBase{Ref: "main", SHA: baseSHA},
+		},
+	})
+
+	cons := &recordingConsumer{}
+	s, _ := newTestSyncer(t, ff, cons)
+
+	// First sync -> BranchAdvanced + ChangeOpened
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("first SyncRepo failed: %v", err)
+	}
+
+	evs := cons.getAndClearEvents()
+	var openEv *consumer.ChangeOpenedEvent
+	for _, e := range evs {
+		if co, ok := e.(consumer.ChangeOpenedEvent); ok && co.Change.Number == 363 {
+			coCopy := co
+			openEv = &coCopy
+			break
+		}
+	}
+	if openEv == nil {
+		t.Fatalf("expected ChangeOpenedEvent for PR #363, got %v", evs)
+	}
+	if openEv.CandidateCloneURL != forkURL {
+		t.Errorf("ChangeOpenedEvent CandidateCloneURL = %q, want fork URL %q", openEv.CandidateCloneURL, forkURL)
+	}
+	if openEv.BaselineCloneURL != baseURL {
+		t.Errorf("ChangeOpenedEvent BaselineCloneURL = %q, want base URL %q", openEv.BaselineCloneURL, baseURL)
+	}
+
+	// 2. Update PR #363: new head SHA2 on fork
+	ff.SetChangeRequests(ref, []forge.ChangeRequest{
+		{
+			ID:     "363",
+			Number: 363,
+			Title:  "feat: fork PR updated",
+			State:  "open",
+			Head: forge.ChangeRequestHead{
+				Ref:      "my-branch",
+				SHA:      forkSHA2,
+				RepoRef:  forkRef,
+				CloneURL: forkURL,
+			},
+			Base: forge.ChangeRequestBase{Ref: "main", SHA: baseSHA},
+		},
+	})
+
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("update SyncRepo failed: %v", err)
+	}
+
+	evs = cons.getAndClearEvents()
+	var updateEv *consumer.ChangeUpdatedEvent
+	for _, e := range evs {
+		if cu, ok := e.(consumer.ChangeUpdatedEvent); ok && cu.Change.Number == 363 {
+			cuCopy := cu
+			updateEv = &cuCopy
+			break
+		}
+	}
+	if updateEv == nil {
+		t.Fatalf("expected ChangeUpdatedEvent for PR #363, got %v", evs)
+	}
+	if updateEv.CandidateCloneURL != forkURL {
+		t.Errorf("ChangeUpdatedEvent CandidateCloneURL = %q, want fork URL %q", updateEv.CandidateCloneURL, forkURL)
+	}
+	if updateEv.BaselineCloneURL != baseURL {
+		t.Errorf("ChangeUpdatedEvent BaselineCloneURL = %q, want base URL %q", updateEv.BaselineCloneURL, baseURL)
+	}
+}

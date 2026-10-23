@@ -721,7 +721,7 @@ func (s *Syncer) syncFillIn(
 				events = append(events, consumer.ChangeOpenedEvent{
 					Repo:              ref,
 					Change:            *cr,
-					CandidateCloneURL: cloneURL,
+					CandidateCloneURL: candidateCloneURL(*cr, cloneURL),
 					BaselineCloneURL:  cloneURL,
 				})
 			}
@@ -768,7 +768,7 @@ func (s *Syncer) syncFillIn(
 				events = append(events, consumer.ChangeOpenedEvent{
 					Repo:              ref,
 					Change:            *cr,
-					CandidateCloneURL: cloneURL,
+					CandidateCloneURL: candidateCloneURL(*cr, cloneURL),
 					BaselineCloneURL:  cloneURL,
 				})
 			} else if prevOpen && !currOpen {
@@ -787,7 +787,7 @@ func (s *Syncer) syncFillIn(
 					Repo:              ref,
 					OldHeadSHA:        oldHeadSHA,
 					Change:            *cr,
-					CandidateCloneURL: cloneURL,
+					CandidateCloneURL: candidateCloneURL(*cr, cloneURL),
 					BaselineCloneURL:  cloneURL,
 				})
 			}
@@ -998,7 +998,7 @@ func (s *Syncer) syncFullReconcile(
 				events = append(events, consumer.ChangeOpenedEvent{
 					Repo:              ref,
 					Change:            cr,
-					CandidateCloneURL: cloneURL,
+					CandidateCloneURL: candidateCloneURL(cr, cloneURL),
 					BaselineCloneURL:  cloneURL,
 				})
 			} else if prevCR.Head.SHA != cr.Head.SHA {
@@ -1006,7 +1006,7 @@ func (s *Syncer) syncFullReconcile(
 					Repo:              ref,
 					OldHeadSHA:        prevCR.Head.SHA,
 					Change:            cr,
-					CandidateCloneURL: cloneURL,
+					CandidateCloneURL: candidateCloneURL(cr, cloneURL),
 					BaselineCloneURL:  cloneURL,
 				})
 			}
@@ -1095,6 +1095,13 @@ func (s *Syncer) clearPendingSyncs(f forge.Forge, ref forge.RepoRef) {
 	if clearable, ok := f.(interface{ ClearPendingEndpointSyncs(forge.RepoRef) }); ok {
 		clearable.ClearPendingEndpointSyncs(ref)
 	}
+}
+
+func candidateCloneURL(cr forge.ChangeRequest, defaultCloneURL string) string {
+	if cr.Head.CloneURL != "" {
+		return cr.Head.CloneURL
+	}
+	return defaultCloneURL
 }
 
 func isCROpen(cr forge.ChangeRequest) bool {

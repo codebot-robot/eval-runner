@@ -188,7 +188,8 @@ func (wp *WorkerPool) ProcessPullRequestClosed(ctx context.Context, item *PullRe
 			Number: item.PRNumber,
 			State:  "closed",
 			Head: forge.ChangeRequestHead{
-				RepoRef: candRef,
+				RepoRef:  candRef,
+				CloneURL: item.CandidateCloneURL,
 			},
 		},
 	}
@@ -212,9 +213,10 @@ func (wp *WorkerPool) ProcessPullRequest(ctx context.Context, item *PullRequestW
 			Title:  fmt.Sprintf("PR #%d", item.PRNumber),
 			State:  "open",
 			Head: forge.ChangeRequestHead{
-				Ref:     item.CandidateRepo,
-				SHA:     item.HeadSHA,
-				RepoRef: candRef,
+				Ref:      item.CandidateRepo,
+				SHA:      item.HeadSHA,
+				RepoRef:  candRef,
+				CloneURL: item.CandidateCloneURL,
 			},
 			Base: forge.ChangeRequestBase{
 				Ref: item.BaselineRepo,

@@ -15,14 +15,20 @@
 package consumer
 
 import (
+	"bytes"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -425,5 +431,212 @@ func TestConsumer_MissingCloneURL_Fails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no clone URL available for repository") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working dir: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find repo root (no go.mod found)")
+		}
+		dir = parent
+	}
+}
+
+// TestControllerRole_ConsumerVerbs parses k8s/rbac.yaml and verifies that eval-runner-controller Role
+// has create, update, patch, and delete on comparisons and runs in evalrunner.gke-labs.dev.
+func TestControllerRole_ConsumerVerbs(t *testing.T) {
+	root := findRepoRoot(t)
+	manifestPath := filepath.Join(root, "k8s", "rbac.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", manifestPath, err)
+	}
+
+	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(data), 4096)
+	var controllerRole *rbacv1.Role
+	for {
+		var role rbacv1.Role
+		err := decoder.Decode(&role)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("failed to decode Role from %s: %v", manifestPath, err)
+		}
+		if role.Kind == "Role" && role.Name == "eval-runner-controller" && role.Namespace == "eval-runner" {
+			controllerRole = &role
+			break
+		}
+	}
+
+	if controllerRole == nil {
+		t.Fatalf("eval-runner-controller Role in namespace eval-runner not found in %s", manifestPath)
+	}
+
+	expectedVerbs := []string{"create", "update", "patch", "delete", "get", "list", "watch"}
+
+	verbsForResource := func(resource string) map[string]bool {
+		verbs := make(map[string]bool)
+		for _, rule := range controllerRole.Rules {
+			for _, group := range rule.APIGroups {
+				if group == "evalrunner.gke-labs.dev" {
+					for _, res := range rule.Resources {
+						if res == resource {
+							for _, v := range rule.Verbs {
+								verbs[v] = true
+							}
+						}
+					}
+				}
+			}
+		}
+		return verbs
+	}
+
+	for _, res := range []string{"comparisons", "runs"} {
+		granted := verbsForResource(res)
+		for _, v := range expectedVerbs {
+			if !granted[v] {
+				t.Errorf("eval-runner-controller Role is missing required verb %q on %s (granted: %v)", v, res, granted)
+			}
+		}
+	}
+}
+
+// TestConsumer_ForkPullRequest_CloneURLs verifies that candidate Runs for fork PRs
+// clone the fork repository (carrying CloneURL from the head side of the change request),
+// while the baseline Run clones from the base repository.
+func TestConsumer_ForkPullRequest_CloneURLs(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+	baseRef := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	forkRef := forge.RepoRef{Host: "github.com", Owner: "codebot-robot", Name: "eval-runner"}
+	baseURL := "https://github.com/gke-labs/eval-runner.git"
+	forkURL := "https://github.com/codebot-robot/eval-runner.git"
+
+	store := &fakeStore{
+		repos: map[string]*forge.Repository{
+			strings.ToLower(baseRef.String()): {
+				Ref:           baseRef,
+				DefaultBranch: "main",
+				CloneURL:      baseURL,
+			},
+		},
+	}
+
+	c := New(cl, Config{
+		Namespace:        "eval-runner",
+		DefaultModel:     "mockllm/model",
+		DefaultBatchSize: 8,
+		TrackedRepos: []RepoConfig{
+			{Name: "gke-labs/eval-runner", Ref: baseRef, Branches: []string{"main"}},
+		},
+		Store: store,
+	})
+
+	baseSHA := "1111111111111111111111111111111111111111"
+	forkSHA1 := "2222222222222222222222222222222222222222"
+	forkSHA2 := "3333333333333333333333333333333333333333"
+
+	// 1. ChangeOpenedEvent for fork PR #363
+	pr := forge.ChangeRequest{
+		ID:     "363",
+		Number: 363,
+		Title:  "fix: fork PR bugfix",
+		State:  "open",
+		Head: forge.ChangeRequestHead{
+			Ref:      "my-branch",
+			SHA:      forkSHA1,
+			RepoRef:  forkRef,
+			CloneURL: forkURL,
+		},
+		Base: forge.ChangeRequestBase{
+			Ref: "main",
+			SHA: baseSHA,
+		},
+	}
+
+	err := c.ConsumeEvent(t.Context(), ChangeOpenedEvent{
+		Repo:   baseRef,
+		Change: pr,
+	})
+	if err != nil {
+		t.Fatalf("ChangeOpened failed: %v", err)
+	}
+
+	// Verify Candidate Run has the fork's clone URL and commit
+	candRunName := CandidateRunName("gke-labs/eval-runner", 363, forkSHA1, false)
+	var candRun v1alpha1.Run
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: candRunName}, &candRun); err != nil {
+		t.Fatalf("failed to get candidate run %s: %v", candRunName, err)
+	}
+	if candRun.Spec.Repo.URL != forkURL {
+		t.Errorf("candidate run spec.repo.url = %q, want fork URL %q", candRun.Spec.Repo.URL, forkURL)
+	}
+	if candRun.Spec.Repo.Commit != forkSHA1 {
+		t.Errorf("candidate run spec.repo.commit = %q, want %q", candRun.Spec.Repo.Commit, forkSHA1)
+	}
+	if candRun.Labels[LabelRepo] != SanitizeLabelValue("codebot-robot/eval-runner") {
+		t.Errorf("candidate run repo label = %q, want %q", candRun.Labels[LabelRepo], SanitizeLabelValue("codebot-robot/eval-runner"))
+	}
+
+	// Verify Baseline Run has the base repo's clone URL and commit
+	baseRunName := BaselineRunName("gke-labs/eval-runner", baseSHA, false)
+	var baseRun v1alpha1.Run
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: baseRunName}, &baseRun); err != nil {
+		t.Fatalf("failed to get baseline run %s: %v", baseRunName, err)
+	}
+	if baseRun.Spec.Repo.URL != baseURL {
+		t.Errorf("baseline run spec.repo.url = %q, want base URL %q", baseRun.Spec.Repo.URL, baseURL)
+	}
+	if baseRun.Spec.Repo.Commit != baseSHA {
+		t.Errorf("baseline run spec.repo.commit = %q, want %q", baseRun.Spec.Repo.Commit, baseSHA)
+	}
+	if baseRun.Labels[LabelRepo] != SanitizeLabelValue("gke-labs/eval-runner") {
+		t.Errorf("baseline run repo label = %q, want %q", baseRun.Labels[LabelRepo], SanitizeLabelValue("gke-labs/eval-runner"))
+	}
+
+	// Verify Comparison references candidate and baseline runs
+	comp, err := FindComparisonForPR(t.Context(), cl, "eval-runner", "gke-labs/eval-runner", 363)
+	if err != nil || comp == nil {
+		t.Fatalf("failed to find comparison for PR #363: %v", err)
+	}
+	if comp.Spec.Candidate.Run != candRunName {
+		t.Errorf("comparison candidate run = %q, want %q", comp.Spec.Candidate.Run, candRunName)
+	}
+	if comp.Spec.Baseline.Run != baseRunName {
+		t.Errorf("comparison baseline run = %q, want %q", comp.Spec.Baseline.Run, baseRunName)
+	}
+
+	// 2. ChangeUpdatedEvent (new commit pushed to fork)
+	pr.Head.SHA = forkSHA2
+	err = c.ConsumeEvent(t.Context(), ChangeUpdatedEvent{
+		Repo:       baseRef,
+		OldHeadSHA: forkSHA1,
+		Change:     pr,
+	})
+	if err != nil {
+		t.Fatalf("ChangeUpdated failed: %v", err)
+	}
+
+	cand2RunName := CandidateRunName("gke-labs/eval-runner", 363, forkSHA2, false)
+	var cand2Run v1alpha1.Run
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "eval-runner", Name: cand2RunName}, &cand2Run); err != nil {
+		t.Fatalf("failed to get updated candidate run %s: %v", cand2RunName, err)
+	}
+	if cand2Run.Spec.Repo.URL != forkURL {
+		t.Errorf("updated candidate run spec.repo.url = %q, want fork URL %q", cand2Run.Spec.Repo.URL, forkURL)
+	}
+	if cand2Run.Spec.Repo.Commit != forkSHA2 {
+		t.Errorf("updated candidate run spec.repo.commit = %q, want %q", cand2Run.Spec.Repo.Commit, forkSHA2)
 	}
 }

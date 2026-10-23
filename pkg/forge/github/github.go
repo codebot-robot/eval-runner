@@ -335,7 +335,9 @@ type pullResponse struct {
 
 func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest {
 	headRepoRef := ref
+	var headCloneURL string
 	if pr.Head.Repo != nil {
+		headCloneURL = pr.Head.Repo.CloneURL
 		if parsed, ok := forge.ParseRepoURL(pr.Head.Repo.CloneURL); ok {
 			headRepoRef = parsed
 		} else if pr.Head.Repo.FullName != "" {
@@ -357,9 +359,10 @@ func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest
 		Title:  pr.Title,
 		Author: pr.User.Login,
 		Head: forge.ChangeRequestHead{
-			Ref:     pr.Head.Ref,
-			SHA:     pr.Head.SHA,
-			RepoRef: headRepoRef,
+			Ref:      pr.Head.Ref,
+			SHA:      pr.Head.SHA,
+			RepoRef:  headRepoRef,
+			CloneURL: headCloneURL,
 		},
 		Base: forge.ChangeRequestBase{
 			Ref: pr.Base.Ref,

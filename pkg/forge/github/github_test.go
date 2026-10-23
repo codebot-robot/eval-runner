@@ -190,8 +190,14 @@ func TestGitHubForge_ChangeRequests_PaginationAnd404(t *testing.T) {
 	if crs[0].Number != 1 || crs[0].ID != "1" || crs[0].Author != "dev1" || crs[0].Head.SHA != "1111" {
 		t.Errorf("crs[0] = %+v", crs[0])
 	}
+	if crs[0].Head.CloneURL != "https://github.com/gke-labs/eval-runner.git" {
+		t.Errorf("crs[0].Head.CloneURL = %q, want https://github.com/gke-labs/eval-runner.git", crs[0].Head.CloneURL)
+	}
 	if crs[1].Number != 2 || crs[1].ID != "2" || crs[1].Author != "dev2" || crs[1].Head.RepoRef.Owner != "fork" {
 		t.Errorf("crs[1] = %+v", crs[1])
+	}
+	if crs[1].Head.CloneURL != "https://github.com/fork/eval-runner.git" {
+		t.Errorf("crs[1].Head.CloneURL = %q, want https://github.com/fork/eval-runner.git", crs[1].Head.CloneURL)
 	}
 
 	// 404 case

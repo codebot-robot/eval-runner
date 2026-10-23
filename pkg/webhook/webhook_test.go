@@ -1094,6 +1094,111 @@ func TestHandler_Validation_BadRequest(t *testing.T) {
 				}
 			}`),
 		},
+		{
+			name:  "pull_request mismatched candidate clone_url",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {
+						"sha": "1111111111111111111111111111111111111111",
+						"ref": "feature",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "fork/eval-runner",
+							"clone_url": "https://github.com/attacker/malicious.git",
+							"owner": {"login": "fork"}
+						}
+					},
+					"base": {
+						"sha": "2222222222222222222222222222222222222222",
+						"ref": "main",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "gke-labs/eval-runner",
+							"owner": {"login": "gke-labs"}
+						}
+					}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "pull_request unparseable candidate clone_url",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {
+						"sha": "1111111111111111111111111111111111111111",
+						"ref": "feature",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "fork/eval-runner",
+							"clone_url": "::invalid-url::",
+							"owner": {"login": "fork"}
+						}
+					},
+					"base": {
+						"sha": "2222222222222222222222222222222222222222",
+						"ref": "main",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "gke-labs/eval-runner",
+							"owner": {"login": "gke-labs"}
+						}
+					}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "pull_request mismatched base clone_url",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {
+						"sha": "1111111111111111111111111111111111111111",
+						"ref": "feature",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "fork/eval-runner",
+							"owner": {"login": "fork"}
+						}
+					},
+					"base": {
+						"sha": "2222222222222222222222222222222222222222",
+						"ref": "main",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "gke-labs/eval-runner",
+							"clone_url": "https://github.com/attacker/eval-runner.git",
+							"owner": {"login": "gke-labs"}
+						}
+					}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
 	}
 
 	for _, tc := range tests {

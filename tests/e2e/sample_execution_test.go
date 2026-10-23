@@ -35,6 +35,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/webhook"
 )
 
 func TestRunSampleExecution(t *testing.T) {
@@ -1419,6 +1420,146 @@ spec:
 
 		// Wait for Run to complete and clean up sandboxes
 		harness.WaitForRunPhase("eval-runner", baseRunName, "Completed", 3*time.Minute)
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+	})
+
+	t.Run("ForkCandidateComparisonExecution", func(t *testing.T) {
+		// 1. Verify eval-runner-controller Role permissions via kubectl auth can-i
+		for _, action := range []struct {
+			verb     string
+			resource string
+		}{
+			{"create", "comparisons"},
+			{"update", "comparisons"},
+			{"patch", "comparisons"},
+			{"delete", "comparisons"},
+			{"create", "runs"},
+			{"update", "runs"},
+			{"patch", "runs"},
+			{"delete", "runs"},
+		} {
+			out := harness.runCmd("kubectl", "auth", "can-i", action.verb, action.resource,
+				"--as=system:serviceaccount:eval-runner:eval-runner-controller", "-n", "eval-runner")
+			if strings.TrimSpace(out) != "yes" {
+				t.Errorf("expected eval-runner-controller to have %s %s permission in eval-runner, got %s",
+					action.verb, action.resource, out)
+			}
+		}
+
+		// 2. Fetch base and fork commits from in-cluster git server
+		baseCommit := harness.GetGitServerCommit("eval-runner-sandbox", "gke-labs/eval-runner.git")
+		forkCommit := harness.GetGitServerCommit("eval-runner-sandbox", "codebot-robot/eval-runner.git")
+		if baseCommit == "" || forkCommit == "" {
+			t.Fatalf("failed to retrieve git commits: base=%q, fork=%q", baseCommit, forkCommit)
+		}
+		if baseCommit == forkCommit {
+			t.Fatalf("expected fork commit to differ from base commit, both are %s", baseCommit)
+		}
+
+		// 3. Port-forward to webhook service
+		baseURL, webhookCleanup := harness.PortForwardWebhook(18089)
+		defer webhookCleanup()
+
+		prNum := 9876
+		candRunName := fmt.Sprintf("pr-%d-%s", prNum, forkCommit[:7])
+		baseRunName := fmt.Sprintf("base-%s", baseCommit[:7])
+		compName := fmt.Sprintf("pr-%d", prNum)
+
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
+			harness.runCmd("kubectl", "delete", "run", candRunName, baseRunName, "-n", "eval-runner", "--ignore-not-found")
+		})
+
+		// 4. Post signed pull_request event driving the consumer through the webhook path
+		payload := fmt.Sprintf(`{
+  "action": "opened",
+  "number": %d,
+  "pull_request": {
+    "number": %d,
+    "state": "open",
+    "head": {
+      "sha": "%s",
+      "ref": "feature",
+      "repo": {
+        "name": "eval-runner",
+        "full_name": "codebot-robot/eval-runner",
+        "clone_url": "git://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git",
+        "owner": {"login": "codebot-robot"}
+      }
+    },
+    "base": {
+      "sha": "%s",
+      "ref": "main",
+      "repo": {
+        "name": "eval-runner",
+        "full_name": "gke-labs/eval-runner",
+        "clone_url": "git://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
+        "owner": {"login": "gke-labs"}
+      }
+    }
+  },
+  "repository": {
+    "name": "eval-runner",
+    "full_name": "gke-labs/eval-runner",
+    "clone_url": "git://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
+    "owner": {"login": "gke-labs"}
+  }
+}`, prNum, prNum, forkCommit, baseCommit)
+
+		sig := webhook.ComputeSignature([]byte(payload), []byte("e2e-webhook-secret"))
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/webhook", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("failed to create webhook request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(webhook.HeaderGitHubEvent, webhook.EventPullRequest)
+		req.Header.Set(webhook.HeaderHubSignature256, sig)
+		req.Header.Set(webhook.HeaderGitHubDelivery, "e2e-fork-candidate-delivery")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to POST pull_request event: %v", err)
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("webhook returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		}
+		if !strings.Contains(string(respBody), "ok: enqueued pull_request") {
+			t.Fatalf("expected webhook to enqueue pull_request, got: %s", string(respBody))
+		}
+
+		// 5. Assert Candidate Run, Baseline Run, and Comparison are created by the consumer
+		candRun := harness.WaitForRunExists("eval-runner", candRunName, 30*time.Second)
+		if candRun.Spec.Repo.URL != "git://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git" {
+			t.Errorf("expected candidate repo URL to be the fork, got %s", candRun.Spec.Repo.URL)
+		}
+		if candRun.Spec.Repo.Commit != forkCommit {
+			t.Errorf("expected candidate repo commit %s, got %s", forkCommit, candRun.Spec.Repo.Commit)
+		}
+
+		baseRun := harness.WaitForRunExists("eval-runner", baseRunName, 30*time.Second)
+		if baseRun.Spec.Repo.URL != "git://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git" {
+			t.Errorf("expected baseline repo URL to be the base repo, got %s", baseRun.Spec.Repo.URL)
+		}
+
+		comp := harness.WaitForComparisonExists("eval-runner", compName, 30*time.Second)
+		if comp.Spec.Candidate.Run != candRunName {
+			t.Errorf("expected comparison candidate run %s, got %s", candRunName, comp.Spec.Candidate.Run)
+		}
+		if comp.Spec.Baseline.Run != baseRunName {
+			t.Errorf("expected comparison baseline run %s, got %s", baseRunName, comp.Spec.Baseline.Run)
+		}
+
+		// 6. Wait for candidate Run (cloning from fork bare repo) and baseline Run to reach Completed
+		harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+		harness.WaitForRunPhase("eval-runner", baseRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		// 7. Wait for Comparison to reach terminal verdict
+		harness.WaitForComparisonVerdict("eval-runner", compName, string(v1alpha1.ComparisonVerdictUnchanged), 60*time.Second)
+
+		// 8. Clean up sandboxes
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 	})
 }
