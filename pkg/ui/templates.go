@@ -1705,7 +1705,9 @@ const pullsListTemplate = `
         <table class="ci">
           <thead>
             <tr>
+              {{- if not .Repo.Host }}
               <th>Repository</th>
+              {{- end }}
               <th>PR</th>
               <th>Base → Head</th>
               <th>Verdict</th>
@@ -1719,7 +1721,9 @@ const pullsListTemplate = `
           <tbody>
             {{ range .Pulls }}
             <tr>
+              {{- if not $.Repo.Host }}
               <td><a href="{{ .RepoLink }}" style="font-weight:600">{{ .Repository }}</a></td>
+              {{- end }}
               <td><a href="{{ .HistoryLink }}" style="font-weight:600">#{{ .Number }}</a> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener" style="font-size:12px;color:var(--muted);margin-left:4px">GitHub ↗</a></td>
               <td><span class="mono" style="font-size:13px">{{ if .BaseSHAShort }}{{ .BaseSHAShort }} → {{ end }}{{ .HeadSHAShort }}</span></td>
               <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span>{{ if ne .PImprovement "—" }} <span class="mono" style="font-size:12px;color:var(--muted)">(P={{ .PImprovement }})</span>{{ end }}</td>
@@ -1731,7 +1735,7 @@ const pullsListTemplate = `
             </tr>
             {{ else }}
             <tr>
-              <td colspan="9" class="empty-state">No pull requests found.</td>
+              <td colspan="{{ if .Repo.Host }}8{{ else }}9{{ end }}" class="empty-state">No pull requests found.</td>
             </tr>
             {{ end }}
           </tbody>
@@ -1770,7 +1774,7 @@ const pullDetailTemplate = `
     <div class="card">
       <div class="card-header">
         <div style="display:flex;align-items:center;gap:12px">
-          <h1 class="card-title">{{ .Repository }} <a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></h1>
+          <h1 class="card-title">{{ if not .Repo.Host }}{{ .Repository }} {{ end }}<a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></h1>
         </div>
         <div style="font-size:13px;color:var(--muted)"><a href="{{ .BackLink }}">← Back to Pull Requests</a></div>
       </div>
@@ -1817,7 +1821,9 @@ const pullDetailTemplate = `
         </div>
       </div>
       <div class="card-footer">
+        {{- if not .Repo.Host }}
         <span><b>Repository:</b> {{ .Repository }}</span>
+        {{- end }}
         <span><b>PR:</b> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener">#{{ .Number }}</a></span>
         <span><b>Comparisons:</b> {{ .TotalCount }}</span>
         {{- if .Version }}
@@ -1981,7 +1987,9 @@ const seriesDetailTemplate = `
       <div class="card-header">
         <div>
           <h1 class="card-title">
+            {{- if not .Repo.Host }}
             <span>{{ .Repository }}</span>
+            {{- end }}
             <span class="mono" style="font-size:16px;color:var(--muted);font-weight:normal">({{ .Branch }})</span>
           </h1>
           <div style="font-size:13px;color:var(--muted);margin-top:4px"><a href="{{ .BackLink }}">← Back to Series</a></div>
@@ -2144,7 +2152,9 @@ const seriesDetailTemplate = `
         {{- end }}
       </div>
       <div class="card-footer">
+        {{- if not .Repo.Host }}
         <span><b>Repository:</b> {{ .Repository }}</span>
+        {{- end }}
         <span><b>Branch:</b> {{ .Branch }}</span>
         <span><b>Total Runs:</b> {{ .TotalRuns }}</span>
         {{- if .Version }}
