@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/forge"
 	"github.com/gke-labs/eval-runner/pkg/forge/store"
@@ -654,3 +655,73 @@ func TestGitHubForge_ETagAndPullRequest(t *testing.T) {
 		t.Errorf("expected nil after ClearPendingEndpointSyncs, got %+v", p)
 	}
 }
+
+func TestConvertPullResponse(t *testing.T) {
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	now := time.Now().Truncate(time.Second)
+
+	tests := []struct {
+		name       string
+		input      pullResponse
+		wantState  string
+		wantMerged bool
+	}{
+		{
+			name: "open pr",
+			input: pullResponse{
+				Number: 1,
+				Title:  "Open PR",
+				State:  "open",
+				Merged: false,
+			},
+			wantState:  "open",
+			wantMerged: false,
+		},
+		{
+			name: "closed unmerged pr",
+			input: pullResponse{
+				Number: 2,
+				Title:  "Closed PR",
+				State:  "closed",
+				Merged: false,
+			},
+			wantState:  "closed",
+			wantMerged: false,
+		},
+		{
+			name: "closed merged pr via merged flag",
+			input: pullResponse{
+				Number: 3,
+				Title:  "Merged PR",
+				State:  "closed",
+				Merged: true,
+			},
+			wantState:  "closed",
+			wantMerged: true,
+		},
+		{
+			name: "closed merged pr via merged_at",
+			input: pullResponse{
+				Number:   4,
+				Title:    "Merged PR with merged_at",
+				State:    "closed",
+				MergedAt: &now,
+			},
+			wantState:  "closed",
+			wantMerged: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := convertPullResponse(ref, tc.input)
+			if got.State != tc.wantState {
+				t.Errorf("convertPullResponse().State = %q, want %q", got.State, tc.wantState)
+			}
+			if got.Merged != tc.wantMerged {
+				t.Errorf("convertPullResponse().Merged = %v, want %v", got.Merged, tc.wantMerged)
+			}
+		})
+	}
+}
+

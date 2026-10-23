@@ -356,10 +356,6 @@ func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest
 	}
 
 	isMerged := pr.Merged || pr.MergedAt != nil
-	state := pr.State
-	if isMerged && (state == "" || state == "closed") {
-		state = "closed"
-	}
 
 	return forge.ChangeRequest{
 		ID:     forge.ChangeRequestID(strconv.Itoa(pr.Number)),
@@ -376,7 +372,7 @@ func convertPullResponse(ref forge.RepoRef, pr pullResponse) forge.ChangeRequest
 			Ref: pr.Base.Ref,
 			SHA: pr.Base.SHA,
 		},
-		State:     state,
+		State:     pr.State,
 		Merged:    isMerged,
 		UpdatedAt: pr.UpdatedAt,
 	}
