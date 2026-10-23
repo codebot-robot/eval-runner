@@ -1032,6 +1032,7 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 			ConfigMapKeyInconclusivePolicy:                  "neutral",
 			configkeys.ConfigMapKeyGitHubWebhookSecret:      "gh-wh",
 			configkeys.ConfigMapKeyWebhookRepositories:      "org/repo",
+			configkeys.ConfigMapKeyAllowedCloneHosts:        "github.com",
 			configkeys.ConfigMapKeyDefaultModel:             "model",
 			configkeys.ConfigMapKeyDefaultLimit:             "5",
 			configkeys.ConfigMapKeyDefaultBatchSize:         "8",

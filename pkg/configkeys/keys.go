@@ -68,6 +68,8 @@ const (
 	ConfigMapKeyGitHubWebhookSecret = "githubWebhookSecret"
 	// ConfigMapKeyWebhookRepositories is the ConfigMap key for repository allow-list (used by eval-runner-webhook).
 	ConfigMapKeyWebhookRepositories = "webhookRepositories"
+	// ConfigMapKeyAllowedCloneHosts is the ConfigMap key for clone URL host allow-list (used by eval-runner-webhook).
+	ConfigMapKeyAllowedCloneHosts = "allowedCloneHosts"
 	// ConfigMapKeyDefaultModel is the ConfigMap key for the default model (used by eval-runner-webhook).
 	ConfigMapKeyDefaultModel = "defaultModel"
 	// ConfigMapKeyDefaultLimit is the ConfigMap key for the default sample limit (used by eval-runner-webhook).

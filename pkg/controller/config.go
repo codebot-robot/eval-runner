@@ -126,6 +126,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyModelPrices:              {},
 	configkeys.ConfigMapKeyGitHubWebhookSecret:      {},
 	configkeys.ConfigMapKeyWebhookRepositories:      {},
+	configkeys.ConfigMapKeyAllowedCloneHosts:        {},
 	configkeys.ConfigMapKeyDefaultModel:             {},
 	configkeys.ConfigMapKeyDefaultLimit:             {},
 	configkeys.ConfigMapKeyDefaultBatchSize:         {},
