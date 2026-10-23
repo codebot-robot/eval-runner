@@ -76,9 +76,10 @@ type ChangeRequestID string
 
 // ChangeRequestHead represents the head (source) of a change request.
 type ChangeRequestHead struct {
-	Ref     string  `json:"ref"`
-	SHA     string  `json:"sha"`
-	RepoRef RepoRef `json:"repo_ref"`
+	Ref      string  `json:"ref"`
+	SHA      string  `json:"sha"`
+	RepoRef  RepoRef `json:"repo_ref"`
+	CloneURL string  `json:"clone_url,omitempty"`
 }
 
 // ChangeRequestBase represents the base (target) branch of a change request.

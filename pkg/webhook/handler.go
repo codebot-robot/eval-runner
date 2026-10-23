@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/forge"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -304,8 +305,26 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		candCloneURL := BuildCloneURL(candOwner, candName)
-		baseCloneURL := BuildCloneURL(baseOwner, baseName)
+		candCloneURL := candRepoObj.CloneURL
+		if candCloneURL != "" {
+			parsed, ok := forge.ParseRepoURL(candCloneURL)
+			if !ok || (parsed.Owner != "-" && !strings.EqualFold(parsed.Owner, candOwner)) || !strings.EqualFold(parsed.Name, candName) {
+				http.Error(w, fmt.Sprintf("Invalid candidate clone URL %q: does not match repository %s/%s", candCloneURL, candOwner, candName), http.StatusBadRequest)
+				return
+			}
+		} else {
+			candCloneURL = BuildCloneURL(candOwner, candName)
+		}
+		baseCloneURL := baseRepoObj.CloneURL
+		if baseCloneURL != "" {
+			parsed, ok := forge.ParseRepoURL(baseCloneURL)
+			if !ok || (parsed.Owner != "-" && !strings.EqualFold(parsed.Owner, baseOwner)) || !strings.EqualFold(parsed.Name, baseName) {
+				http.Error(w, fmt.Sprintf("Invalid base clone URL %q: does not match repository %s/%s", baseCloneURL, baseOwner, baseName), http.StatusBadRequest)
+				return
+			}
+		} else {
+			baseCloneURL = BuildCloneURL(baseOwner, baseName)
+		}
 		candRepoFullName := fmt.Sprintf("%s/%s", candOwner, candName)
 		baseRepoFullName := fmt.Sprintf("%s/%s", baseOwner, baseName)
 

@@ -49,6 +49,20 @@ RUN git config --global user.email "test@example.com" && \
     git commit -m "remove evals list" && \
     git clone --bare /docs-work /git/docs-no-manifest.git && \
     touch /git/docs-no-manifest.git/git-daemon-export-ok && \
+    git clone /git/docs-eval.git /docs-fork-work && \
+    cd /docs-fork-work && \
+    git checkout -b feature && \
+    echo "fork candidate change" >> README.md && \
+    git commit -am "candidate commit in fork" && \
+    git clone --bare /docs-fork-work /git/docs-eval-fork.git && \
+    touch /git/docs-eval-fork.git/git-daemon-export-ok && \
+    mkdir -p /git/gke-labs /git/codebot-robot && \
+    cp -a /git/docs-eval.git /git/gke-labs/eval-runner.git && \
+    touch /git/gke-labs/eval-runner.git/git-daemon-export-ok && \
+    cp -a /git/docs-eval-fork.git /git/codebot-robot/eval-runner.git && \
+    touch /git/codebot-robot/eval-runner.git/git-daemon-export-ok && \
+    rm -rf /docs-fork-work && \
+    cd /docs-work && \
     chown -R 65534:65534 /git && \
     chmod -R 775 /git && \
     cp -a /git /git-baked && \

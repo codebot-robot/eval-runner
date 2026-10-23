@@ -246,7 +246,10 @@ func (c *Consumer) processChangeOpenedOrUpdated(ctx context.Context, cfg Config,
 	}
 	baseRepo := targetRepo
 
-	candCloneURL := candCloneURLHint
+	candCloneURL := cr.Head.CloneURL
+	if candCloneURL == "" {
+		candCloneURL = candCloneURLHint
+	}
 	if candCloneURL == "" {
 		if !cr.Head.RepoRef.IsZero() {
 			candURL, err := c.getCloneURL(cr.Head.RepoRef, "")

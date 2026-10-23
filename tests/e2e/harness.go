@@ -551,6 +551,47 @@ func (h *Harness) PortForwardUI(port int) (baseURL string, cleanup func()) {
 	return baseURL, cleanup
 }
 
+func (h *Harness) PortForwardWebhook(port int) (baseURL string, cleanup func()) {
+	cmd := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-webhook", fmt.Sprintf("%d:80", port))
+	if err := cmd.Start(); err != nil {
+		h.t.Fatalf("failed to start eval-runner-webhook port-forward: %v", err)
+	}
+	cleanup = func() {
+		if cmd.Process != nil {
+			if err := cmd.Process.Kill(); err != nil {
+				h.t.Logf("warning: failed to kill port-forward process: %v", err)
+			}
+			if err := cmd.Wait(); err != nil {
+				h.t.Logf("port-forward process terminated: %v", err)
+			}
+		}
+	}
+
+	baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	ready := false
+	for i := 0; i < 30; i++ {
+		resp, err := http.Get(baseURL + "/healthz")
+		if err == nil && resp.StatusCode == http.StatusOK {
+			ready = true
+			if err := resp.Body.Close(); err != nil {
+				h.t.Logf("warning: failed to close response body: %v", err)
+			}
+			break
+		}
+		if resp != nil {
+			if err := resp.Body.Close(); err != nil {
+				h.t.Logf("warning: failed to close response body: %v", err)
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !ready {
+		cleanup()
+		h.t.Fatalf("eval-runner-webhook port-forward failed to become ready on port %d", port)
+	}
+	return baseURL, cleanup
+}
+
 func (h *Harness) WaitForSandboxExists(namespace, sandboxName string, timeout time.Duration) {
 	h.t.Logf("Waiting for Sandbox %s/%s to be created (timeout %v)", namespace, sandboxName, timeout)
 	start := time.Now()
