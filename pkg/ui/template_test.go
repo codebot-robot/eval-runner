@@ -1199,6 +1199,94 @@ func TestTemplateRenderingPullDetailGolden(t *testing.T) {
 	assertGolden(t, "pull_detail.golden.html", buf.String())
 }
 
+func TestTemplateRenderingPullsList_RepoScopedVsLegacy(t *testing.T) {
+	t.Run("RepoScoped", func(t *testing.T) {
+		view := sampleRepoPullRequestsListView()
+		var buf bytes.Buffer
+		if err := tmplPullsList.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute pulls list template: %v", err)
+		}
+		body := buf.String()
+		if strings.Contains(body, "<th>Repository</th>") {
+			t.Errorf("expected repo-scoped pulls list not to contain <th>Repository</th>")
+		}
+		if strings.Contains(body, `<td><a href="/github.com/gke-labs/eval-runner/pulls" style="font-weight:600">gke-labs/eval-runner</a></td>`) {
+			t.Errorf("expected repo-scoped pulls list row not to contain repository column td")
+		}
+
+		// Empty state colspan
+		view.Pulls = nil
+		buf.Reset()
+		if err := tmplPullsList.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute pulls list template with empty pulls: %v", err)
+		}
+		if !strings.Contains(buf.String(), `<td colspan="8" class="empty-state">No pull requests found.</td>`) {
+			t.Errorf("expected colspan=8 in repo-scoped empty state, got:\n%s", buf.String())
+		}
+	})
+
+	t.Run("LegacyGlobal", func(t *testing.T) {
+		view := samplePullRequestsListView()
+		var buf bytes.Buffer
+		if err := tmplPullsList.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute pulls list template: %v", err)
+		}
+		body := buf.String()
+		if !strings.Contains(body, "<th>Repository</th>") {
+			t.Errorf("expected legacy global pulls list to contain <th>Repository</th>")
+		}
+		if !strings.Contains(body, `<td><a href="/github.com/gke-labs/eval-runner/pulls" style="font-weight:600">gke-labs/eval-runner</a></td>`) {
+			t.Errorf("expected legacy global pulls list row to contain repository column td")
+		}
+
+		// Empty state colspan
+		view.Pulls = nil
+		buf.Reset()
+		if err := tmplPullsList.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute pulls list template with empty pulls: %v", err)
+		}
+		if !strings.Contains(buf.String(), `<td colspan="9" class="empty-state">No pull requests found.</td>`) {
+			t.Errorf("expected colspan=9 in legacy global empty state, got:\n%s", buf.String())
+		}
+	})
+}
+
+func TestTemplateRenderingPullDetail_RepoScopedVsLegacy(t *testing.T) {
+	t.Run("RepoScoped", func(t *testing.T) {
+		view := samplePullRequestDetailView()
+		var buf bytes.Buffer
+		if err := tmplPullDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute pull detail template: %v", err)
+		}
+		body := buf.String()
+		wantTitle := `<h1 class="card-title"><a href="https://github.com/gke-labs/eval-runner/pull/42" target="_blank" rel="noopener">#42</a></h1>`
+		if !strings.Contains(body, wantTitle) {
+			t.Errorf("expected repo-scoped card title to be %q, got body:\n%s", wantTitle, body)
+		}
+		if strings.Contains(body, "<span><b>Repository:</b>") {
+			t.Errorf("expected repo-scoped pull detail footer not to contain Repository")
+		}
+	})
+
+	t.Run("LegacyGlobal", func(t *testing.T) {
+		view := samplePullRequestDetailView()
+		view.Repo = RepoRef{} // clear repo to simulate legacy /pulls/{repohash}/{number} route
+		var buf bytes.Buffer
+		if err := tmplPullDetail.Execute(&buf, view); err != nil {
+			t.Fatalf("failed to execute pull detail template: %v", err)
+		}
+		body := buf.String()
+		wantTitle := `<h1 class="card-title">gke-labs/eval-runner <a href="https://github.com/gke-labs/eval-runner/pull/42" target="_blank" rel="noopener">#42</a></h1>`
+		if !strings.Contains(body, wantTitle) {
+			t.Errorf("expected legacy card title to be %q, got body:\n%s", wantTitle, body)
+		}
+		wantFooter := `<span><b>Repository:</b> gke-labs/eval-runner</span>`
+		if !strings.Contains(body, wantFooter) {
+			t.Errorf("expected legacy pull detail footer to contain %q, got body:\n%s", wantFooter, body)
+		}
+	})
+}
+
 func TestTemplateRenderingComparisonTableGolden(t *testing.T) {
 	tasks := sampleComparisonDetailView().Tasks
 
