@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1199,6 +1200,146 @@ func TestHandler_Validation_BadRequest(t *testing.T) {
 				}
 			}`),
 		},
+		{
+			name:  "pull_request candidate clone_url foreign host with matching owner and name",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {
+						"sha": "1111111111111111111111111111111111111111",
+						"ref": "feature",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "fork/eval-runner",
+							"clone_url": "https://evil.example.com/fork/eval-runner.git",
+							"owner": {"login": "fork"}
+						}
+					},
+					"base": {
+						"sha": "2222222222222222222222222222222222222222",
+						"ref": "main",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "gke-labs/eval-runner",
+							"owner": {"login": "gke-labs"}
+						}
+					}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "pull_request candidate clone_url single-segment path",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {
+						"sha": "1111111111111111111111111111111111111111",
+						"ref": "feature",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "fork/eval-runner",
+							"clone_url": "https://evil.example.com/eval-runner.git",
+							"owner": {"login": "fork"}
+						}
+					},
+					"base": {
+						"sha": "2222222222222222222222222222222222222222",
+						"ref": "main",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "gke-labs/eval-runner",
+							"owner": {"login": "gke-labs"}
+						}
+					}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "pull_request candidate clone_url single-segment path on allowed host",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {
+						"sha": "1111111111111111111111111111111111111111",
+						"ref": "feature",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "fork/eval-runner",
+							"clone_url": "https://github.com/eval-runner.git",
+							"owner": {"login": "fork"}
+						}
+					},
+					"base": {
+						"sha": "2222222222222222222222222222222222222222",
+						"ref": "main",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "gke-labs/eval-runner",
+							"owner": {"login": "gke-labs"}
+						}
+					}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
+		{
+			name:  "pull_request candidate clone_url scp-style form foreign host",
+			event: EventPullRequest,
+			payload: []byte(`{
+				"action": "opened",
+				"number": 1,
+				"pull_request": {
+					"number": 1,
+					"head": {
+						"sha": "1111111111111111111111111111111111111111",
+						"ref": "feature",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "fork/eval-runner",
+							"clone_url": "git@evil.example.com:fork/eval-runner.git",
+							"owner": {"login": "fork"}
+						}
+					},
+					"base": {
+						"sha": "2222222222222222222222222222222222222222",
+						"ref": "main",
+						"repo": {
+							"name": "eval-runner",
+							"full_name": "gke-labs/eval-runner",
+							"owner": {"login": "gke-labs"}
+						}
+					}
+				},
+				"repository": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}`),
+		},
 	}
 
 	for _, tc := range tests {
@@ -1507,6 +1648,164 @@ func TestResolveWebhookConfig_DefaultBudgetUSD(t *testing.T) {
 	}
 	if cfgZeroFlag.DefaultBudgetUSD != nil {
 		t.Errorf("expected explicit flag 0 to unset defaultBudgetUSD, got %v", cfgZeroFlag.DefaultBudgetUSD)
+	}
+}
+
+func TestResolveWebhookConfig_AllowedCloneHosts(t *testing.T) {
+	// 1. Default when unset
+	cfgDef, err := ResolveWebhookConfig(nil, RawWebhookFlags{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(cfgDef.AllowedCloneHosts, []string{"github.com"}) {
+		t.Errorf("expected default AllowedCloneHosts [github.com], got %v", cfgDef.AllowedCloneHosts)
+	}
+
+	// 2. ConfigMap parses allowedCloneHosts
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyAllowedCloneHosts: "github.com, git-server.eval-runner-sandbox.svc",
+		},
+	}
+	cfgCM, err := ResolveWebhookConfig(cm, RawWebhookFlags{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expectedCM := []string{"github.com", "git-server.eval-runner-sandbox.svc"}
+	if !reflect.DeepEqual(cfgCM.AllowedCloneHosts, expectedCM) {
+		t.Errorf("expected AllowedCloneHosts %v, got %v", expectedCM, cfgCM.AllowedCloneHosts)
+	}
+
+	// 3. Sentinel "none" in ConfigMap disables allowed clone hosts
+	cmNone := &corev1.ConfigMap{
+		Data: map[string]string{
+			ConfigMapKeyAllowedCloneHosts: "none",
+		},
+	}
+	cfgNone, err := ResolveWebhookConfig(cmNone, RawWebhookFlags{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgNone.AllowedCloneHosts != nil {
+		t.Errorf("expected nil AllowedCloneHosts for 'none', got %v", cfgNone.AllowedCloneHosts)
+	}
+
+	// 4. Explicit flag overrides ConfigMap
+	flags := RawWebhookFlags{
+		AllowedCloneHosts: "git.mycorp.internal, github.com",
+		Explicit: map[string]bool{
+			"allowed-clone-hosts": true,
+		},
+	}
+	cfgFlag, err := ResolveWebhookConfig(cm, flags, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expectedFlag := []string{"git.mycorp.internal", "github.com"}
+	if !reflect.DeepEqual(cfgFlag.AllowedCloneHosts, expectedFlag) {
+		t.Errorf("expected explicit flag to override AllowedCloneHosts, got %v", cfgFlag.AllowedCloneHosts)
+	}
+
+	// 5. Explicit alias flag -allowed-clone-host overrides ConfigMap
+	flagsAlias := RawWebhookFlags{
+		AllowedCloneHosts: "git-server.eval-runner-sandbox.svc",
+		Explicit: map[string]bool{
+			"allowed-clone-host": true,
+		},
+	}
+	cfgAlias, err := ResolveWebhookConfig(cm, flagsAlias, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expectedAlias := []string{"git-server.eval-runner-sandbox.svc"}
+	if !reflect.DeepEqual(cfgAlias.AllowedCloneHosts, expectedAlias) {
+		t.Errorf("expected explicit alias flag to override AllowedCloneHosts, got %v", cfgAlias.AllowedCloneHosts)
+	}
+}
+
+func TestValidateCloneURL(t *testing.T) {
+	s := &Server{
+		cfg: Config{
+			AllowedCloneHosts: []string{"github.com"},
+		},
+	}
+
+	// 1. Foreign host with matching owner and name returns error
+	foreignHostURL := "https://evil.example.com/fork/eval-runner.git"
+	if err := s.validateCloneURL(foreignHostURL, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL(%q) to fail for foreign host, but succeeded", foreignHostURL)
+	} else if !strings.Contains(err.Error(), "evil.example.com") {
+		t.Errorf("expected error to mention foreign host evil.example.com, got: %v", err)
+	}
+
+	// Fail if host check is removed: if foreign host IS allowed, it succeeds!
+	sForeignAllowed := &Server{
+		cfg: Config{
+			AllowedCloneHosts: []string{"github.com", "evil.example.com"},
+		},
+	}
+	if err := sForeignAllowed.validateCloneURL(foreignHostURL, "fork", "eval-runner"); err != nil {
+		t.Errorf("expected validateCloneURL(%q) to succeed when evil.example.com is allowed, got: %v", foreignHostURL, err)
+	}
+
+	// 2. Single-segment path returns error unconditionally (even on allowed host)
+	singleSegmentAllowed := "https://github.com/eval-runner.git"
+	if err := s.validateCloneURL(singleSegmentAllowed, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL(%q) to fail for single-segment path, but succeeded", singleSegmentAllowed)
+	}
+	singleSegmentForeign := "https://evil.example.com/eval-runner.git"
+	if err := s.validateCloneURL(singleSegmentForeign, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL(%q) to fail for single-segment foreign path, but succeeded", singleSegmentForeign)
+	}
+
+	// 3. SCP-style form with foreign host returns error
+	scpForeignURL := "git@evil.example.com:fork/eval-runner.git"
+	if err := s.validateCloneURL(scpForeignURL, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL(%q) to fail for foreign scp-style host, but succeeded", scpForeignURL)
+	} else if !strings.Contains(err.Error(), "evil.example.com") {
+		t.Errorf("expected error to mention foreign host evil.example.com, got: %v", err)
+	}
+
+	// Fail if host check is removed: if foreign host IS allowed for scp, it succeeds!
+	if err := sForeignAllowed.validateCloneURL(scpForeignURL, "fork", "eval-runner"); err != nil {
+		t.Errorf("expected validateCloneURL(%q) to succeed when evil.example.com is allowed, got: %v", scpForeignURL, err)
+	}
+
+	// 4. Valid github.com URLs with matching owner/name succeed
+	validHTTPS := "https://github.com/fork/eval-runner.git"
+	if err := s.validateCloneURL(validHTTPS, "fork", "eval-runner"); err != nil {
+		t.Errorf("expected validateCloneURL(%q) to succeed, got: %v", validHTTPS, err)
+	}
+	validSCP := "git@github.com:fork/eval-runner.git"
+	if err := s.validateCloneURL(validSCP, "fork", "eval-runner"); err != nil {
+		t.Errorf("expected validateCloneURL(%q) to succeed, got: %v", validSCP, err)
+	}
+
+	// 5. Mismatched owner or name on allowed host returns error
+	mismatchedOwner := "https://github.com/other/eval-runner.git"
+	if err := s.validateCloneURL(mismatchedOwner, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL(%q) to fail on owner mismatch, but succeeded", mismatchedOwner)
+	}
+	mismatchedName := "https://github.com/fork/other-repo.git"
+	if err := s.validateCloneURL(mismatchedName, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL(%q) to fail on repo name mismatch, but succeeded", mismatchedName)
+	}
+
+	// 6. Unparseable clone URL returns error
+	unparseableURL := "::invalid-url::"
+	if err := s.validateCloneURL(unparseableURL, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL(%q) to fail on unparseable URL, but succeeded", unparseableURL)
+	}
+
+	// 7. Package-level function validateCloneURL works directly
+	if err := validateCloneURL(validHTTPS, "fork", "eval-runner"); err != nil {
+		t.Errorf("expected validateCloneURL package helper to succeed, got: %v", err)
+	}
+	if err := validateCloneURL(foreignHostURL, "fork", "eval-runner"); err == nil {
+		t.Errorf("expected validateCloneURL package helper to fail for foreign host, but succeeded")
+	}
+	if err := validateCloneURL(foreignHostURL, "fork", "eval-runner", []string{"evil.example.com"}); err != nil {
+		t.Errorf("expected validateCloneURL package helper with custom allowList to succeed, got: %v", err)
 	}
 }
 

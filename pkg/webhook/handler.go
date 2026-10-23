@@ -53,6 +53,9 @@ type Server struct {
 
 // NewServer creates a new webhook Server and initializes endpoints.
 func NewServer(cfg Config) *Server {
+	if cfg.AllowedCloneHosts == nil {
+		cfg.AllowedCloneHosts = []string{DefaultAllowedCloneHosts}
+	}
 	s := &Server{
 		cfg:    cfg,
 		mux:    http.NewServeMux(),
@@ -307,9 +310,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 		candCloneURL := candRepoObj.CloneURL
 		if candCloneURL != "" {
-			parsed, ok := forge.ParseRepoURL(candCloneURL)
-			if !ok || (parsed.Owner != "-" && !strings.EqualFold(parsed.Owner, candOwner)) || !strings.EqualFold(parsed.Name, candName) {
-				http.Error(w, fmt.Sprintf("Invalid candidate clone URL %q: does not match repository %s/%s", candCloneURL, candOwner, candName), http.StatusBadRequest)
+			if err := s.validateCloneURL(candCloneURL, candOwner, candName); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid candidate clone URL %q: %v", candCloneURL, err), http.StatusBadRequest)
 				return
 			}
 		} else {
@@ -317,9 +319,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		baseCloneURL := baseRepoObj.CloneURL
 		if baseCloneURL != "" {
-			parsed, ok := forge.ParseRepoURL(baseCloneURL)
-			if !ok || (parsed.Owner != "-" && !strings.EqualFold(parsed.Owner, baseOwner)) || !strings.EqualFold(parsed.Name, baseName) {
-				http.Error(w, fmt.Sprintf("Invalid base clone URL %q: does not match repository %s/%s", baseCloneURL, baseOwner, baseName), http.StatusBadRequest)
+			if err := s.validateCloneURL(baseCloneURL, baseOwner, baseName); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid base clone URL %q: %v", baseCloneURL, err), http.StatusBadRequest)
 				return
 			}
 		} else {
@@ -579,4 +580,33 @@ func (s *Server) handleIssueCommentEvent(w http.ResponseWriter, r *http.Request,
 
 	log.Printf("successfully recorded /eval more %d on PR #%d for delivery %s", n, prNum, deliveryID)
 	writeResponse(w, http.StatusOK, "ok: pending command recorded\n")
+}
+
+// validateCloneURL validates that a repository clone URL parses, that its host
+// is within the allow-list, and that its owner and name match unconditionally.
+func (s *Server) validateCloneURL(raw, owner, name string) error {
+	return validateCloneURL(raw, owner, name, s.cfg.AllowedCloneHosts)
+}
+
+// validateCloneURL validates that a repository clone URL parses, that its host
+// is in the provided allow-list (or DefaultAllowedCloneHosts if omitted), and
+// that its owner and name match unconditionally.
+func validateCloneURL(raw, owner, name string, allowedHosts ...[]string) error {
+	var hosts []string
+	if len(allowedHosts) > 0 {
+		hosts = allowedHosts[0]
+	} else {
+		hosts = []string{DefaultAllowedCloneHosts}
+	}
+	parsed, ok := forge.ParseRepoURL(raw)
+	if !ok {
+		return fmt.Errorf("failed to parse clone URL")
+	}
+	if !IsHostAllowed(parsed.Host, hosts) {
+		return fmt.Errorf("host %q is not in the allowed-clone-hosts list", parsed.Host)
+	}
+	if !strings.EqualFold(parsed.Owner, owner) || !strings.EqualFold(parsed.Name, name) {
+		return fmt.Errorf("does not match repository %s/%s", owner, name)
+	}
+	return nil
 }

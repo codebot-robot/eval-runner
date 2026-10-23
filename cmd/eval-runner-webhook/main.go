@@ -63,6 +63,7 @@ func main() {
 	var defaultMaxSamplesPerTask int
 	var defaultBudgetUSD float64
 	var webhookRepositories string
+	var allowedCloneHosts string
 	var workers int
 	var queueSize int
 	var showVersion bool
@@ -78,6 +79,8 @@ func main() {
 	flag.IntVar(&defaultMaxSamplesPerTask, "default-max-samples-per-task", webhook.DefaultMaxSamplesPerTask, "Default maximum samples per task across batches")
 	flag.Float64Var(&defaultBudgetUSD, "default-budget-usd", 0.0, "Default comparison budget in USD across all tasks and batches (0 = unlimited)")
 	flag.StringVar(&webhookRepositories, "webhook-repositories", "", "Comma-separated allow-list of repositories (owner/repo)")
+	flag.StringVar(&allowedCloneHosts, "allowed-clone-hosts", webhook.DefaultAllowedCloneHosts, "Comma-separated allow-list of clone URL hosts")
+	flag.StringVar(&allowedCloneHosts, "allowed-clone-host", webhook.DefaultAllowedCloneHosts, "Comma-separated allow-list of clone URL hosts (alias for -allowed-clone-hosts)")
 	flag.IntVar(&workers, "workers", webhook.DefaultWorkers, "Number of concurrent worker goroutines")
 	flag.IntVar(&queueSize, "queue-size", webhook.DefaultQueueSize, "Queue buffer size for incoming webhook events")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
@@ -124,6 +127,7 @@ func main() {
 		DefaultMaxSamplesPerTask: maxSamplesPtr,
 		DefaultBudgetUSD:         budgetPtr,
 		WebhookRepositories:      webhookRepositories,
+		AllowedCloneHosts:        allowedCloneHosts,
 		Workers:                  workers,
 		QueueSize:                queueSize,
 		Explicit:                 explicit,
@@ -157,6 +161,12 @@ func main() {
 		log.Println("warning: webhookRepositories allow-list is empty; all repositories will be rejected (set to '*' to allow all)")
 	} else {
 		log.Printf("webhookRepositories allow-list configured: %v", cfg.WebhookRepositories)
+	}
+
+	if len(cfg.AllowedCloneHosts) == 0 {
+		log.Println("warning: allowedCloneHosts allow-list is empty; all clone URLs will be rejected")
+	} else {
+		log.Printf("allowedCloneHosts allow-list configured: %v", cfg.AllowedCloneHosts)
 	}
 
 	server := webhook.NewServer(cfg)
