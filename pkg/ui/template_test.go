@@ -472,6 +472,8 @@ func samplePullRequestsListView() PullRequestsListView {
 				Repository:     "gke-labs/eval-runner",
 				RepoHash:       RepoHash("gke-labs/eval-runner"),
 				Number:         42,
+				State:          "Open",
+				StateChip:      "open",
 				GitHubURL:      "https://github.com/gke-labs/eval-runner/pull/42",
 				HeadSHA:        "05ce4d8222222222222222222222222222222222",
 				HeadSHAShort:   "05ce4d8",
@@ -497,12 +499,21 @@ func samplePullRequestsListView() PullRequestsListView {
 		HasMore:      false,
 		HasPrev:      false,
 		ShowingRange: "Showing 1–1 of 1",
+		State:        "all",
+		OpenCount:    1,
+		ClosedCount:  0,
+		OpenLink:     "/pulls?state=open",
+		ClosedLink:   "/pulls?state=closed",
+		AllLink:      "/pulls?state=all",
 	}
 }
 
 func sampleRepoPullRequestsListView() PullRequestsListView {
 	v := samplePullRequestsListView()
 	v.Repo = RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	v.OpenLink = "/github.com/gke-labs/eval-runner/pulls?state=open"
+	v.ClosedLink = "/github.com/gke-labs/eval-runner/pulls?state=closed"
+	v.AllLink = "/github.com/gke-labs/eval-runner/pulls?state=all"
 	return v
 }
 

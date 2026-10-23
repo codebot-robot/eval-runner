@@ -35,6 +35,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -2058,6 +2059,91 @@ func groupPullRequests(comps []v1alpha1.Comparison, filter *RepoRef) []prGroup {
 	return groups
 }
 
+const (
+	PRStateAll    = "all"
+	PRStateOpen   = "open"
+	PRStateClosed = "closed"
+)
+
+func parsePRStateQuery(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case PRStateOpen:
+		return PRStateOpen
+	case PRStateClosed:
+		return PRStateClosed
+	default:
+		return PRStateAll
+	}
+}
+
+// pullRequestState returns the display state ("Open", "Merged", "Closed")
+// and the chip class ("open", "merged", "closed") for a comparison.
+// Comparisons without the pr-state label count as open.
+func pullRequestState(comp *v1alpha1.Comparison) (string, string) {
+	if comp == nil {
+		return "Open", "open"
+	}
+	st := strings.ToLower(strings.TrimSpace(comp.Labels[consumer.LabelPRState]))
+	switch st {
+	case consumer.StateMerged:
+		return "Merged", "merged"
+	case consumer.StateClosed:
+		return "Closed", "closed"
+	default:
+		return "Open", "open"
+	}
+}
+
+// filterPullRequestGroups counts open and closed PRs across all groups before filtering,
+// and filters groups by the requested state.
+// "closed" includes both closed and merged; invalid values or "all" keep all groups.
+func filterPullRequestGroups(groups []prGroup, state string) (filtered []prGroup, openCount int, closedCount int) {
+	for _, grp := range groups {
+		var latest *v1alpha1.Comparison
+		if len(grp.comparisons) > 0 {
+			latest = &grp.comparisons[0]
+		}
+		st, _ := pullRequestState(latest)
+		isOpen := st == "Open"
+		isClosed := st == "Closed" || st == "Merged"
+
+		if isOpen {
+			openCount++
+		}
+		if isClosed {
+			closedCount++
+		}
+
+		switch state {
+		case PRStateOpen:
+			if isOpen {
+				filtered = append(filtered, grp)
+			}
+		case PRStateClosed:
+			if isClosed {
+				filtered = append(filtered, grp)
+			}
+		default:
+			filtered = append(filtered, grp)
+		}
+	}
+	return filtered, openCount, closedCount
+}
+
+func pullsStateLink(basePath string, query url.Values, state string) string {
+	q := make(url.Values)
+	for k, v := range query {
+		q[k] = v
+	}
+	q.Del("offset")
+	q.Set("state", state)
+	encoded := q.Encode()
+	if encoded == "" {
+		return basePath
+	}
+	return basePath + "?" + encoded
+}
+
 func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
@@ -2103,7 +2189,11 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 
 	groups := groupPullRequests(compList.Items, nil)
 
-	totalCount := len(groups)
+	stateQuery := r.URL.Query().Get("state")
+	state := parsePRStateQuery(stateQuery)
+	filteredGroups, openCount, closedCount := filterPullRequestGroups(groups, state)
+
+	totalCount := len(filteredGroups)
 	start := offset
 	if start > totalCount {
 		start = totalCount
@@ -2114,10 +2204,11 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	linkNS := s.linkNamespace(ns)
-	pageGroups := groups[start:end]
+	pageGroups := filteredGroups[start:end]
 	items := make([]PullRequestListItem, 0, len(pageGroups))
 	for _, grp := range pageGroups {
 		latest := grp.comparisons[0]
+		st, chip := pullRequestState(&latest)
 		pImp := "—"
 		if latest.Status.PImprovement != nil {
 			pImp = fmt.Sprintf("%.2f", *latest.Status.PImprovement)
@@ -2148,6 +2239,8 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 			Repository:     grp.repository,
 			RepoHash:       grp.repoHash,
 			Number:         grp.number,
+			State:          st,
+			StateChip:      chip,
 			GitHubURL:      BuildGitHubPRURL(grp.repository, grp.number),
 			HeadSHA:        headSHA,
 			HeadSHAShort:   ShortCommit(headSHA),
@@ -2172,15 +2265,16 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 	hasPrev := start > 0
 
 	var nextLink, prevLink string
+	basePath := "/pulls"
 	if hasMore {
-		nextLink = buildPageURL("/pulls", r.URL.Query(), end, limit)
+		nextLink = buildPageURL(basePath, r.URL.Query(), end, limit)
 	}
 	if hasPrev {
 		prevOffset := start - limit
 		if prevOffset < 0 {
 			prevOffset = 0
 		}
-		prevLink = buildPageURL("/pulls", r.URL.Query(), prevOffset, limit)
+		prevLink = buildPageURL(basePath, r.URL.Query(), prevOffset, limit)
 	}
 
 	showingRange := ""
@@ -2201,6 +2295,12 @@ func (s *Server) handlePullsList(w http.ResponseWriter, r *http.Request) {
 		HasPrev:       hasPrev,
 		PrevLink:      prevLink,
 		ShowingRange:  showingRange,
+		State:         state,
+		OpenCount:     openCount,
+		ClosedCount:   closedCount,
+		OpenLink:      pullsStateLink(basePath, r.URL.Query(), PRStateOpen),
+		ClosedLink:    pullsStateLink(basePath, r.URL.Query(), PRStateClosed),
+		AllLink:       pullsStateLink(basePath, r.URL.Query(), PRStateAll),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2238,7 +2338,11 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 
 	groups := groupPullRequests(compList.Items, &ref)
 
-	totalCount := len(groups)
+	stateQuery := r.URL.Query().Get("state")
+	state := parsePRStateQuery(stateQuery)
+	filteredGroups, openCount, closedCount := filterPullRequestGroups(groups, state)
+
+	totalCount := len(filteredGroups)
 	start := offset
 	if start > totalCount {
 		start = totalCount
@@ -2249,10 +2353,11 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	linkNS := s.linkNamespace(ns)
-	pageGroups := groups[start:end]
+	pageGroups := filteredGroups[start:end]
 	items := make([]PullRequestListItem, 0, len(pageGroups))
 	for _, grp := range pageGroups {
 		latest := grp.comparisons[0]
+		st, chip := pullRequestState(&latest)
 		pImp := "—"
 		if latest.Status.PImprovement != nil {
 			pImp = fmt.Sprintf("%.2f", *latest.Status.PImprovement)
@@ -2269,6 +2374,8 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 			Repository:     ref.Owner + "/" + ref.Name,
 			RepoHash:       RepoHash(ref.Owner + "/" + ref.Name),
 			Number:         grp.number,
+			State:          st,
+			StateChip:      chip,
 			GitHubURL:      BuildGitHubPRURL(ref.Owner+"/"+ref.Name, grp.number),
 			HeadSHA:        headSHA,
 			HeadSHAShort:   ShortCommit(headSHA),
@@ -2324,6 +2431,12 @@ func (s *Server) handleRepoPullsList(w http.ResponseWriter, r *http.Request) {
 		HasPrev:       hasPrev,
 		PrevLink:      prevLink,
 		ShowingRange:  showingRange,
+		State:         state,
+		OpenCount:     openCount,
+		ClosedCount:   closedCount,
+		OpenLink:      pullsStateLink(basePath, r.URL.Query(), PRStateOpen),
+		ClosedLink:    pullsStateLink(basePath, r.URL.Query(), PRStateClosed),
+		AllLink:       pullsStateLink(basePath, r.URL.Query(), PRStateAll),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

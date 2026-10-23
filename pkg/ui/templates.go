@@ -1690,7 +1690,14 @@ const pullsListTemplate = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pull Requests · eval-runner</title>
-  <style>` + baseCSS + `</style>
+  <style>` + baseCSS + `
+.state-filter { color: var(--muted); text-decoration: none; }
+.state-filter:hover { color: var(--ink); text-decoration: underline; }
+.state-filter.active { color: var(--ink); font-weight: 600; text-decoration: none; }
+.chip.open { background: var(--good-soft); color: var(--good); }
+.chip.merged { background: #F3E8FF; color: #7E22CE; }
+.chip.closed { background: var(--bad-soft); color: var(--bad); }
+</style>
 </head>
 <body>
   {{ template "repo_header" . }}
@@ -1699,7 +1706,13 @@ const pullsListTemplate = `
     <div class="card">
       <div class="card-header">
         <h1 class="card-title">Pull Requests</h1>
-        <span style="font-size:13px;color:var(--muted)">{{ .TotalCount }} total</span>
+        <div style="font-size:13px;display:flex;align-items:center;gap:6px">
+          <a href="{{ .OpenLink }}" class="state-filter{{ if eq .State "open" }} active{{ end }}">Open {{ .OpenCount }}</a>
+          <span style="color:var(--muted)">·</span>
+          <a href="{{ .ClosedLink }}" class="state-filter{{ if eq .State "closed" }} active{{ end }}">Closed {{ .ClosedCount }}</a>
+          <span style="color:var(--muted)">·</span>
+          <a href="{{ .AllLink }}" class="state-filter{{ if or (eq .State "all") (eq .State "") }} active{{ end }}">All</a>
+        </div>
       </div>
       <div style="overflow-x:auto">
         <table class="ci">
@@ -1724,7 +1737,7 @@ const pullsListTemplate = `
               {{- if not $.Repo.Host }}
               <td><a href="{{ .RepoLink }}" style="font-weight:600">{{ .Repository }}</a></td>
               {{- end }}
-              <td><a href="{{ .HistoryLink }}" style="font-weight:600">#{{ .Number }}</a> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener" style="font-size:12px;color:var(--muted);margin-left:4px">GitHub ↗</a></td>
+              <td><a href="{{ .HistoryLink }}" style="font-weight:600">#{{ .Number }}</a> <span class="chip {{ .StateChip }}"><span class="dot"></span>{{ .State }}</span> <a href="{{ .GitHubURL }}" target="_blank" rel="noopener" style="font-size:12px;color:var(--muted);margin-left:4px">GitHub ↗</a></td>
               <td><span class="mono" style="font-size:13px">{{ if .BaseSHAShort }}{{ .BaseSHAShort }} → {{ end }}{{ .HeadSHAShort }}</span></td>
               <td><span class="chip {{ .VerdictChip }}"><span class="dot"></span>{{ .Verdict }}</span>{{ if ne .PImprovement "—" }} <span class="mono" style="font-size:12px;color:var(--muted)">(P={{ .PImprovement }})</span>{{ end }}</td>
               <td class="num">{{ .SamplesRun }}</td>
