@@ -258,6 +258,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				PullRequest: &PullRequestWorkItem{
 					Action:        ActionClosed,
 					PRNumber:      prNum,
+					Merged:        event.PullRequest.Merged,
 					CandidateRepo: candRepoFullName,
 					TargetRepo:    targetRepoFullName,
 				},

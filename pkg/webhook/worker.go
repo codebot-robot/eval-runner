@@ -182,11 +182,16 @@ func (wp *WorkerPool) ProcessPullRequestClosed(ctx context.Context, item *PullRe
 	if item.CandidateRepo != "" {
 		candRef, _ = parseRepoRef(item.CandidateRepo)
 	}
+	state := "closed"
+	if item.Merged {
+		state = "merged"
+	}
 	ev := consumer.ChangeClosedEvent{
 		Repo: ref,
 		Change: forge.ChangeRequest{
 			Number: item.PRNumber,
-			State:  "closed",
+			State:  state,
+			Merged: item.Merged,
 			Head: forge.ChangeRequestHead{
 				RepoRef:  candRef,
 				CloneURL: item.CandidateCloneURL,

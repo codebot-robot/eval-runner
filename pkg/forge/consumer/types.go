@@ -24,6 +24,18 @@ const (
 	// LabelPR tracks the pull request number on created Runs and Comparisons.
 	LabelPR = "evalrunner.gke-labs.dev/pr"
 
+	// LabelPRState tracks the pull request state ("open", "merged", "closed") on Comparisons.
+	LabelPRState = "evalrunner.gke-labs.dev/pr-state"
+
+	// StateOpen is the PR state label value for open pull requests.
+	StateOpen = "open"
+
+	// StateMerged is the PR state label value for merged pull requests.
+	StateMerged = "merged"
+
+	// StateClosed is the PR state label value for closed pull requests.
+	StateClosed = "closed"
+
 	// LabelRepo tracks the repository identifier on created Runs and Comparisons.
 	LabelRepo = "evalrunner.gke-labs.dev/repo"
 

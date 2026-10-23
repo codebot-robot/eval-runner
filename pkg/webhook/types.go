@@ -31,6 +31,9 @@ const (
 	// LabelPR tracks the pull request number on created Runs and Comparisons.
 	LabelPR = "evalrunner.gke-labs.dev/pr"
 
+	// LabelPRState tracks the pull request state ("open", "merged", "closed") on Comparisons.
+	LabelPRState = consumer.LabelPRState
+
 	// LabelRepo tracks the repository identifier on created Runs and Comparisons.
 	LabelRepo = "evalrunner.gke-labs.dev/repo"
 
@@ -117,6 +120,7 @@ type GitHubCommitRef struct {
 type GitHubPullRequestData struct {
 	Number int             `json:"number"`
 	State  string          `json:"state"`
+	Merged bool            `json:"merged"`
 	Head   GitHubCommitRef `json:"head"`
 	Base   GitHubCommitRef `json:"base"`
 }
@@ -198,6 +202,7 @@ func ParseEvalMoreCommand(body string, maxSamplesPerTask int) (int, bool) {
 type PullRequestWorkItem struct {
 	Action            string
 	PRNumber          int
+	Merged            bool
 	HeadSHA           string
 	BaseSHA           string
 	CandidateCloneURL string

@@ -319,27 +319,193 @@ func TestConsumer_LifecycleAndReplay(t *testing.T) {
 		t.Fatalf("ChangeClosed failed: %v", err)
 	}
 
-	// Verify comparison deleted
+	// Verify comparison is retained with pr-state=closed
 	if err := cl.List(t.Context(), &comps, client.InNamespace("eval-runner")); err != nil {
 		t.Fatalf("failed to list comparisons: %v", err)
 	}
-	if len(comps.Items) != 0 {
-		t.Fatalf("expected 0 comparisons after close, got %d", len(comps.Items))
+	if len(comps.Items) != 1 {
+		t.Fatalf("expected 1 comparison after close, got %d", len(comps.Items))
+	}
+	if comps.Items[0].Labels[LabelPRState] != StateClosed {
+		t.Errorf("expected comparison label %s=%s, got %s", LabelPRState, StateClosed, comps.Items[0].Labels[LabelPRState])
 	}
 
-	// Verify baseline run preserved
+	// Verify candidate run for head2 and baseline run are preserved; orphaned head1 run is deleted
 	var survivingRuns v1alpha1.RunList
 	if err := cl.List(t.Context(), &survivingRuns, client.InNamespace("eval-runner")); err != nil {
 		t.Fatalf("failed to list runs: %v", err)
 	}
-	var foundBaseline bool
+	var foundBaseline, foundCand2, foundCand1 bool
 	for _, r := range survivingRuns.Items {
 		if r.Spec.Repo.Commit == baseSHA {
 			foundBaseline = true
 		}
+		if r.Spec.Repo.Commit == head2SHA {
+			foundCand2 = true
+		}
+		if r.Spec.Repo.Commit == head1SHA {
+			foundCand1 = true
+		}
 	}
 	if !foundBaseline {
 		t.Errorf("expected baseline run for %s to be preserved after PR close", baseSHA)
+	}
+	if !foundCand2 {
+		t.Errorf("expected candidate run for %s to be preserved after PR close", head2SHA)
+	}
+	if foundCand1 {
+		t.Errorf("expected orphaned candidate run for %s to be deleted after PR close", head1SHA)
+	}
+}
+
+// TestConsumer_PRCloseAndReopen verifies:
+// - Closing a PR retains its Comparison with pr-state=merged (when merged);
+// - Candidate seed Run is retained;
+// - Orphaned seed Run is deleted;
+// - A reopen flips the label back to open.
+func TestConsumer_PRCloseAndReopen(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	cloneURL := "https://github.com/gke-labs/eval-runner.git"
+	baseSHA := "1111111111111111111111111111111111111111"
+	head1SHA := "2222222222222222222222222222222222222222"
+	head2SHA := "3333333333333333333333333333333333333333"
+
+	store := &fakeStore{
+		repos: map[string]*forge.Repository{
+			strings.ToLower(ref.String()): {
+				Ref:      ref,
+				CloneURL: cloneURL,
+			},
+		},
+	}
+
+	c := New(cl, Config{
+		Namespace:        "eval-runner",
+		DefaultModel:     "mockllm/model",
+		DefaultBatchSize: 8,
+		TrackedRepos: []RepoConfig{
+			{Name: "gke-labs/eval-runner", Ref: ref, Branches: []string{"main"}},
+		},
+		Store: store,
+	})
+
+	// Pre-seed baseline run via branch advanced
+	err := c.ConsumeEvent(t.Context(), BranchAdvancedEvent{
+		Repo:   ref,
+		Branch: "main",
+		NewSHA: baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("BranchAdvanced failed: %v", err)
+	}
+
+	// 1. Open PR #10 with head1SHA
+	pr := forge.ChangeRequest{
+		ID:     "10",
+		Number: 10,
+		Title:  "feat: test close and reopen",
+		State:  "open",
+		Head: forge.ChangeRequestHead{
+			Ref: "feature-branch",
+			SHA: head1SHA,
+		},
+		Base: forge.ChangeRequestBase{
+			Ref: "main",
+			SHA: baseSHA,
+		},
+	}
+	if err := c.ConsumeEvent(t.Context(), ChangeOpenedEvent{
+		Repo:   ref,
+		Change: pr,
+	}); err != nil {
+		t.Fatalf("ChangeOpened failed: %v", err)
+	}
+
+	// Verify comparison created with pr-state=open
+	var comps v1alpha1.ComparisonList
+	if err := cl.List(t.Context(), &comps, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list comparisons: %v", err)
+	}
+	if len(comps.Items) != 1 {
+		t.Fatalf("expected 1 comparison, got %d", len(comps.Items))
+	}
+	if comps.Items[0].Labels[LabelPRState] != StateOpen {
+		t.Errorf("expected comparison label %s=%s, got %s", LabelPRState, StateOpen, comps.Items[0].Labels[LabelPRState])
+	}
+
+	// 2. Update PR #10 with head2SHA
+	pr.Head.SHA = head2SHA
+	if err := c.ConsumeEvent(t.Context(), ChangeUpdatedEvent{
+		Repo:       ref,
+		OldHeadSHA: head1SHA,
+		Change:     pr,
+	}); err != nil {
+		t.Fatalf("ChangeUpdated failed: %v", err)
+	}
+
+	// 3. Close PR #10 as merged
+	pr.State = "closed"
+	pr.Merged = true
+	if err := c.ConsumeEvent(t.Context(), ChangeClosedEvent{
+		Repo:   ref,
+		Change: pr,
+	}); err != nil {
+		t.Fatalf("ChangeClosed failed: %v", err)
+	}
+
+	// Verify comparison is retained with pr-state=merged
+	if err := cl.List(t.Context(), &comps, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list comparisons: %v", err)
+	}
+	if len(comps.Items) != 1 {
+		t.Fatalf("expected 1 comparison retained after close, got %d", len(comps.Items))
+	}
+	if comps.Items[0].Labels[LabelPRState] != StateMerged {
+		t.Errorf("expected comparison label %s=%s, got %s", LabelPRState, StateMerged, comps.Items[0].Labels[LabelPRState])
+	}
+
+	// Verify candidate seed Run (head2) is retained, orphaned seed Run (head1) is deleted
+	var runs v1alpha1.RunList
+	if err := cl.List(t.Context(), &runs, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list runs: %v", err)
+	}
+	var foundCand2, foundCand1 bool
+	for _, r := range runs.Items {
+		if r.Spec.Repo.Commit == head2SHA {
+			foundCand2 = true
+		}
+		if r.Spec.Repo.Commit == head1SHA {
+			foundCand1 = true
+		}
+	}
+	if !foundCand2 {
+		t.Errorf("expected referenced candidate run (%s) to be retained", head2SHA)
+	}
+	if foundCand1 {
+		t.Errorf("expected orphaned seed run (%s) to be deleted", head1SHA)
+	}
+
+	// 4. Reopen PR #10
+	pr.State = "open"
+	pr.Merged = false
+	if err := c.ConsumeEvent(t.Context(), ChangeOpenedEvent{
+		Repo:   ref,
+		Change: pr,
+	}); err != nil {
+		t.Fatalf("Reopen ChangeOpened failed: %v", err)
+	}
+
+	// Verify comparison label flipped back to open
+	if err := cl.List(t.Context(), &comps, client.InNamespace("eval-runner")); err != nil {
+		t.Fatalf("failed to list comparisons: %v", err)
+	}
+	if len(comps.Items) != 1 {
+		t.Fatalf("expected 1 comparison after reopen, got %d", len(comps.Items))
+	}
+	if comps.Items[0].Labels[LabelPRState] != StateOpen {
+		t.Errorf("expected comparison label to flip back to %s=%s after reopen, got %s",
+			LabelPRState, StateOpen, comps.Items[0].Labels[LabelPRState])
 	}
 }
 

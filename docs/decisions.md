@@ -205,6 +205,8 @@ Future pull requests that introduce an architectural decision should append an e
   8. **Labels**: Created resources are labeled with `evalrunner.gke-labs.dev/pr`, `evalrunner.gke-labs.dev/repo` (sanitized for label value syntax), and `evalrunner.gke-labs.dev/head-sha`.
 - **Rationale**:
   Closes the automated evaluation loop described in concept §5.1, transitioning eval-runner from manual CR creation to fully automated PR-driven execution. Running the webhook in its own container with least-privilege RBAC isolates public HTTP exposure from the controller core and enforces defense-in-depth: compromising the webhook reveals only the webhook HMAC secret, not repository tokens or model keys. Bounded asynchronous workers prevent request timeouts and shield the Kubernetes apiserver from webhook bursts. Baseline cache reuse significantly optimizes compute budget and turnaround time by running merge target evaluations only once per base commit.
+- **Amendment (PR State Retention on Close, #368)**:
+  Resource deletion on PR close is superseded. On `pull_request` (`closed`) or `ChangeClosedEvent`, Comparisons are retained rather than deleted and labeled with `evalrunner.gke-labs.dev/pr-state` set to `merged` or `closed` (reflecting forge state). Candidate seed Runs referenced by live Comparisons are preserved; only orphaned seed Runs are deleted. Reopening a PR resets the label to `open`. Deletion of PR history is now governed solely by `comparisonTTL`.
 
 ### ADR-024: GitHub App Authentication for Check Runs, Comment Pagination, and Author Verification
 - **Date**: 2026-10-18
