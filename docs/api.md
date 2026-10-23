@@ -334,7 +334,7 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Task cohort length | `MaxCohortLength` | `64` | Maximum character length of a cohort identifier; must be label-safe. |
 | Changed files cap | `MaxPullRequestFiles` | `300` | Maximum changed files retrieved from GitHub; exceeding cap treats all tasks declaring paths as matched. |
 | Affinity mode | `--affinity-mode` / ConfigMap `affinityMode` | `"order"` | Changed-file task affinity scheduling mode: `"order"` (matched/always tasks scheduled first, unmatched second) or `"prune"` (unmatched tasks dropped from batches and reported as skipped). |
-| Comparison TTL | `--comparison-ttl` / ConfigMap `comparisonTTL` | `0` (disabled) | Duration after which `Completed` Comparisons are deleted by the controller as a safety net; defaults to `0` (disabled). Owned batch Runs are deleted via Kubernetes owner references. Baseline Runs are preserved. |
+| Comparison TTL | `--comparison-ttl` / ConfigMap `comparisonTTL` | `0` (keep indefinitely) | Duration after which `Completed` Comparisons are deleted by the controller as a safety net; defaults to `0` (keep indefinitely). Governs retention of Comparisons on PR close. Owned batch Runs are deleted via Kubernetes owner references. Baseline Runs are preserved. |
 | ls-remote interval | ConfigMap `lsRemoteInterval` | `60s` | Interval between `git ls-remote` reference advertisement checks per repository; randomized with ±20% jitter. |
 | Full reconcile interval | ConfigMap `fullReconcileInterval` | `1h` | Cadence for full reconciliation of branches and change requests using HTTP conditional headers. |
 | Rate limit floor percent | ConfigMap `rateLimitFloorPercent` | `10` | Minimum percentage of GitHub rate limit quota remaining before REST API calls are suppressed until reset. |
@@ -501,18 +501,19 @@ Comparisons, candidate Runs, and baseline Runs created automatically by `eval-ru
 
 ## Retention and Cleanup
 
-Eval-runner provides two complementary mechanisms to clean up Comparisons and Runs:
+Eval-runner provides two complementary mechanisms to manage the lifecycle of Comparisons and Runs:
 
-### 1. Webhook PR Close Cleanup
-When a pull request closes (merged or closed without merge), GitHub sends a `pull_request` event with `action: closed`. The `eval-runner-webhook` handler matches the Comparisons and seed candidate Runs for that pull request by label (`evalrunner.gke-labs.dev/pr`) and repository (`spec.pullRequest.repository` matching the target repository) and deletes them:
-- **Comparisons**: Deleted directly. Their owned batch Runs are automatically garbage-collected by Kubernetes via `metadata.ownerReferences`.
-- **Seed Candidate Runs**: Deleted directly by the webhook, unless referenced as `spec.baseline.run` by another surviving live Comparison or carrying an owner reference to a surviving Comparison (e.g. stacked branches or fast-forward merges), in which case they are preserved.
-- **Baseline Runs**: Preserved. Baseline Runs are keyed to default branch commits (`base-<sha7>` or `base-<repoHash>-<sha7>`), are not tagged with PR labels, and are reused across pull requests to eliminate redundant evaluation work.
-- **Reopen**: If a closed PR is reopened, its resources are recreated on the next incoming `pull_request` event.
+### 1. Webhook PR Close Handling
+When a pull request closes (merged or closed without merge), GitHub sends a `pull_request` event with `action: closed`. The forge consumer / webhook handler retains the pull request's Comparisons and referenced candidate/baseline Runs to preserve evaluation history:
+- **Comparisons**: Retained and labeled `evalrunner.gke-labs.dev/pr-state: merged` (when merged) or `evalrunner.gke-labs.dev/pr-state: closed` (when closed without merge).
+- **Candidate and Baseline Runs**: Any Run referenced by a retained Comparison as candidate or baseline is preserved.
+- **Orphaned Seed Runs**: Orphaned PR-labelled seed Runs (not referenced by any retained Comparison or carrying an owner reference to a surviving Comparison) may still be deleted on close.
+- **Baseline Runs**: Never touched. Baseline Runs are keyed to default branch commits (`base-<sha7>` or `base-<repoHash>-<sha7>`), are not tagged with PR labels, and are reused across pull requests to eliminate redundant evaluation work.
+- **Reopen**: If a closed PR is reopened, existing Comparisons have their `evalrunner.gke-labs.dev/pr-state` label updated back to `open`.
 - **Artifacts**: Artifacts in the artifact sink (GCS or local directory) are not purged by PR closure or TTL; artifact retention is governed independently by storage lifecycle policies.
 
 ### 2. Comparison TTL (`comparisonTTL`)
-As a safety net for standalone or lingering Comparisons, the controller supports an optional time-to-live (`comparisonTTL` in the ConfigMap or `--comparison-ttl` CLI flag, duration, default `0` = disabled). When configured:
+Comparison retention is governed by the existing `comparisonTTL` setting (in the ConfigMap or via `--comparison-ttl` CLI flag, duration, default `0` = keep indefinitely). When configured (> 0):
 - The controller automatically deletes `Completed` Comparisons whose age exceeds the TTL. Age is measured from completion (`status.completionTime`), falling back to creation (`metadata.creationTimestamp`) only for objects that predate the field.
 - Owned batch Runs are garbage-collected via owner references.
 - Baseline Runs are preserved.

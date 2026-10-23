@@ -1682,10 +1682,12 @@ func TestSyncer_Consumer_EmptyStore_PRClosedInForge_GetsClosed(t *testing.T) {
 		t.Fatalf("SyncRepo failed: %v", err)
 	}
 
-	// 1. Verify PR 42 Comparison and candidate run were closed (deleted)
+	// 1. Verify PR 42 Comparison was retained and labeled merged
 	var checkComp v1alpha1.Comparison
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-42"}, &checkComp); err == nil {
-		t.Errorf("expected comparison pr-42 to be deleted on PR close, but it still exists")
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-42"}, &checkComp); err != nil {
+		t.Errorf("expected comparison pr-42 to be retained on PR close, got err: %v", err)
+	} else if checkComp.Labels[consumer.LabelPRState] != consumer.StateMerged {
+		t.Errorf("expected pr-42 label %s=%s, got %q", consumer.LabelPRState, consumer.StateMerged, checkComp.Labels[consumer.LabelPRState])
 	}
 
 	// 2. Verify PullRequest(42) was called to set merged correctly
@@ -1882,12 +1884,16 @@ func TestSyncer_Consumer_HourlyReconcile_ClosesOlderPodComparison(t *testing.T) 
 		t.Fatalf("second (hourly full reconcile) SyncRepo failed: %v", err)
 	}
 
-	// Verify both PR 50 and PR 55 comparisons are closed/deleted
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-50"}, &comp50); err == nil {
-		t.Errorf("expected comparison pr-50 to be deleted on hourly reconcile")
+	// Verify PR 50 comparison is retained and labeled closed
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-50"}, &comp50); err != nil {
+		t.Errorf("expected comparison pr-50 to be retained on hourly reconcile, got err: %v", err)
+	} else if comp50.Labels[consumer.LabelPRState] != consumer.StateClosed {
+		t.Errorf("expected pr-50 label %s=%s, got %q", consumer.LabelPRState, consumer.StateClosed, comp50.Labels[consumer.LabelPRState])
 	}
 	var checkComp55 v1alpha1.Comparison
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-55"}, &checkComp55); err == nil {
-		t.Errorf("expected comparison pr-55 (from older pod) to be deleted on hourly reconcile")
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "eval-runner", Name: "pr-55"}, &checkComp55); err != nil {
+		t.Errorf("expected comparison pr-55 to be retained on hourly reconcile, got err: %v", err)
+	} else if checkComp55.Labels[consumer.LabelPRState] != consumer.StateMerged {
+		t.Errorf("expected pr-55 label %s=%s, got %q", consumer.LabelPRState, consumer.StateMerged, checkComp55.Labels[consumer.LabelPRState])
 	}
 }

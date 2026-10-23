@@ -314,11 +314,67 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 		t.Fatalf("closed pull_request webhook returned status %d: %s", closedResp.StatusCode, string(closedRespBody))
 	}
 
-	// 9. Assert Comparison and Candidate Run are deleted; Baseline Run is preserved
-	harness.WaitForComparisonDeleted("eval-runner", compName, 30*time.Second)
-	harness.WaitForRunDeleted("eval-runner", candRunName, 30*time.Second)
+	// 9. Assert Comparison persists with pr-state=closed; Candidate and Baseline Runs are preserved
+	harness.WaitForComparisonLabel("eval-runner", compName, "evalrunner.gke-labs.dev/pr-state", "closed", 30*time.Second)
+	_ = harness.WaitForRunExists("eval-runner", candRunName, 5*time.Second)
+	_ = harness.WaitForRunExists("eval-runner", baseRunName, 5*time.Second)
 
-	// Baseline Run must be preserved for future PR reuse
+	// Merged variant: POST closed event with merged: true and assert pr-state=merged
+	mergedPayload := []byte(`{
+		"action": "closed",
+		"number": 305,
+		"pull_request": {
+			"number": 305,
+			"state": "closed",
+			"merged": true,
+			"head": {
+				"sha": "aaaaaaa111111122222223333333444444455555",
+				"ref": "feature",
+				"repo": {
+					"full_name": "contributor-fork/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "contributor-fork"}
+				}
+			},
+			"base": {
+				"sha": "bbbbbbb111111122222223333333444444455555",
+				"ref": "main",
+				"repo": {
+					"full_name": "gke-labs/eval-runner",
+					"name": "eval-runner",
+					"owner": {"login": "gke-labs"}
+				}
+			}
+		},
+		"repository": {
+			"full_name": "gke-labs/eval-runner",
+			"name": "eval-runner",
+			"owner": {"login": "gke-labs"}
+		}
+	}`)
+	mergedSig := webhook.ComputeSignature(mergedPayload, webhookSecret)
+
+	reqMerged, err := http.NewRequest(http.MethodPost, baseURL+"/webhook", bytes.NewReader(mergedPayload))
+	if err != nil {
+		t.Fatalf("failed to create merged pull_request webhook HTTP request: %v", err)
+	}
+	reqMerged.Header.Set("Content-Type", "application/json")
+	reqMerged.Header.Set(webhook.HeaderGitHubEvent, webhook.EventPullRequest)
+	reqMerged.Header.Set(webhook.HeaderHubSignature256, mergedSig)
+	reqMerged.Header.Set(webhook.HeaderGitHubDelivery, "e2e-smoke-merged-delivery")
+
+	mergedResp, err := http.DefaultClient.Do(reqMerged)
+	if err != nil {
+		t.Fatalf("failed to POST merged pull_request webhook payload: %v", err)
+	}
+	mergedRespBody, _ := io.ReadAll(mergedResp.Body)
+	mergedResp.Body.Close()
+	if mergedResp.StatusCode != http.StatusOK {
+		t.Fatalf("merged pull_request webhook returned status %d: %s", mergedResp.StatusCode, string(mergedRespBody))
+	}
+
+	harness.WaitForComparisonLabel("eval-runner", compName, "evalrunner.gke-labs.dev/pr-state", "merged", 30*time.Second)
+	_ = harness.WaitForRunExists("eval-runner", candRunName, 5*time.Second)
 	_ = harness.WaitForRunExists("eval-runner", baseRunName, 5*time.Second)
 
 	// 10. POST two signed push payloads and verify /series shows two rows and two points

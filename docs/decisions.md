@@ -206,6 +206,17 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Closes the automated evaluation loop described in concept §5.1, transitioning eval-runner from manual CR creation to fully automated PR-driven execution. Running the webhook in its own container with least-privilege RBAC isolates public HTTP exposure from the controller core and enforces defense-in-depth: compromising the webhook reveals only the webhook HMAC secret, not repository tokens or model keys. Bounded asynchronous workers prevent request timeouts and shield the Kubernetes apiserver from webhook bursts. Baseline cache reuse significantly optimizes compute budget and turnaround time by running merge target evaluations only once per base commit.
 
+### Amendment to ADR-023: Retention of Comparisons and Seed Runs on PR Close (#384)
+- **Date**: 2026-10-23
+- **Status**: Accepted
+- **Decision**:
+  1. **Retain and Label on Close**: Closing or merging a pull request no longer deletes its Comparisons or referenced seed Runs. Comparisons are retained and labeled `evalrunner.gke-labs.dev/pr-state: merged` (when merged) or `evalrunner.gke-labs.dev/pr-state: closed` (when closed without merge).
+  2. **Reopening**: On `ChangeOpenedEvent` (or webhook reopened actions), existing Comparisons for the PR are updated back to `evalrunner.gke-labs.dev/pr-state: open`.
+  3. **Run Retention**: Any Run referenced as candidate or baseline by a retained Comparison is preserved. Orphaned PR-labelled seed Runs (not referenced by any retained Comparison) may still be deleted on close; baseline Runs are never touched.
+  4. **Retention Policy**: Comparison retention is governed by the existing `comparisonTTL` (default `0` = keep indefinitely).
+- **Rationale**:
+  Preserves historical evaluation data so developers can inspect how recent (and merged) PRs performed without losing comparison results when PRs close.
+
 ### ADR-024: GitHub App Authentication for Check Runs, Comment Pagination, and Author Verification
 - **Date**: 2026-10-18
 - **Status**: Accepted

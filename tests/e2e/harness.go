@@ -807,6 +807,36 @@ func (h *Harness) WaitForComparisonPhase(namespace, compName, expectedPhase stri
 	}
 }
 
+func (h *Harness) WaitForComparisonLabel(namespace, compName, key, expectedValue string, timeout time.Duration) *v1alpha1.Comparison {
+	h.t.Logf("Waiting for Comparison %s/%s to have label %s=%s (timeout %v)", namespace, compName, key, expectedValue, timeout)
+	start := time.Now()
+	var lastComp v1alpha1.Comparison
+	var lastErr error
+	for {
+		cmd := exec.Command("kubectl", "get", "comparison", compName, "-n", namespace, "-o", "json")
+		out, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+		} else {
+			var c v1alpha1.Comparison
+			if err := json.Unmarshal(out, &c); err != nil {
+				lastErr = err
+			} else {
+				lastComp = c
+				if c.Labels != nil && c.Labels[key] == expectedValue {
+					return &c
+				}
+			}
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for Comparison %s/%s to have label %s=%s; current labels: %v, lastErr: %v",
+				namespace, compName, key, expectedValue, lastComp.Labels, lastErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func (h *Harness) WaitForSandboxDeleted(namespace, sandboxName string, timeout time.Duration) {
 	h.t.Logf("Waiting for Sandbox %s/%s to be deleted (timeout %v)", namespace, sandboxName, timeout)
 	start := time.Now()
