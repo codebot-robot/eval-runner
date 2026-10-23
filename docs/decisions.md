@@ -456,7 +456,7 @@ Future pull requests that introduce an architectural decision should append an e
      - **Branch deleted**: 0 calls (`[]`)
      - **PR opened**: 2 calls (`PullRequest(number)`, `Commit(headSHA)`)
      - **PR synchronised**: 2 calls (`PullRequest(number)`, `Commit(headSHA)`)
-     - **Closed PR head moved**: 0 calls / 0 events (`[]`, head SHA updated in store without events)
+     - **Closed PR head moved**: 2 calls (`PullRequest(number)`, `Commit(headSHA)`) / 0 events (`[PullRequest, Commit]`, head SHA updated in store without events)
      - **Hourly reconcile**: 3 calls (`Repository`, `Branches`, `ChangeRequests`, returning 304s when unchanged)
      - **Restart cost**: Because `hasEverSynced` is maintained in-memory, the first tick after a controller restart performs a full conditional reconcile costing 3 calls per repository (`Repository`, `Branches`, `ChangeRequests`), which count against unauthenticated rate limits.
 - **Rationale**:

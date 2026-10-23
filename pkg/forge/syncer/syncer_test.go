@@ -734,7 +734,7 @@ func TestSyncer_ZeroCalls_FakeReturnsOpenPRsOnly(t *testing.T) {
 
 // TestSyncer_ExactAPICallSequencePerScenario asserts the exact call sequence for every scenario:
 // unchanged tick = []; seeding tick; branch push = [Commit]; new branch; branch deleted;
-// PR opened; PR synchronised; hourly reconcile.
+// PR opened; PR synchronised; closed PR head moved; hourly reconcile.
 // Asserts no Repository() and no full /pulls list on fill-in ticks.
 func TestSyncer_ExactAPICallSequencePerScenario(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -866,7 +866,22 @@ func TestSyncer_ExactAPICallSequencePerScenario(t *testing.T) {
 		t.Errorf("Scenario PR synchronised: expected %v, got %v", wantPRSync, calls)
 	}
 
-	// 8. Scenario: Hourly reconcile = [Repository, Branches, ChangeRequests]
+	// 8. Scenario: Closed PR head moved = [PullRequest, Commit]
+	fake.changes[0].State = "closed"
+	currentRefs = []*plumbing.Reference{
+		plumbing.NewReferenceFromStrings("refs/heads/main", "2222222222222222222222222222222222222222"),
+		plumbing.NewReferenceFromStrings("refs/pull/50/head", "7777777777777777777777777777777777777777"),
+	}
+	fake.changes[0].Head.SHA = "7777777777777777777777777777777777777777"
+	if err := s.SyncRepo(ctx, ref); err != nil {
+		t.Fatalf("closed PR head moved sync failed: %v", err)
+	}
+	wantClosedMoved := []string{"PullRequest(50)", "Commit(7777777)"}
+	if calls := fake.getAndClearCalls(); fmt.Sprintf("%v", calls) != fmt.Sprintf("%v", wantClosedMoved) {
+		t.Errorf("Scenario closed PR head moved: expected %v, got %v", wantClosedMoved, calls)
+	}
+
+	// 9. Scenario: Hourly reconcile = [Repository, Branches, ChangeRequests]
 	rKey := strings.ToLower(ref.String())
 	s.mu.Lock()
 	s.lastFullReconcile[rKey] = time.Now().Add(-2 * time.Hour) // force full reconcile
@@ -1272,6 +1287,12 @@ func TestSyncer_ClosedPRHeadMoved_EmitsNoEvent(t *testing.T) {
 	evs := cons.getAndClearEvents()
 	if len(evs) != 0 {
 		t.Fatalf("expected 0 events when closed PR head moves, got %d: %v", len(evs), evs)
+	}
+
+	// Assert exact call sequence: 2 calls (PullRequest and Commit) and 0 events
+	wantCalls := []string{"PullRequest(20)", "Commit(8888888)"}
+	if calls := fake.getAndClearCalls(); fmt.Sprintf("%v", calls) != fmt.Sprintf("%v", wantCalls) {
+		t.Errorf("expected calls %v, got %v", wantCalls, calls)
 	}
 
 	// Assert stored CR has updated head SHA
