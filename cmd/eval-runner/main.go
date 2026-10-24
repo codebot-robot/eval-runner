@@ -49,6 +49,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -289,24 +290,7 @@ func main() {
 		},
 	}
 
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme,
-		Cache:  cacheOptions,
-		Client: client.Options{
-			Cache: &client.CacheOptions{
-				DisableFor: []client.Object{
-					&corev1.Secret{},
-					&corev1.ConfigMap{},
-					&networkingv1.NetworkPolicy{},
-				},
-			},
-		},
-		LeaderElection:                leaderElect,
-		LeaderElectionID:              defaultLeaderElectionID,
-		LeaderElectionNamespace:       evalRunnerNamespace,
-		LeaderElectionReleaseOnCancel: true,
-		HealthProbeBindAddress:        probeAddr,
-	})
+	mgr, err := ctrl.NewManager(cfg, newManagerOptions(scheme, cacheOptions, leaderElect, evalRunnerNamespace, probeAddr))
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -602,5 +586,30 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+func newManagerOptions(scheme *runtime.Scheme, cacheOptions cache.Options, leaderElect bool, evalRunnerNamespace string, probeAddr string) ctrl.Options {
+	return ctrl.Options{
+		Scheme: scheme,
+		Cache:  cacheOptions,
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{
+					&corev1.Secret{},
+					&corev1.ConfigMap{},
+					&networkingv1.NetworkPolicy{},
+				},
+			},
+		},
+		LeaderElection:                leaderElect,
+		LeaderElectionID:              defaultLeaderElectionID,
+		LeaderElectionNamespace:       evalRunnerNamespace,
+		LeaderElectionReleaseOnCancel: true,
+		// Single-replica controller: fast failover is unnecessary, looser timings tolerate transient API-server stalls.
+		LeaseDuration:          ptr.To(60 * time.Second),
+		RenewDeadline:          ptr.To(40 * time.Second),
+		RetryPeriod:            ptr.To(8 * time.Second),
+		HealthProbeBindAddress: probeAddr,
 	}
 }
