@@ -619,6 +619,9 @@ func TestConsumer_ForkPullRequest_CloneURLs(t *testing.T) {
 	if candRun.Labels[LabelRepo] != SanitizeLabelValue("codebot-robot/eval-runner") {
 		t.Errorf("candidate run repo label = %q, want %q", candRun.Labels[LabelRepo], SanitizeLabelValue("codebot-robot/eval-runner"))
 	}
+	if candRun.Labels[LabelTargetRepo] != SanitizeLabelValue("gke-labs/eval-runner") {
+		t.Errorf("candidate run target-repo label = %q, want %q", candRun.Labels[LabelTargetRepo], SanitizeLabelValue("gke-labs/eval-runner"))
+	}
 
 	// Verify Baseline Run has the base repo's clone URL and commit
 	baseRunName := BaselineRunName("gke-labs/eval-runner", baseSHA, false)
@@ -634,6 +637,9 @@ func TestConsumer_ForkPullRequest_CloneURLs(t *testing.T) {
 	}
 	if baseRun.Labels[LabelRepo] != SanitizeLabelValue("gke-labs/eval-runner") {
 		t.Errorf("baseline run repo label = %q, want %q", baseRun.Labels[LabelRepo], SanitizeLabelValue("gke-labs/eval-runner"))
+	}
+	if baseRun.Labels[LabelTargetRepo] != SanitizeLabelValue("gke-labs/eval-runner") {
+		t.Errorf("baseline run target-repo label = %q, want %q", baseRun.Labels[LabelTargetRepo], SanitizeLabelValue("gke-labs/eval-runner"))
 	}
 
 	// Verify Comparison references candidate and baseline runs

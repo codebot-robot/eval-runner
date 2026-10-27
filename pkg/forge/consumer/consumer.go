@@ -183,9 +183,10 @@ func (c *Consumer) processBranchAdvanced(ctx context.Context, cfg Config, ev Bra
 	sanitizedBranch := SanitizeLabelValue(branch)
 
 	labels := map[string]string{
-		LabelRepo:    sanitizedRepo,
-		LabelHeadSHA: ev.NewSHA,
-		LabelBranch:  sanitizedBranch,
+		LabelRepo:       sanitizedRepo,
+		LabelTargetRepo: sanitizedRepo,
+		LabelHeadSHA:    ev.NewSHA,
+		LabelBranch:     sanitizedBranch,
 	}
 
 	var annotations map[string]string
@@ -338,9 +339,10 @@ func (c *Consumer) processChangeOpenedOrUpdated(ctx context.Context, cfg Config,
 			Name:      candRunName,
 			Namespace: cfg.Namespace,
 			Labels: map[string]string{
-				LabelPR:      strconv.Itoa(prNum),
-				LabelRepo:    sanitizedCandRepo,
-				LabelHeadSHA: headSHA,
+				LabelPR:         strconv.Itoa(prNum),
+				LabelRepo:       sanitizedCandRepo,
+				LabelTargetRepo: sanitizedTargetRepo,
+				LabelHeadSHA:    headSHA,
 			},
 		},
 		Spec: v1alpha1.RunSpec{
@@ -375,8 +377,9 @@ func (c *Consumer) processChangeOpenedOrUpdated(ctx context.Context, cfg Config,
 				Name:      baselineRunName,
 				Namespace: cfg.Namespace,
 				Labels: map[string]string{
-					LabelRepo:    sanitizedBaseRepo,
-					LabelHeadSHA: baseSHA,
+					LabelRepo:       sanitizedBaseRepo,
+					LabelTargetRepo: sanitizedBaseRepo,
+					LabelHeadSHA:    baseSHA,
 				},
 			},
 			Spec: v1alpha1.RunSpec{
@@ -502,7 +505,7 @@ func (c *Consumer) processChangeClosed(ctx context.Context, cfg Config, repo for
 	var deletedRuns int
 	for i := range runList.Items {
 		run := &runList.Items[i]
-		isMatch := (sanitizedTargetRepo != "" && run.Labels[LabelRepo] == sanitizedTargetRepo) ||
+		isMatch := (sanitizedTargetRepo != "" && (run.Labels[LabelRepo] == sanitizedTargetRepo || run.Labels[LabelTargetRepo] == sanitizedTargetRepo)) ||
 			(sanitizedCandRepo != "" && run.Labels[LabelRepo] == sanitizedCandRepo)
 
 		if !isMatch {
