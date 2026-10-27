@@ -40,11 +40,13 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	discoveryk8s "k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -61,10 +63,17 @@ import (
 )
 
 const (
-	defaultLeaderElectionID = "eval-runner-leader-election"
+	defaultLeaderElectionID    = "eval-runner-leader-election"
+	defaultStartupRetryTimeout = 2 * time.Minute
 )
 
 var (
+	defaultStartupBackoff = wait.Backoff{
+		Duration: 1 * time.Second,
+		Factor:   2.0,
+		Jitter:   0.1,
+		Steps:    8,
+	}
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
@@ -223,10 +232,10 @@ func main() {
 			os.Exit(1)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), defaultStartupRetryTimeout)
 		defer cancel()
 
-		pod, err := kubeClient.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
+		pod, err := getPodWithRetry(ctx, kubeClient, podNamespace, podName, defaultStartupBackoff, setupLog)
 		if err != nil {
 			setupLog.Error(err, "unable to get controller pod to derive sample-runner image", "pod", podName, "namespace", podNamespace)
 			os.Exit(1)
@@ -612,4 +621,35 @@ func newManagerOptions(scheme *runtime.Scheme, cacheOptions cache.Options, leade
 		RetryPeriod:            ptr.To(8 * time.Second),
 		HealthProbeBindAddress: probeAddr,
 	}
+}
+
+// getPodWithRetry fetches the specified pod using the provided kubernetes interface,
+// retrying transient errors using exponential backoff until the context is done or backoff steps are exhausted.
+// Failed attempts are logged at INFO level. If all retries fail, the last encountered error is returned.
+func getPodWithRetry(ctx context.Context, client kubernetes.Interface, namespace, name string, backoff wait.Backoff, logger logr.Logger) (*corev1.Pod, error) {
+	if client == nil {
+		return nil, fmt.Errorf("kubernetes client is required")
+	}
+
+	var pod *corev1.Pod
+	var lastErr error
+
+	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
+		var getErr error
+		pod, getErr = client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if getErr == nil {
+			return true, nil
+		}
+		lastErr = getErr
+		logger.Info("unable to get controller pod; retrying", "pod", name, "namespace", namespace, "error", getErr)
+		return false, nil
+	})
+
+	if err != nil {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, err
+	}
+	return pod, nil
 }
