@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -40,11 +41,13 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	discoveryk8s "k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -61,10 +64,18 @@ import (
 )
 
 const (
-	defaultLeaderElectionID = "eval-runner-leader-election"
+	defaultLeaderElectionID      = "eval-runner-leader-election"
+	defaultStartupRetryTimeout   = 2 * time.Minute
+	defaultStartupAttemptTimeout = 10 * time.Second
 )
 
 var (
+	defaultStartupBackoff = wait.Backoff{
+		Duration: 1 * time.Second,
+		Factor:   2.0,
+		Jitter:   0.1,
+		Steps:    8,
+	}
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
@@ -223,10 +234,14 @@ func main() {
 			os.Exit(1)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		pod, err := kubeClient.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
+		ctx, cancel := context.WithTimeout(context.Background(), defaultStartupRetryTimeout)
+		var pod *corev1.Pod
+		err := retryStartup(ctx, defaultStartupBackoff, setupLog, "get controller pod", func(attemptCtx context.Context) error {
+			var getErr error
+			pod, getErr = kubeClient.CoreV1().Pods(podNamespace).Get(attemptCtx, podName, metav1.GetOptions{})
+			return getErr
+		})
+		cancel()
 		if err != nil {
 			setupLog.Error(err, "unable to get controller pod to derive sample-runner image", "pod", podName, "namespace", podNamespace)
 			os.Exit(1)
@@ -296,17 +311,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfgCtx, cfgCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cfgCancel()
-
-	clusterConfig, err := controller.LoadAndResolveClusterConfig(
-		cfgCtx,
-		mgr.GetAPIReader(),
-		evalRunnerNamespace,
-		controller.DefaultConfigMapName,
-		rawFlags,
-		setupLog,
-	)
+	var clusterConfig controller.ClusterConfig
+	cfgCtx, cfgCancel := context.WithTimeout(context.Background(), defaultStartupRetryTimeout)
+	err = retryStartup(cfgCtx, defaultStartupBackoff, setupLog, "load cluster configuration", func(attemptCtx context.Context) error {
+		var loadErr error
+		clusterConfig, loadErr = controller.LoadAndResolveClusterConfig(
+			attemptCtx,
+			mgr.GetAPIReader(),
+			evalRunnerNamespace,
+			controller.DefaultConfigMapName,
+			rawFlags,
+			setupLog,
+		)
+		return loadErr
+	})
+	cfgCancel()
 	if err != nil {
 		setupLog.Error(err, "failed to load cluster configuration", "configmap", controller.DefaultConfigMapName, "namespace", evalRunnerNamespace)
 		os.Exit(1)
@@ -612,4 +631,43 @@ func newManagerOptions(scheme *runtime.Scheme, cacheOptions cache.Options, leade
 		RetryPeriod:            ptr.To(8 * time.Second),
 		HealthProbeBindAddress: probeAddr,
 	}
+}
+
+// retryStartup repeatedly executes fn using exponential backoff until it succeeds,
+// the context is cancelled, or backoff steps are exhausted.
+// Each attempt is given a bounded timeout (defaultStartupAttemptTimeout) so hung calls cannot consume the whole budget.
+// Failed attempts are logged at INFO level with the attempt number.
+// If all retries fail, the last encountered error is returned.
+func retryStartup(ctx context.Context, backoff wait.Backoff, logger logr.Logger, description string, fn func(ctx context.Context) error) error {
+	if fn == nil {
+		return fmt.Errorf("fn is required")
+	}
+
+	var lastErr error
+	attempts := 0
+
+	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
+		attempts++
+		attemptCtx, cancel := context.WithTimeout(ctx, defaultStartupAttemptTimeout)
+		getErr := fn(attemptCtx)
+		cancel()
+
+		if getErr == nil {
+			return true, nil
+		}
+		lastErr = getErr
+		logger.Info(fmt.Sprintf("unable to %s; retrying", description), "attempt", attempts, "error", getErr)
+		return false, nil
+	})
+
+	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return ctx.Err()
+		}
+		if lastErr != nil {
+			return lastErr
+		}
+		return err
+	}
+	return nil
 }
