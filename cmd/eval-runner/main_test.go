@@ -23,13 +23,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/eval-runner/pkg/controller"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
@@ -80,15 +83,7 @@ func TestNewManagerOptions(t *testing.T) {
 	}
 }
 
-func TestGetPodWithRetry_SuccessFirstAttempt(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "eval-runner-controller-abc",
-			Namespace: "eval-runner",
-		},
-	}
-	fakeClient := k8sfake.NewSimpleClientset(pod)
-
+func TestRetryStartup_SuccessFirstAttempt(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := zap.New(zap.WriteTo(&logBuf), zap.UseDevMode(true))
 
@@ -98,19 +93,23 @@ func TestGetPodWithRetry_SuccessFirstAttempt(t *testing.T) {
 		Steps:    5,
 	}
 
-	gotPod, err := getPodWithRetry(context.Background(), fakeClient, "eval-runner", "eval-runner-controller-abc", testBackoff, logger)
+	calls := 0
+	err := retryStartup(context.Background(), testBackoff, logger, "test operation", func(attemptCtx context.Context) error {
+		calls++
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if gotPod == nil || gotPod.Name != "eval-runner-controller-abc" {
-		t.Fatalf("gotPod = %v, want pod with name eval-runner-controller-abc", gotPod)
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
 	}
 	if logBuf.Len() > 0 {
 		t.Errorf("expected no logs on immediate success, got: %s", logBuf.String())
 	}
 }
 
-func TestGetPodWithRetry_RetryThenSuccess(t *testing.T) {
+func TestRetryStartup_PodLookupRetryThenSuccess(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "eval-runner-controller-abc",
@@ -137,7 +136,12 @@ func TestGetPodWithRetry_RetryThenSuccess(t *testing.T) {
 		Steps:    5,
 	}
 
-	gotPod, err := getPodWithRetry(context.Background(), fakeClient, "eval-runner", "eval-runner-controller-abc", testBackoff, logger)
+	var gotPod *corev1.Pod
+	err := retryStartup(context.Background(), testBackoff, logger, "get controller pod", func(attemptCtx context.Context) error {
+		var getErr error
+		gotPod, getErr = fakeClient.CoreV1().Pods("eval-runner").Get(attemptCtx, "eval-runner-controller-abc", metav1.GetOptions{})
+		return getErr
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,21 +159,105 @@ func TestGetPodWithRetry_RetryThenSuccess(t *testing.T) {
 	if !strings.Contains(logOutput, "connection refused") {
 		t.Errorf("expected connection refused in log output, got: %s", logOutput)
 	}
+	if !strings.Contains(logOutput, `"attempt": 1`) || !strings.Contains(logOutput, `"attempt": 2`) || !strings.Contains(logOutput, `"attempt": 3`) {
+		t.Errorf("expected attempt numbers in log output, got: %s", logOutput)
+	}
 	retryCount := strings.Count(logOutput, "unable to get controller pod; retrying")
 	if retryCount != 3 {
 		t.Errorf("expected 3 retry logs, got %d in: %s", retryCount, logOutput)
 	}
 }
 
-func TestGetPodWithRetry_ExhaustedRetries(t *testing.T) {
-	fakeClient := k8sfake.NewSimpleClientset()
+type failingConfigReader struct {
+	failCount int
+	calls     int
+	configMap *corev1.ConfigMap
+}
 
+func (r *failingConfigReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	r.calls++
+	if r.calls <= r.failCount {
+		return fmt.Errorf("dial tcp 10.1.0.1:443: connect: connection refused")
+	}
+	if r.configMap != nil && key.Name == r.configMap.Name && key.Namespace == r.configMap.Namespace {
+		if cm, ok := obj.(*corev1.ConfigMap); ok {
+			*cm = *r.configMap
+			return nil
+		}
+	}
+	return apierrors.NewNotFound(corev1.Resource("configmaps"), key.Name)
+}
+
+func (r *failingConfigReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	return nil
+}
+
+func TestRetryStartup_ConfigLoadRetryThenSuccess(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      controller.DefaultConfigMapName,
+			Namespace: "eval-runner",
+		},
+		Data: map[string]string{
+			"discoveryDeadline": "5m",
+		},
+	}
+	reader := &failingConfigReader{
+		failCount: 3,
+		configMap: cm,
+	}
+
+	var logBuf bytes.Buffer
+	logger := zap.New(zap.WriteTo(&logBuf), zap.UseDevMode(true))
+
+	testBackoff := wait.Backoff{
+		Duration: time.Millisecond,
+		Factor:   1.0,
+		Steps:    5,
+	}
+
+	var clusterConfig controller.ClusterConfig
+	err := retryStartup(context.Background(), testBackoff, logger, "load cluster configuration", func(attemptCtx context.Context) error {
+		var loadErr error
+		clusterConfig, loadErr = controller.LoadAndResolveClusterConfig(
+			attemptCtx,
+			reader,
+			"eval-runner",
+			controller.DefaultConfigMapName,
+			controller.RawFlags{},
+			logger,
+		)
+		return loadErr
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if clusterConfig.DiscoveryDeadline != 5*time.Minute {
+		t.Errorf("clusterConfig.DiscoveryDeadline = %v, want 5m", clusterConfig.DiscoveryDeadline)
+	}
+	if reader.calls != 4 {
+		t.Errorf("reader.calls = %d, want 4", reader.calls)
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "unable to load cluster configuration; retrying") {
+		t.Errorf("expected retry log in output, got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "connection refused") {
+		t.Errorf("expected connection refused in log output, got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, `"attempt": 1`) || !strings.Contains(logOutput, `"attempt": 2`) || !strings.Contains(logOutput, `"attempt": 3`) {
+		t.Errorf("expected attempt numbers in log output, got: %s", logOutput)
+	}
+	retryCount := strings.Count(logOutput, "unable to load cluster configuration; retrying")
+	if retryCount != 3 {
+		t.Errorf("expected 3 retry logs, got %d in: %s", retryCount, logOutput)
+	}
+}
+
+func TestRetryStartup_ExhaustedRetries(t *testing.T) {
 	attempts := 0
 	expectedErr := fmt.Errorf("dial tcp 10.1.0.1:443: connect: connection refused")
-	fakeClient.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		attempts++
-		return true, nil, expectedErr
-	})
 
 	var logBuf bytes.Buffer
 	logger := zap.New(zap.WriteTo(&logBuf), zap.UseDevMode(true))
@@ -180,28 +268,31 @@ func TestGetPodWithRetry_ExhaustedRetries(t *testing.T) {
 		Steps:    3,
 	}
 
-	gotPod, err := getPodWithRetry(context.Background(), fakeClient, "eval-runner", "eval-runner-controller-abc", testBackoff, logger)
+	err := retryStartup(context.Background(), testBackoff, logger, "test operation", func(attemptCtx context.Context) error {
+		attempts++
+		return expectedErr
+	})
 	if err == nil {
-		t.Fatalf("expected error after exhausted retries, got nil and pod %v", gotPod)
+		t.Fatalf("expected error after exhausted retries, got nil")
 	}
 	if !strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("expected connection refused error, got: %v", err)
 	}
-	if gotPod != nil {
-		t.Errorf("gotPod = %v, want nil", gotPod)
-	}
 	if attempts != 3 {
 		t.Errorf("attempts = %d, want 3", attempts)
 	}
-	retryCount := strings.Count(logBuf.String(), "unable to get controller pod; retrying")
+
+	logOutput := logBuf.String()
+	retryCount := strings.Count(logOutput, "unable to test operation; retrying")
 	if retryCount != 3 {
-		t.Errorf("expected 3 retry logs, got %d", retryCount)
+		t.Errorf("expected 3 retry logs, got %d in: %s", retryCount, logOutput)
+	}
+	if !strings.Contains(logOutput, `"attempt": 1`) || !strings.Contains(logOutput, `"attempt": 2`) || !strings.Contains(logOutput, `"attempt": 3`) {
+		t.Errorf("expected attempt numbers in log output, got: %s", logOutput)
 	}
 }
 
-func TestGetPodWithRetry_ContextCanceled(t *testing.T) {
-	fakeClient := k8sfake.NewSimpleClientset()
-
+func TestRetryStartup_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // canceled before execution
 
@@ -214,33 +305,57 @@ func TestGetPodWithRetry_ContextCanceled(t *testing.T) {
 		Steps:    3,
 	}
 
-	gotPod, err := getPodWithRetry(ctx, fakeClient, "eval-runner", "eval-runner-controller-abc", testBackoff, logger)
+	calls := 0
+	err := retryStartup(ctx, testBackoff, logger, "test operation", func(attemptCtx context.Context) error {
+		calls++
+		return fmt.Errorf("should not run")
+	})
 	if err == nil {
 		t.Fatalf("expected error on canceled context, got nil")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled error, got: %v", err)
 	}
-	if gotPod != nil {
-		t.Errorf("gotPod = %v, want nil", gotPod)
+	if calls != 0 {
+		t.Errorf("calls = %d, want 0", calls)
 	}
 }
 
-func TestGetPodWithRetry_NilClient(t *testing.T) {
+func TestRetryStartup_AttemptTimeout(t *testing.T) {
+	logger := zap.New(zap.UseDevMode(true))
 	testBackoff := wait.Backoff{
 		Duration: time.Millisecond,
-		Factor:   1.0,
 		Steps:    1,
 	}
-	var logBuf bytes.Buffer
-	logger := zap.New(zap.WriteTo(&logBuf), zap.UseDevMode(true))
 
-	gotPod, err := getPodWithRetry(context.Background(), nil, "eval-runner", "eval-runner-controller-abc", testBackoff, logger)
-	if err == nil {
-		t.Fatalf("expected error for nil client, got nil")
+	var deadlineSet bool
+	var timeoutRemaining time.Duration
+	err := retryStartup(context.Background(), testBackoff, logger, "test operation", func(attemptCtx context.Context) error {
+		deadline, ok := attemptCtx.Deadline()
+		if ok {
+			deadlineSet = true
+			timeoutRemaining = time.Until(deadline)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if gotPod != nil {
-		t.Errorf("gotPod = %v, want nil", gotPod)
+	if !deadlineSet {
+		t.Errorf("expected deadline to be set on attemptCtx")
+	}
+	if timeoutRemaining < 5*time.Second || timeoutRemaining > defaultStartupAttemptTimeout+time.Second {
+		t.Errorf("timeoutRemaining = %v, want approx %v", timeoutRemaining, defaultStartupAttemptTimeout)
+	}
+}
+
+func TestRetryStartup_NilFn(t *testing.T) {
+	logger := zap.New(zap.UseDevMode(true))
+	testBackoff := wait.Backoff{Steps: 1}
+
+	err := retryStartup(context.Background(), testBackoff, logger, "test operation", nil)
+	if err == nil {
+		t.Fatalf("expected error for nil fn, got nil")
 	}
 }
 
@@ -259,5 +374,8 @@ func TestDefaultStartupBackoff(t *testing.T) {
 	}
 	if defaultStartupRetryTimeout != 2*time.Minute {
 		t.Errorf("defaultStartupRetryTimeout = %v, want 2m", defaultStartupRetryTimeout)
+	}
+	if defaultStartupAttemptTimeout != 10*time.Second {
+		t.Errorf("defaultStartupAttemptTimeout = %v, want 10s", defaultStartupAttemptTimeout)
 	}
 }

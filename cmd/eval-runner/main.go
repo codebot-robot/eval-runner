@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -63,8 +64,9 @@ import (
 )
 
 const (
-	defaultLeaderElectionID    = "eval-runner-leader-election"
-	defaultStartupRetryTimeout = 2 * time.Minute
+	defaultLeaderElectionID      = "eval-runner-leader-election"
+	defaultStartupRetryTimeout   = 2 * time.Minute
+	defaultStartupAttemptTimeout = 10 * time.Second
 )
 
 var (
@@ -233,9 +235,13 @@ func main() {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), defaultStartupRetryTimeout)
-		defer cancel()
-
-		pod, err := getPodWithRetry(ctx, kubeClient, podNamespace, podName, defaultStartupBackoff, setupLog)
+		var pod *corev1.Pod
+		err := retryStartup(ctx, defaultStartupBackoff, setupLog, "get controller pod", func(attemptCtx context.Context) error {
+			var getErr error
+			pod, getErr = kubeClient.CoreV1().Pods(podNamespace).Get(attemptCtx, podName, metav1.GetOptions{})
+			return getErr
+		})
+		cancel()
 		if err != nil {
 			setupLog.Error(err, "unable to get controller pod to derive sample-runner image", "pod", podName, "namespace", podNamespace)
 			os.Exit(1)
@@ -305,17 +311,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfgCtx, cfgCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cfgCancel()
-
-	clusterConfig, err := controller.LoadAndResolveClusterConfig(
-		cfgCtx,
-		mgr.GetAPIReader(),
-		evalRunnerNamespace,
-		controller.DefaultConfigMapName,
-		rawFlags,
-		setupLog,
-	)
+	var clusterConfig controller.ClusterConfig
+	cfgCtx, cfgCancel := context.WithTimeout(context.Background(), defaultStartupRetryTimeout)
+	err = retryStartup(cfgCtx, defaultStartupBackoff, setupLog, "load cluster configuration", func(attemptCtx context.Context) error {
+		var loadErr error
+		clusterConfig, loadErr = controller.LoadAndResolveClusterConfig(
+			attemptCtx,
+			mgr.GetAPIReader(),
+			evalRunnerNamespace,
+			controller.DefaultConfigMapName,
+			rawFlags,
+			setupLog,
+		)
+		return loadErr
+	})
+	cfgCancel()
 	if err != nil {
 		setupLog.Error(err, "failed to load cluster configuration", "configmap", controller.DefaultConfigMapName, "namespace", evalRunnerNamespace)
 		os.Exit(1)
@@ -623,33 +633,41 @@ func newManagerOptions(scheme *runtime.Scheme, cacheOptions cache.Options, leade
 	}
 }
 
-// getPodWithRetry fetches the specified pod using the provided kubernetes interface,
-// retrying transient errors using exponential backoff until the context is done or backoff steps are exhausted.
-// Failed attempts are logged at INFO level. If all retries fail, the last encountered error is returned.
-func getPodWithRetry(ctx context.Context, client kubernetes.Interface, namespace, name string, backoff wait.Backoff, logger logr.Logger) (*corev1.Pod, error) {
-	if client == nil {
-		return nil, fmt.Errorf("kubernetes client is required")
+// retryStartup repeatedly executes fn using exponential backoff until it succeeds,
+// the context is cancelled, or backoff steps are exhausted.
+// Each attempt is given a bounded timeout (defaultStartupAttemptTimeout) so hung calls cannot consume the whole budget.
+// Failed attempts are logged at INFO level with the attempt number.
+// If all retries fail, the last encountered error is returned.
+func retryStartup(ctx context.Context, backoff wait.Backoff, logger logr.Logger, description string, fn func(ctx context.Context) error) error {
+	if fn == nil {
+		return fmt.Errorf("fn is required")
 	}
 
-	var pod *corev1.Pod
 	var lastErr error
+	attempts := 0
 
 	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
-		var getErr error
-		pod, getErr = client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		attempts++
+		attemptCtx, cancel := context.WithTimeout(ctx, defaultStartupAttemptTimeout)
+		getErr := fn(attemptCtx)
+		cancel()
+
 		if getErr == nil {
 			return true, nil
 		}
 		lastErr = getErr
-		logger.Info("unable to get controller pod; retrying", "pod", name, "namespace", namespace, "error", getErr)
+		logger.Info(fmt.Sprintf("unable to %s; retrying", description), "attempt", attempts, "error", getErr)
 		return false, nil
 	})
 
 	if err != nil {
-		if lastErr != nil {
-			return nil, lastErr
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return ctx.Err()
 		}
-		return nil, err
+		if lastErr != nil {
+			return lastErr
+		}
+		return err
 	}
-	return pod, nil
+	return nil
 }
