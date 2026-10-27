@@ -1110,7 +1110,9 @@ func (s *Server) renderRepoRuns(w http.ResponseWriter, r *http.Request, ns strin
 	}
 
 	var compList v1alpha1.ComparisonList
-	_ = s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns))
+	if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
+		log.Printf("failed to list comparisons in namespace %s for repo run filtering: %v", ns, err)
+	}
 
 	var filtered []v1alpha1.Run
 	for i := range runList.Items {
@@ -1309,7 +1311,9 @@ func (s *Server) handleRepoRunDetail(w http.ResponseWriter, r *http.Request) {
 	runBelongs := runBelongsToRepo(&run, ref)
 	if !runBelongs {
 		var compList v1alpha1.ComparisonList
-		_ = s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns))
+		if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
+			log.Printf("failed to list comparisons in namespace %s for run repo fallback: %v", ns, err)
+		}
 		runBelongs = runBelongsToRepo(&run, ref, compList.Items...)
 	}
 	if !runBelongs {
@@ -4102,7 +4106,9 @@ func (s *Server) handleRepoRunTasks(w http.ResponseWriter, r *http.Request) {
 	runBelongs := runBelongsToRepo(&run, ref)
 	if !runBelongs {
 		var compList v1alpha1.ComparisonList
-		_ = s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns))
+		if err := s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns)); err != nil {
+			log.Printf("failed to list comparisons in namespace %s for run repo fallback: %v", ns, err)
+		}
 		runBelongs = runBelongsToRepo(&run, ref, compList.Items...)
 	}
 	if !runBelongs {
