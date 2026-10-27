@@ -33,6 +33,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	forgegithub "github.com/gke-labs/eval-runner/pkg/forge/github"
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
 	"github.com/gke-labs/eval-runner/pkg/github"
@@ -62,6 +63,14 @@ const (
 	LabelBatch = "evalrunner.gke-labs.dev/batch"
 	// LabelRole indicates whether a batch run is candidate or baseline.
 	LabelRole = "evalrunner.gke-labs.dev/role"
+	// LabelTargetRepo tracks the target repository identifier on created Runs and Comparisons.
+	LabelTargetRepo = consumer.LabelTargetRepo
+	// LabelRepo tracks the repository identifier on created Runs and Comparisons.
+	LabelRepo = consumer.LabelRepo
+	// LabelPR tracks the pull request number on created Runs and Comparisons.
+	LabelPR = consumer.LabelPR
+	// LabelHeadSHA tracks the git commit SHA on created Runs and Comparisons.
+	LabelHeadSHA = consumer.LabelHeadSHA
 
 	// RoleCandidate identifies the candidate run in a batch pair.
 	RoleCandidate = "candidate"
@@ -1176,6 +1185,15 @@ func (r *ComparisonReconciler) ensureBatchRun(
 		}
 		if role == RoleBaseline {
 			labels[LabelBatchKey] = ComputeBatchKey(templateRun.Spec.Repo.URL, templateRun.Spec.Repo.Commit, templateRun.Spec.Model, tasks, window)
+		}
+		// Copy target-repo, repo, pr, and head-sha labels from templateRun if present
+		for _, k := range []string{LabelTargetRepo, LabelRepo, LabelPR, LabelHeadSHA} {
+			if v, ok := templateRun.Labels[k]; ok && v != "" {
+				labels[k] = v
+			}
+		}
+		if _, ok := labels[LabelTargetRepo]; !ok && comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Repository != "" {
+			labels[LabelTargetRepo] = consumer.SanitizeLabelValue(comp.Spec.PullRequest.Repository)
 		}
 
 		clone := &v1alpha1.Run{

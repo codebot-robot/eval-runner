@@ -17098,3 +17098,164 @@ func TestComparisonReconciler_FakeForgeReporting(t *testing.T) {
 		}
 	})
 }
+
+func TestEnsureBatchRun_InheritsLabels(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-391",
+			Namespace: "eval-runner",
+			UID:       types.UID("comp-uid-391"),
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     391,
+			},
+		},
+	}
+
+	candTemplate := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-391-184dfbc",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelTargetRepo: "gke-labs_eval-runner",
+				LabelRepo:       "codebot-robot_eval-runner",
+				LabelPR:         "391",
+				LabelHeadSHA:    "184dfbc",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/codebot-robot/eval-runner.git",
+				Commit: "184dfbc",
+			},
+			Model: "mockllm/model",
+		},
+	}
+
+	baseTemplate := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-a81d0c4",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelTargetRepo: "gke-labs_eval-runner",
+				LabelRepo:       "gke-labs_eval-runner",
+				LabelHeadSHA:    "a81d0c4",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "a81d0c4",
+			},
+			Model: "mockllm/model",
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(comp, candTemplate, baseTemplate).
+		Build()
+
+	r := &ComparisonReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	tasks := []string{"docs/test_task"}
+	window := v1alpha1.SampleRange{Start: 9, End: 16}
+
+	// 1. Candidate batch Run
+	candBatchRunName, err := r.ensureBatchRun(t.Context(), comp, candTemplate, RoleCandidate, tasks, window, 2)
+	if err != nil {
+		t.Fatalf("ensureBatchRun for candidate failed: %v", err)
+	}
+	if candBatchRunName != "pr-391-b2-cand" {
+		t.Errorf("expected candidate batch run name 'pr-391-b2-cand', got %q", candBatchRunName)
+	}
+
+	var candBatchRun v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: candBatchRunName}, &candBatchRun); err != nil {
+		t.Fatalf("failed to get candidate batch run: %v", err)
+	}
+
+	// Verify all inherited labels
+	expectedCandLabels := map[string]string{
+		LabelComparison: "pr-391",
+		LabelBatch:      "2",
+		LabelRole:       RoleCandidate,
+		LabelTargetRepo: "gke-labs_eval-runner",
+		LabelRepo:       "codebot-robot_eval-runner",
+		LabelPR:         "391",
+		LabelHeadSHA:    "184dfbc",
+	}
+	for k, want := range expectedCandLabels {
+		if got := candBatchRun.Labels[k]; got != want {
+			t.Errorf("candidate batch run label %s = %q, want %q", k, got, want)
+		}
+	}
+
+	// 2. Baseline batch Run
+	baseBatchRunName, err := r.ensureBatchRun(t.Context(), comp, baseTemplate, RoleBaseline, tasks, window, 2)
+	if err != nil {
+		t.Fatalf("ensureBatchRun for baseline failed: %v", err)
+	}
+	if baseBatchRunName != "pr-391-b2-base" {
+		t.Errorf("expected baseline batch run name 'pr-391-b2-base', got %q", baseBatchRunName)
+	}
+
+	var baseBatchRun v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: baseBatchRunName}, &baseBatchRun); err != nil {
+		t.Fatalf("failed to get baseline batch run: %v", err)
+	}
+
+	expectedBaseLabels := map[string]string{
+		LabelComparison: "pr-391",
+		LabelBatch:      "2",
+		LabelRole:       RoleBaseline,
+		LabelTargetRepo: "gke-labs_eval-runner",
+		LabelRepo:       "gke-labs_eval-runner",
+		LabelHeadSHA:    "a81d0c4",
+	}
+	for k, want := range expectedBaseLabels {
+		if got := baseBatchRun.Labels[k]; got != want {
+			t.Errorf("baseline batch run label %s = %q, want %q", k, got, want)
+		}
+	}
+
+	// 3. Template Run without target-repo label falls back to comp.Spec.PullRequest.Repository
+	legacyTemplate := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-cand",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelRepo:    "codebot-robot_eval-runner",
+				LabelPR:      "391",
+				LabelHeadSHA: "184dfbc",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/codebot-robot/eval-runner.git",
+				Commit: "184dfbc",
+			},
+			Model: "mockllm/model",
+		},
+	}
+	legacyBatchRunName, err := r.ensureBatchRun(t.Context(), comp, legacyTemplate, RoleCandidate, tasks, window, 3)
+	if err != nil {
+		t.Fatalf("ensureBatchRun for legacy template failed: %v", err)
+	}
+	var legacyBatchRun v1alpha1.Run
+	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: legacyBatchRunName}, &legacyBatchRun); err != nil {
+		t.Fatalf("failed to get legacy batch run: %v", err)
+	}
+	if got := legacyBatchRun.Labels[LabelTargetRepo]; got != "gke-labs_eval-runner" {
+		t.Errorf("legacy batch run target-repo label = %q, want %q", got, "gke-labs_eval-runner")
+	}
+}
