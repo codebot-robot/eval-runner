@@ -938,6 +938,7 @@ When an event arrives:
 5. **Labels**:
    All created resources are labeled with:
    - `evalrunner.gke-labs.dev/pr`: PR number (for PR runs and comparisons)
+   - `evalrunner.gke-labs.dev/target-repo`: Sanitized target repository identifier (e.g. `owner_name`)
    - `evalrunner.gke-labs.dev/repo`: Sanitized repository identifier (e.g. `owner_name`)
    - `evalrunner.gke-labs.dev/head-sha`: Commit SHA
    - `evalrunner.gke-labs.dev/branch`: Default branch name (for push-created baseline Runs)

@@ -1109,10 +1109,13 @@ func (s *Server) renderRepoRuns(w http.ResponseWriter, r *http.Request, ns strin
 		return
 	}
 
+	var compList v1alpha1.ComparisonList
+	_ = s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns))
+
 	var filtered []v1alpha1.Run
 	for i := range runList.Items {
 		run := runList.Items[i]
-		if runRef, ok := runRepoRef(&run); ok && runRef.Equal(ref) {
+		if runBelongsToRepo(&run, ref, compList.Items...) {
 			filtered = append(filtered, run)
 		}
 	}
@@ -1257,6 +1260,11 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ref, ok := targetRepoRef(&run); ok && !ref.IsZero() {
+		target := s.redirectURLWithQuery(ref.Path()+"/runs/"+name, r, ns)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
 	if ref, ok := runRepoRef(&run); ok && !ref.IsZero() {
 		target := s.redirectURLWithQuery(ref.Path()+"/runs/"+name, r, ns)
 		http.Redirect(w, r, target, http.StatusPermanentRedirect)
@@ -1298,8 +1306,13 @@ func (s *Server) handleRepoRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runRef, ok := runRepoRef(&run)
-	if !ok || !runRef.Equal(ref) {
+	runBelongs := runBelongsToRepo(&run, ref)
+	if !runBelongs {
+		var compList v1alpha1.ComparisonList
+		_ = s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns))
+		runBelongs = runBelongsToRepo(&run, ref, compList.Items...)
+	}
+	if !runBelongs {
 		httpError(w, http.StatusNotFound, "run not found", fmt.Sprintf("run %s/%s does not belong to repo %s", ns, name, ref), nil)
 		return
 	}
@@ -4017,7 +4030,11 @@ func (s *Server) handleRunTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ref, ok := runRepoRef(&run); ok && !ref.IsZero() {
+	ref, ok := targetRepoRef(&run)
+	if !ok || ref.IsZero() {
+		ref, ok = runRepoRef(&run)
+	}
+	if ok && !ref.IsZero() {
 		escapedPath := r.URL.EscapedPath()
 		legacyPrefix := fmt.Sprintf("/runs/%s/%s", url.PathEscape(ns), url.PathEscape(name))
 		suffix := strings.TrimPrefix(escapedPath, legacyPrefix)
@@ -4082,8 +4099,13 @@ func (s *Server) handleRepoRunTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runRef, ok := runRepoRef(&run)
-	if !ok || !runRef.Equal(ref) {
+	runBelongs := runBelongsToRepo(&run, ref)
+	if !runBelongs {
+		var compList v1alpha1.ComparisonList
+		_ = s.readerFor(ns).List(ctx, &compList, client.InNamespace(ns))
+		runBelongs = runBelongsToRepo(&run, ref, compList.Items...)
+	}
+	if !runBelongs {
 		httpError(w, http.StatusNotFound, "run not found", fmt.Sprintf("run %s/%s does not belong to repo %s", ns, name, ref), nil)
 		return
 	}

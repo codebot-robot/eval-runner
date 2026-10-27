@@ -117,7 +117,7 @@ func (s *Server) collectRepoObservations(ctx context.Context, ns string, ref Rep
 func buildRepoObservations(runs []v1alpha1.Run, ref RepoRef, branch, cohort string, linkNS string, hasArtifactStorage bool) *RepoObservations {
 	var totalRuns int
 	for i := range runs {
-		if rRef, ok := runRepoRef(&runs[i]); ok && rRef.Equal(ref) {
+		if runBelongsToRepo(&runs[i], ref) {
 			totalRuns++
 		}
 	}
