@@ -31,6 +31,9 @@ const (
 	// LabelPR tracks the pull request number on created Runs and Comparisons.
 	LabelPR = "evalrunner.gke-labs.dev/pr"
 
+	// LabelTargetRepo tracks the target repository identifier on created Runs and Comparisons.
+	LabelTargetRepo = "evalrunner.gke-labs.dev/target-repo"
+
 	// LabelRepo tracks the repository identifier on created Runs and Comparisons.
 	LabelRepo = "evalrunner.gke-labs.dev/repo"
 

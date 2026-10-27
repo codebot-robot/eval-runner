@@ -36,6 +36,9 @@ const (
 	// StateClosed is the PR state label value for closed pull requests.
 	StateClosed = "closed"
 
+	// LabelTargetRepo tracks the target repository identifier on created Runs and Comparisons.
+	LabelTargetRepo = "evalrunner.gke-labs.dev/target-repo"
+
 	// LabelRepo tracks the repository identifier on created Runs and Comparisons.
 	LabelRepo = "evalrunner.gke-labs.dev/repo"
 

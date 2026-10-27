@@ -8135,3 +8135,256 @@ func TestServerLegacyRedirect_NonDefaultNamespacePropagation(t *testing.T) {
 		t.Errorf("expected ?namespace=eval-runner when ns != DefaultNamespace, got Location %q", loc)
 	}
 }
+
+func TestServerRepoRunDetail_ForkSourcedRun(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Fork-sourced candidate run
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-391-184dfbc",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelPR:         "391",
+				consumer.LabelRepo:       "codebot-robot_eval-runner",
+				consumer.LabelTargetRepo: "gke-labs_eval-runner",
+				consumer.LabelHeadSHA:    "184dfbc",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/codebot-robot/eval-runner.git",
+				Commit: "184dfbc",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "docs/readme_comprehension",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					Samples: 8,
+					LogPath: "gs://eval-bucket/runs/184dfbc/docs/readme_comprehension/inspect.json",
+				},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-a81d0c4",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelRepo:       "gke-labs_eval-runner",
+				consumer.LabelTargetRepo: "gke-labs_eval-runner",
+				consumer.LabelHeadSHA:    "a81d0c4",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "a81d0c4",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-391",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelPR:      "391",
+				consumer.LabelRepo:    "gke-labs_eval-runner",
+				consumer.LabelHeadSHA: "184dfbc",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     391,
+				HeadSHA:    "184dfbc",
+				BaseSHA:    "a81d0c4",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "pr-391-184dfbc",
+			},
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "base-a81d0c4",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase: v1alpha1.ComparisonPhaseCompleted,
+		},
+	}
+
+	// Legacy candidate run: no target-repo label, points to fork repo URL
+	legacyCandRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-pr-392-cand",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelPR:      "392",
+				consumer.LabelRepo:    "codebot-robot_eval-runner",
+				consumer.LabelHeadSHA: "abcdef0",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/codebot-robot/eval-runner.git",
+				Commit: "abcdef0",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	legacyComp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pr-392",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelPR:      "392",
+				consumer.LabelRepo:    "gke-labs_eval-runner",
+				consumer.LabelHeadSHA: "abcdef0",
+			},
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     392,
+				HeadSHA:    "abcdef0",
+				BaseSHA:    "a81d0c4",
+			},
+			Candidate: v1alpha1.ComparisonRunRef{
+				Run: "legacy-pr-392-cand",
+			},
+			Baseline: v1alpha1.ComparisonRunRef{
+				Run: "base-a81d0c4",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase: v1alpha1.ComparisonPhaseCompleted,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp, legacyCandRun, legacyComp).
+		Build()
+
+	server := NewServer(Config{
+		Client:           fakeClient,
+		DefaultNamespace: "eval-runner",
+	})
+
+	// 1. Comparison page links candidate run under target repository path
+	t.Run("comparison_page_links_fork_candidate_under_target_repo", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/comparisons/pr-391", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for comparison page, got %d: %s", w.Code, w.Body.String())
+		}
+		expectedRunLink := "/github.com/gke-labs/eval-runner/runs/pr-391-184dfbc"
+		if !strings.Contains(w.Body.String(), expectedRunLink) {
+			t.Errorf("expected comparison page to link to %q, body:\n%s", expectedRunLink, w.Body.String())
+		}
+	})
+
+	// 2. Candidate Run resolves under target repository path
+	t.Run("fork_candidate_resolves_under_target_repo", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/pr-391-184dfbc", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for target repo run detail, got %d: %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "pr-391-184dfbc") {
+			t.Errorf("expected run detail body to contain run name, body:\n%s", w.Body.String())
+		}
+	})
+
+	// 3. Candidate Run task page resolves under target repository path
+	t.Run("fork_candidate_tasks_resolves_under_target_repo", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/pr-391-184dfbc/tasks/docs%2Freadme_comprehension/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for target repo tasks page, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	// 4. Candidate Run listed in repo runs list
+	t.Run("fork_candidate_in_repo_runs_list", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for repo runs list, got %d: %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "/github.com/gke-labs/eval-runner/runs/pr-391-184dfbc") {
+			t.Errorf("expected repo runs list to include pr-391-184dfbc, body:\n%s", w.Body.String())
+		}
+	})
+
+	// 5. Non-goal: Fork run also renders under fork repository path
+	t.Run("fork_candidate_resolves_under_fork_repo", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/codebot-robot/eval-runner/runs/pr-391-184dfbc", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for fork repo run detail, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	// 6. Unrelated repository path returns 404
+	t.Run("fork_candidate_rejects_unrelated_repo", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/other-org/other-repo/runs/pr-391-184dfbc", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 Not Found for unrelated repo, got %d", w.Code)
+		}
+	})
+
+	// 7. Legacy candidate without target-repo resolves via Comparison fallback
+	t.Run("legacy_fork_candidate_resolves_via_comparison_fallback", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/legacy-pr-392-cand", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for legacy candidate run via comparison fallback, got %d: %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "legacy-pr-392-cand") {
+			t.Errorf("expected run detail body to contain run name, body:\n%s", w.Body.String())
+		}
+	})
+
+	// 8. Legacy unscoped redirect points to target repository
+	t.Run("unscoped_redirect_uses_target_repo", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/pr-391-184dfbc", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPermanentRedirect {
+			t.Fatalf("expected 308 for unscoped run, got %d", w.Code)
+		}
+		if loc := w.Header().Get("Location"); loc != "/github.com/gke-labs/eval-runner/runs/pr-391-184dfbc" {
+			t.Errorf("expected Location /github.com/gke-labs/eval-runner/runs/pr-391-184dfbc, got %q", loc)
+		}
+	})
+}

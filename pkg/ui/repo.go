@@ -22,6 +22,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/forge"
+	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -96,6 +97,87 @@ func runRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
 		}
 	}
 	return RepoRef{}, false
+}
+
+// targetRepoMatches checks if a sanitized target-repo label value matches ref.
+func targetRepoMatches(labelVal string, ref RepoRef) bool {
+	if labelVal == "" {
+		return false
+	}
+	if strings.EqualFold(labelVal, consumer.SanitizeLabelValue(ref.Owner+"/"+ref.Name)) {
+		return true
+	}
+	if ref.Host != "" && !strings.EqualFold(ref.Host, "github.com") {
+		if strings.EqualFold(labelVal, consumer.SanitizeLabelValue(ref.Host+"/"+ref.Owner+"/"+ref.Name)) {
+			return true
+		}
+	}
+	ownerName := strings.ReplaceAll(labelVal, "_", "/")
+	if tRef, ok := forge.RepoRefFromOwnerName(ownerName); ok && tRef.Equal(ref) {
+		return true
+	}
+	return false
+}
+
+// targetRepoRef resolves the RepoRef of a Run via the "evalrunner.gke-labs.dev/target-repo" label.
+func targetRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
+	if run == nil || run.Labels == nil {
+		return RepoRef{}, false
+	}
+	if labelVal, ok := run.Labels[consumer.LabelTargetRepo]; ok && labelVal != "" {
+		ownerName := strings.ReplaceAll(labelVal, "_", "/")
+		if ref, ok := forge.RepoRefFromOwnerName(ownerName); ok {
+			return ref, true
+		}
+	}
+	return RepoRef{}, false
+}
+
+// runBelongsToRepo returns true if the Run belongs to the given repository ref.
+// A Run belongs to ref if its "evalrunner.gke-labs.dev/target-repo" label matches ref,
+// or runRepoRef matches ref, or (fallback for objects created before this change)
+// a Comparison in the namespace references the Run as candidate or baseline and its
+// spec.pullRequest.repository matches ref.
+func runBelongsToRepo(run *v1alpha1.Run, ref RepoRef, comps ...v1alpha1.Comparison) bool {
+	if run == nil || ref.IsZero() {
+		return false
+	}
+
+	// 1. Target repo label match
+	if run.Labels != nil {
+		if labelVal, ok := run.Labels[consumer.LabelTargetRepo]; ok && labelVal != "" {
+			if targetRepoMatches(labelVal, ref) {
+				return true
+			}
+		}
+	}
+
+	// 2. Source repo match
+	if runRef, ok := runRepoRef(run); ok && runRef.Equal(ref) {
+		return true
+	}
+
+	// 3. Fallback: Comparison references the Run as candidate or baseline
+	for i := range comps {
+		comp := &comps[i]
+		if comp.Spec.PullRequest == nil || comp.Spec.PullRequest.Repository == "" {
+			continue
+		}
+		isReferenced := (comp.Spec.Candidate.Run != "" && comp.Spec.Candidate.Run == run.Name) ||
+			(comp.Spec.Baseline.Run != "" && comp.Spec.Baseline.Run == run.Name)
+		if !isReferenced && run.Labels != nil {
+			if parentComp, ok := run.Labels["evalrunner.gke-labs.dev/comparison"]; ok && parentComp != "" && parentComp == comp.Name {
+				isReferenced = true
+			}
+		}
+		if isReferenced {
+			if prRef, ok := pullRequestRepoRef(comp.Spec.PullRequest.Repository); ok && prRef.Equal(ref) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // pullRequestRepoRef parses a repository string from a PullRequestSpec.
