@@ -15,17 +15,15 @@
 
 """Provision a GKE cluster for eval-runner and deploy to it.
 
-This wraps the one-time cloud setup that ./dev/tasks/deploy does not do:
+This wraps the one-time cloud setup that ./dev/tasks/deploy-to-kube does not do:
 
   1. Fetch cluster credentials into a dedicated kubeconfig (never ~/.kube/config).
   2. Create the artifact bucket if it does not exist.
   3. Grant the controller and UI Kubernetes ServiceAccounts access to the bucket
      through Workload Identity Federation principals (no Google service
      accounts, no KSA annotations).
-  4. Write the eval-runner-config ConfigMap (artifactBucket plus any --set keys).
-  5. Run ./dev/tasks/deploy with IMAGE_PREFIX pointing at the project's registry,
-     wait for the rollouts, and confirm configuration took effect.
-  6. Check for the model credentials Secret and print what is still missing.
+  4. Delegate generic cluster bring-up, ConfigMap, deploy, and verification
+     to ./dev/tasks/deploy-to-kube.
 
 Every step is idempotent, so re-running after fixing a permission problem is
 safe. Use --dry-run to print the commands without running them.
@@ -45,19 +43,12 @@ import re
 import shlex
 import subprocess
 import sys
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 NAMESPACE = "eval-runner"
-SANDBOX_NAMESPACE = "eval-runner-sandbox"
-CONFIGMAP = "eval-runner-config"
 CONTROLLER_KSA = "eval-runner-controller"
 UI_KSA = "eval-runner-ui"
-DEPLOYMENTS = ["eval-runner-controller", "eval-runner-ui", "eval-runner-webhook"]
-CONTROLLER_DEPLOYMENT = "eval-runner-controller"
-MODEL_SECRET = "model-credentials"
 
 CLUSTER_PATH_RE = re.compile(
     r"^projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)/clusters/(?P<cluster>[^/]+)$"
@@ -155,6 +146,11 @@ def parse_args() -> argparse.Namespace:
         metavar="KEY=VALUE",
         help="extra eval-runner-config ConfigMap entries, e.g. --set sandboxdImage=gcr.io/p/sandboxd:tag "
         "(repeatable)",
+    )
+    p.add_argument(
+        "--skip-sandboxd-build",
+        action="store_true",
+        help="reuse an already pushed sandboxd image",
     )
     p.add_argument("--skip-deploy", action="store_true", help="provision only; do not run ./dev/tasks/deploy")
     p.add_argument("--skip-bucket", action="store_true", help="do not create the bucket or grant access to it")
@@ -306,99 +302,6 @@ def ensure_bucket(r: Runner, args: argparse.Namespace, account: str) -> None:
         print(f"    {role} -> {subject}")
 
 
-def ensure_configmap(r: Runner, args: argparse.Namespace, desired: Dict[str, str]) -> bool:
-    """Merge desired keys into the ConfigMap. Returns True when something changed."""
-    ns_manifest = json.dumps({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NAMESPACE}})
-    r.run(["kubectl", "apply", "-f", "-"], stdin=ns_manifest, capture=True, quiet=True)
-    print(f"    namespace {NAMESPACE} ensured")
-
-    existing = r.run(
-        ["kubectl", "-n", NAMESPACE, "get", "configmap", CONFIGMAP, "-o", "json"],
-        check=False, capture=True, mutating=False, quiet=True,
-    )
-    data: Dict[str, str] = {}
-    if existing.returncode == 0 and existing.stdout.strip():
-        data = json.loads(existing.stdout).get("data") or {}
-    merged = dict(data)
-    merged.update(desired)
-    if merged == data:
-        print(f"    configmap {NAMESPACE}/{CONFIGMAP} already up to date")
-        return False
-    manifest = json.dumps(
-        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": CONFIGMAP, "namespace": NAMESPACE}, "data": merged}
-    )
-    r.run(["kubectl", "apply", "-f", "-"], stdin=manifest)
-    for k, v in sorted(desired.items()):
-        print(f"    {k}: {v}")
-    return True
-
-
-def deploy(r: Runner, args: argparse.Namespace, root: Path, restart: bool) -> None:
-    r.run([str(root / "dev" / "tasks" / "deploy")], env_overrides={"IMAGE_PREFIX": args.image_prefix})
-    if restart:
-        # For clusters running a controller older than #277 that does not reload at runtime.
-        for d in DEPLOYMENTS:
-            r.run(["kubectl", "-n", NAMESPACE, "rollout", "restart", f"deployment/{d}"])
-    for d in DEPLOYMENTS:
-        r.run(["kubectl", "-n", NAMESPACE, "rollout", "status", f"deployment/{d}", "--timeout=300s"])
-
-
-def wait_for_effective_settings(
-    r: Runner,
-    bucket: Optional[str],
-    *,
-    since_time: Optional[str] = None,
-    timeout: float = 60.0,
-) -> None:
-    """Wait for the controller to log effective cluster settings reflecting the bucket."""
-    cmd = ["kubectl", "-n", NAMESPACE, "logs", f"deployment/{CONTROLLER_DEPLOYMENT}"] + (
-        [f"--since-time={since_time}"] if since_time else []
-    )
-    if r.dry_run:
-        r.show(cmd)
-        return
-
-    print(f"    waiting up to {int(timeout)}s for controller to log effective cluster settings...")
-    deadline = time.time() + timeout
-    last_err: Optional[str] = None
-    while time.time() < deadline:
-        res = r.run(cmd, check=False, capture=True, mutating=False, quiet=True)
-        if res.returncode == 0 and res.stdout:
-            for line in reversed(res.stdout.splitlines()):
-                if "effective cluster settings" in line and (not bucket or bucket in line):
-                    print(f"    {line.strip()}")
-                    return
-        elif res.returncode != 0:
-            last_err = res.stderr.strip()
-        time.sleep(2)
-
-    if last_err:
-        print(f"    kubectl logs returned an error:\n      {last_err.splitlines()[-1]}")
-    desc = f" reflecting artifactBucket={bucket}" if bucket else ""
-    print(
-        f"    WARNING: did not see 'effective cluster settings'{desc} within {int(timeout)}s;\n"
-        f"    the deploy succeeded. Check with: kubectl -n {NAMESPACE} logs deployment/{CONTROLLER_DEPLOYMENT} | grep 'effective cluster settings'"
-    )
-    return
-
-
-def check_model_secret(r: Runner) -> None:
-    res = r.run(
-        ["kubectl", "-n", SANDBOX_NAMESPACE, "get", "secret", MODEL_SECRET, "-o", "name"],
-        check=False, capture=True, mutating=False, quiet=True,
-    )
-    if res.returncode == 0:
-        print(f"    secret {SANDBOX_NAMESPACE}/{MODEL_SECRET} present")
-        return
-    print(
-        f"    secret {SANDBOX_NAMESPACE}/{MODEL_SECRET} is MISSING. Sandboxes read model API keys from it.\n"
-        f"    Create it with the keys your evals need, for example:\n"
-        f"      kubectl -n {SANDBOX_NAMESPACE} create secret generic {MODEL_SECRET} \\\n"
-        f"        --from-literal=GOOGLE_API_KEY=<key>\n"
-        f"    (see docs/development.md, 'Running Sample Evaluations with a Real Model')."
-    )
-
-
 def main() -> None:
     args = parse_args()
     root = repo_root()
@@ -412,41 +315,35 @@ def main() -> None:
     Step(f"Cluster credentials for {args.cluster} ({args.location})")
     ensure_kubeconfig(r, args)
 
-    desired: Dict[str, str] = {}
     if args.skip_bucket:
         Step("Artifact bucket (skipped)")
         print("    --skip-bucket: sample trajectories will not be viewable in the UI")
     else:
         Step(f"Artifact bucket gs://{args.bucket}")
         ensure_bucket(r, args, account)
-        desired["artifactBucket"] = args.bucket
-        # A leftover local-directory sink would shadow the bucket for the UI.
-        desired["artifactDir"] = "none"
+
+    Step("Deploying eval-runner via deploy-to-kube")
+    cmd = [
+        str(root / "dev" / "tasks" / "deploy-to-kube"),
+        f"--image-prefix={args.image_prefix}",
+    ]
+    if not args.skip_bucket:
+        cmd.extend(["--set", f"artifactBucket={args.bucket}", "--set", "artifactDir=none"])
     for item in args.set:
-        k, v = item.split("=", 1)
-        desired[k.strip()] = v
-
-    Step(f"ConfigMap {NAMESPACE}/{CONFIGMAP}")
-    started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    changed = ensure_configmap(r, args, desired)
-
+        cmd.extend(["--set", item])
+    if args.skip_sandboxd_build:
+        cmd.append("--skip-sandboxd-build")
     if args.skip_deploy:
-        Step("Deploy (skipped)")
-        print(f"    run later: KUBECONFIG={args.kubeconfig} IMAGE_PREFIX={args.image_prefix} ./dev/tasks/deploy")
-    else:
-        Step(f"Deploy images {args.image_prefix}/*:<git sha> and manifests")
-        deploy(r, args, root, restart=args.restart)
-        wait_for_effective_settings(r, desired.get("artifactBucket"), since_time=started if changed else None)
+        cmd.append("--skip-deploy")
+    if args.restart:
+        cmd.append("--restart")
+    if args.dry_run:
+        cmd.append("--dry-run")
 
-    Step("Model credentials")
-    check_model_secret(r)
+    r.run(cmd, mutating=False)
 
-    Step("Done")
+    Step("GKE deployment complete")
     print(f"    export KUBECONFIG={args.kubeconfig}")
-    print(f"    kubectl -n {NAMESPACE} get runs,comparisons")
-    print(f"    kubectl -n {NAMESPACE} port-forward svc/eval-runner-ui 8080:80   # then open http://localhost:8080/")
-    print("    Next: expose the UI behind your own ingress or gateway, and set uiBaseURL in the ConfigMap")
-    print("    (--set uiBaseURL=https://...) so PR comments link back to it.")
 
 
 if __name__ == "__main__":

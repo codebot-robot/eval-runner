@@ -18,7 +18,9 @@ set -o nounset
 set -o pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-PINNED_COMMIT="0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7"
+# shellcheck source=dev/tasks/versions.sh
+source "${REPO_ROOT}/dev/tasks/versions.sh"
+PINNED_COMMIT="${SANDBOXD_COMMIT}"
 FORK_URL="https://github.com/codebot-robot/agent-sandbox.git"
 
 export PATH="${REPO_ROOT}/.build/bin:${PATH}"
@@ -69,11 +71,14 @@ fi
 
 PUSH=false
 CLONE_ONLY=false
+PLATFORM="${PLATFORM:-linux/amd64}"
 for arg in "$@"; do
   if [[ "${arg}" == "--push" ]]; then
     PUSH=true
   elif [[ "${arg}" == "--clone-only" ]]; then
     CLONE_ONLY=true
+  elif [[ "${arg}" == --platform=* ]]; then
+    PLATFORM="${arg#*=}"
   fi
 done
 
@@ -83,11 +88,11 @@ if [[ "${CLONE_ONLY}" == "true" ]]; then
 fi
 
 IMAGE_PREFIX="${IMAGE_PREFIX:-gcr.io/justinsb-knotai-dev}"
-IMAGE_TAG="${IMAGE_TAG:-0d9e0d2}"
+IMAGE_TAG="${IMAGE_TAG:-${SANDBOXD_TAG}}"
 IMAGE_NAME="${IMAGE_PREFIX}/sandboxd:${IMAGE_TAG}"
 
-echo "Building sandboxd from ${AGENT_SANDBOX_DIR} as ${IMAGE_NAME}..."
-docker build -t "${IMAGE_NAME}" -f "${AGENT_SANDBOX_DIR}/packages/sandboxd/Dockerfile" "${AGENT_SANDBOX_DIR}"
+echo "Building sandboxd from ${AGENT_SANDBOX_DIR} as ${IMAGE_NAME} (platform: ${PLATFORM})..."
+docker build --platform "${PLATFORM}" -t "${IMAGE_NAME}" -f "${AGENT_SANDBOX_DIR}/packages/sandboxd/Dockerfile" "${AGENT_SANDBOX_DIR}"
 
 if [[ "${PUSH}" == "true" ]]; then
   echo "Pushing ${IMAGE_NAME}..."
