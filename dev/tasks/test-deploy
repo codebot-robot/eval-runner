@@ -230,4 +230,184 @@ if ! verify_deploy_manifests_output "${DRY_RUN_OUT}"; then
 fi
 echo "PASS: ap deploy --dry-run lists only this repo's k8s/ manifests after build-sandboxd."
 
+echo "=== 6. Testing dev/tasks/versions.sh and synchronization with e2e harness ==="
+# shellcheck source=dev/tasks/versions.sh
+source "${REPO_ROOT}/dev/tasks/versions.sh"
+
+if [[ -z "${AGENT_SANDBOX_VERSION:-}" ]]; then
+  echo "FAIL: AGENT_SANDBOX_VERSION is not defined in dev/tasks/versions.sh" >&2
+  exit 1
+fi
+
+HARNESS_VERSION="$(grep 'AgentSandboxVersion =' "${REPO_ROOT}/tests/e2e/harness.go" | sed -E 's/.*"([^"]+)".*/\1/')"
+if [[ "${AGENT_SANDBOX_VERSION}" != "${HARNESS_VERSION}" ]]; then
+  echo "FAIL: AGENT_SANDBOX_VERSION (${AGENT_SANDBOX_VERSION}) does not match harness.go (${HARNESS_VERSION})" >&2
+  exit 1
+fi
+echo "PASS: AGENT_SANDBOX_VERSION (${AGENT_SANDBOX_VERSION}) matches tests/e2e/harness.go."
+
+echo "=== 7. Testing dev/tasks/build-sandboxd platform default ==="
+MOCK_BIN="${TMP_DIR}/bin"
+mkdir -p "${MOCK_BIN}"
+cat << EOF > "${MOCK_BIN}/docker"
+#!/bin/sh
+echo "mock-docker: \$@" >> "${TMP_DIR}/docker.log"
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/docker"
+
+(
+  export PATH="${MOCK_BIN}:${PATH}"
+  export AGENT_SANDBOX_DIR="${TMP_DIR}/fake-agent-sandbox"
+  mkdir -p "${AGENT_SANDBOX_DIR}/packages/sandboxd"
+  touch "${AGENT_SANDBOX_DIR}/packages/sandboxd/Dockerfile"
+  "${REPO_ROOT}/dev/tasks/build-sandboxd" >/dev/null 2>&1 || true
+)
+
+if grep -q -- "--platform linux/amd64" "${TMP_DIR}/docker.log"; then
+  echo "PASS: dev/tasks/build-sandboxd builds for linux/amd64 by default."
+else
+  echo "FAIL: dev/tasks/build-sandboxd did not build for linux/amd64 by default. Log: $(cat "${TMP_DIR}/docker.log" 2>/dev/null || true)" >&2
+  exit 1
+fi
+
+echo "=== 8. Testing dev/tasks/deploy-to-kube ==="
+
+# Test 8A: Missing IMAGE_PREFIX on non-kind context fails
+MISSING_PREFIX_ERR="$("${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run 2>&1 || true)"
+if echo "${MISSING_PREFIX_ERR}" | grep -q "error: IMAGE_PREFIX must be set when deploying to a non-kind cluster"; then
+  echo "PASS: deploy-to-kube requires IMAGE_PREFIX on non-kind cluster."
+else
+  echo "FAIL: deploy-to-kube did not reject missing IMAGE_PREFIX on non-kind cluster. Got: ${MISSING_PREFIX_ERR}" >&2
+  exit 1
+fi
+
+# Test 8B: Invalid --set syntax is rejected
+INVALID_SET_ERR="$(IMAGE_PREFIX=test-prefix "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run --set invalid 2>&1 || true)"
+if echo "${INVALID_SET_ERR}" | grep -q "error: --set expects KEY=VALUE, got 'invalid'"; then
+  echo "PASS: deploy-to-kube rejects invalid --set syntax."
+else
+  echo "FAIL: deploy-to-kube did not reject invalid --set syntax. Got: ${INVALID_SET_ERR}" >&2
+  exit 1
+fi
+
+# Test 8C: Kind context defaults to images.local, host platform, and SANDBOXD_TAG
+cat << 'EOF' > "${MOCK_BIN}/kubectl"
+#!/bin/sh
+if [ "$1" = "config" ] && [ "$2" = "current-context" ]; then
+  echo "kind-test-cluster"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/kubectl"
+
+KIND_DRY_RUN="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run)"
+if echo "${KIND_DRY_RUN}" | grep -q "sandboxdImage: images.local/sandboxd:${SANDBOXD_TAG}"; then
+  echo "PASS: deploy-to-kube defaults IMAGE_PREFIX to images.local on kind cluster."
+else
+  echo "FAIL: deploy-to-kube did not default to images.local on kind cluster. Got: ${KIND_DRY_RUN}" >&2
+  exit 1
+fi
+
+HOST_ARCH="$(uname -m)"
+case "${HOST_ARCH}" in
+  x86_64|amd64) EXPECTED_KIND_PLATFORM="linux/amd64" ;;
+  aarch64|arm64) EXPECTED_KIND_PLATFORM="linux/arm64" ;;
+  *) EXPECTED_KIND_PLATFORM="linux/${HOST_ARCH}" ;;
+esac
+
+if echo "${KIND_DRY_RUN}" | grep -q -- "--platform=${EXPECTED_KIND_PLATFORM}"; then
+  echo "PASS: deploy-to-kube passes host platform ${EXPECTED_KIND_PLATFORM} on kind."
+else
+  echo "FAIL: deploy-to-kube did not pass host platform on kind. Got: ${KIND_DRY_RUN}" >&2
+  exit 1
+fi
+
+# Test 8C.1: Kind context without kind on PATH fails fast
+KIND_MISSING_ERR="$(PATH="${MOCK_BIN}:/usr/bin:/bin" "${REPO_ROOT}/dev/tasks/deploy-to-kube" 2>&1 || true)"
+if echo "${KIND_MISSING_ERR}" | grep -q "error: kind is required on PATH when deploying to a kind cluster"; then
+  echo "PASS: deploy-to-kube fails loudly when kind is not on PATH for kind cluster."
+else
+  echo "FAIL: deploy-to-kube did not fail when kind is not on PATH. Got: ${KIND_MISSING_ERR}" >&2
+  exit 1
+fi
+
+# Test 8D: Dry run on non-kind cluster with --set and artifactBucket notice
+rm -f "${MOCK_BIN}/kubectl"
+NONKIND_DRY_RUN="$(IMAGE_PREFIX="gcr.io/test-project" "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run --set artifactBucket=my-bucket --set defaultModel=test-model)"
+for expected in \
+  "Ensuring namespaces eval-runner and eval-runner-sandbox" \
+  "Installing agent-sandbox (${AGENT_SANDBOX_VERSION})" \
+  "build-sandboxd --push" \
+  "artifactBucket: my-bucket" \
+  "sandboxdImage: gcr.io/test-project/sandboxd:${SANDBOXD_TAG}" \
+  "roles/storage.objectAdmin granted on bucket gs://my-bucket" \
+  "eval-runner-sandbox get secret model-credentials" \
+  "dev/tasks/deploy --dry-run"; do
+  if ! echo "${NONKIND_DRY_RUN}" | grep -q "${expected}"; then
+    echo "FAIL: deploy-to-kube dry run missing expected line '${expected}'. Got: ${NONKIND_DRY_RUN}" >&2
+    exit 1
+  fi
+done
+echo "PASS: deploy-to-kube dry run executes all steps idempotently with expected configurations."
+
+# Test 8E: --skip-sandboxd-build
+SKIP_SANDBOXD_RUN="$(IMAGE_PREFIX="gcr.io/test-project" "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run --skip-sandboxd-build)"
+if echo "${SKIP_SANDBOXD_RUN}" | grep -q -- "--skip-sandboxd-build: reusing existing image"; then
+  echo "PASS: deploy-to-kube respects --skip-sandboxd-build."
+else
+  echo "FAIL: deploy-to-kube did not respect --skip-sandboxd-build. Got: ${SKIP_SANDBOXD_RUN}" >&2
+  exit 1
+fi
+
+# Test 8F: --skip-deploy
+SKIP_DEPLOY_RUN="$(IMAGE_PREFIX="gcr.io/test-project" "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run --skip-deploy)"
+if echo "${SKIP_DEPLOY_RUN}" | grep -q "Deploy (skipped)"; then
+  echo "PASS: deploy-to-kube respects --skip-deploy."
+else
+  echo "FAIL: deploy-to-kube did not respect --skip-deploy. Got: ${SKIP_DEPLOY_RUN}" >&2
+  exit 1
+fi
+
+# Test 8G: --restart
+RESTART_RUN="$(IMAGE_PREFIX="gcr.io/test-project" "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run --restart)"
+if echo "${RESTART_RUN}" | grep -q "rollout restart deployment/eval-runner-controller"; then
+  echo "PASS: deploy-to-kube respects --restart."
+else
+  echo "FAIL: deploy-to-kube did not respect --restart. Got: ${RESTART_RUN}" >&2
+  exit 1
+fi
+
+# Test 8H: IMAGE_TAG in caller environment does not leak to build-sandboxd
+TAG_ISOLATION_OUT="$(IMAGE_TAG="polluted-tag" IMAGE_PREFIX="gcr.io/test-project" "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run)"
+if echo "${TAG_ISOLATION_OUT}" | grep -q "env IMAGE_TAG=${SANDBOXD_TAG} .*build-sandboxd"; then
+  echo "PASS: deploy-to-kube passes IMAGE_TAG=\${SANDBOXD_TAG} to build-sandboxd when IMAGE_TAG is set in caller environment."
+else
+  echo "FAIL: deploy-to-kube did not isolate IMAGE_TAG for build-sandboxd. Got: ${TAG_ISOLATION_OUT}" >&2
+  exit 1
+fi
+
+echo "=== 9. Testing dev/tasks/deploy-to-gke delegation to deploy-to-kube ==="
+cat << 'EOF' > "${MOCK_BIN}/gcloud"
+#!/bin/sh
+if [ "$1" = "auth" ]; then echo "test-user@google.com"; exit 0; fi
+if [ "$1" = "container" ] && [ "$2" = "clusters" ] && [ "$3" = "describe" ]; then
+  echo '{"workloadIdentityConfig": {"workloadPool": "test-project.svc.id.goog"}}'
+  exit 0
+fi
+if [ "$1" = "projects" ] && [ "$2" = "describe" ]; then echo "123456789"; exit 0; fi
+if [ "$1" = "storage" ]; then exit 0; fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/gcloud"
+
+GKE_DRY_RUN="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/deploy-to-gke" --cluster projects/test-project/locations/us-central1/clusters/test-cluster --dry-run 2>&1)"
+if echo "${GKE_DRY_RUN}" | grep -q "deploy-to-kube --image-prefix=gcr.io/test-project"; then
+  echo "PASS: dev/tasks/deploy-to-gke delegates to deploy-to-kube."
+else
+  echo "FAIL: dev/tasks/deploy-to-gke did not delegate to deploy-to-kube. Got: ${GKE_DRY_RUN}" >&2
+  exit 1
+fi
+
 echo "=== All test-deploy checks passed successfully ==="

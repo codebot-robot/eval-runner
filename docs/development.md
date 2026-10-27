@@ -23,7 +23,7 @@ This document describes how to set up your local development environment, deploy
 - **Go**: 1.27 or newer
 - **Docker**: Docker daemon running (locally or via `DOCKER_HOST`). (The `buildx` plugin is only required if building multi-arch images with `ap`.)
 - **Git**
-- **Kubernetes cluster with agent-sandbox**: `agent-sandbox` is a prerequisite for running `eval-runner`. On any cluster where `eval-runner` is deployed, install the pinned `v1.0.7` release:
+- **Kubernetes cluster with agent-sandbox**: `agent-sandbox` is a prerequisite for running `eval-runner`. When deploying with `./dev/tasks/deploy-to-kube` (or `./dev/tasks/deploy-to-gke`), `agent-sandbox` is installed automatically. To install the pinned `v1.0.7` release manually on any cluster where `eval-runner` is deployed:
 
   ```bash
   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.7/sandbox.yaml
@@ -162,15 +162,48 @@ For example, on Google Kubernetes Engine (GKE):
 IMAGE_PREFIX=gcr.io/my-gke-project ./dev/tasks/deploy
 ```
 
+### Deploying to any Kubernetes cluster in one step (`dev/tasks/deploy-to-kube`)
+
+For generic Kubernetes clusters (kind, kops, EKS, etc.), `./dev/tasks/deploy-to-kube` (bash, standard library tools only) handles cluster bring-up and deployment idempotently in one step:
+1. Ensures namespaces `eval-runner` and `eval-runner-sandbox` exist with restricted pod-security labels (`k8s/00-namespaces.yaml`).
+2. Installs `agent-sandbox` at the pinned release (`v1.0.7`, shared with the e2e test harness via `dev/tasks/versions.sh`), waits for the CRD to be established, and waits for the controller deployment rollout.
+3. Builds and makes the pinned fork `sandboxd` image available under `IMAGE_PREFIX` (or reuses an existing image with `--skip-sandboxd-build`). When built on an arm64 host, it produces a `linux/amd64` image by default so x86 cluster nodes can execute it.
+4. Writes the `eval-runner-config` ConfigMap with `sandboxdImage` and any extra settings supplied via `--set KEY=VALUE`.
+5. Verifies whether Secret `eval-runner-sandbox/model-credentials` exists and prints instructions on creating it if absent.
+6. Invokes `./dev/tasks/deploy`, waits for controller, UI, and webhook rollouts, and confirms effective cluster settings took effect.
+
+Usage:
+
+```bash
+IMAGE_PREFIX=<registry> ./dev/tasks/deploy-to-kube
+```
+
+On kind clusters (active context matching `kind-*`), `IMAGE_PREFIX` defaults to `images.local`, `IMAGE_TAG` defaults to `dev`, and `sandboxd` is loaded directly into the kind node. On real clusters, `IMAGE_PREFIX` is required (e.g. `IMAGE_PREFIX=gcr.io/my-project`).
+
+Options:
+- `--set KEY=VALUE`: Merges extra ConfigMap entries (repeatable), for example `--set artifactBucket=my-bucket` or `--set defaultModel=gemini-2.5-flash`.
+- `--skip-sandboxd-build`: Skips building and pushing `sandboxd`, reusing an already pushed image index.
+- `--skip-deploy`: Provisions namespaces, `agent-sandbox`, `sandboxd`, and ConfigMap without running `./dev/tasks/deploy`.
+- `--restart`: Restarts deployments after deploy.
+- `--dry-run`: Prints commands without executing mutating actions.
+
+If `artifactBucket` is configured, the controller and UI interact with GCS using Application Default Credentials (ADC). On non-GKE clusters, ensure the node service account (or cloud IAM role provider) is granted `roles/storage.objectAdmin` on the bucket.
+
 ### Deploying to GKE in one step (`dev/tasks/deploy-to-gke`)
 
-For a fresh GKE cluster, `./dev/tasks/deploy-to-gke` (Python, standard library only) does the one-time cloud setup and then runs `./dev/tasks/deploy`:
+For a fresh GKE cluster, `./dev/tasks/deploy-to-gke` (Python, standard library only) performs the GKE-specific cloud setup and delegates generic cluster bring-up and deployment to `./dev/tasks/deploy-to-kube`:
 
 ```bash
 ./dev/tasks/deploy-to-gke --cluster projects/<project>/locations/<region>/clusters/<cluster>
 ```
 
-It fetches cluster credentials into a dedicated kubeconfig (`~/.kube/eval-runner-<project>-<cluster>.kubeconfig`, never `~/.kube/config`, so your default context is untouched), creates the artifact bucket `<project>-eval-runner` if needed, grants the controller and UI Kubernetes ServiceAccounts access to it through Workload Identity Federation principals (no Google service accounts or annotations needed), writes `artifactBucket` into the `eval-runner-config` ConfigMap, deploys with `IMAGE_PREFIX=gcr.io/<project>`, waits for the rollouts, confirms that configuration took effect by waiting for the controller's `effective cluster settings` log line, and reports whether the `model-credentials` Secret exists. Every step is idempotent; `--dry-run` prints the commands instead of running them. Use `--set key=value` for extra ConfigMap entries (for example `--set sandboxdImage=...`), `--bucket`, `--image-prefix` and `--kubeconfig` to override defaults, and `--skip-bucket` or `--skip-deploy` to run only part of it. Use `--restart` to restart deployments after deploying if running a controller older than #277 (the controller and UI reload at runtime since #277).
+It:
+1. Fetches cluster credentials into a dedicated kubeconfig (`~/.kube/eval-runner-<project>-<cluster>.kubeconfig`, never `~/.kube/config`, so your default context is untouched).
+2. Creates the artifact bucket `<project>-eval-runner` if needed.
+3. Grants the controller and UI Kubernetes ServiceAccounts access to the bucket through Workload Identity Federation principals (`principal://iam.googleapis.com/...`) without needing Google Service Account keys or KSA annotations.
+4. Delegates the remainder to `./dev/tasks/deploy-to-kube` with `IMAGE_PREFIX=gcr.io/<project>` and `--set artifactBucket=... --set artifactDir=none`.
+
+Every step is idempotent; `--dry-run` prints the commands instead of running them. Use `--set KEY=VALUE` for extra ConfigMap entries, `--bucket`, `--image-prefix` and `--kubeconfig` to override defaults, and `--skip-bucket`, `--skip-sandboxd-build`, or `--skip-deploy` to run only part of it. Use `--restart` to restart deployments after deploying if running a controller older than #277 (the controller and UI reload at runtime since #277).
 
 Granting bucket access needs `storage.buckets.setIamPolicy`. If that step is denied, the script prints the account you are authenticated as and suggests the project-level grant to ask for (or to give yourself, if you administer the project):
 
