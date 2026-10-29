@@ -194,7 +194,7 @@ func (a *AppTokenProvider) Token(ctx context.Context) (_ string, retErr error) {
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			if retErr == nil {
-				retErr = closeErr
+				retErr = fmt.Errorf("close response body: %w", closeErr)
 			}
 		}
 	}()
@@ -266,7 +266,7 @@ func (a *AppTokenProvider) Identity(ctx context.Context) (_ string, retErr error
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			if retErr == nil {
-				retErr = closeErr
+				retErr = fmt.Errorf("close response body: %w", closeErr)
 			}
 		}
 	}()
