@@ -393,7 +393,9 @@ func (c *HTTPClient) doRequestInternal(ctx context.Context, method, path string,
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			_ = closeErr
+			if err == nil {
+				err = closeErr
+			}
 		}
 	}()
 
