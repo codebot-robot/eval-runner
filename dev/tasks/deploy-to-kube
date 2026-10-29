@@ -226,10 +226,10 @@ else
       aarch64|arm64) KIND_PLATFORM="linux/arm64" ;;
       *) KIND_PLATFORM="linux/${HOST_ARCH}" ;;
     esac
-    run_cmd env IMAGE_TAG="${SANDBOXD_TAG}" "${REPO_ROOT}/dev/tasks/build-sandboxd" "--platform=${KIND_PLATFORM}"
+    run_cmd env IMAGE_TAG="${SANDBOXD_TAG}" "${REPO_ROOT}/dev/tasks/sandboxd-image" "--platform=${KIND_PLATFORM}"
     run_cmd kind load docker-image "${DEFAULT_SANDBOXD_IMAGE}" --name "${KIND_CLUSTER_NAME}"
   else
-    run_cmd env IMAGE_TAG="${SANDBOXD_TAG}" "${REPO_ROOT}/dev/tasks/build-sandboxd" --push
+    run_cmd env IMAGE_TAG="${SANDBOXD_TAG}" "${REPO_ROOT}/dev/tasks/sandboxd-image" --push
   fi
 fi
 

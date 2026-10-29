@@ -126,7 +126,7 @@ func (h *Harness) DeployEvalRunner() {
 	h.KindLoad("sample-runner:e2e")
 
 	// Build and load sandboxd image from fork (clones out of tree if sibling is absent)
-	h.runCmd(filepath.Join(gitRoot, "dev/tasks/build-sandboxd"))
+	h.runCmd(filepath.Join(gitRoot, "dev/tasks/sandboxd-image"))
 	agentSandboxDir := os.Getenv("AGENT_SANDBOX_DIR")
 	if agentSandboxDir == "" {
 		sibling := filepath.Join(gitRoot, "../agent-sandbox")

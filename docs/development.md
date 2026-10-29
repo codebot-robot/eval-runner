@@ -70,12 +70,12 @@ replace sigs.k8s.io/agent-sandbox => github.com/codebot-robot/agent-sandbox <com
 #### Building the `sandboxd` Image
 To build the `sandboxd` image from the fork:
 ```bash
-./dev/tasks/build-sandboxd
+./dev/tasks/sandboxd-image
 ```
 Pass `--push` to push the image to a container registry, or pass `IMAGE_PREFIX` and `IMAGE_TAG` to customize the tag.
 Pass `--clone-only` to prepare the checkout without building the image.
 
-`dev/tasks/build-sandboxd` uses a sibling checkout (`../agent-sandbox`) if present, or clones the pinned commit outside the repository into `${XDG_CACHE_HOME:-~/.cache}/eval-runner/agent-sandbox` (configurable via `AGENT_SANDBOX_DIR`). The fork is intentionally never cloned under the repository tree.
+`dev/tasks/sandboxd-image` uses a sibling checkout (`../agent-sandbox`) if present, or clones the pinned commit outside the repository into `${XDG_CACHE_HOME:-~/.cache}/eval-runner/agent-sandbox` (configurable via `AGENT_SANDBOX_DIR`). The fork is intentionally never cloned under the repository tree.
 
 For production and multi-platform releases (`linux/amd64,linux/arm64`), maintainers build and push the image using:
 ```bash
@@ -115,6 +115,16 @@ Common commands:
 - `ap build`: Builds container images defined under `images/`.
 - `ap deploy`: Builds and deploys images and Kubernetes manifests from `k8s/` into the active cluster.
 - `ap e2e`: Discovers and executes all end-to-end tests.
+
+### Task Script Discovery in `dev/tasks/`
+
+`ap` automatically discovers executable scripts located in `dev/tasks/` based on reserved prefixes:
+- `build-*`: Executed during `ap build` (and therefore `ap deploy`).
+- `test-*`: Executed during `ap test`.
+- `lint-*`: Executed during `ap lint`.
+- `test-e2e*`: Executed during `ap e2e`.
+
+New scripts added to `dev/tasks/` must pick prefixes deliberately. Standalone utility or maintenance scripts (such as `sandboxd-image` or `deploy-to-kube`) must use names outside these reserved prefixes so they are not run unexpectedly during every build or deploy cycle.
 
 ## Generating CRDs and DeepCopy
 
