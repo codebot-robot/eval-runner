@@ -359,7 +359,7 @@ func (c *sandboxdClient) ReadFile(ctx context.Context, path string) (_ []byte, r
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			if retErr == nil {
-				retErr = closeErr
+				retErr = fmt.Errorf("close response body: %w", closeErr)
 			}
 		}
 	}()
