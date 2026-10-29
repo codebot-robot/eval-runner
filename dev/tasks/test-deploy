@@ -204,20 +204,20 @@ else
   exit 1
 fi
 
-# Test Case 5G: build-sandboxd cleans up legacy .build/agent-sandbox, clones out of tree,
+# Test Case 5G: sandboxd-image cleans up legacy .build/agent-sandbox, clones out of tree,
 # and dev/tasks/deploy --dry-run lists only this repo's k8s/ manifests.
 mkdir -p "${REPO_ROOT}/.build/agent-sandbox/k8s"
 touch "${REPO_ROOT}/.build/agent-sandbox/k8s/controller.yaml"
 
 TEST_CLONE_DIR="$(mktemp -d)/test-agent-sandbox"
-AGENT_SANDBOX_DIR="${TEST_CLONE_DIR}" "${REPO_ROOT}/dev/tasks/build-sandboxd" --clone-only
+AGENT_SANDBOX_DIR="${TEST_CLONE_DIR}" "${REPO_ROOT}/dev/tasks/sandboxd-image" --clone-only
 
 if [[ -d "${REPO_ROOT}/.build/agent-sandbox" ]]; then
-  echo "FAIL: build-sandboxd failed to clean up legacy .build/agent-sandbox directory!" >&2
+  echo "FAIL: sandboxd-image failed to clean up legacy .build/agent-sandbox directory!" >&2
   exit 1
 fi
 if [[ ! -d "${TEST_CLONE_DIR}" ]]; then
-  echo "FAIL: build-sandboxd failed to create out-of-tree checkout at ${TEST_CLONE_DIR}!" >&2
+  echo "FAIL: sandboxd-image failed to create out-of-tree checkout at ${TEST_CLONE_DIR}!" >&2
   exit 1
 fi
 rm -rf "$(dirname "${TEST_CLONE_DIR}")"
@@ -225,10 +225,18 @@ rm -rf "$(dirname "${TEST_CLONE_DIR}")"
 # Verify actual dev/tasks/deploy --dry-run succeeds and lists only this repo's k8s/*.yaml manifests
 DRY_RUN_OUT="$("${REPO_ROOT}/dev/tasks/deploy" --dry-run)"
 if ! verify_deploy_manifests_output "${DRY_RUN_OUT}"; then
-  echo "FAIL: ap deploy --dry-run failed manifest verification after build-sandboxd!" >&2
+  echo "FAIL: ap deploy --dry-run failed manifest verification after sandboxd-image!" >&2
   exit 1
 fi
-echo "PASS: ap deploy --dry-run lists only this repo's k8s/ manifests after build-sandboxd."
+echo "PASS: ap deploy --dry-run lists only this repo's k8s/ manifests after sandboxd-image."
+
+# Verify ap build --dry-run does not discover sandboxd-image as a build task
+AP_BUILD_DRY_RUN="$("${AP_CMD[@]}" build --dry-run 2>&1)"
+if echo "${AP_BUILD_DRY_RUN}" | grep -q "sandboxd"; then
+  echo "FAIL: ap build --dry-run discovered sandboxd task: ${AP_BUILD_DRY_RUN}" >&2
+  exit 1
+fi
+echo "PASS: ap build --dry-run does not include sandboxd in discovered build tasks."
 
 echo "=== 6. Testing dev/tasks/versions.sh and synchronization with e2e harness ==="
 # shellcheck source=dev/tasks/versions.sh
@@ -246,7 +254,7 @@ if [[ "${AGENT_SANDBOX_VERSION}" != "${HARNESS_VERSION}" ]]; then
 fi
 echo "PASS: AGENT_SANDBOX_VERSION (${AGENT_SANDBOX_VERSION}) matches tests/e2e/harness.go."
 
-echo "=== 7. Testing dev/tasks/build-sandboxd platform default ==="
+echo "=== 7. Testing dev/tasks/sandboxd-image platform default ==="
 MOCK_BIN="${TMP_DIR}/bin"
 mkdir -p "${MOCK_BIN}"
 cat << EOF > "${MOCK_BIN}/docker"
@@ -256,7 +264,7 @@ exit 0
 EOF
 chmod +x "${MOCK_BIN}/docker"
 
-BUILD_LOG="${TMP_DIR}/build-sandboxd.log"
+BUILD_LOG="${TMP_DIR}/sandboxd-image.log"
 BUILD_STATUS=0
 (
   export DOCKER="${MOCK_BIN}/docker"
@@ -264,15 +272,15 @@ BUILD_STATUS=0
   export AGENT_SANDBOX_DIR="${TMP_DIR}/fake-agent-sandbox"
   mkdir -p "${AGENT_SANDBOX_DIR}/packages/sandboxd"
   touch "${AGENT_SANDBOX_DIR}/packages/sandboxd/Dockerfile"
-  "${REPO_ROOT}/dev/tasks/build-sandboxd"
+  "${REPO_ROOT}/dev/tasks/sandboxd-image"
 ) > "${BUILD_LOG}" 2>&1 || BUILD_STATUS=$?
 
 if [[ ${BUILD_STATUS} -eq 0 ]] && grep -q -- "--platform linux/amd64" "${TMP_DIR}/docker.log" 2>/dev/null; then
-  echo "PASS: dev/tasks/build-sandboxd builds for linux/amd64 by default."
+  echo "PASS: dev/tasks/sandboxd-image builds for linux/amd64 by default."
 else
-  echo "FAIL: dev/tasks/build-sandboxd did not build for linux/amd64 by default. (exit status: ${BUILD_STATUS})" >&2
+  echo "FAIL: dev/tasks/sandboxd-image did not build for linux/amd64 by default. (exit status: ${BUILD_STATUS})" >&2
   echo "Mock docker log: $(cat "${TMP_DIR}/docker.log" 2>/dev/null || true)" >&2
-  echo "build-sandboxd output:" >&2
+  echo "sandboxd-image output:" >&2
   cat "${BUILD_LOG}" >&2
   exit 1
 fi
@@ -345,7 +353,7 @@ NONKIND_DRY_RUN="$(IMAGE_PREFIX="gcr.io/test-project" "${REPO_ROOT}/dev/tasks/de
 for expected in \
   "Ensuring namespaces eval-runner and eval-runner-sandbox" \
   "Installing agent-sandbox (${AGENT_SANDBOX_VERSION})" \
-  "build-sandboxd --push" \
+  "sandboxd-image --push" \
   "artifactBucket: my-bucket" \
   "sandboxdImage: gcr.io/test-project/sandboxd:${SANDBOXD_TAG}" \
   "roles/storage.objectAdmin granted on bucket gs://my-bucket" \
@@ -385,12 +393,12 @@ else
   exit 1
 fi
 
-# Test 8H: IMAGE_TAG in caller environment does not leak to build-sandboxd
+# Test 8H: IMAGE_TAG in caller environment does not leak to sandboxd-image
 TAG_ISOLATION_OUT="$(IMAGE_TAG="polluted-tag" IMAGE_PREFIX="gcr.io/test-project" "${REPO_ROOT}/dev/tasks/deploy-to-kube" --dry-run)"
-if echo "${TAG_ISOLATION_OUT}" | grep -q "env IMAGE_TAG=${SANDBOXD_TAG} .*build-sandboxd"; then
-  echo "PASS: deploy-to-kube passes IMAGE_TAG=\${SANDBOXD_TAG} to build-sandboxd when IMAGE_TAG is set in caller environment."
+if echo "${TAG_ISOLATION_OUT}" | grep -q "env IMAGE_TAG=${SANDBOXD_TAG} .*sandboxd-image"; then
+  echo "PASS: deploy-to-kube passes IMAGE_TAG=\${SANDBOXD_TAG} to sandboxd-image when IMAGE_TAG is set in caller environment."
 else
-  echo "FAIL: deploy-to-kube did not isolate IMAGE_TAG for build-sandboxd. Got: ${TAG_ISOLATION_OUT}" >&2
+  echo "FAIL: deploy-to-kube did not isolate IMAGE_TAG for sandboxd-image. Got: ${TAG_ISOLATION_OUT}" >&2
   exit 1
 fi
 
