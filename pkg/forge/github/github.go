@@ -605,9 +605,11 @@ func (f *Forge) SetStatus(ctx context.Context, ref forge.RepoRef, sha string, st
 	}
 
 	checkState := gh.CheckRunState{
-		Name:    status.Context,
-		Title:   status.Description,
-		Summary: status.Description,
+		Name:       status.Context,
+		Title:      status.Description,
+		Summary:    status.Description,
+		Text:       status.Text,
+		DetailsURL: status.TargetURL,
 	}
 	if checkState.Name == "" {
 		checkState.Name = gh.CheckRunName

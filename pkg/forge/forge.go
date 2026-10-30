@@ -117,6 +117,7 @@ type Status struct {
 	State       string `json:"state,omitempty"`
 	Context     string `json:"context"`
 	Description string `json:"description"`
+	Text        string `json:"text,omitempty"`
 	TargetURL   string `json:"target_url"`
 	CheckRunID  int64  `json:"check_run_id,omitempty"`
 }
