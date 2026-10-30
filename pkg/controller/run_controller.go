@@ -53,6 +53,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -69,8 +70,17 @@ const (
 	// DefaultDiscoveryDeadline is the default overall deadline for discovery to complete.
 	DefaultDiscoveryDeadline = 10 * time.Minute
 
+	// DefaultDiscoveryStepTimeout is the maximum duration for a single discovery Execute call.
+	DefaultDiscoveryStepTimeout = 60 * time.Second
+
 	// DefaultExecutionDeadline is the default overall deadline for sample execution.
 	DefaultExecutionDeadline = 30 * time.Minute
+
+	// DefaultExecutionStepTimeout is the maximum duration for non-inspect execution Execute calls.
+	DefaultExecutionStepTimeout = 2 * time.Minute
+
+	// DefaultWatchdogInterval is the interval between watchdog checks for expired discovery deadlines.
+	DefaultWatchdogInterval = 5 * time.Second
 
 	// DefaultMaxParallelTasks is the default maximum number of concurrent task sandboxes.
 	DefaultMaxParallelTasks = 4
@@ -173,9 +183,21 @@ type RunReconciler struct {
 	// Defaults to DefaultDiscoveryDeadline (10m) if <= 0.
 	DiscoveryDeadline time.Duration
 
+	// DiscoveryStepTimeout is the maximum duration for a single discovery Execute call.
+	// Defaults to DefaultDiscoveryStepTimeout (60s) if <= 0.
+	DiscoveryStepTimeout time.Duration
+
 	// ExecutionDeadline is the overall deadline duration for sample execution.
 	// Defaults to DefaultExecutionDeadline (30m) if <= 0.
 	ExecutionDeadline time.Duration
+
+	// ExecutionStepTimeout is the maximum duration for non-inspect execution Execute calls (e.g. git clone, checkout).
+	// Defaults to DefaultExecutionStepTimeout (2m) if <= 0.
+	ExecutionStepTimeout time.Duration
+
+	// WatchdogInterval is the interval between watchdog checks for expired discovery deadlines.
+	// Defaults to DefaultWatchdogInterval (5s) if <= 0.
+	WatchdogInterval time.Duration
 
 	// TaskGracePeriod is the grace period before treating absence of a running task's sandbox as a failure.
 	// Defaults to DefaultTaskGracePeriod (30s) if <= 0.
@@ -514,6 +536,15 @@ func (r *RunReconciler) discoveryDeadline() time.Duration {
 	return DefaultDiscoveryDeadline
 }
 
+func (r *RunReconciler) discoveryStepTimeout() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	if r.DiscoveryStepTimeout > 0 {
+		return r.DiscoveryStepTimeout
+	}
+	return DefaultDiscoveryStepTimeout
+}
+
 func (r *RunReconciler) executionDeadline() time.Duration {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
@@ -521,6 +552,92 @@ func (r *RunReconciler) executionDeadline() time.Duration {
 		return r.ExecutionDeadline
 	}
 	return DefaultExecutionDeadline
+}
+
+func (r *RunReconciler) executionStepTimeout() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	if r.ExecutionStepTimeout > 0 {
+		return r.ExecutionStepTimeout
+	}
+	return DefaultExecutionStepTimeout
+}
+
+func (r *RunReconciler) watchdogInterval() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	if r.WatchdogInterval > 0 {
+		return r.WatchdogInterval
+	}
+	return DefaultWatchdogInterval
+}
+
+func (r *RunReconciler) stepContext(parent context.Context, deadline *metav1.Time, maxStepTimeout time.Duration) (context.Context, context.CancelFunc) {
+	if deadline != nil {
+		remaining := deadline.Sub(r.now())
+		if remaining <= 0 {
+			return context.WithDeadline(parent, r.now().Add(-1*time.Millisecond))
+		}
+		if maxStepTimeout > 0 && maxStepTimeout < remaining {
+			return context.WithTimeout(parent, maxStepTimeout)
+		}
+		return context.WithTimeout(parent, remaining)
+	}
+	if maxStepTimeout > 0 {
+		return context.WithTimeout(parent, maxStepTimeout)
+	}
+	return context.WithCancel(parent)
+}
+
+func isStepTimeout(stepCtx context.Context, err error) bool {
+	if stepCtx != nil && errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if status.Code(err) == codes.DeadlineExceeded {
+		return true
+	}
+	return false
+}
+
+func executeSandboxWithTimeout(ctx context.Context, client sandboxclient.Client, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+	type result struct {
+		res *sandboxclient.ExecuteResult
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		res, err := client.Execute(ctx, cfg)
+		ch <- result{res: res, err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.res, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func readFileWithTimeout(ctx context.Context, client sandboxclient.Client, path string) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := client.ReadFile(ctx, path)
+		ch <- result{data: data, err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.data, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (r *RunReconciler) taskGracePeriod() time.Duration {
@@ -1089,18 +1206,12 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}()
 
 	// Set execution deadline context
-	execTimeout := 5 * time.Minute
 	if run.Status.DiscoveryDeadline != nil {
 		remaining := run.Status.DiscoveryDeadline.Sub(r.now())
 		if remaining <= 0 {
 			return r.failRun(ctx, &run, &sandbox, formatPodDeadlineMessage(&pod))
 		}
-		if remaining < execTimeout {
-			execTimeout = remaining
-		}
 	}
-	execCtx, cancel := context.WithTimeout(ctx, execTimeout)
-	defer cancel()
 
 	maxAttempts := r.maxDiscoveryAttempts()
 	backoffs := r.DiscoveryRetryBackoff
@@ -1121,6 +1232,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	var cloneErr error
 	var cloneAttempts int
 	var uncountedRetried bool
+	var lastCloneStepCtx context.Context
 
 	handleUnavailable := func(dialErr error) (retried bool, handled bool, res ctrl.Result, err error) {
 		logger.Info("Discovery step failed with Unavailable; checking sandbox status", "error", dialErr, "run", run.Name, "endpoint", currentEndpoint)
@@ -1203,15 +1315,25 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	executeCleanAndClone := func() (*sandboxclient.ExecuteResult, error) {
-		if _, cleanErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+		cleanCtx, cleanCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
+		defer cleanCancel()
+		lastCloneStepCtx = cleanCtx
+		if _, cleanErr := executeSandboxWithTimeout(cleanCtx, sbClient, sandboxclient.ProcessConfig{
 			Command: []string{"rm", "-rf", "repo"},
 		}); cleanErr != nil {
 			logger.V(1).Info("Failed to clean repo directory before clone attempt", "error", cleanErr)
+			if isStepTimeout(cleanCtx, cleanErr) {
+				return nil, cleanErr
+			}
 			if isUnavailableOrDialTimeout(cleanErr) {
 				return nil, cleanErr
 			}
 		}
-		return sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+
+		cloneCtx, cloneCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
+		defer cloneCancel()
+		lastCloneStepCtx = cloneCtx
+		return executeSandboxWithTimeout(cloneCtx, sbClient, sandboxclient.ProcessConfig{
 			Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
 		})
 	}
@@ -1240,6 +1362,10 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 		cloneRes, cloneErr = executeCleanAndClone()
 
+		if isStepTimeout(lastCloneStepCtx, cloneErr) {
+			return r.failRun(ctx, &run, &sandbox, "step git clone failed: sandbox did not report completion")
+		}
+
 		if isUnavailableOrDialTimeout(cloneErr) && !uncountedRetried {
 			uncountedRetried = true
 			recovered, handled, res, err := handleUnavailable(cloneErr)
@@ -1248,6 +1374,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 			if recovered {
 				cloneRes, cloneErr = executeCleanAndClone()
+				if isStepTimeout(lastCloneStepCtx, cloneErr) {
+					return r.failRun(ctx, &run, &sandbox, "step git clone failed: sandbox did not report completion")
+				}
 			}
 		} else if isUnavailableOrDialTimeout(cloneErr) {
 			_, handled, res, err := handleUnavailable(cloneErr)
@@ -1264,7 +1393,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			break
 		}
 
-		if cloneAttempts >= maxAttempts || execCtx.Err() != nil {
+		if cloneAttempts >= maxAttempts {
 			break
 		}
 
@@ -1292,7 +1421,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 		attemptMsg := fmt.Sprintf("Running discovery in sandbox (step git clone attempt %d of %d failed; retrying)", cloneAttempts, maxAttempts)
 		retryMsg := fmt.Sprintf("step git clone attempt %d of %d failed; retrying", cloneAttempts, maxAttempts)
-		if updateErr := r.updateRunStatus(execCtx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+		if updateErr := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionTypeDiscovered,
 				Status:             metav1.ConditionFalse,
@@ -1305,14 +1434,20 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			logger.Error(updateErr, "failed to update run status during retry", "attempt", cloneAttempts)
 		}
 
-		if err := sleepFn(execCtx, backoffDuration); err != nil {
-			logger.Info("Context done while waiting to retry clone", "error", err)
+		sleepCtx, sleepCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, backoffDuration)
+		sleepErr := sleepFn(sleepCtx, backoffDuration)
+		sleepCancel()
+		if sleepErr != nil {
+			logger.Info("Context done while waiting to retry clone", "error", sleepErr)
 			break
 		}
 	}
 
 	// Evaluate git clone outcome
 	if cloneErr != nil || cloneRes == nil || cloneRes.ExitCode != 0 {
+		if isStepTimeout(lastCloneStepCtx, cloneErr) {
+			return r.failRun(ctx, &run, &sandbox, "step git clone failed: sandbox did not report completion")
+		}
 		var cloneStderr string
 		var exitCode int
 		if cloneRes != nil {
@@ -1320,8 +1455,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			exitCode = cloneRes.ExitCode
 		}
 		tail := extractStderrTail(cloneStderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		isDeadlineExceeded := (run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time)) ||
-			errors.Is(execCtx.Err(), context.DeadlineExceeded)
+		isDeadlineExceeded := (run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time))
 		if isDeadlineExceeded {
 			msg := formatPodDeadlineMessage(&pod)
 			if tail != "" {
@@ -1347,11 +1481,16 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Step 2: git checkout <commit> (no retry: commit not found is permanent)
 	// -------------------------------------------------------------------------
 	logger.Info("Step 1 succeeded; starting step 2: git checkout", "commit", run.Spec.Repo.Commit)
-	checkoutRes, checkoutErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+	checkoutCtx, checkoutCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
+	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, sandboxclient.ProcessConfig{
 		Command: []string{"git", "checkout", run.Spec.Repo.Commit},
 		Cwd:     "repo",
 	})
+	checkoutCancel()
 	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
+		if isStepTimeout(checkoutCtx, checkoutErr) {
+			return r.failRun(ctx, &run, &sandbox, "step git checkout failed: sandbox did not report completion")
+		}
 		if status.Code(checkoutErr) == codes.Unauthenticated {
 			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr))
 		}
@@ -1362,8 +1501,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			exitCode = checkoutRes.ExitCode
 		}
 		tail := extractStderrTail(checkoutStderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		isDeadlineExceeded := (run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time)) ||
-			errors.Is(execCtx.Err(), context.DeadlineExceeded)
+		isDeadlineExceeded := (run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time))
 		if isDeadlineExceeded {
 			msg := formatPodDeadlineMessage(&pod)
 			if tail != "" {
@@ -1387,12 +1525,17 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Step 3: ./.evals/list (writes /workspace/out/manifest.json)
 	// -------------------------------------------------------------------------
 	logger.Info("Step 2 succeeded; starting step 3: discover evals to file", "command", discovery.DiscoveryCommand)
-	listRes, listErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+	listCtx, listCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, 0)
+	listRes, listErr := executeSandboxWithTimeout(listCtx, sbClient, sandboxclient.ProcessConfig{
 		Command: []string{"sh", "-c", discovery.DiscoveryCommand},
 		Cwd:     "repo",
 	})
+	listCancel()
 
 	if listErr != nil {
+		if isStepTimeout(listCtx, listErr) {
+			return r.failRun(ctx, &run, &sandbox, "step ./.evals/list failed: sandbox did not report completion")
+		}
 		var limitErr *discovery.LimitError
 		if errors.As(listErr, &limitErr) {
 			var tail string
@@ -1454,8 +1597,13 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Step 4: Pull manifest via bounded sandboxd ReadFile (resolves under /workspace)
-	manifestBytes, readErr := sbClient.ReadFile(execCtx, discovery.DiscoveryManifestReadPath)
+	manifestCtx, manifestCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
+	manifestBytes, readErr := readFileWithTimeout(manifestCtx, sbClient, discovery.DiscoveryManifestReadPath)
+	manifestCancel()
 	if readErr != nil {
+		if isStepTimeout(manifestCtx, readErr) {
+			return r.failRun(ctx, &run, &sandbox, "step ./.evals/list failed: sandbox did not report completion")
+		}
 		var limitErr *discovery.LimitError
 		if errors.As(readErr, &limitErr) {
 			return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("step ./.evals/list failed: %v", limitErr))
@@ -2482,18 +2630,32 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}()
 
 	// Ensure /workspace/out exists
-	if _, mkdirErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+	mkdirCtx, mkdirCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	if _, mkdirErr := executeSandboxWithTimeout(mkdirCtx, sbClient, sandboxclient.ProcessConfig{
 		Command: []string{"mkdir", "-p", "/workspace/out"},
 	}); mkdirErr != nil {
 		logger.V(1).Info("mkdir /workspace/out returned error", "error", mkdirErr)
 	}
+	mkdirCancel()
 
 	// Step 1: Clone repo
 	logger.Info("Starting task step 1: git clone", "url", run.Spec.Repo.URL)
-	cloneRes, cloneErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+	cloneCtx, cloneCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	cloneRes, cloneErr := executeSandboxWithTimeout(cloneCtx, sbClient, sandboxclient.ProcessConfig{
 		Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
 	})
+	cloneCancel()
 	if cloneErr != nil || cloneRes == nil || cloneRes.ExitCode != 0 {
+		if isStepTimeout(cloneCtx, cloneErr) {
+			msg := "step git clone failed: sandbox did not report completion"
+			logger.Error(errors.New(msg), "Task step git clone timed out", "task", taskID)
+			return taskExecutionResult{
+				taskID:      taskID,
+				phase:       v1alpha1.TaskPhaseFailed,
+				message:     msg,
+				sampleRange: effRange,
+			}
+		}
 		if status.Code(cloneErr) == codes.Unauthenticated {
 			msg := fmt.Sprintf("step git clone failed: unauthenticated: %v", cloneErr)
 			logger.Error(cloneErr, "Task step git clone failed", "task", taskID)
@@ -2538,11 +2700,23 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	// Step 2: Checkout commit
 	logger.Info("Starting task step 2: git checkout", "commit", run.Spec.Repo.Commit)
-	checkoutRes, checkoutErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+	checkoutCtx, checkoutCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, sandboxclient.ProcessConfig{
 		Command: []string{"git", "checkout", run.Spec.Repo.Commit},
 		Cwd:     "repo",
 	})
+	checkoutCancel()
 	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
+		if isStepTimeout(checkoutCtx, checkoutErr) {
+			msg := "step git checkout failed: sandbox did not report completion"
+			logger.Error(errors.New(msg), "Task step git checkout timed out", "task", taskID)
+			return taskExecutionResult{
+				taskID:      taskID,
+				phase:       v1alpha1.TaskPhaseFailed,
+				message:     msg,
+				sampleRange: effRange,
+			}
+		}
 		if status.Code(checkoutErr) == codes.Unauthenticated {
 			msg := fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr)
 			logger.Error(checkoutErr, "Task step git checkout failed", "task", taskID)
@@ -2606,14 +2780,26 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		r.pollTaskProgress(execCtx, sbClient, run, taskID, effRange, pollInterval, startTime, stopPoller)
 	}()
 
-	inspectRes, inspectErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+	inspectCtx, inspectCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, 0)
+	inspectRes, inspectErr := executeSandboxWithTimeout(inspectCtx, sbClient, sandboxclient.ProcessConfig{
 		Command: inspectCmd,
 		Cwd:     cwd,
 	})
+	inspectCancel()
 
 	close(stopPoller)
 	pollerWg.Wait()
 	if inspectErr != nil || inspectRes == nil || inspectRes.ExitCode != 0 {
+		if isStepTimeout(inspectCtx, inspectErr) {
+			msg := "step inspect eval failed: sandbox did not report completion"
+			logger.Error(errors.New(msg), "Task step inspect eval timed out", "task", taskID)
+			return taskExecutionResult{
+				taskID:      taskID,
+				phase:       v1alpha1.TaskPhaseFailed,
+				message:     msg,
+				sampleRange: effRange,
+			}
+		}
 		if status.Code(inspectErr) == codes.Unauthenticated {
 			msg := fmt.Sprintf("step inspect eval failed: unauthenticated: %v", inspectErr)
 			logger.Error(inspectErr, "Task step inspect eval failed", "task", taskID)
@@ -2659,10 +2845,22 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 
 	// Step 4: List /out for json log
-	lsRes, lsErr := sbClient.Execute(execCtx, sandboxclient.ProcessConfig{
+	lsCtx, lsCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	lsRes, lsErr := executeSandboxWithTimeout(lsCtx, sbClient, sandboxclient.ProcessConfig{
 		Command: []string{"ls", "/out"},
 	})
+	lsCancel()
 	if lsErr != nil || lsRes == nil {
+		if isStepTimeout(lsCtx, lsErr) {
+			msg := "step list /out failed: sandbox did not report completion"
+			logger.Error(errors.New(msg), "Task step list /out timed out", "task", taskID)
+			return taskExecutionResult{
+				taskID:      taskID,
+				phase:       v1alpha1.TaskPhaseFailed,
+				message:     msg,
+				sampleRange: effRange,
+			}
+		}
 		msg := fmt.Sprintf("failed to list /out: %v", lsErr)
 		logger.Error(lsErr, "Task step list /out failed", "task", taskID)
 		return taskExecutionResult{
@@ -2694,8 +2892,20 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	sort.Sort(sort.Reverse(sort.StringSlice(validFiles)))
 	logFilename := validFiles[0]
 
-	logBytes, readErr := sbClient.ReadFile(execCtx, filepath.Join("/out", logFilename))
+	readCtx, readCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	logBytes, readErr := readFileWithTimeout(readCtx, sbClient, filepath.Join("/out", logFilename))
+	readCancel()
 	if readErr != nil {
+		if isStepTimeout(readCtx, readErr) {
+			msg := "step read inspect log failed: sandbox did not report completion"
+			logger.Error(errors.New(msg), "Task step read inspect log timed out", "task", taskID)
+			return taskExecutionResult{
+				taskID:      taskID,
+				phase:       v1alpha1.TaskPhaseFailed,
+				message:     msg,
+				sampleRange: effRange,
+			}
+		}
 		msg := fmt.Sprintf("failed to read inspect log: %v", readErr)
 		logger.Error(readErr, "Task step read inspect log failed", "task", taskID)
 		return taskExecutionResult{
@@ -2910,9 +3120,11 @@ func (r *RunReconciler) pollTaskProgress(
 			return
 		case <-ticker.C:
 			// Step 1: ls /out via Execute
-			lsRes, lsErr := sbClient.Execute(ctx, sandboxclient.ProcessConfig{
+			pollStepCtx, pollCancel := context.WithTimeout(ctx, 5*time.Second)
+			lsRes, lsErr := executeSandboxWithTimeout(pollStepCtx, sbClient, sandboxclient.ProcessConfig{
 				Command: []string{"ls", "/out"},
 			})
+			pollCancel()
 			if lsErr != nil || lsRes == nil || lsRes.ExitCode != 0 {
 				logger.V(1).Info("poller ls /out returned error or non-zero", "error", lsErr)
 				continue
@@ -2934,7 +3146,9 @@ func (r *RunReconciler) pollTaskProgress(
 			logFilename := validFiles[0]
 
 			// Step 2: ReadFile newest json log
-			logBytes, readErr := sbClient.ReadFile(ctx, filepath.Join("/out", logFilename))
+			readStepCtx, readCancel := context.WithTimeout(ctx, 5*time.Second)
+			logBytes, readErr := readFileWithTimeout(readStepCtx, sbClient, filepath.Join("/out", logFilename))
+			readCancel()
 			if readErr != nil {
 				var limitErr *discovery.LimitError
 				if errors.As(readErr, &limitErr) {
@@ -3324,8 +3538,81 @@ func FormatRatesSummary(tasks []v1alpha1.TaskStatus, maxLen int) string {
 	return res
 }
 
+// CheckDiscoveryDeadlines inspects all Runs in the Discovering phase and fails any that have exceeded their DiscoveryDeadline.
+// It returns the number of expired runs that were failed.
+func (r *RunReconciler) CheckDiscoveryDeadlines(ctx context.Context) (int, error) {
+	var runList v1alpha1.RunList
+	if err := r.List(ctx, &runList); err != nil {
+		return 0, fmt.Errorf("failed to list runs for watchdog: %w", err)
+	}
+
+	logger := log.FromContext(ctx)
+	failedCount := 0
+
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		if run.Status.Phase != v1alpha1.RunPhaseDiscovering {
+			continue
+		}
+		if run.Status.DiscoveryDeadline == nil {
+			continue
+		}
+		if r.now().Before(run.Status.DiscoveryDeadline.Time) {
+			continue
+		}
+
+		logger.Info("Watchdog: discovery deadline exceeded; failing Run", "run", run.Name, "namespace", run.Namespace)
+
+		sbName := discovery.SandboxNameForRun(run.Name)
+		sbNamespace := r.sandboxNamespace()
+		var pod corev1.Pod
+		var podPtr *corev1.Pod
+		if err := r.Get(ctx, types.NamespacedName{Namespace: sbNamespace, Name: sbName}, &pod); err != nil {
+			if !apierrors.IsNotFound(err) {
+				logger.V(1).Info("Watchdog: failed to get backing pod", "pod", sbName, "error", err)
+			}
+		} else {
+			podPtr = &pod
+		}
+
+		msg := formatPodDeadlineMessage(podPtr)
+		foundSB, sbErr := r.findDiscoverySandbox(ctx, run)
+		if sbErr != nil {
+			logger.Error(sbErr, "Watchdog: failed to find discovery sandbox for expired run", "run", run.Name)
+		}
+
+		if _, err := r.failRun(ctx, run, foundSB, msg); err != nil {
+			logger.Error(err, "Watchdog: failed to fail expired run", "run", run.Name)
+		} else {
+			failedCount++
+		}
+	}
+
+	return failedCount, nil
+}
+
+// StartDiscoveryWatchdog runs a periodic loop checking for Runs whose discovery deadline has expired.
+func (r *RunReconciler) StartDiscoveryWatchdog(ctx context.Context) error {
+	ticker := time.NewTicker(r.watchdogInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if _, err := r.CheckDiscoveryDeadlines(ctx); err != nil {
+				log.FromContext(ctx).V(1).Info("Watchdog check encountered error", "error", err)
+			}
+		}
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RunReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.Add(manager.RunnableFunc(r.StartDiscoveryWatchdog)); err != nil {
+		return fmt.Errorf("failed to add discovery watchdog runnable: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 4}).
 		For(&v1alpha1.Run{}).

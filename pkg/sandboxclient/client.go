@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
@@ -51,7 +52,23 @@ const (
 	// DefaultGRPCHeadroom is the additional buffer allocated for gRPC message overhead and
 	// small excess output before gRPC's MaxCallRecvMsgSize triggers ResourceExhausted (4 MiB).
 	DefaultGRPCHeadroom = 4 * 1024 * 1024
+
+	// DefaultKeepaliveTime is the default duration after which a keepalive ping is sent if no activity is seen.
+	// Defaults to 5 minutes to satisfy grpc-go's default server EnforcementPolicy.MinTime (5m) and avoid
+	// GOAWAY too_many_pings on quiet unary RPCs.
+	DefaultKeepaliveTime = 5 * time.Minute
+
+	// DefaultKeepaliveTimeout is the default duration to wait for keepalive ping ack before closing the transport.
+	DefaultKeepaliveTimeout = 20 * time.Second
 )
+
+// DefaultKeepaliveParams defines the default client keepalive configuration
+// for detecting dead transport to sandboxd pods.
+var DefaultKeepaliveParams = keepalive.ClientParameters{
+	Time:                DefaultKeepaliveTime,
+	Timeout:             DefaultKeepaliveTimeout,
+	PermitWithoutStream: false,
+}
 
 // ProcessConfig configures a process execution in the sandbox.
 type ProcessConfig struct {
@@ -103,10 +120,18 @@ type ClientOptions struct {
 	AuthToken          string
 	TLSConfig          *tls.Config
 	HTTPClient         *http.Client
+	KeepaliveParams    *keepalive.ClientParameters
 }
 
 // Option configures ClientOptions.
 type Option func(*ClientOptions)
+
+// WithKeepaliveParams overrides the gRPC keepalive parameters.
+func WithKeepaliveParams(kp keepalive.ClientParameters) Option {
+	return func(o *ClientOptions) {
+		o.KeepaliveParams = &kp
+	}
+}
 
 // WithTLSConfig sets the TLS configuration for connecting to sandboxd over mTLS.
 func WithTLSConfig(tlsConfig *tls.Config) Option {
@@ -220,6 +245,12 @@ func New(podIP string, opts ...Option) (Client, error) {
 		maxRecvMsgSize = int(options.StdoutLimit + options.StderrLimit + DefaultGRPCHeadroom)
 	}
 	dialOpts = append(dialOpts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgSize)))
+
+	kp := DefaultKeepaliveParams
+	if options.KeepaliveParams != nil {
+		kp = *options.KeepaliveParams
+	}
+	dialOpts = append(dialOpts, grpc.WithKeepaliveParams(kp))
 
 	if options.AuthToken != "" {
 		token := options.AuthToken

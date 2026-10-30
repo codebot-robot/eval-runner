@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"google.golang.org/grpc/keepalive"
 )
 
 // FakeClient is a test fake implementing Client and Factory.
@@ -63,6 +64,8 @@ type FakeClient struct {
 	StdoutLimit   int64
 	StderrLimit   int64
 	ReadFileLimit int64
+
+	KeepaliveParams *keepalive.ClientParameters
 }
 
 // NewFakeClient returns a new FakeClient.
@@ -80,6 +83,7 @@ func (f *FakeClient) NewClient(podIP string, opts ...Option) (Client, error) {
 	f.LastPodIP = podIP
 	f.LastAuthToken = o.AuthToken
 	f.LastTLSConfig = o.TLSConfig
+	f.KeepaliveParams = o.KeepaliveParams
 	if o.StdoutLimit > 0 {
 		f.StdoutLimit = o.StdoutLimit
 	}
