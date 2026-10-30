@@ -143,11 +143,11 @@ func TestBadgeHandler_DataPresent(t *testing.T) {
 		if strings.Contains(body, "<script") {
 			t.Errorf("expected no JavaScript in SVG")
 		}
-		if !strings.Contains(body, `<tspan font-size="80%" opacity=".8">.</tspan>evals`) {
-			t.Errorf("expected wordmark dot and 'evals' in badge SVG, got:\n%s", body)
-		}
 		if !strings.Contains(body, `aria-label=".evals:`) {
 			t.Errorf("expected aria-label starting with '.evals:' in badge SVG, got:\n%s", body)
+		}
+		if !strings.Contains(body, ">.<") || !strings.Contains(body, ">evals<") {
+			t.Errorf("expected '.' and 'evals' text nodes in badge SVG, got:\n%s", body)
 		}
 		if !strings.Contains(body, "81%") {
 			t.Errorf("expected '81%%' in badge body")
@@ -758,11 +758,11 @@ func TestBadgeLabel_WordmarkDotAndJSON(t *testing.T) {
 			t.Fatalf("expected 200 OK, got %d", w.Code)
 		}
 		body := w.Body.String()
-		if !strings.Contains(body, `<tspan font-size="80%" opacity=".8">.</tspan>evals`) {
-			t.Errorf("expected badge SVG to render wordmark dot markup, got:\n%s", body)
-		}
 		if !strings.Contains(body, `aria-label=".evals:`) {
 			t.Errorf("expected aria-label with '.evals:', got:\n%s", body)
+		}
+		if !strings.Contains(body, ">.<") || !strings.Contains(body, ">evals<") {
+			t.Errorf("expected '.' and 'evals' text nodes in badge SVG, got:\n%s", body)
 		}
 	})
 
@@ -794,8 +794,8 @@ func TestBadgeLabel_WordmarkDotAndJSON(t *testing.T) {
 		if !strings.Contains(body, ">suite/task-1<") {
 			t.Errorf("expected plain label 'suite/task-1' in SVG, got:\n%s", body)
 		}
-		if strings.Contains(body, `<tspan font-size="80%" opacity=".8">.</tspan>suite/task-1`) {
-			t.Errorf("custom eval ID should not be prefixed with wordmark dot")
+		if strings.Contains(body, ">.<") {
+			t.Errorf("custom eval ID should not include dot text node")
 		}
 
 		reqJSON := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/badge.json?eval=suite/task-1", nil)

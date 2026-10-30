@@ -86,6 +86,9 @@ func parseDimension(param string, defVal, minVal, maxVal int) int {
 
 // measureTextWidth estimates character width in Verdana 11px scaled by 10 (tenths of a pixel).
 func measureTextWidth(s string) int {
+	if s == defaultBadgeLabel {
+		return int(math.Round(0.8*float64(measureTextWidth(".")))) + measureTextWidth("evals")
+	}
 	w := 0
 	for _, r := range s {
 		switch {
@@ -129,9 +132,6 @@ func measureTextWidth(s string) int {
 // RenderBadgeSVG generates a Shields-style flat badge SVG.
 func RenderBadgeSVG(data BadgeData) []byte {
 	lbl := data.Label
-	if lbl == "" {
-		lbl = defaultBadgeLabel
-	}
 
 	labelWidth := (measureTextWidth(lbl) + 120 + 5) / 10
 	valWidth := (measureTextWidth(data.Message) + 120 + 5) / 10
@@ -154,11 +154,6 @@ func RenderBadgeSVG(data BadgeData) []byte {
 		colorHex = "#9f9f9f"
 	}
 
-	labelBody := escLabel
-	if lbl == defaultBadgeLabel {
-		labelBody = `<tspan font-size="80%" opacity=".8">.</tspan>evals`
-	}
-
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="20" viewBox="0 0 %d 20" role="img" aria-label="%s: %s">`+"\n", totalWidth, totalWidth, escLabel, escMessage))
 	sb.WriteString(fmt.Sprintf(`  <title>%s</title>`+"\n", escTitle))
@@ -175,8 +170,16 @@ func RenderBadgeSVG(data BadgeData) []byte {
 	sb.WriteString(fmt.Sprintf(`    <rect width="%d" height="20" fill="url(#s)"/>`+"\n", totalWidth))
 	sb.WriteString(`  </g>` + "\n")
 	sb.WriteString(`  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110">` + "\n")
-	sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, labelBody))
-	sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, labelBody))
+	if lbl == defaultBadgeLabel {
+		labelLeft := (labelWidth*10 - labelTextLength10) / 2
+		sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" text-anchor="start" font-size="88" textLength="32">.</text>`+"\n", labelLeft))
+		sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" text-anchor="start" textLength="288">evals</text>`+"\n", labelLeft+35))
+		sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" fill-opacity=".8" text-anchor="start" font-size="88" textLength="32">.</text>`+"\n", labelLeft))
+		sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" text-anchor="start" textLength="288">evals</text>`+"\n", labelLeft+35))
+	} else {
+		sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, escLabel))
+		sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, escLabel))
+	}
 	sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="%d">%s</text>`+"\n", valCenter10, valTextLength10, escMessage))
 	sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" textLength="%d">%s</text>`+"\n", valCenter10, valTextLength10, escMessage))
 	sb.WriteString(`  </g>` + "\n")

@@ -80,10 +80,6 @@ a:hover { text-decoration: underline; }
   gap: 8px;
 }
 .header-logo:hover { text-decoration: none; }
-.wordmark {
-  display: inline-flex;
-  align-items: baseline;
-}
 .wordmark-dot {
   font-size: 0.8em;
   opacity: 0.7;
@@ -264,9 +260,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 .reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
 `
 
-const wordmarkHTML = `<span class="wordmark"><span class="wordmark-dot">.</span>evals</span>`
-
-const wordmarkPartial = `{{- define "wordmark" }}` + wordmarkHTML + `{{- end -}}`
+const wordmarkPartial = `{{- define "wordmark" }}<span class="wordmark"><span class="wordmark-dot">.</span>evals</span>{{- end -}}`
 
 const repoHeaderPartial = wordmarkPartial + `{{- define "repo_header" }}
   <header class="header-bar">
@@ -1639,9 +1633,6 @@ const sampleTranscriptTemplate = `
 `
 
 var funcMap = template.FuncMap{
-	"wordmark": func() template.HTML {
-		return template.HTML(wordmarkHTML)
-	},
 	"repoLink":      repoLink,
 	"repoIndexLink": repoIndexLink,
 	"runLink":       runLink,
