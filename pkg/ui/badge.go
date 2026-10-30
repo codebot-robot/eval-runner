@@ -30,6 +30,8 @@ import (
 )
 
 const (
+	// defaultBadgeLabel is the default label for shields badges and endpoints.
+	defaultBadgeLabel = ".evals"
 	// DefaultSparklineWidth is the standard sparkline width in pixels.
 	DefaultSparklineWidth = 120
 	// DefaultSparklineHeight is the standard sparkline height in pixels.
@@ -126,16 +128,21 @@ func measureTextWidth(s string) int {
 
 // RenderBadgeSVG generates a Shields-style flat badge SVG.
 func RenderBadgeSVG(data BadgeData) []byte {
-	labelWidth := (measureTextWidth(data.Label) + 120 + 5) / 10
+	lbl := data.Label
+	if lbl == "" {
+		lbl = defaultBadgeLabel
+	}
+
+	labelWidth := (measureTextWidth(lbl) + 120 + 5) / 10
 	valWidth := (measureTextWidth(data.Message) + 120 + 5) / 10
 	totalWidth := labelWidth + valWidth
 
 	labelCenter10 := (labelWidth * 10) / 2
 	valCenter10 := labelWidth*10 + (valWidth*10)/2
-	labelTextLength10 := measureTextWidth(data.Label)
+	labelTextLength10 := measureTextWidth(lbl)
 	valTextLength10 := measureTextWidth(data.Message)
 
-	escLabel := html.EscapeString(data.Label)
+	escLabel := html.EscapeString(lbl)
 	escMessage := html.EscapeString(data.Message)
 	escTitle := html.EscapeString(data.Title)
 	if escTitle == "" {
@@ -145,6 +152,11 @@ func RenderBadgeSVG(data BadgeData) []byte {
 	colorHex := data.ColorHex
 	if colorHex == "" {
 		colorHex = "#9f9f9f"
+	}
+
+	labelBody := escLabel
+	if lbl == defaultBadgeLabel {
+		labelBody = `<tspan font-size="80%" opacity=".8">.</tspan>evals`
 	}
 
 	var sb strings.Builder
@@ -163,8 +175,8 @@ func RenderBadgeSVG(data BadgeData) []byte {
 	sb.WriteString(fmt.Sprintf(`    <rect width="%d" height="20" fill="url(#s)"/>`+"\n", totalWidth))
 	sb.WriteString(`  </g>` + "\n")
 	sb.WriteString(`  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110">` + "\n")
-	sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, escLabel))
-	sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, escLabel))
+	sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, labelBody))
+	sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" textLength="%d">%s</text>`+"\n", labelCenter10, labelTextLength10, labelBody))
 	sb.WriteString(fmt.Sprintf(`    <text aria-hidden="true" x="%d" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="%d">%s</text>`+"\n", valCenter10, valTextLength10, escMessage))
 	sb.WriteString(fmt.Sprintf(`    <text x="%d" y="140" transform="scale(.1)" fill="#fff" textLength="%d">%s</text>`+"\n", valCenter10, valTextLength10, escMessage))
 	sb.WriteString(`  </g>` + "\n")
@@ -250,7 +262,7 @@ func (s *Server) writeBadgeError(w http.ResponseWriter, logMsg string, err error
 		klog.Warning(logMsg)
 	}
 	body := RenderBadgeSVG(BadgeData{
-		Label:    "evals",
+		Label:    defaultBadgeLabel,
 		Message:  "error",
 		Color:    "grey",
 		ColorHex: "#9f9f9f",
@@ -287,13 +299,13 @@ func (s *Server) writeBadgeJSONError(w http.ResponseWriter, logMsg string, err e
 	}
 	resp := ShieldsEndpointResponse{
 		SchemaVersion: 1,
-		Label:         "evals",
+		Label:         defaultBadgeLabel,
 		Message:       "error",
 		Color:         "grey",
 	}
 	body, mErr := json.Marshal(resp)
 	if mErr != nil {
-		body = []byte(`{"schemaVersion":1,"label":"evals","message":"error","color":"grey"}`)
+		body = []byte(`{"schemaVersion":1,"label":".evals","message":"error","color":"grey"}`)
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -309,7 +321,7 @@ func (s *Server) resolveRepoBadgeData(ctx context.Context, r *http.Request, ref 
 	if len(evalID) > 40 {
 		evalID = evalID[:37] + "..."
 	}
-	label := "evals"
+	label := defaultBadgeLabel
 	if evalID != "" {
 		label = evalID
 	}
@@ -424,7 +436,7 @@ func (s *Server) handleRepoBadgeSVG(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.parseRouteRepo(r)
 	if !ok {
 		body := RenderBadgeSVG(BadgeData{
-			Label:    "evals",
+			Label:    defaultBadgeLabel,
 			Message:  "unknown",
 			Color:    "grey",
 			ColorHex: "#9f9f9f",
@@ -493,7 +505,7 @@ func (s *Server) handleRepoBadgeJSON(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		resp := ShieldsEndpointResponse{
 			SchemaVersion: 1,
-			Label:         "evals",
+			Label:         defaultBadgeLabel,
 			Message:       "unknown",
 			Color:         "grey",
 		}

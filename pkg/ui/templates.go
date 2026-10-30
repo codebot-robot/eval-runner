@@ -80,6 +80,14 @@ a:hover { text-decoration: underline; }
   gap: 8px;
 }
 .header-logo:hover { text-decoration: none; }
+.wordmark {
+  display: inline-flex;
+  align-items: baseline;
+}
+.wordmark-dot {
+  font-size: 0.8em;
+  opacity: 0.7;
+}
 .nav-links {
   display: flex;
   gap: 8px;
@@ -256,12 +264,16 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 .reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
 `
 
-const repoHeaderPartial = `{{- define "repo_header" }}
+const wordmarkHTML = `<span class="wordmark"><span class="wordmark-dot">.</span>evals</span>`
+
+const wordmarkPartial = `{{- define "wordmark" }}` + wordmarkHTML + `{{- end -}}`
+
+const repoHeaderPartial = wordmarkPartial + `{{- define "repo_header" }}
   <header class="header-bar">
     <div class="header-brand">
       {{- if .Repo.Host }}
       <div style="display:flex;align-items:center;gap:8px;font-size:16px">
-        <a href="{{ repoIndexLink .LinkNamespace }}" class="header-logo">eval-runner</a>
+        <a href="{{ repoIndexLink .LinkNamespace }}" class="header-logo">{{ template "wordmark" }}</a>
         <span style="color:var(--muted)">/</span>
         <span class="mono" style="color:var(--muted)">{{ .Repo.Host }}</span>
         <span style="color:var(--muted)">/</span>
@@ -278,7 +290,7 @@ const repoHeaderPartial = `{{- define "repo_header" }}
         <a href="{{ repoLink .Repo "/series" .LinkNamespace }}" class="nav-link {{ if eq .ActiveTab "series" }}active{{ end }}">Series</a>
       </nav>
       {{- else }}
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <a href="/runs" class="header-logo">{{ template "wordmark" }}</a>
       <nav class="nav-links">
         <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
@@ -303,7 +315,7 @@ const repoIndexTemplate = `
 <body>
   <header class="header-bar">
     <div class="header-brand">
-      <a href="{{ repoIndexLink .LinkNamespace }}" class="header-logo">eval-runner</a>
+      <a href="{{ repoIndexLink .LinkNamespace }}" class="header-logo">{{ template "wordmark" }}</a>
     </div>
     {{- if .LinkNamespace }}
     <span class="badge chip neutral mono" style="font-size:12px">namespace: {{ .LinkNamespace }}</span>
@@ -1627,6 +1639,9 @@ const sampleTranscriptTemplate = `
 `
 
 var funcMap = template.FuncMap{
+	"wordmark": func() template.HTML {
+		return template.HTML(wordmarkHTML)
+	},
 	"repoLink":      repoLink,
 	"repoIndexLink": repoIndexLink,
 	"runLink":       runLink,
@@ -1913,7 +1928,7 @@ const seriesListTemplate = `
 <body>
   <header class="header-bar">
     <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <a href="/runs" class="header-logo">{{ template "wordmark" }}</a>
       <nav class="nav-links">
         <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
@@ -1981,7 +1996,7 @@ const seriesDetailTemplate = `
 {{- else }}
   <header class="header-bar">
     <div class="header-brand">
-      <a href="/runs" class="header-logo">eval-runner</a>
+      <a href="/runs" class="header-logo">{{ template "wordmark" }}</a>
       <nav class="nav-links">
         <a href="/pulls" class="nav-link {{ if eq .ActiveTab "pulls" }}active{{ end }}">Pull Requests</a>
         <a href="/runs" class="nav-link {{ if eq .ActiveTab "runs" }}active{{ end }}">Runs</a>
