@@ -24,11 +24,12 @@ import (
 
 // FakeStorageClient is an in-memory test double for gcs.StorageClient.
 type FakeStorageClient struct {
-	mu         sync.Mutex
-	Objects    map[string]FakeObject // key: "bucket/object"
-	Errors     map[string]error      // key: "bucket/object" -> injected error
-	WriteCalls []FakeObject
-	Closed     bool
+	mu                sync.Mutex
+	Objects           map[string]FakeObject // key: "bucket/object"
+	Errors            map[string]error      // key: "bucket/object" -> injected error
+	BucketAccessError error
+	WriteCalls        []FakeObject
+	Closed            bool
 }
 
 // FakeObject represents a stored object in FakeStorageClient.
@@ -113,6 +114,22 @@ func (f *FakeStorageClient) ReadObject(ctx context.Context, bucket, object strin
 	dataCopy := make([]byte, len(obj.Data))
 	copy(dataCopy, obj.Data)
 	return dataCopy, nil
+}
+
+// CheckAccess verifies whether the bucket is accessible in memory.
+func (f *FakeStorageClient) CheckAccess(ctx context.Context, bucket string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.BucketAccessError != nil {
+		return f.BucketAccessError
+	}
+	if err, ok := f.Errors[bucket]; ok {
+		return err
+	}
+	if err, ok := f.Errors[bucket+"/*"]; ok {
+		return err
+	}
+	return nil
 }
 
 // Close marks the client as closed.

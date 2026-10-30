@@ -709,3 +709,49 @@ func TestGCSSink_SummaryJSON_NewFieldsAndTruncation(t *testing.T) {
 		t.Errorf("Expected %d samples, got %d", artifacts.MaxSummarySamples, len(summaryLarge.Samples))
 	}
 }
+
+func TestCheckAccess(t *testing.T) {
+	ctx := t.Context()
+	fakeClient := fakes.NewFakeStorageClient()
+	sink, err := New(ctx, "eval-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := sink.CheckAccess(ctx); err != nil {
+		t.Errorf("expected CheckAccess to succeed, got %v", err)
+	}
+
+	probeErr := errors.New("dial tcp 169.254.169.254:80: connect: connection refused")
+	fakeClient.BucketAccessError = probeErr
+	if err := sink.CheckAccess(ctx); !errors.Is(err, probeErr) {
+		t.Errorf("expected CheckAccess to return probeErr, got %v", err)
+	}
+}
+
+func TestStoreManifest_ErrorNamesSinkOperation(t *testing.T) {
+	ctx := t.Context()
+	fakeClient := fakes.NewFakeStorageClient()
+	sink, err := New(ctx, "eval-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName: "run-1",
+		Commit:  "abcdef12",
+	}
+
+	// Make write fail
+	fakeClient.Errors["eval-bucket/runs/abcdef12/manifest.json"] = errors.New("connection refused")
+	_, err = sink.StoreManifest(ctx, meta, []byte(`{"tasks":[]}`))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.HasPrefix(err.Error(), "store manifest to gs://eval-bucket/runs/abcdef12/manifest.json") {
+		t.Errorf("expected error to name sink operation and gs:// URI, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("expected error to preserve underlying cause, got: %v", err)
+	}
+}
