@@ -385,6 +385,10 @@ type ComparisonReportingStatus struct {
 	// +optional
 	CheckRunID int64 `json:"checkRunID,omitempty"`
 
+	// CheckRunIDs records GitHub check run IDs created for this comparison, keyed by commit SHA.
+	// +optional
+	CheckRunIDs map[string]int64 `json:"checkRunIDs,omitempty"`
+
 	// LastPostedHash is the hash of the last successfully posted content and state.
 	// +optional
 	LastPostedHash string `json:"lastPostedHash,omitempty"`
@@ -511,6 +515,18 @@ type ComparisonStatus struct {
 	// ExtraSamplesApplied records the number of extra samples that have been consumed into extension batches.
 	// +optional
 	ExtraSamplesApplied int `json:"extraSamplesApplied,omitempty"`
+
+	// ObservedCandidateRun records the candidate Run from which the current status was computed.
+	// +optional
+	ObservedCandidateRun string `json:"observedCandidateRun,omitempty"`
+
+	// ObservedBaselineRun records the baseline Run from which the current status was computed.
+	// +optional
+	ObservedBaselineRun string `json:"observedBaselineRun,omitempty"`
+
+	// ObservedGeneration records the metadata.generation from which the current status was computed.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Tasks records the status and paired comparison results for each evaluated task.
 	// +optional
