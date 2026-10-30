@@ -473,15 +473,22 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Diffing against all stored change requests with closed-head seeding eliminates false-positive API churn from GitHub's permanent pull-head advertisements. Free `git ls-remote` polling permits responsive change detection (60s) without risking rate limit exhaustion. Sizing rate limit floors and coupling validators atomically with event consumption ensures resilience across crashes and transient network failures.
 
+---
 
-
-
-
-
-
-
-
-
-
-
-
+### ADR-036: Re-score Comparison and post fresh check run when pull request head commit moves
+- **Date**: 2026-10-30
+- **Status**: Decided
+- **Context**:
+  When a pull request receives a new head commit, forge consumers create a candidate Run for the new commit and update `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing PR Comparison resource. Previously, if the Comparison had already reached a terminal phase (`Completed`), `comparison_controller` treated terminal phases as immutable unless `spec.extraSamples` grew, leaving `status` untouched: the verdict, completion time, and summary described the previous head commit, no check run was posted to GitHub for the new head commit, and the PR comment continued to display the old result.
+- **Decision**:
+  1. **Observed Run Tracking in Comparison Status**:
+     `ComparisonStatus` records `observedCandidateRun` and `observedBaselineRun` (and `observedGeneration`). If unpopulated, the controller falls back to the candidate and baseline Run names in `status.batches[0]` to ensure seamless backwards compatibility with pre-existing resources.
+  2. **Scoring State Reset on Head Move**:
+     At the start of reconciliation, if `spec.candidate.run` or `spec.baseline.run` differs from the observed values, the controller resets the scoring state: `phase` is set to `Running`, `verdict` to `RUNNING`, `completionTime` to nil, `batches` cleared, `extraSamplesApplied` reset to 0, per-task results cleared, and any subsequent extension batch Runs (`<comp>-b<k>-cand` and `<comp>-b<k>-base`) from the old head are cleaned up.
+  3. **In-Place Comment Update and Fresh Check Runs Keyed by Commit SHA**:
+     - The single PR comment is updated in place (retaining `status.reporting.commentID` and matching by marker) with a `"re-running for <sha2>"` headline under `## RUNNING`, preserved while candidate tasks run until the new verdict is reached.
+     - Check runs on GitHub are per-commit. `ComparisonReportingStatus` records `checkRunIDs` as a map keyed by commit SHA (`map[string]int64`). On head move, a new check run is immediately posted in `in_progress` state for the new head SHA. Keying check runs by commit SHA ensures that late or out-of-order updates for older heads cannot overwrite the check run of the new head.
+  4. **Baseline Reuse**:
+     When only the candidate changes and the baseline Run is present and complete, the existing baseline Run is reused without re-execution or recreation.
+- **Rationale**:
+  Pull requests frequently evolve through multiple pushes. Automatically detecting head moves, starting fresh batch scoring, posting an in-progress check run on the new commit, and updating the existing PR comment ensures developers immediately see that evals are running for their latest code rather than seeing stale results or missing GitHub status checks.

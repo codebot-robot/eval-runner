@@ -114,7 +114,7 @@ The `Run` custom resource represents an evaluation execution against a specific 
 
 ### The `Comparison` CRD (`evalrunner.gke-labs.dev/v1alpha1`)
 
-The `Comparison` custom resource pairs two `Run` resources, evaluates statistical stopping rules, manages adaptive batch extension, and drives GitHub PR reporting (ADR-018, ADR-021, ADR-025, ADR-026):
+The `Comparison` custom resource pairs two `Run` resources, evaluates statistical stopping rules, manages adaptive batch extension, and drives GitHub PR reporting (ADR-018, ADR-021, ADR-025, ADR-026, ADR-036):
 - **Group/Version**: `evalrunner.gke-labs.dev/v1alpha1`
 - **Kind**: `Comparison` (short name: `comp`)
 - **Scope**: Namespaced (`eval-runner`)
@@ -132,8 +132,15 @@ The `Comparison` custom resource pairs two `Run` resources, evaluates statistica
   - `pImprovement`: Aggregate posterior probability of net improvement.
   - `tasks`: Per-task paired metrics (`ComparisonTaskStatus`): `baseRate`, `candidateRate`, `delta`, `deltaCI` (95% bootstrap percentile interval with normal-approximation fallback), `pairs`, `wins`, `losses`, `ties`, `dropped: {candidate, baseline}`, `label`, `decision`, `samplesRun`, `suggestedNext`, and `tokens`.
   - `batches`: List of completed and in-flight evaluation batch records (`ComparisonBatchStatus` structs with `index`, `sampleRange`, `candidateRun`, `baselineRun`, and `phase`).
+  - `observedCandidateRun`: Candidate `Run` resource from which current status was computed.
+  - `observedBaselineRun`: Baseline `Run` resource from which current status was computed.
   - `summaryPath`: Storage path or URI where `comparisons/<name>.json` was written to the artifact sink.
   - `message`: Human-readable summary of verdicts, task notes, or candidate-task failure caps.
+
+**Comparison Lifecycle & Head Moves (ADR-036)**:
+When a PR receives a new head commit, forge consumers create a new candidate Run and update `spec.candidate.run` and `spec.pullRequest.headSHA` on the existing Comparison. The Comparison controller detects the change against `status.observedCandidateRun` (or `status.batches[0].candidateRun`), cleans up superseded extension batch runs, and resets scoring state to `Running` with cleared batches and extra samples. Completed baseline Runs are reused without re-execution.
+
+The single PR comment is updated in place with a `"re-running for <sha>"` headline until new results land. A new GitHub check run is immediately posted in `in_progress` state for the new commit SHA; check-run IDs are tracked per commit SHA in `status.reporting.checkRunIDs` so out-of-order updates for older commits cannot overwrite newer check runs.
 
 ### Webhook Service (`cmd/eval-runner-webhook`)
 
