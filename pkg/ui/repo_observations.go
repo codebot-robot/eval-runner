@@ -17,12 +17,12 @@ package ui
 import (
 	"context"
 	"fmt"
-	"math"
 	"net/url"
 	"sort"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/pooling"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -160,12 +160,9 @@ func buildRepoObservations(runs []v1alpha1.Run, ref RepoRef, branch, cohort stri
 			if t.ID == "" {
 				continue
 			}
-			if t.Phase == v1alpha1.TaskPhaseCompleted && t.Samples > 0 {
-				samples := t.Samples
-				succ := t.Successes
-				if succ == 0 && t.SuccessRate != nil && *t.SuccessRate > 0 {
-					succ = int(math.Round(*t.SuccessRate * float64(samples)))
-				}
+			if tc, ok := pooling.ExtractTaskCounts(*t); ok {
+				samples := tc.Samples
+				succ := tc.Successes
 				est := stats.PooledWilsonFromTotals(succ, samples, 0.95)
 				scoreStr := fmt.Sprintf("%.2f", est.Point)
 				ciStr := fmt.Sprintf("[%.2f, %.2f]", est.CI.Lower, est.CI.Upper)
