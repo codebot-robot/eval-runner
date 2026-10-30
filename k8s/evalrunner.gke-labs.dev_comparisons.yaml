@@ -443,6 +443,15 @@ spec:
                 description: Reporting records the status of GitHub PR comment and
                   check run reporting.
                 properties:
+                  annotationsHash:
+                    description: AnnotationsHash is the hash of the annotations posted
+                      to the check run.
+                    type: string
+                  annotationsPosted:
+                    description: |-
+                      AnnotationsPosted indicates whether sample failure annotations have already been posted to the check run.
+                      GitHub appends annotations on each check run update, so they are only posted once when the comparison completes.
+                    type: boolean
                   attempts:
                     description: Attempts is the number of times the controller has
                       attempted to report to GitHub.
