@@ -2661,6 +2661,146 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		if updated2.Status.Reporting.LastPostedHash == updated1.Status.Reporting.LastPostedHash {
 			t.Errorf("expected LastPostedHash to change from in_progress to completed")
 		}
+		if !updated2.Status.Reporting.AnnotationsPosted {
+			t.Errorf("expected AnnotationsPosted to be true at completion")
+		}
+
+		// 4. Third reconcile after terminal completion makes 0 new requests and duplicates nothing
+		reqCountAfterTerminal := len(server.RequestLog())
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("third Reconcile error: %v", err)
+		}
+		if len(server.RequestLog()) != reqCountAfterTerminal {
+			t.Errorf("expected 0 new requests after terminal reporting, got %d", len(server.RequestLog())-reqCountAfterTerminal)
+		}
+	})
+
+	t.Run("terminal annotations resolved on changed files", func(t *testing.T) {
+		server := github.NewFakeGitHubServer()
+		defer server.Close()
+		server.SetPullRequestFiles("gke-labs", "eval-runner", 101, []string{"docs/readme.md"})
+
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+			Data:       map[string][]byte{"token": []byte("test-gh-token")},
+		}
+
+		manifestJSON := `{"tasks":[{"id":"` + taskID + `","paths":["docs/**"]}]}`
+		fakeGCS.Objects["eval-bucket/runs/cand-commit-annot/manifest.json"] = fakes.FakeObject{Data: []byte(manifestJSON)}
+		fakeGCS.Objects["eval-bucket/runs/base-commit-annot/manifest.json"] = fakes.FakeObject{Data: []byte(manifestJSON)}
+
+		candLog := makeSyntheticInspectLog(taskID, []stats.SampleScore{
+			{ID: "sample-1", Score: 0.0},
+			{ID: "sample-2", Score: 1.0},
+		})
+		baseLog := makeSyntheticInspectLog(taskID, []stats.SampleScore{
+			{ID: "sample-1", Score: 1.0},
+			{ID: "sample-2", Score: 1.0},
+		})
+		candLogP := "gs://eval-bucket/runs/cand-commit-annot/" + taskID + "/inspect.json"
+		baseLogP := "gs://eval-bucket/runs/base-commit-annot/" + taskID + "/inspect.json"
+		fakeGCS.Objects["eval-bucket/runs/cand-commit-annot/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: candLog}
+		fakeGCS.Objects["eval-bucket/runs/base-commit-annot/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: baseLog}
+
+		candRunAnnot := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "cand-run-annot", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit-annot"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					ManifestPath: "gs://eval-bucket/runs/cand-commit-annot/manifest.json",
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: candLogP, Samples: 2, Successes: 1},
+				},
+				Summary: &v1alpha1.RunSummary{TotalSamples: 2},
+			},
+		}
+		baseRunAnnot := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "base-run-annot", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit-annot"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: baseLogP, Samples: 2, Successes: 2},
+				},
+				Summary: &v1alpha1.RunSummary{TotalSamples: 2},
+			},
+		}
+
+		compAnnot := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-annot", Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-annot"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-annot"},
+				PullRequest: &v1alpha1.PullRequestSpec{
+					Repository: "gke-labs/eval-runner",
+					Number:     101,
+					HeadSHA:    "cand-commit-annot",
+					BaseSHA:    "base-commit-annot",
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candRunAnnot, baseRunAnnot, compAnnot, tokenSecret).
+			WithStatusSubresource(candRunAnnot, baseRunAnnot, compAnnot).
+			Build()
+
+		reconciler := &ComparisonReconciler{
+			Client:              cl,
+			Scheme:              scheme,
+			ArtifactSink:        sink,
+			ControllerNamespace: "eval-runner",
+			GitHubTokenSecret:   "github-token",
+			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+				return server.Client(creds.Token)
+			},
+		}
+
+		reqAnnot := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-annot"}}
+		if _, err := reconciler.Reconcile(t.Context(), reqAnnot); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedAnnot v1alpha1.Comparison
+		if err := cl.Get(t.Context(), reqAnnot.NamespacedName, &updatedAnnot); err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if !updatedAnnot.Status.Reporting.AnnotationsPosted {
+			t.Errorf("expected AnnotationsPosted to be true")
+		}
+
+		runs := server.CheckRuns()
+		if len(runs) != 1 {
+			t.Fatalf("expected 1 check run, got %d", len(runs))
+		}
+		if len(runs[0].Annotations) != 1 {
+			t.Fatalf("expected 1 annotation, got %d: %+v", len(runs[0].Annotations), runs[0].Annotations)
+		}
+		// Path must be resolved to concrete file docs/readme.md, not glob docs/**
+		if runs[0].Annotations[0].Path != "docs/readme.md" {
+			t.Errorf("annotation path = %q, want 'docs/readme.md'", runs[0].Annotations[0].Path)
+		}
+
+		// Reconcile again: no extra requests or duplicate annotations
+		reqCountBefore := len(server.RequestLog())
+		if _, err := reconciler.Reconcile(t.Context(), reqAnnot); err != nil {
+			t.Fatalf("second Reconcile error: %v", err)
+		}
+		if len(server.RequestLog()) != reqCountBefore {
+			t.Errorf("expected 0 new requests on subsequent reconcile, got %d", len(server.RequestLog())-reqCountBefore)
+		}
+		if len(runs[0].Annotations) != 1 {
+			t.Errorf("expected annotations to remain 1 (no duplicate), got %d", len(runs[0].Annotations))
+		}
 	})
 
 	t.Run("transient failure at completion retries on next reconcile", func(t *testing.T) {

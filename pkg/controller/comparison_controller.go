@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -856,16 +857,27 @@ func (r *ComparisonReconciler) reportToGitHub(
 
 	markdown := github.RenderComparisonMarkdown(comp, baseRun, candRun, r.uiBaseURL())
 	checkState := github.CheckRunStateForComparison(comp, baseRun, candRun, r.inconclusivePolicy(), r.uiBaseURL())
-	hash := github.HashContent(markdown, checkState)
+	baseHash := github.HashContent(markdown, checkState)
 
 	commentID := int64(0)
 	checkRunID := int64(0)
 	if comp.Status.Reporting != nil {
 		commentID = comp.Status.Reporting.CommentID
 		checkRunID = comp.Status.Reporting.CheckRunID
-		if comp.Status.Reporting.LastPostedHash == hash && commentID != 0 {
-			// Idempotent: content has not changed
-			return nil
+		if comp.Status.Reporting.LastPostedHash == baseHash && commentID != 0 {
+			// If not in a terminal phase, or if annotations have already been posted, short-circuit immediately.
+			if !isTerminalComparisonPhase(comp.Status.Phase) || comp.Status.Reporting.AnnotationsPosted {
+				return nil
+			}
+		}
+	}
+
+	// Annotations: GitHub appends annotations on each check run update.
+	// Emit annotations only once, upon reaching a terminal comparison phase.
+	if isTerminalComparisonPhase(comp.Status.Phase) && (comp.Status.Reporting == nil || !comp.Status.Reporting.AnnotationsPosted) {
+		annotations := r.buildTerminalAnnotations(ctx, comp, baseRun, candRun)
+		if len(annotations) > 0 {
+			checkState.Annotations = annotations
 		}
 	}
 
@@ -907,6 +919,8 @@ func (r *ComparisonReconciler) reportToGitHub(
 			Text:        checkState.Text,
 			TargetURL:   checkState.DetailsURL,
 			CheckRunID:  checkRunID,
+			Images:      checkState.Images,
+			Annotations: checkState.Annotations,
 		}
 		newCheckRunID, err := rep.SetStatus(ctx, repoRef, headSHA, st)
 		if err != nil {
@@ -926,13 +940,106 @@ func (r *ComparisonReconciler) reportToGitHub(
 		} else {
 			comp.Status.Reporting.CheckRunID = newCheckRunID
 			comp.Status.Reporting.Message = ""
+			if isTerminalComparisonPhase(comp.Status.Phase) {
+				comp.Status.Reporting.AnnotationsPosted = true
+				if len(checkState.Annotations) > 0 {
+					comp.Status.Reporting.AnnotationsHash = computeAnnotationsHash(checkState.Annotations)
+				}
+			}
 		}
 	}
 
-	comp.Status.Reporting.LastPostedHash = hash
+	comp.Status.Reporting.LastPostedHash = baseHash
 	comp.Status.Reporting.Attempts = 0
 	comp.Status.Reporting.NextAttemptAt = nil
 	return nil
+}
+
+func (r *ComparisonReconciler) buildTerminalAnnotations(
+	ctx context.Context,
+	comp *v1alpha1.Comparison,
+	baseRun, candRun *v1alpha1.Run,
+) []forge.CheckRunAnnotation {
+	if candRun == nil || r.artifactSink() == nil {
+		return nil
+	}
+
+	manifest, err := r.loadManifest(ctx, candRun, baseRun)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("unable to load manifest for check run annotations", "error", err)
+		return nil
+	}
+	if manifest == nil || len(manifest.Tasks) == 0 {
+		return nil
+	}
+
+	// Get changed files for the PR to resolve task path globs
+	var changedFiles []string
+	if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Repository != "" && comp.Spec.PullRequest.Number > 0 {
+		cacheKey := fmt.Sprintf("%s#%d", comp.Spec.PullRequest.Repository, comp.Spec.PullRequest.Number)
+		if cached, ok := r.getCachedAffinity(cacheKey); ok && len(cached.files) > 0 {
+			changedFiles = cached.files
+		} else {
+			ghClient, clientErr := r.getGitHubClient(ctx)
+			if clientErr != nil {
+				log.FromContext(ctx).V(1).Info("unable to get GitHub client for annotations", "error", clientErr)
+			} else if ghClient != nil {
+				parts := strings.Split(comp.Spec.PullRequest.Repository, "/")
+				if len(parts) == 2 {
+					files, truncated, listErr := ghClient.ListPullRequestFiles(ctx, parts[0], parts[1], comp.Spec.PullRequest.Number)
+					if listErr != nil {
+						log.FromContext(ctx).V(1).Info("unable to list PR files for annotations", "error", listErr)
+					} else {
+						changedFiles = files
+						r.recordCachedAffinity(cacheKey, cachedPRFiles{files: files, truncated: truncated})
+					}
+				}
+			}
+		}
+	}
+
+	// Filter tasks: must declare paths that resolve to concrete changed files,
+	// and candidate task must have recorded failures.
+	taskLogs := make(map[string][]byte)
+	for _, mt := range manifest.Tasks {
+		if len(mt.Paths) == 0 {
+			continue
+		}
+		resolved := github.ResolveTaskFilePaths(mt.Paths, changedFiles)
+		if len(resolved) == 0 {
+			continue
+		}
+		for _, ct := range candRun.Status.Tasks {
+			if ct.ID == mt.ID && ct.LogPath != "" && ct.Samples > ct.Successes {
+				loadCtx, loadCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
+				data, err := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), ct.LogPath)
+				loadCancel()
+				if err == nil && len(data) > 0 {
+					taskLogs[mt.ID] = data
+				}
+				break
+			}
+		}
+	}
+
+	if len(taskLogs) == 0 {
+		return nil
+	}
+
+	return github.BuildCheckRunAnnotations(manifest.Tasks, changedFiles, taskLogs)
+}
+
+func computeAnnotationsHash(anns []forge.CheckRunAnnotation) string {
+	h := sha256.New()
+	for _, a := range anns {
+		h.Write([]byte(a.Path))
+		h.Write([]byte{0})
+		h.Write([]byte(strconv.Itoa(a.StartLine)))
+		h.Write([]byte{0})
+		h.Write([]byte(a.Message))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func isTerminalRunPhase(phase v1alpha1.RunPhase) bool {
