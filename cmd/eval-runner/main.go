@@ -579,6 +579,18 @@ func main() {
 		setupLog.Error(err, "failed initial reconcile of sandbox egress network policies; continuing")
 	}
 
+	topUpRunner := controller.NewHeadTopUpRunner(controller.HeadTopUpRunnerOptions{
+		Client:    mgr.GetClient(),
+		Namespace: evalRunnerNamespace,
+		Logger:    setupLog.WithName("head-topup"),
+		Config:    clusterConfig,
+	})
+
+	if err := mgr.Add(topUpRunner); err != nil {
+		setupLog.Error(err, "unable to add head top-up runner")
+		os.Exit(1)
+	}
+
 	reloader := controller.NewConfigReloader(controller.ConfigReloaderOptions{
 		RawFlags:       rawFlags,
 		Logger:         setupLog,
@@ -587,6 +599,7 @@ func main() {
 		CompReconciler: comparisonReconciler,
 		Syncer:         forgeSyncer,
 		Consumer:       forgeConsumer,
+		TopUpRunner:    topUpRunner,
 		InitialConfig:  &clusterConfig,
 		FQDNSyncFunc:   egressController.SyncHosts,
 		GitHubClient:   ghClient,
