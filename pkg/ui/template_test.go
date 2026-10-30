@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"html"
+	"io"
 	"math"
 	"net/url"
 	"os"
@@ -3404,5 +3405,170 @@ func TestComparisonTable_CostTooltip(t *testing.T) {
 	html := buf.String()
 	if !strings.Contains(html, `title="default prices"`) {
 		t.Errorf("expected default prices tooltip in comparison cost table, got:\n%s", html)
+	}
+}
+
+func TestHeaderWordmarkMarkup(t *testing.T) {
+	if !strings.Contains(baseCSS, ".wordmark-dot") {
+		t.Errorf("baseCSS missing .wordmark-dot definition")
+	}
+	if !strings.Contains(baseCSS, "font-size: 0.8em") {
+		t.Errorf("expected .wordmark-dot font-size to be 0.8em, got baseCSS:\n%s", baseCSS)
+	}
+	if !strings.Contains(baseCSS, "opacity: 0.7") {
+		t.Errorf("expected .wordmark-dot opacity to be 0.7, got baseCSS:\n%s", baseCSS)
+	}
+
+	const expectedWordmark = `<span class="wordmark"><span class="wordmark-dot">.</span>evals</span>`
+
+	repoWithHost := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	testCases := []struct {
+		name   string
+		render func(w io.Writer) error
+	}{
+		{
+			name: "repo_index",
+			render: func(w io.Writer) error {
+				return RenderRepoIndex(w, RepoIndexView{})
+			},
+		},
+		{
+			name: "repo_overview",
+			render: func(w io.Writer) error {
+				return RenderRepoOverview(w, RepoOverviewView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "repo_suite_detail",
+			render: func(w io.Writer) error {
+				return RenderRepoSuiteDetail(w, RepoSuiteDetailView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "series_list",
+			render: func(w io.Writer) error {
+				return RenderSeriesList(w, SeriesListView{})
+			},
+		},
+		{
+			name: "series_detail_standalone",
+			render: func(w io.Writer) error {
+				return RenderSeriesDetail(w, SeriesDetailView{})
+			},
+		},
+		{
+			name: "series_detail_repo",
+			render: func(w io.Writer) error {
+				return RenderSeriesDetail(w, SeriesDetailView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "pulls_list_standalone",
+			render: func(w io.Writer) error {
+				return RenderPullsList(w, PullRequestsListView{})
+			},
+		},
+		{
+			name: "pulls_list_repo",
+			render: func(w io.Writer) error {
+				return RenderPullsList(w, PullRequestsListView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "pull_detail_standalone",
+			render: func(w io.Writer) error {
+				return RenderPullDetail(w, PullRequestDetailView{})
+			},
+		},
+		{
+			name: "pull_detail_repo",
+			render: func(w io.Writer) error {
+				return RenderPullDetail(w, PullRequestDetailView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "task_samples_list",
+			render: func(w io.Writer) error {
+				return RenderTaskSamplesList(w, TaskSamplesListView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "sample_transcript",
+			render: func(w io.Writer) error {
+				return RenderSampleTranscript(w, SampleTranscriptView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "runs_list_standalone",
+			render: func(w io.Writer) error {
+				return tmplRunsList.Execute(w, RunsListView{})
+			},
+		},
+		{
+			name: "runs_list_repo",
+			render: func(w io.Writer) error {
+				return tmplRunsList.Execute(w, RunsListView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "run_detail_standalone",
+			render: func(w io.Writer) error {
+				return tmplRunDetail.Execute(w, RunDetailView{})
+			},
+		},
+		{
+			name: "run_detail_repo",
+			render: func(w io.Writer) error {
+				return tmplRunDetail.Execute(w, RunDetailView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "comparisons_list_standalone",
+			render: func(w io.Writer) error {
+				return tmplComparisonsList.Execute(w, ComparisonsListView{})
+			},
+		},
+		{
+			name: "comparisons_list_repo",
+			render: func(w io.Writer) error {
+				return tmplComparisonsList.Execute(w, ComparisonsListView{Repo: repoWithHost})
+			},
+		},
+		{
+			name: "comparison_detail_standalone",
+			render: func(w io.Writer) error {
+				return tmplComparisonDetail.Execute(w, ComparisonDetailView{})
+			},
+		},
+		{
+			name: "comparison_detail_repo",
+			render: func(w io.Writer) error {
+				return tmplComparisonDetail.Execute(w, ComparisonDetailView{Repo: repoWithHost})
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := tc.render(&buf); err != nil {
+				t.Fatalf("render failed: %v", err)
+			}
+			out := buf.String()
+			count := strings.Count(out, expectedWordmark)
+			if count != 1 {
+				t.Errorf("expected wordmark markup exactly once, found %d times in %s", count, tc.name)
+			}
+			if !strings.Contains(out, `<header class="header-bar">`) {
+				t.Errorf("expected header-bar element in %s", tc.name)
+			}
+			if !strings.Contains(out, `class="header-logo">`+expectedWordmark+`</a>`) {
+				t.Errorf("expected header-logo to enclose wordmark in %s, got:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, `<title>.evals`) {
+				t.Errorf("title should keep eval-runner, not wordmark in %s", tc.name)
+			}
+		})
 	}
 }

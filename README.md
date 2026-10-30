@@ -1,6 +1,6 @@
 # eval-runner
 
-[![evals](https://dev.dotevals.com/github.com/gke-labs/eval-runner/badge.svg)](https://dev.dotevals.com/github.com/gke-labs/eval-runner) ![trend](https://dev.dotevals.com/github.com/gke-labs/eval-runner/sparkline.svg)
+[![.evals](https://dev.dotevals.com/github.com/gke-labs/eval-runner/badge.svg)](https://dev.dotevals.com/github.com/gke-labs/eval-runner) ![trend](https://dev.dotevals.com/github.com/gke-labs/eval-runner/sparkline.svg)
 
 CI for evals: efficient statistical estimation of agentic goodness.  
 *CI stands for confidence interval.*

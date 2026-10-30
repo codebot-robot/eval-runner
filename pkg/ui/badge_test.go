@@ -29,7 +29,7 @@ import (
 
 func TestBadgeSVG_Golden(t *testing.T) {
 	data := BadgeData{
-		Label:       "evals",
+		Label:       ".evals",
 		Message:     "81% ± 4",
 		Color:       "green",
 		ColorHex:    "#4c1",
@@ -143,8 +143,11 @@ func TestBadgeHandler_DataPresent(t *testing.T) {
 		if strings.Contains(body, "<script") {
 			t.Errorf("expected no JavaScript in SVG")
 		}
-		if !strings.Contains(body, ">evals<") {
-			t.Errorf("expected label 'evals' in badge SVG")
+		if !strings.Contains(body, `aria-label=".evals:`) {
+			t.Errorf("expected aria-label starting with '.evals:' in badge SVG, got:\n%s", body)
+		}
+		if !strings.Contains(body, ">.<") || !strings.Contains(body, ">evals<") {
+			t.Errorf("expected '.' and 'evals' text nodes in badge SVG, got:\n%s", body)
 		}
 		if !strings.Contains(body, "81%") {
 			t.Errorf("expected '81%%' in badge body")
@@ -218,8 +221,8 @@ func TestBadgeHandler_DataPresent(t *testing.T) {
 		if resp.SchemaVersion != 1 {
 			t.Errorf("expected schemaVersion 1, got %d", resp.SchemaVersion)
 		}
-		if resp.Label != "evals" {
-			t.Errorf("expected label 'evals', got %q", resp.Label)
+		if resp.Label != ".evals" {
+			t.Errorf("expected label '.evals', got %q", resp.Label)
 		}
 		if !strings.HasPrefix(resp.Message, "81%") {
 			t.Errorf("expected message starting with '81%%', got %q", resp.Message)
@@ -725,6 +728,88 @@ func TestBadgeHandler_InternalError_DegradesGracefully(t *testing.T) {
 		}
 		if resp.Message != "error" {
 			t.Errorf("expected message 'error', got %q", resp.Message)
+		}
+		if resp.Label != ".evals" {
+			t.Errorf("expected label '.evals' on 500, got %q", resp.Label)
+		}
+	})
+}
+
+func TestBadgeLabel_WordmarkDotAndJSON(t *testing.T) {
+	now := time.Now()
+	rate := 0.85
+	run := createTestRun("run-wordmark", "main", "1111111111111111111111111111111111111111", now, []v1alpha1.TaskStatus{
+		{
+			ID:          "suite/task-1",
+			Phase:       v1alpha1.TaskPhaseCompleted,
+			Samples:     100,
+			Successes:   85,
+			SuccessRate: &rate,
+		},
+	})
+	server := setupBadgeTestServer(t, run)
+
+	// Default label assertions
+	t.Run("default_svg_has_wordmark_dot", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/badge.svg", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, `aria-label=".evals:`) {
+			t.Errorf("expected aria-label with '.evals:', got:\n%s", body)
+		}
+		if !strings.Contains(body, ">.<") || !strings.Contains(body, ">evals<") {
+			t.Errorf("expected '.' and 'evals' text nodes in badge SVG, got:\n%s", body)
+		}
+	})
+
+	t.Run("default_json_is_plain_dot_evals", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/badge.json", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		var resp ShieldsEndpointResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode json: %v", err)
+		}
+		if resp.Label != ".evals" {
+			t.Errorf("expected label '.evals', got %q", resp.Label)
+		}
+	})
+
+	// Custom eval ID label assertions (must remain plain text)
+	t.Run("eval_filter_keeps_label_as_is", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/badge.svg?eval=suite/task-1", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, ">suite/task-1<") {
+			t.Errorf("expected plain label 'suite/task-1' in SVG, got:\n%s", body)
+		}
+		if strings.Contains(body, ">.<") {
+			t.Errorf("custom eval ID should not include dot text node")
+		}
+
+		reqJSON := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/badge.json?eval=suite/task-1", nil)
+		wJSON := httptest.NewRecorder()
+		server.ServeHTTP(wJSON, reqJSON)
+		if wJSON.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", wJSON.Code)
+		}
+		var resp ShieldsEndpointResponse
+		if err := json.Unmarshal(wJSON.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode json: %v", err)
+		}
+		if resp.Label != "suite/task-1" {
+			t.Errorf("expected label 'suite/task-1', got %q", resp.Label)
 		}
 	})
 }
