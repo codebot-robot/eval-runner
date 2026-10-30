@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 )
 
@@ -41,7 +42,7 @@ const (
 	LabelHeadSHA = "evalrunner.gke-labs.dev/head-sha"
 
 	// LabelBranch tracks the branch name on created baseline Runs.
-	LabelBranch = "evalrunner.gke-labs.dev/branch"
+	LabelBranch = configkeys.LabelBranch
 
 	// AnnotationCommitTime tracks the commit timestamp (RFC3339) on created baseline Runs.
 	AnnotationCommitTime = "evalrunner.gke-labs.dev/commit-time"
