@@ -362,6 +362,15 @@ func main() {
 		setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", clusterConfig.ArtifactBucket)
 		os.Exit(1)
 	}
+	if clusterConfig.ArtifactBucket != "" && sink != nil {
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if probeErr := sinkconfig.ProbeArtifactSink(probeCtx, sink); probeErr != nil {
+			setupLog.Info(fmt.Sprintf("WARN: artifactBucket is set but credentials are unavailable: %v; ensure workload identity or pod credentials are configured, or set artifactBucket: %q in eval-runner-config to disable", probeErr, configkeys.ConfigSentinelDisabled))
+			_ = sink.Close()
+			sink = artifacts.NewUnavailableSink(clusterConfig.ArtifactBucket, probeErr)
+		}
+		probeCancel()
+	}
 	if sink == nil {
 		setupLog.Info("neither artifactBucket nor artifactDir configured; using default in-memory sink (non-durable: controller restarts reset Runs to Pending to re-discover)")
 		sink = artifacts.NewInMemorySink()

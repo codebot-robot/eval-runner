@@ -9321,3 +9321,432 @@ func TestReconcile_HungExecuteInTaskExecutionTimesOut(t *testing.T) {
 		t.Errorf("Expected task message to contain %q, got: %s", expectedMsg, task.Message)
 	}
 }
+
+type fakeBlockingOrFailingSink struct {
+	storeManifestFn func(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error)
+	storeArtifactFn func(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error)
+}
+
+func (s *fakeBlockingOrFailingSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
+	if s.storeManifestFn != nil {
+		return s.storeManifestFn(ctx, meta, data)
+	}
+	return "gs://bucket/manifest.json", nil
+}
+
+func (s *fakeBlockingOrFailingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+	if s.storeArtifactFn != nil {
+		return s.storeArtifactFn(ctx, meta, filename, data)
+	}
+	return "gs://bucket/artifact.json", nil
+}
+
+func (s *fakeBlockingOrFailingSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
+	return "gs://bucket/comparison.json", nil
+}
+
+func (s *fakeBlockingOrFailingSink) Load(ctx context.Context, path string) ([]byte, error) {
+	return []byte(`{"tasks":[{"id":"task-1","spec":"eval.py@task1"}]}`), nil
+}
+
+func (s *fakeBlockingOrFailingSink) ArtifactPrefix(commit string) string {
+	return "gs://bucket/runs/" + commit + "/"
+}
+
+func (s *fakeBlockingOrFailingSink) IsDurable() bool {
+	return true
+}
+
+func (s *fakeBlockingOrFailingSink) Close() error {
+	return nil
+}
+
+func TestReconcile_HungStoreManifestStepTimesOutAndFailsRun(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-hung-store-manifest"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+			Labels:    sb.Spec.PodTemplate.ObjectMeta.Labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return []byte(`{"tasks":[{"id":"task-1","spec":"eval.py@task1"}]}`), nil
+		},
+	}
+
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+	sink := &fakeBlockingOrFailingSink{
+		storeManifestFn: func(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
+			<-hungCh
+			return "gs://bucket/manifest.json", nil
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:               cl,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
+		ArtifactSink:         sink,
+		DiscoveryDeadline:    10 * time.Minute,
+		DiscoveryStepTimeout: 50 * time.Millisecond,
+		ArtifactSinkTimeout:  50 * time.Millisecond,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	start := time.Now()
+	res, err := reconciler.Reconcile(t.Context(), req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue on step timeout failure, got %v", res.RequeueAfter)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Reconcile took too long (%v), expected ~50ms", elapsed)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "step store manifest failed") {
+		t.Errorf("Expected message to contain 'step store manifest failed', got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "context deadline exceeded") {
+		t.Errorf("Expected message to contain 'context deadline exceeded', got: %s", updatedRun.Status.Message)
+	}
+
+	// Verify sandbox is deleted
+	var checkSb sandboxv1beta1.Sandbox
+	err = cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcile_StoreManifestErrorSurfacedVerbatim(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-fail-store-manifest"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+			Labels:    sb.Spec.PodTemplate.ObjectMeta.Labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return []byte(`{"tasks":[{"id":"task-1","spec":"eval.py@task1"}]}`), nil
+		},
+	}
+
+	fakeErr := errors.New("credentials: cannot fetch token: dial tcp 169.254.169.254:80: connect: connection refused")
+	sink := &fakeBlockingOrFailingSink{
+		storeManifestFn: func(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
+			return "", fakeErr
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "step store manifest failed") {
+		t.Errorf("Expected message to name sink operation, got: %s", updatedRun.Status.Message)
+	}
+	if !strings.Contains(updatedRun.Status.Message, fakeErr.Error()) {
+		t.Errorf("Expected message to surface underlying error verbatim (%q), got: %s", fakeErr.Error(), updatedRun.Status.Message)
+	}
+}
+
+func TestReconcile_UnavailableArtifactSinkFailsFast(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-unavail-sink"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhasePending,
+		},
+	}
+
+	unavailErr := errors.New("dial tcp 169.254.169.254:80: connect: connection refused")
+	sink := artifacts.NewUnavailableSink("eval-bucket", unavailErr)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	expectedMsg := "artifactBucket is set but credentials are unavailable: dial tcp 169.254.169.254:80: connect: connection refused"
+	if !strings.Contains(updatedRun.Status.Message, expectedMsg) {
+		t.Errorf("Expected message to contain %q, got: %s", expectedMsg, updatedRun.Status.Message)
+	}
+
+	// Verify no sandbox was created
+	var sbList sandboxv1beta1.SandboxList
+	if err := cl.List(t.Context(), &sbList); err != nil {
+		t.Fatalf("Failed to list sandboxes: %v", err)
+	}
+	if len(sbList.Items) > 0 {
+		t.Errorf("Expected no sandboxes to be created, got %d", len(sbList.Items))
+	}
+}
+
+func TestReconcile_HungStoreArtifactStepTimesOut(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-1", Spec: "eval.py@task1", Workdir: "evals"},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-hung-artifact",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+	sink := &fakeBlockingOrFailingSink{
+		storeArtifactFn: func(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+			<-hungCh
+			return "gs://bucket/artifact.json", nil
+		},
+	}
+
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "ls" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task-1.json\n"}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			return []byte(`{"eval":{"dataset":{"samples":1}},"samples":[{"id":1,"score":{"value":1.0}}]}`), nil
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		SandboxNamespace:    "eval-runner-sandbox",
+		SandboxClient:       executor,
+		ArtifactSink:        sink,
+		ArtifactSinkTimeout: 50 * time.Millisecond,
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-hung-artifact"}}
+
+	// Turn 1: Creates sandbox
+	_, _ = reconciler.Reconcile(t.Context(), req)
+
+	// Create ready pod
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun("test-run-hung-artifact", "task-1"),
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.51",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: Executes task; StoreArtifact hangs until timeout (50ms)
+	start := time.Now()
+	_, err := reconciler.Reconcile(t.Context(), req)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Reconcile took too long (%v), expected ~50ms", elapsed)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if len(updatedRun.Status.Tasks) != 1 {
+		t.Fatalf("Expected 1 task status, got %d", len(updatedRun.Status.Tasks))
+	}
+	t1 := updatedRun.Status.Tasks[0]
+	if t1.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task phase Failed, got %s", t1.Phase)
+	}
+	if !strings.Contains(t1.Message, "failed to store artifact") {
+		t.Errorf("Expected task message to contain 'failed to store artifact', got: %s", t1.Message)
+	}
+	if !strings.Contains(t1.Message, "context deadline exceeded") {
+		t.Errorf("Expected task message to contain 'context deadline exceeded', got: %s", t1.Message)
+	}
+}

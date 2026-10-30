@@ -1019,6 +1019,15 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 				resolved.ArtifactMaxUploadBytes = 0
 			}
 		} else {
+			if resolved.ArtifactBucket != "" && newSink != nil {
+				probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
+				if probeErr := sinkconfig.ProbeArtifactSink(probeCtx, newSink); probeErr != nil {
+					r.logger.Info(fmt.Sprintf("WARN: artifactBucket is set but credentials are unavailable: %v; ensure workload identity or pod credentials are configured, or set artifactBucket: %q in eval-runner-config to disable", probeErr, configkeys.ConfigSentinelDisabled))
+					_ = newSink.Close()
+					newSink = artifacts.NewUnavailableSink(resolved.ArtifactBucket, probeErr)
+				}
+				probeCancel()
+			}
 			if newSink == nil {
 				r.logger.Info("neither artifactBucket nor artifactDir configured; using default in-memory sink (non-durable: controller restarts reset Runs to Pending to re-discover)")
 				newSink = artifacts.NewInMemorySink()

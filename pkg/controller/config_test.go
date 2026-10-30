@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/internal/fakes"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
@@ -2811,5 +2812,70 @@ func TestResolveConfig_CadenceIntervalsAndRateLimitFloor(t *testing.T) {
 	}
 	if _, err := ResolveConfig(badFloorCM, RawFlags{}); err == nil {
 		t.Errorf("expected error for invalid rateLimitFloorPercent, got nil")
+	}
+}
+
+func TestConfigReloader_ProbeCredentials_UnavailableOnFailure(t *testing.T) {
+	ctx := t.Context()
+	const ns = "eval-runner"
+	const cmName = DefaultConfigMapName
+
+	initialSink := artifacts.NewInMemorySink()
+	reloadableSink := artifacts.NewReloadableSink(initialSink)
+
+	probeErr := errors.New("dial tcp 169.254.169.254:80: connect: connection refused")
+	fakeStorage := fakes.NewFakeStorageClient()
+	fakeStorage.BucketAccessError = probeErr
+
+	mockFactory := func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+		if bucket == "failing-bucket" {
+			return gcs.New(ctx, bucket, gcs.WithStorageClient(fakeStorage))
+		}
+		if bucket == "working-bucket" {
+			workingStorage := fakes.NewFakeStorageClient()
+			return gcs.New(ctx, bucket, gcs.WithStorageClient(workingStorage))
+		}
+		return artifacts.NewInMemorySink(), nil
+	}
+
+	reloader := NewConfigReloader(ConfigReloaderOptions{
+		ReloadableSink: reloadableSink,
+		SinkFactory:    mockFactory,
+		Logger:         logr.Discard(),
+	})
+
+	// 1. Reload with failing-bucket: probe fails, sink marked unavailable
+	failingCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: cmName, ResourceVersion: "1"},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "failing-bucket",
+		},
+	}
+	if err := reloader.ReloadWait(ctx, failingCM); err != nil {
+		t.Fatalf("ReloadWait failed: %v", err)
+	}
+
+	err, isUnavail := artifacts.IsUnavailable(reloadableSink)
+	if !isUnavail {
+		t.Fatalf("expected sink to be marked unavailable after failed probe")
+	}
+	if !errors.Is(err, probeErr) {
+		t.Errorf("expected probe error %v, got %v", probeErr, err)
+	}
+
+	// 2. Subsequent reload with working-bucket: probe succeeds, sink becomes available
+	workingCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: cmName, ResourceVersion: "2"},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "working-bucket",
+		},
+	}
+	if err := reloader.ReloadWait(ctx, workingCM); err != nil {
+		t.Fatalf("ReloadWait failed: %v", err)
+	}
+
+	_, isUnavail = artifacts.IsUnavailable(reloadableSink)
+	if isUnavail {
+		t.Fatalf("expected sink to be available after working probe")
 	}
 }
