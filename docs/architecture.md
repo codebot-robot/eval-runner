@@ -350,6 +350,18 @@ When `spec.pullRequest` is configured on a `Comparison`, the controller reports 
   - `REGRESSED`: status `completed`, conclusion `failure`, description `REGRESSED`
 - Descriptions differ from the original concept mockup as listed above. Authentication uses GitHub App credentials (preferred) or a personal access token stored in the controller namespace.
 
+#### Tracked-Branch Head Check Run Reporting
+
+In addition to PR comparison reporting, the controller posts and updates an `eval-runner / evals` check run on every tracked-branch head commit (not only on PRs):
+- **Commit Identification**: Identifies the commit SHA strictly via `run.Labels["evalrunner.gke-labs.dev/head-sha"]` (falling back to `run.Spec.Repo.Commit`), never by parsing the Run name.
+- **In-Progress Lifecycle**: When the seed baseline Run (`base-*`) starts running, the controller creates the check run with `status: in_progress` so the commit shows a yellow dot on GitHub while evals run.
+- **Pooled Score & Delta vs Parent**: Whenever a `base-*` Run (seed or top-up) at the head commit reaches a terminal phase, the controller computes the pooled estimate (`pkg/pooling`) across all completed runs at that commit, computes the informational delta vs the parent commit in the branch series, and creates or updates the check run:
+  - **Title**: `63% ± 21 · n=16 · Δ vs parent +2 (95% CI −9…+13)`
+  - **Summary**: Per-task markdown table (eval, score, samples, tokens) plus `"pooled from N Runs; next top-up in ~... "` when top-ups are enabled.
+  - **Conclusions**: `success` when the estimate exists; `neutral` while only partial; `failure` only if every task failed to run. Branch heads are never "regressed" by themselves; the Δ vs parent is informational.
+  - **Details URL**: Points to the repo-scoped series page for that branch, e.g. `{uiBaseURL}/{host}/{owner}/{repo}/series/{branch}`.
+- **Idempotency & Restarts**: The check-run ID is persisted in the seed Run's `status.reporting.checkRunID` along with `status.reporting.lastPostedHash`. Controller restarts and re-reconciles compute the state hash and avoid redundant GitHub API PATCH calls.
+
 ### The Forge Abstraction (`pkg/forge`)
 
 eval-runner interacts with code hosting environments (such as github.com, GitLab, Gerrit, or bare git servers) through the `pkg/forge` abstraction, decoupling repository discovery, branch tracking, change requests, and status reporting from any single hosting vendor or webhook event delivery mechanism (ADR-033).
