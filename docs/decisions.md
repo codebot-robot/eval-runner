@@ -473,15 +473,25 @@ Future pull requests that introduce an architectural decision should append an e
 - **Rationale**:
   Diffing against all stored change requests with closed-head seeding eliminates false-positive API churn from GitHub's permanent pull-head advertisements. Free `git ls-remote` polling permits responsive change detection (60s) without risking rate limit exhaustion. Sizing rate limit floors and coupling validators atomically with event consumption ensures resilience across crashes and transient network failures.
 
-
-
-
-
-
-
-
-
-
-
-
-
+### ADR-036: Periodic Head Top-Up Runs for Baseline Score Convergence (#419)
+- **Status**: Decided
+- **Context**:
+  When a tracked branch advances, `pkg/forge/consumer` creates a single baseline Run `base-<sha7>` evaluating an initial seed batch (`1..defaultBatchSize`, typically 8 samples). When main is quiet, the head commit remains at this 8-sample seed batch indefinitely. Confidence interval (CI) width scales inversely with sample size; leaving baseline commits at 8 samples results in wide confidence intervals for baseline scores. Because PR comparisons pair candidate PR samples against baseline samples at the base commit, noisy baseline estimates degrade PR verdict certainty ("CI stands for confidence interval: per-PR verdicts only get better if the baseline they are paired with is well estimated").
+  The web UI already aggregates and pools every completed Run at the same commit into a single estimate via Wilson score interval pooling across all task observations (`pkg/pooling`, `pkg/ui/repo_observations.go`), with series pages selecting Runs by the `base-` name prefix and branch label. Additional head Runs require no UI schema changes.
+- **Decision**:
+  1. **Controller-Side Top-Up Loop**:
+     Introduce a periodic `HeadTopUpRunner` in `pkg/controller/head_topup.go` running every `headTopUpInterval` (ConfigMap key, default `0` = off/disabled; reloadable).
+  2. **Newest Head Selection**:
+     For each tracked repository x baseline branch, query cluster `base-*` Runs (labels `target-repo`, `branch`, `head-sha`, and annotation `evalrunner.gke-labs.dev/commit-time`) to determine the newest branch-head commit. Cluster state is sufficient; no forge API calls are made. Only the newest head per branch receives top-ups; older commits keep whatever observations they already have.
+  3. **Stop Conditions**:
+     Pool existing completed observations at the newest head commit using shared pooling logic (`pkg/pooling.PoolCommitRuns`). Skip the commit if any of the following hold:
+     - Pooled overall 95% Wilson CI half-width is `<= headTargetCIHalfWidth` (ConfigMap key, default `0.05`).
+     - Evaluated samples for any task at that commit reaches `>= headMaxSamplesPerTask` (ConfigMap key, defaults to `defaultMaxSamplesPerTask`, typically 64).
+     - Accumulated evaluation spend reaches or projected next batch spend exceeds `defaultBudgetUSD`.
+  4. **In-Flight Safety**:
+     Skip top-up if any Run at that commit is still in-flight (`Pending`, `Discovering`, `Running`), ensuring at most one in-flight top-up per commit.
+  5. **Run Creation and Window Progression**:
+     Create an incremental Run named `base-<sha7>-<n>` where n >= 2 is the next free index, copying labels, annotations, model, and cohort from the seed Run, recording the top-up epoch in label `evalrunner.gke-labs.dev/topup: "<n>"`.
+     Evaluate the next window of `defaultBatchSize` samples (`Start: prevEnd + 1, End: prevEnd + batchSize`). If the previous run evaluated fewer samples than requested (dataset exhausted), wrap back to window `1..batchSize`; re-sampling the same inputs is a valid new observation because LLM evaluation is stochastic.
+- **Rationale**:
+  Automating bounded top-ups when branches are quiet operationalizes "bound the confidence interval, not the budget" (concept functionality §4). Reusing the `base-` naming prefix and labels seamlessly feeds the UI's existing commit pooling without schema migrations. Defaulting to disabled preserves zero change in behavior on existing clusters until explicitly configured.
