@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
@@ -689,4 +690,31 @@ func TestFakeClient_LimitsAndResourceExhausted(t *testing.T) {
 		t.Errorf("expected LastPodIP '10.0.0.1', got %q", fakeClient.LastPodIP)
 	}
 	_ = factoryClient
+}
+
+func TestSandboxClient_KeepaliveParams(t *testing.T) {
+	if DefaultKeepaliveParams.Time < 5*time.Minute {
+		t.Errorf("expected DefaultKeepaliveParams.Time >= 5m, got %v", DefaultKeepaliveParams.Time)
+	}
+	if DefaultKeepaliveParams.PermitWithoutStream {
+		t.Errorf("expected DefaultKeepaliveParams.PermitWithoutStream to be false, got true")
+	}
+
+	customKP := keepalive.ClientParameters{
+		Time:                10 * time.Minute,
+		Timeout:             30 * time.Second,
+		PermitWithoutStream: false,
+	}
+
+	fakeClient := NewFakeClient()
+	_, err := fakeClient.NewClient("10.0.0.1", WithKeepaliveParams(customKP))
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	if fakeClient.KeepaliveParams == nil {
+		t.Fatalf("expected KeepaliveParams to be recorded, got nil")
+	}
+	if *fakeClient.KeepaliveParams != customKP {
+		t.Errorf("expected KeepaliveParams %+v, got %+v", customKP, *fakeClient.KeepaliveParams)
+	}
 }
