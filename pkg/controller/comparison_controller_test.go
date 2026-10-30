@@ -17259,3 +17259,158 @@ func TestEnsureBatchRun_InheritsLabels(t *testing.T) {
 		t.Errorf("legacy batch run target-repo label = %q, want %q", got, "gke-labs_eval-runner")
 	}
 }
+
+func TestComparisonReconciler_HungSinkCallsBounded(t *testing.T) {
+	scheme := setupScheme(t)
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cand-run-hung",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/org/repo.git",
+				Commit: "c123456",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskIDs: []string{"task-1"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "task-1",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://bucket/runs/c123456/task-1/eval.json",
+				},
+			},
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-run-hung",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/org/repo.git",
+				Commit: "b123456",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskIDs: []string{"task-1"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "task-1",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://bucket/runs/b123456/task-1/eval.json",
+				},
+			},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-hung",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-hung"},
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-hung"},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase: v1alpha1.ComparisonPhaseRunning,
+		},
+	}
+
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+	sink := &fakeBlockingOrFailingSink{
+		storeManifestFn: nil,
+	}
+	// override Load on fakeBlockingOrFailingSink
+	blockingSink := &blockingSinkComparison{
+		loadFn: func(ctx context.Context, path string) ([]byte, error) {
+			<-hungCh
+			return []byte("{}"), nil
+		},
+	}
+	_ = sink
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(candRun, baseRun, comp).
+		WithStatusSubresource(comp).
+		Build()
+
+	r := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        blockingSink,
+		ArtifactSinkTimeout: 50 * time.Millisecond,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-hung"}}
+	start := time.Now()
+	_, _ = r.Reconcile(t.Context(), req)
+	elapsed := time.Since(start)
+
+	if elapsed > 3*time.Second {
+		t.Errorf("Reconcile took too long (%v), expected ~50ms", elapsed)
+	}
+
+	var updated v1alpha1.Comparison
+	_ = cl.Get(t.Context(), req.NamespacedName, &updated)
+	if !strings.Contains(updated.Status.Message, "failed to load candidate log") {
+		t.Errorf("expected status message to contain 'failed to load candidate log', got: %s", updated.Status.Message)
+	}
+	if !strings.Contains(updated.Status.Message, "task-1") {
+		t.Errorf("expected status message to contain task target 'task-1', got: %s", updated.Status.Message)
+	}
+	if !strings.Contains(updated.Status.Message, "sink did not report completion within deadline") {
+		t.Errorf("expected status message to contain 'sink did not report completion within deadline', got: %s", updated.Status.Message)
+	}
+}
+
+type blockingSinkComparison struct {
+	loadFn func(ctx context.Context, path string) ([]byte, error)
+}
+
+func (b *blockingSinkComparison) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+	return "", nil
+}
+
+func (b *blockingSinkComparison) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
+	return "", nil
+}
+
+func (b *blockingSinkComparison) StoreManifest(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
+	return "", nil
+}
+
+func (b *blockingSinkComparison) Load(ctx context.Context, path string) ([]byte, error) {
+	if b.loadFn != nil {
+		return b.loadFn(ctx, path)
+	}
+	return []byte("{}"), nil
+}
+
+func (b *blockingSinkComparison) ArtifactPrefix(commit string) string {
+	return "gs://bucket/runs/" + commit + "/"
+}
+
+func (b *blockingSinkComparison) IsDurable() bool {
+	return true
+}
+
+func (b *blockingSinkComparison) Close() error {
+	return nil
+}

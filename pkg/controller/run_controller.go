@@ -82,6 +82,9 @@ const (
 	// DefaultWatchdogInterval is the interval between watchdog checks for expired discovery deadlines.
 	DefaultWatchdogInterval = 5 * time.Second
 
+	// DefaultArtifactSinkTimeout is the default maximum duration for an artifact sink operation (uploads/loads of small JSON: 60s).
+	DefaultArtifactSinkTimeout = 60 * time.Second
+
 	// DefaultMaxParallelTasks is the default maximum number of concurrent task sandboxes.
 	DefaultMaxParallelTasks = 4
 
@@ -221,6 +224,10 @@ type RunReconciler struct {
 
 	// ArtifactSink stores raw Inspect logs and returns their storage path.
 	ArtifactSink artifacts.ArtifactSink
+
+	// ArtifactSinkTimeout is the maximum duration for a single artifact sink operation (uploads/loads of small JSON: 60s).
+	// Defaults to DefaultArtifactSinkTimeout (60s) if <= 0.
+	ArtifactSinkTimeout time.Duration
 
 	// Now returns the current time. In tests, this can be overridden.
 	Now func() time.Time
@@ -572,6 +579,15 @@ func (r *RunReconciler) watchdogInterval() time.Duration {
 	return DefaultWatchdogInterval
 }
 
+func (r *RunReconciler) artifactSinkTimeout() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	if r.ArtifactSinkTimeout > 0 {
+		return r.ArtifactSinkTimeout
+	}
+	return DefaultArtifactSinkTimeout
+}
+
 func (r *RunReconciler) stepContext(parent context.Context, deadline *metav1.Time, maxStepTimeout time.Duration) (context.Context, context.CancelFunc) {
 	if deadline != nil {
 		remaining := deadline.Sub(r.now())
@@ -800,13 +816,24 @@ func (r *RunReconciler) getOrLoadManifest(ctx context.Context, run *v1alpha1.Run
 	}
 
 	sink := r.artifactSink()
-	data, err := sink.Load(ctx, manifestPath)
+	var deadline *metav1.Time
+	if run.Status.ExecutionDeadline != nil {
+		deadline = run.Status.ExecutionDeadline
+	} else if run.Status.DiscoveryDeadline != nil {
+		deadline = run.Status.DiscoveryDeadline
+	}
+	loadCtx, loadCancel := r.stepContext(ctx, deadline, r.artifactSinkTimeout())
+	data, err := artifacts.LoadWithTimeout(loadCtx, sink, manifestPath)
+	loadCancel()
 	if err != nil {
 		if !sink.IsDurable() {
 			return nil, fmt.Errorf("%w: non-durable sink lost manifest (%v)", ErrNeedsRediscovery, err)
 		}
 		if artifacts.IsNotFound(err) {
 			return nil, fmt.Errorf("%w: manifest not found at %s: %v", ErrNeedsRediscovery, manifestPath, err)
+		}
+		if isStepTimeout(loadCtx, err) {
+			return nil, fmt.Errorf("%w: load manifest from %s timed out: %v", ErrTransient, manifestPath, err)
 		}
 		if isTransientError(err) {
 			return nil, fmt.Errorf("%w: %v", ErrTransient, err)
@@ -979,6 +1006,13 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if err := r.Update(ctx, &run); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// Fail fast if artifact storage is configured but unavailable (e.g. invalid credentials).
+	if unavailErr, isUnavail := artifacts.IsUnavailable(r.artifactSink()); isUnavail {
+		msg := fmt.Sprintf("artifactBucket is set but credentials are unavailable: %v", unavailErr)
+		logger.Error(unavailErr, "artifact storage is unavailable; failing Run", "run", run.Name)
+		return r.failRun(ctx, &run, nil, msg)
 	}
 
 	// If Run is already in Running phase, proceed to task sample execution
@@ -1634,14 +1668,22 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Store manifest in artifact store
-	manifestURI, storeErr := r.artifactSink().StoreManifest(ctx, artifacts.RunMetadata{
+	sinkCtx, sinkCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.artifactSinkTimeout())
+	manifestURI, storeErr := artifacts.StoreManifestWithTimeout(sinkCtx, r.artifactSink(), artifacts.RunMetadata{
 		RunName:      run.Name,
 		RunNamespace: run.Namespace,
 		Commit:       run.Spec.Repo.Commit,
 		TaskCount:    len(manifest.Tasks),
 	}, manifestBytes)
+	sinkCancel()
 	if storeErr != nil {
-		return r.failRun(ctx, &run, &sandbox, fmt.Sprintf("failed to store manifest: %v", storeErr))
+		msg := fmt.Sprintf("step store manifest failed: %v", storeErr)
+		if isStepTimeout(sinkCtx, storeErr) {
+			logger.Error(storeErr, "Step store manifest timed out", "run", run.Name)
+		} else {
+			logger.Error(storeErr, "Step store manifest failed", "run", run.Name)
+		}
+		return r.failRun(ctx, &run, &sandbox, msg)
 	}
 
 	// Compute checksum, counts, and capped task IDs (up to 50)
@@ -3015,16 +3057,19 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		CostSource:        costSource,
 		PossibleSamples:   datasetSamples,
 	}
-	logPath, storeErr := r.artifactSink().StoreArtifact(execCtx, meta, logFilename, logBytes)
+	sinkCtx, sinkCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
+	logPath, storeErr := artifacts.StoreArtifactWithTimeout(sinkCtx, r.artifactSink(), meta, logFilename, logBytes)
+	sinkCancel()
 	if storeErr != nil {
 		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
+		msg := fmt.Sprintf("failed to store artifact: %v", storeErr)
 		return taskExecutionResult{
 			taskID:          taskID,
 			phase:           v1alpha1.TaskPhaseFailed,
 			samples:         agg.Samples,
 			successes:       agg.Successes,
 			meanScore:       agg.MeanScore,
-			message:         fmt.Sprintf("failed to store artifact: %v", storeErr),
+			message:         msg,
 			sampleRange:     effRange,
 			possibleSamples: datasetSamples,
 		}
