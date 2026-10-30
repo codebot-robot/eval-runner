@@ -102,6 +102,7 @@ type ComparisonReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
 	ArtifactSink           artifacts.ArtifactSink
+	ArtifactSinkTimeout    time.Duration
 	ControllerNamespace    string
 	GitHubTokenSecret      string
 	GitHubAppSecret        string
@@ -259,6 +260,15 @@ func (r *ComparisonReconciler) artifactSink() artifacts.ArtifactSink {
 		return r.ArtifactSink
 	}
 	return &artifacts.NoopSink{}
+}
+
+func (r *ComparisonReconciler) artifactSinkTimeout() time.Duration {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	if r.ArtifactSinkTimeout > 0 {
+		return r.ArtifactSinkTimeout
+	}
+	return DefaultArtifactSinkTimeout
 }
 
 func (r *ComparisonReconciler) controllerNamespace() string {
@@ -1446,7 +1456,8 @@ type resolvedAffinity struct {
 }
 
 func (r *ComparisonReconciler) loadManifest(ctx context.Context, candRun, baseRun *v1alpha1.Run) (*v1alpha1.Manifest, error) {
-	if r.ArtifactSink == nil {
+	sink := r.artifactSink()
+	if sink == nil {
 		return nil, nil
 	}
 	manifestPath := ""
@@ -1458,9 +1469,11 @@ func (r *ComparisonReconciler) loadManifest(ctx context.Context, candRun, baseRu
 	if manifestPath == "" {
 		return nil, nil
 	}
-	data, err := r.ArtifactSink.Load(ctx, manifestPath)
+	loadCtx, loadCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
+	data, err := artifacts.LoadWithTimeout(loadCtx, sink, manifestPath)
+	loadCancel()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load manifest from %s: %w", manifestPath, err)
 	}
 	return discovery.ParseManifest(data)
 }
@@ -2248,7 +2261,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 
 			// Load Inspect log for candidate
-			candData, err := r.artifactSink().Load(ctx, candTask.LogPath)
+			candCtx, candCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
+			candData, err := artifacts.LoadWithTimeout(candCtx, r.artifactSink(), candTask.LogPath)
+			candCancel()
 			if err != nil {
 				if artifacts.IsNotFound(err) {
 					if batchIdx > 0 {
@@ -2279,7 +2294,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 
 			// Load Inspect log for baseline
-			baseData, err := r.artifactSink().Load(ctx, baseTask.LogPath)
+			baseCtx, baseCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
+			baseData, err := artifacts.LoadWithTimeout(baseCtx, r.artifactSink(), baseTask.LogPath)
+			baseCancel()
 			if err != nil {
 				if artifacts.IsNotFound(err) {
 					if batchIdx > 0 {
@@ -3347,7 +3364,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	if err != nil {
 		logger.Error(err, "failed to marshal comparison artifact", "comparison", comp.Name)
 	} else {
-		storedPath, storeErr := r.artifactSink().StoreComparison(ctx, comp.Name, artJSON)
+		storeCtx, storeCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
+		storedPath, storeErr := artifacts.StoreComparisonWithTimeout(storeCtx, r.artifactSink(), comp.Name, artJSON)
+		storeCancel()
 		if storeErr != nil {
 			logger.Error(storeErr, "failed to store comparison artifact in sink", "comparison", comp.Name)
 		} else {

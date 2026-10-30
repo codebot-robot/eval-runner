@@ -135,6 +135,18 @@ func NewArtifactSink(ctx context.Context, bucket, dir string, maxUploadBytes int
 	return nil, nil
 }
 
+// ProbeArtifactSink probes credentials and bucket access for sinks that support access checking (such as GCSSink).
+// Sinks that do not implement AccessChecker return nil without error.
+func ProbeArtifactSink(ctx context.Context, sink artifacts.ArtifactSink) error {
+	if rs, ok := sink.(*artifacts.ReloadableSink); ok {
+		sink = rs.Current()
+	}
+	if checker, ok := sink.(artifacts.AccessChecker); ok {
+		return checker.CheckAccess(ctx)
+	}
+	return nil
+}
+
 // WatchConfigMap watches a single ConfigMap by name in namespace using the Kubernetes API.
 // It uses only get and watch operations scoped to the specified ConfigMap name.
 // When the ConfigMap is added or modified, onChange is called with the ConfigMap.
