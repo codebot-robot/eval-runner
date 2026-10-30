@@ -407,6 +407,10 @@ func main() {
 		SampleRunnerImage:    sampleRunnerImage,
 		ArtifactSink:         reloadableSink,
 		ControllerVersion:    version.String(),
+		GitHubTokenSecret:    clusterConfig.GitHubTokenSecret,
+		GitHubAppSecret:      clusterConfig.GitHubAppSecret,
+		UIBaseURL:            clusterConfig.UIBaseURL,
+		HeadTopUpInterval:    clusterConfig.HeadTopUpInterval,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {
@@ -417,6 +421,7 @@ func main() {
 	// Precedence: App installation token > plain token > unauthenticated;
 	// polling uses them; never fail a poll for lack of a token.
 	var ghClient *github.HTTPClient
+	var hasCreds bool
 	credCtx, credCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer credCancel()
 
@@ -439,6 +444,7 @@ func main() {
 						AppAuth:               appAuth,
 						RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
 					})
+					hasCreds = true
 					setupLog.Info("resolved GitHub App installation token credentials at startup", "appID", appIDStr, "installationID", instIDStr)
 				} else {
 					setupLog.Info("failed to initialize GitHub App token provider at startup; checking fallback", "error", err)
@@ -458,6 +464,7 @@ func main() {
 					Token:                 strings.TrimSpace(tok),
 					RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
 				})
+				hasCreds = true
 				setupLog.Info("resolved GitHub plain token credentials at startup", "secret", clusterConfig.GitHubTokenSecret)
 			}
 		} else {
@@ -470,6 +477,10 @@ func main() {
 			RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
 		})
 		setupLog.Info("no GitHub credentials configured; operating unauthenticated within 60/h rate limit")
+	}
+
+	if hasCreds {
+		reconciler.GitHubClient = ghClient
 	}
 
 	forgeStore, err := store.Open(forgeDBPath)

@@ -259,6 +259,22 @@ spec:
                 - Completed
                 - Failed
                 type: string
+              reporting:
+                description: Reporting records the status of GitHub check run reporting.
+                properties:
+                  checkRunID:
+                    description: CheckRunID is the ID of the posted GitHub check run.
+                    format: int64
+                    type: integer
+                  lastPostedHash:
+                    description: LastPostedHash is the hash of the check run state
+                      when last posted.
+                    type: string
+                  message:
+                    description: Message is human-readable detail on reporting failure
+                      (e.g. 403, 404).
+                    type: string
+                type: object
               summary:
                 description: Summary provides aggregate statistics across tasks in
                   the Run.

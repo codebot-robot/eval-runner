@@ -2039,24 +2039,6 @@ func formatEvalsAdded(count int) string {
 	return fmt.Sprintf("%d evals added", count)
 }
 
-// estimateFromTaskStatus converts a completed TaskStatus into a stats.Estimate.
-func estimateFromTaskStatus(t *v1alpha1.TaskStatus) stats.Estimate {
-	if t == nil || t.SuccessRate == nil {
-		return stats.Estimate{}
-	}
-	est := stats.Estimate{
-		Point: *t.SuccessRate,
-		N:     t.Samples,
-		SD:    t.SuccessRateSD,
-	}
-	if t.SuccessRateCI != nil {
-		est.CI = stats.Interval{Lower: t.SuccessRateCI.Lower, Upper: t.SuccessRateCI.Upper}
-		est.Confidence = t.SuccessRateCI.Confidence
-		est.Method = t.SuccessRateCI.Method
-	}
-	return est
-}
-
 // FormatDeltaCI formats a delta point estimate and confidence interval,
 // e.g. "Δ −0.05 [−0.21, +0.11]".
 func FormatDeltaCI(delta, lower, upper float64) string {

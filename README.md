@@ -25,6 +25,11 @@ CI for evals: efficient statistical estimation of agentic goodness.
 - [Functional Description](docs/concept/functionality.md): Detailed architecture, execution lifecycle, statistical gates, and UI mockups.
 - [Contributing](docs/contributing.md): Contribution guidelines and community standards.
 
+## Recommended repository setup
+
+1. **Required Status Check**: Add `eval-runner / evals` as a required status check in a repository ruleset or branch protection rule once evaluation verdicts are trusted, ensuring regressions cannot merge into tracked branches.
+2. **About Website**: Point your repository's GitHub "About" website URL at the eval-runner repo page (e.g. `https://dotevals.com/github.com/<owner>/<repo>`) so visitors can immediately see current evaluation scores and historical series trends without having to open the README.
+
 ## Contributing
 
 This project is licensed under the [Apache 2.0 License](LICENSE).
