@@ -26,6 +26,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -837,5 +838,112 @@ func TestRepoOverview_NamespaceLinks(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Errorf("expected body to contain %q, body:\n%s", expected, body)
 		}
+	}
+}
+
+func TestRepoOverview_HeadTopUpObsCount2(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add v1alpha1 scheme: %v", err)
+	}
+
+	run1 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-c0ffee1",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/target-repo": "github.com_gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/repo":        "github.com_gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch":      "main",
+				"evalrunner.gke-labs.dev/head-sha":    "c0ffee1",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": "2026-10-30T20:00:00Z",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner",
+				Commit: "c0ffee1",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:        "eval/docs",
+					Phase:     v1alpha1.TaskPhaseCompleted,
+					Samples:   8,
+					Successes: 6,
+				},
+			},
+		},
+	}
+
+	run2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-c0ffee1-2",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/target-repo": "github.com_gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/repo":        "github.com_gke-labs_eval-runner",
+				"evalrunner.gke-labs.dev/branch":      "main",
+				"evalrunner.gke-labs.dev/head-sha":    "c0ffee1",
+				"evalrunner.gke-labs.dev/topup":       "2",
+			},
+			Annotations: map[string]string{
+				"evalrunner.gke-labs.dev/commit-time": "2026-10-30T20:00:00Z",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner",
+				Commit: "c0ffee1",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:        "eval/docs",
+					Phase:     v1alpha1.TaskPhaseCompleted,
+					Samples:   8,
+					Successes: 7,
+				},
+			},
+		},
+	}
+
+	ref := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+	obs := buildRepoObservations([]v1alpha1.Run{*run1, *run2}, ref, "main", "", "", false)
+	sparklines := obs.EvalSparklineItems("eval/docs", obs.Commits)
+	if len(sparklines) != 1 {
+		t.Fatalf("expected 1 commit sparkline item, got %d", len(sparklines))
+	}
+	if sparklines[0].ObsCount != 2 {
+		t.Errorf("expected ObsCount=2, got %d", sparklines[0].ObsCount)
+	}
+	if sparklines[0].SuccessRate == nil {
+		t.Fatalf("expected SuccessRate to be set")
+	}
+	expectedRate := 13.0 / 16.0
+	if fmt.Sprintf("%.2f", *sparklines[0].SuccessRate) != fmt.Sprintf("%.2f", expectedRate) {
+		t.Errorf("expected pooled success rate %.2f, got %.2f", expectedRate, *sparklines[0].SuccessRate)
+	}
+
+	// Also verify HTTP response renders successfully
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run1, run2).Build()
+	server := NewServer(Config{Client: cl, DefaultNamespace: "eval-runner"})
+
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner?branch=main", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "0.81") && !strings.Contains(body, "81%") {
+		t.Errorf("expected body to contain pooled score 0.81 or 81%%, body:\n%s", body)
 	}
 }

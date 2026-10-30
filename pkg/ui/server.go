@@ -36,6 +36,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
+	"github.com/gke-labs/eval-runner/pkg/pooling"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -665,13 +666,7 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func runCommitSHA(run *v1alpha1.Run) string {
-	if run == nil {
-		return ""
-	}
-	if run.Spec.Repo.Commit != "" {
-		return run.Spec.Repo.Commit
-	}
-	return run.Labels["evalrunner.gke-labs.dev/head-sha"]
+	return pooling.RunCommitSHA(run)
 }
 
 type seriesRun struct {

@@ -716,6 +716,9 @@ Supported ConfigMap keys include:
 - `githubAppSecret`: Name of Secret in controller namespace containing GitHub App credentials.
 - `githubTokenSecret`: Name of Secret in controller namespace containing GitHub credentials (default `github-token`).
 - `githubWebhookSecret`: Name of Secret in controller namespace containing GitHub webhook secret (default `github-webhook`).
+- `headTopUpInterval`: Interval for periodic head top-up loop evaluating current branch heads (default `0` = disabled; e.g. `6h`).
+- `headTargetCIHalfWidth`: Target 95% confidence interval half-width for branch head scores (default `0.05`). When the pooled CI half-width reaches or falls below this target, top-ups stop for that commit.
+- `headMaxSamplesPerTask`: Maximum total samples evaluated per task across all top-up runs at a branch head commit (defaults to `defaultMaxSamplesPerTask`, typically `64`).
 - `inconclusivePolicy`: Check-run conclusion policy for INCONCLUSIVE comparisons (`neutral` or `failure`, default `neutral`). When set to `failure`, an INCONCLUSIVE comparison marks the `eval-runner / evals` check run conclusion as `failure` to block PR merging.
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
 - `pollProgressInterval`: Interval between task progress polling attempts and per-task write floor (default `10s`, minimum `1s`).
@@ -731,7 +734,7 @@ Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the Conf
 
 Both the controller and UI watch `eval-runner-config` and dynamically apply configuration changes at runtime without requiring a deployment restart:
 - **Artifact Sink**: When `artifactBucket`, `artifactDir`, or `artifactMaxUploadBytes` is modified (e.g. setting `artifactBucket` after initial cluster deploy), the controller and UI construct the new artifact sink and safely retire the previous one. In-flight uploads and reads are permitted to complete before the old sink is closed. *(Note: Swapping away from the default in-memory sink discards previously stored in-memory artifacts, so Runs or Comparisons in flight at that moment may encounter unreadable artifacts.)*
-- **Reloadable Settings**: Changes to deadlines (`discoveryDeadline`, `executionDeadline`), concurrency limits (`maxParallelTasks`), progress polling intervals (`pollProgressInterval`), sandbox task grace periods (`taskGracePeriod`), sandbox images (`sandboxdImage`), model credentials (`modelSecret`), token pricing (`modelPrices`), command authorizers (`commandUsers`), GitHub credentials (`githubTokenSecret`, `githubAppSecret`), PR reporting (`uiBaseURL`, `inconclusivePolicy`), completed comparison retention expiry, and task affinity (`affinityMode`) take effect immediately for subsequent evaluations.
+- **Reloadable Settings**: Changes to deadlines (`discoveryDeadline`, `executionDeadline`), concurrency limits (`maxParallelTasks`), progress polling intervals (`pollProgressInterval`), sandbox task grace periods (`taskGracePeriod`), sandbox images (`sandboxdImage`), model credentials (`modelSecret`), token pricing (`modelPrices`), command authorizers (`commandUsers`), GitHub credentials (`githubTokenSecret`, `githubAppSecret`), PR reporting (`uiBaseURL`, `inconclusivePolicy`), head top-up loop (`headTopUpInterval`, `headTargetCIHalfWidth`, `headMaxSamplesPerTask`), completed comparison retention expiry, and task affinity (`affinityMode`) take effect immediately for subsequent evaluations.
 - **Observability**: When settings reload, the controller logs a single `"effective cluster settings"` line reflecting all active values, and the UI increments its internal `config_generation` value and updates the artifact sink status in page footers (`artifacts: gs://bucket`).
 
 #### Restart-Only Settings
