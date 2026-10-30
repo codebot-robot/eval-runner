@@ -8694,3 +8694,630 @@ func TestComputeSamplesPlanned_Clamping(t *testing.T) {
 		t.Errorf("expected dataset size 21 when no limit/range, got %d", got)
 	}
 }
+
+func TestReconcile_HungExecuteStepTimesOutAndFailsRun(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-hung-exec"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+			Labels:    sb.Spec.PodTemplate.ObjectMeta.Labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	// Fake client where step 1 & 2 succeed, but step 3 (./.evals/list) never returns
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || strings.Contains(strings.Join(cfg.Command, " "), "./.evals/list")) {
+				// Simulates a hung Execute call that ignores ctx.Done() and never returns
+				<-hungCh
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:               client,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
+		DiscoveryDeadline:    50 * time.Millisecond,
+		DiscoveryStepTimeout: 50 * time.Millisecond,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	start := time.Now()
+	res, err := reconciler.Reconcile(t.Context(), req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue on step timeout failure, got %v", res.RequeueAfter)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Reconcile took too long (%v), expected ~50ms", elapsed)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	expectedMsg := "step ./.evals/list failed: sandbox did not report completion"
+	if !strings.Contains(updatedRun.Status.Message, expectedMsg) {
+		t.Errorf("Expected message to contain %q, got: %s", expectedMsg, updatedRun.Status.Message)
+	}
+
+	// Verify sandbox is deleted
+	var checkSb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted on failure, got err: %v", err)
+	}
+}
+
+func TestReconcile_HungExecuteDoesNotBlockOtherRunsFromReconciling(t *testing.T) {
+	scheme := setupScheme(t)
+
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+
+	const hungRunCount = 4
+	var objects []client.Object
+
+	for i := 1; i <= hungRunCount; i++ {
+		name := fmt.Sprintf("hung-run-%d", i)
+		r := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "git://git-server/repo.git",
+					Commit: "abc1234",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseDiscovering,
+			},
+		}
+		sbName := discovery.SandboxNameForRun(name)
+		sb := discovery.BuildSandbox(r, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbName,
+				Namespace: "eval-runner-sandbox",
+				Labels:    sb.Spec.PodTemplate.ObjectMeta.Labels,
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: fmt.Sprintf("10.244.0.%d", 10+i),
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+		}
+		objects = append(objects, r, sb, pod)
+	}
+
+	// Normal run 5
+	normalRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "normal-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+	normalSBName := discovery.SandboxNameForRun("normal-run")
+	normalSB := discovery.BuildSandbox(normalRun, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	normalPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      normalSBName,
+			Namespace: "eval-runner-sandbox",
+			Labels:    normalSB.Spec.PodTemplate.ObjectMeta.Labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.99",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	objects = append(objects, normalRun, normalSB, normalPod)
+
+	manifestJSON := `{"tasks":[{"id":"t1","spec":"run.py@t1"}]}`
+
+	factory := sandboxclient.FactoryFunc(func(podIP string, opts ...sandboxclient.Option) (sandboxclient.Client, error) {
+		if podIP == "10.244.0.99" {
+			// Normal run succeeds immediately
+			return &sandboxclient.FakeClient{
+				ListStdout:    manifestJSON,
+				ManifestBytes: []byte(manifestJSON),
+			}, nil
+		}
+		// Hung runs hang on step 3
+		return &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && (cfg.Command[0] == "./.evals/list" || strings.Contains(strings.Join(cfg.Command, " "), "./.evals/list")) {
+					<-hungCh
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}, nil
+	})
+
+	builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...)
+	for i := 1; i <= hungRunCount; i++ {
+		name := fmt.Sprintf("hung-run-%d", i)
+		var r v1alpha1.Run
+		r.Name = name
+		r.Namespace = "eval-runner"
+		builder = builder.WithStatusSubresource(&r)
+	}
+	builder = builder.WithStatusSubresource(normalRun)
+	cl := builder.Build()
+
+	reconciler := &RunReconciler{
+		Client:               cl,
+		Scheme:               scheme,
+		ClientFactory:        factory,
+		SandboxNamespace:     "eval-runner-sandbox",
+		DiscoveryDeadline:    50 * time.Millisecond,
+		DiscoveryStepTimeout: 50 * time.Millisecond,
+	}
+
+	// Reconcile all 4 hung runs in parallel goroutines (representing the 4 MaxConcurrentReconciles workers)
+	var wg sync.WaitGroup
+	for i := 1; i <= hungRunCount; i++ {
+		wg.Add(1)
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: fmt.Sprintf("hung-run-%d", i)}}
+		go func() {
+			defer wg.Done()
+			_, _ = reconciler.Reconcile(t.Context(), req)
+		}()
+	}
+
+	// Wait for the hung reconciles to finish
+	wg.Wait()
+
+	// Verify all 4 hung runs failed with sandbox did not report completion
+	for i := 1; i <= hungRunCount; i++ {
+		name := fmt.Sprintf("hung-run-%d", i)
+		var r v1alpha1.Run
+		if err := cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: name}, &r); err != nil {
+			t.Fatalf("Failed to get %s: %v", name, err)
+		}
+		if r.Status.Phase != v1alpha1.RunPhaseFailed {
+			t.Errorf("Expected %s phase Failed, got %s", name, r.Status.Phase)
+		}
+		if !strings.Contains(r.Status.Message, "sandbox did not report completion") {
+			t.Errorf("Expected %s message to contain 'sandbox did not report completion', got %s", name, r.Status.Message)
+		}
+	}
+
+	// Reconcile normal run - workers are not pinned and normal run reconciles successfully
+	normalReq := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "normal-run"}}
+	res, err := reconciler.Reconcile(t.Context(), normalReq)
+	if err != nil {
+		t.Fatalf("Reconcile normal run error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("Expected no requeue on normal run success, got %v", res.RequeueAfter)
+	}
+
+	var updatedNormalRun v1alpha1.Run
+	if err := cl.Get(t.Context(), normalReq.NamespacedName, &updatedNormalRun); err != nil {
+		t.Fatalf("Failed to get normal run: %v", err)
+	}
+	if updatedNormalRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+		t.Errorf("Expected normal run phase Discovered, got %s", updatedNormalRun.Status.Phase)
+	}
+}
+
+func TestReconcile_HungGitCloneStepTimesOutAndFailsRun(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-hung-clone"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+			Labels:    sb.Spec.PodTemplate.ObjectMeta.Labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				<-hungCh
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:               client,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
+		DiscoveryStepTimeout: 50 * time.Millisecond,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	expectedMsg := "step git clone failed: sandbox did not report completion"
+	if !strings.Contains(updatedRun.Status.Message, expectedMsg) {
+		t.Errorf("Expected message to contain %q, got: %s", expectedMsg, updatedRun.Status.Message)
+	}
+}
+
+func TestReconcile_HungGitCheckoutStepTimesOutAndFailsRun(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-hung-checkout"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+			Labels:    sb.Spec.PodTemplate.ObjectMeta.Labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "checkout" {
+				<-hungCh
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb, pod).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:               client,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
+		DiscoveryStepTimeout: 50 * time.Millisecond,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	expectedMsg := "step git checkout failed: sandbox did not report completion"
+	if !strings.Contains(updatedRun.Status.Message, expectedMsg) {
+		t.Errorf("Expected message to contain %q, got: %s", expectedMsg, updatedRun.Status.Message)
+	}
+}
+
+func TestReconcile_DiscoveryWatchdogFailsExpiredRun(t *testing.T) {
+	scheme := setupScheme(t)
+
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	pastDeadline := metav1.NewTime(now.Add(-5 * time.Minute))
+
+	runName := "test-run-watchdog-expiry"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:             v1alpha1.RunPhaseDiscovering,
+			DiscoveryDeadline: &pastDeadline,
+		},
+	}
+
+	sandboxName := discovery.SandboxNameForRun(runName)
+	sb := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sb).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              func() time.Time { return now },
+	}
+
+	// Trigger watchdog check directly
+	failedCount, err := reconciler.CheckDiscoveryDeadlines(t.Context())
+	if err != nil {
+		t.Fatalf("CheckDiscoveryDeadlines error: %v", err)
+	}
+	if failedCount != 1 {
+		t.Errorf("Expected 1 failed run from watchdog, got %d", failedCount)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: runName}, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	if !strings.Contains(updatedRun.Status.Message, "Discovery deadline exceeded") {
+		t.Errorf("Expected message to contain 'Discovery deadline exceeded', got: %s", updatedRun.Status.Message)
+	}
+
+	// Verify sandbox was deleted
+	var checkSb sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sandboxName}, &checkSb)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected sandbox to be deleted by watchdog, got err: %v", err)
+	}
+}
+
+func TestReconcile_HungExecuteInTaskExecutionTimesOut(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "test-run-task-hung"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  "eval-runner",
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/test",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:    "task-hung",
+					Phase: v1alpha1.TaskPhasePending,
+				},
+			},
+		},
+	}
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-hung", Spec: "eval.py@hung"},
+		},
+	}
+
+	hungCh := make(chan struct{})
+	defer close(hungCh)
+	executor := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+				<-hungCh
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:               cl,
+		Scheme:               scheme,
+		SandboxClient:        executor,
+		SandboxNamespace:     "eval-runner-sandbox",
+		ExecutionStepTimeout: 50 * time.Millisecond,
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+
+	// Turn 1: creates task sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	// Create ready pod for the task sandbox
+	taskSBName := discovery.TaskSandboxNameForRun(runName, "task-hung")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSBName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	_ = cl.Create(t.Context(), pod)
+
+	// Turn 2: executes task; git clone hangs until step deadline (50ms)
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if len(updatedRun.Status.Tasks) == 0 {
+		t.Fatalf("Expected tasks in status")
+	}
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task phase Failed, got %s", task.Phase)
+	}
+	expectedMsg := "step git clone failed: sandbox did not report completion"
+	if !strings.Contains(task.Message, expectedMsg) {
+		t.Errorf("Expected task message to contain %q, got: %s", expectedMsg, task.Message)
+	}
+}
