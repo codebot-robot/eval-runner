@@ -318,6 +318,9 @@ kubectl -n eval-runner port-forward svc/eval-runner-ui 8080:80
 Then open your browser:
 - `http://localhost:8080/`: repository index listing distinct repositories and counts in the namespace.
 - `http://localhost:8080/<host>/<owner>/<repo>`: repository home page and Overview tab displaying overall eval score headline with 95% interval, eval suites and evals with main-branch scores, deltas, and observation trend sparklines.
+- `http://localhost:8080/<host>/<owner>/<repo>/badge.svg`: embeddable Shields-style flat badge with pooled score and 95% CI.
+- `http://localhost:8080/<host>/<owner>/<repo>/sparkline.svg`: embeddable SVG sparkline trend over the last ≤ 20 commits with shaded CI band.
+- `http://localhost:8080/<host>/<owner>/<repo>/badge.json`: shields.io endpoint JSON schema for custom badge styling.
 - `http://localhost:8080/<host>/<owner>/<repo>/runs`: view all Runs for the repository.
 - `http://localhost:8080/<host>/<owner>/<repo>/comparisons`: view all Comparisons for the repository.
 - `http://localhost:8080/<host>/<owner>/<repo>/pulls`: view all pull requests for the repository with latest verdicts, base → head commit SHAs, samples, batches, completion time, and age.

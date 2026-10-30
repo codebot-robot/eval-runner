@@ -148,6 +148,9 @@ The `eval-runner-webhook` service (image `eval-runner-webhook`) receives GitHub 
 The `eval-runner-ui` service (image `eval-runner-ui`) serves an HTML web dashboard:
 - `GET /`: Repository index listing distinct repositories and counts in the namespace.
 - `GET /{host}/{owner}/{repo}`: Repository home page and Overview tab displaying overall eval score headline with 95% interval, eval suites and evals with main-branch scores, deltas, and observation trend sparklines.
+- `GET /{host}/{owner}/{repo}/badge.svg`: Embeddable Shields-style flat badge with pooled score and 95% CI. Supports `?branch=` (defaults to `main`), `?eval=` (narrows to task ID, capped at 40 chars), and `?cohort=`. *(Note: The badge displays the pooled Wilson estimate across tasks, whereas the repo overview headline displays the unweighted mean of suite points.)*
+- `GET /{host}/{owner}/{repo}/sparkline.svg`: Embeddable SVG sparkline trend over the last ≤ 20 commits with shaded CI band. Supports `?w=`, `?h=`, `?branch=`, `?eval=`, and `?cohort=`.
+- `GET /{host}/{owner}/{repo}/badge.json`: Shields.io endpoint schema JSON for custom shields badge styling.
 - `GET /{host}/{owner}/{repo}/runs`: Repository-scoped Runs list.
 - `GET /{host}/{owner}/{repo}/runs/{name}`: Repository-scoped Run detail.
 - `GET /{host}/{owner}/{repo}/comparisons`: Repository-scoped Comparisons list.
