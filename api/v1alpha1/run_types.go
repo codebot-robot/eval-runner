@@ -454,6 +454,23 @@ type RunStatus struct {
 	// CostUSD is the estimated total evaluation cost in USD for this Run.
 	// +optional
 	CostUSD *float64 `json:"costUSD,omitempty"`
+
+	// Reporting records the status of GitHub check run reporting.
+	// +optional
+	Reporting *RunReportingStatus `json:"reporting,omitempty"`
+}
+
+// RunReportingStatus records the status of external reporting (e.g. GitHub check runs).
+type RunReportingStatus struct {
+	// CheckRunID is the ID of the posted GitHub check run.
+	CheckRunID int64 `json:"checkRunID,omitempty"`
+
+	// LastPostedHash is the hash of the check run state when last posted.
+	LastPostedHash string `json:"lastPostedHash,omitempty"`
+
+	// Message is human-readable detail on reporting failure (e.g. 403, 404).
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true
