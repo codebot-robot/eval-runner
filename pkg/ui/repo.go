@@ -30,9 +30,9 @@ import (
 // Moved to pkg/forge and aliased here for backwards compatibility.
 type RepoRef = forge.RepoRef
 
-// repoLink returns a URL path for the repository with the given suffix, appending
+// RepoLink returns a URL path for the repository with the given suffix, appending
 // "?namespace=" when linkNS is non-empty.
-func repoLink(ref RepoRef, suffix string, linkNS string) string {
+func RepoLink(ref RepoRef, suffix string, linkNS string) string {
 	var base string
 	if ref.Host != "" {
 		base = ref.Path() + suffix
@@ -57,6 +57,10 @@ func repoLink(ref RepoRef, suffix string, linkNS string) string {
 	return base
 }
 
+func repoLink(ref RepoRef, suffix string, linkNS string) string {
+	return RepoLink(ref, suffix, linkNS)
+}
+
 // repoIndexLink returns the repository index link ("/" or "/?namespace=...").
 func repoIndexLink(linkNS string) string {
 	return repoLink(RepoRef{}, "", linkNS)
@@ -76,9 +80,9 @@ func runLink(ref RepoRef, runName string, linkNS string, legacyNS ...string) str
 	return fmt.Sprintf("/runs/%s/%s", ns, runName)
 }
 
-// runRepoRef resolves the RepoRef of a Run via spec.repo.url, then the
+// RunRepoRef resolves the RepoRef of a Run via spec.repo.url, then the
 // "evalrunner.gke-labs.dev/repo" label.
-func runRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
+func RunRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
 	if run == nil {
 		return RepoRef{}, false
 	}
@@ -97,6 +101,10 @@ func runRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
 		}
 	}
 	return RepoRef{}, false
+}
+
+func runRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
+	return RunRepoRef(run)
 }
 
 // targetRepoMatches checks if a sanitized target-repo label value matches ref.
@@ -119,18 +127,25 @@ func targetRepoMatches(labelVal string, ref RepoRef) bool {
 	return false
 }
 
-// targetRepoRef resolves the RepoRef of a Run via the "evalrunner.gke-labs.dev/target-repo" label.
-func targetRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
-	if run == nil || run.Labels == nil {
+// TargetRepoRef resolves the RepoRef from labels via the "evalrunner.gke-labs.dev/target-repo" label.
+func TargetRepoRef(labels map[string]string) (RepoRef, bool) {
+	if labels == nil {
 		return RepoRef{}, false
 	}
-	if labelVal, ok := run.Labels[consumer.LabelTargetRepo]; ok && labelVal != "" {
+	if labelVal, ok := labels[consumer.LabelTargetRepo]; ok && labelVal != "" {
 		ownerName := strings.ReplaceAll(labelVal, "_", "/")
 		if ref, ok := forge.RepoRefFromOwnerName(ownerName); ok {
 			return ref, true
 		}
 	}
 	return RepoRef{}, false
+}
+
+func targetRepoRef(run *v1alpha1.Run) (RepoRef, bool) {
+	if run == nil {
+		return RepoRef{}, false
+	}
+	return TargetRepoRef(run.Labels)
 }
 
 // runBelongsToRepo returns true if the Run belongs to the given repository ref.
@@ -180,13 +195,47 @@ func runBelongsToRepo(run *v1alpha1.Run, ref RepoRef, comps ...v1alpha1.Comparis
 	return false
 }
 
-// pullRequestRepoRef parses a repository string from a PullRequestSpec.
+// PullRequestRepoRef parses a repository string from a PullRequestSpec.
 // It tries RepoRefFromOwnerName first (for "owner/repo" format), falling back to ParseRepoURL.
-func pullRequestRepoRef(repo string) (RepoRef, bool) {
+func PullRequestRepoRef(repo string) (RepoRef, bool) {
 	if ref, ok := forge.RepoRefFromOwnerName(repo); ok {
 		return ref, true
 	}
 	return forge.ParseRepoURL(repo)
+}
+
+func pullRequestRepoRef(repo string) (RepoRef, bool) {
+	return PullRequestRepoRef(repo)
+}
+
+// ComparisonRepoRef resolves the RepoRef of a Comparison from its pull-request spec,
+// target-repo labels, or referenced candidate/baseline runs.
+func ComparisonRepoRef(comp *v1alpha1.Comparison, runs ...*v1alpha1.Run) (RepoRef, bool) {
+	if comp == nil {
+		return RepoRef{}, false
+	}
+	if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Repository != "" {
+		if ref, ok := PullRequestRepoRef(comp.Spec.PullRequest.Repository); ok {
+			return ref, true
+		}
+	}
+	if comp.Labels != nil {
+		if ref, ok := TargetRepoRef(comp.Labels); ok {
+			return ref, true
+		}
+	}
+	for _, run := range runs {
+		if run == nil {
+			continue
+		}
+		if ref, ok := TargetRepoRef(run.Labels); ok {
+			return ref, true
+		}
+		if ref, ok := RunRepoRef(run); ok {
+			return ref, true
+		}
+	}
+	return RepoRef{}, false
 }
 
 // comparisonRepoRef resolves the RepoRef of a Comparison via spec.pullRequest.repository,

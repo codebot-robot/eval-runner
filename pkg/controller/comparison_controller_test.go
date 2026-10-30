@@ -3148,9 +3148,16 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 		if len(comments) != 1 {
 			t.Fatalf("expected 1 comment, got %d", len(comments))
 		}
-		expectedURL := "[web view](https://eval-ui.example.com/comparisons/eval-runner/comp-ui-url)"
+		expectedURL := "[web view](https://eval-ui.example.com/github.com/gke-labs/eval-runner/pulls/98)"
 		if !strings.Contains(comments[0].Body, expectedURL) {
 			t.Errorf("expected comment body to contain absolute link %q, got:\n%s", expectedURL, comments[0].Body)
+		}
+		checkRuns := server.CheckRuns()
+		if len(checkRuns) != 1 {
+			t.Fatalf("expected 1 check run, got %d", len(checkRuns))
+		}
+		if checkRuns[0].DetailsURL != "https://eval-ui.example.com/github.com/gke-labs/eval-runner/pulls/98" {
+			t.Errorf("expected check run DetailsURL %q, got %q", "https://eval-ui.example.com/github.com/gke-labs/eval-runner/pulls/98", checkRuns[0].DetailsURL)
 		}
 	})
 

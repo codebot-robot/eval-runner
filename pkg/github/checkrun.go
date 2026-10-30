@@ -16,10 +16,16 @@ package github
 
 import (
 	"fmt"
+	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/ui"
 )
 
 // CheckRunName is the standardized check run name for eval verdicts.
@@ -32,6 +38,125 @@ type CheckRunState struct {
 	Conclusion string // "success", "neutral", "failure", or "" (when in_progress)
 	Title      string // short state summary
 	Summary    string // detailed summary text
+	Text       string // technical details text (e.g. collapsed error details)
+	DetailsURL string // URL of the details page
+}
+
+// ComparisonWebPath returns the web path for a Comparison:
+// /{host}/{owner}/{repo}/pulls/{number} when a pull request spec is present,
+// /{host}/{owner}/{repo}/comparisons/{name} when repo identity is resolved,
+// or /comparisons/{namespace}/{name} as fallback.
+func ComparisonWebPath(comp *v1alpha1.Comparison, ref ui.RepoRef) string {
+	if comp == nil {
+		return ""
+	}
+	if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Number > 0 {
+		if ref.Host != "" {
+			return ui.RepoLink(ref, fmt.Sprintf("/pulls/%d", comp.Spec.PullRequest.Number), "")
+		}
+	}
+	if ref.Host != "" {
+		return ui.RepoLink(ref, fmt.Sprintf("/comparisons/%s", comp.Name), "")
+	}
+	return fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name)
+}
+
+// CheckRunDetailsURL returns the URL for the check run Details link:
+// {uiBaseURL}/{host}/{owner}/{repo}/pulls/{number}; falling back to the comparison page
+// only when the Comparison has no pull-request spec.
+func CheckRunDetailsURL(comp *v1alpha1.Comparison, uiBaseURL string, runs ...*v1alpha1.Run) string {
+	if comp == nil || strings.TrimSpace(uiBaseURL) == "" {
+		return ""
+	}
+	trimmed := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+	ref, _ := ui.ComparisonRepoRef(comp, runs...)
+	return trimmed + ComparisonWebPath(comp, ref)
+}
+
+var (
+	uriRegex      = regexp.MustCompile(`(?:gs|s3|file)://[^\s)":',]+`)
+	localDirRegex = regexp.MustCompile(`(?:/tmp|/private/tmp|/var/tmp)/[^\s)":',]+`)
+)
+
+// SanitizeArtifactPaths replaces known on-disk local directory paths and storage URIs
+// with only the artifact name (e.g. "log.json"), preventing internal deployment details
+// or /tmp/ and gs:// paths from leaking into user-facing output.
+func SanitizeArtifactPaths(s string, runs ...*v1alpha1.Run) string {
+	if s == "" {
+		return ""
+	}
+	for _, run := range runs {
+		if run == nil {
+			continue
+		}
+		for _, task := range run.Status.Tasks {
+			if task.LogPath != "" {
+				s = strings.ReplaceAll(s, task.LogPath, path.Base(task.LogPath))
+			}
+		}
+	}
+	s = uriRegex.ReplaceAllStringFunc(s, func(m string) string {
+		return path.Base(m)
+	})
+	s = localDirRegex.ReplaceAllStringFunc(s, func(m string) string {
+		return filepath.Base(m)
+	})
+	return s
+}
+
+// IsScoringFailure reports whether a Comparison cannot be scored due to missing
+// or unreadable artifacts (ConditionTypeArtifactsReadable is False).
+func IsScoringFailure(comp *v1alpha1.Comparison) bool {
+	if comp == nil {
+		return false
+	}
+	return meta.IsStatusConditionFalse(comp.Status.Conditions, v1alpha1.ConditionTypeArtifactsReadable)
+}
+
+// ScoringFailureDetails extracts the user-facing headline and sanitized technical error
+// when scoring fails for a Comparison.
+func ScoringFailureDetails(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) (headline string, techError string) {
+	if comp == nil {
+		return "", ""
+	}
+	msgLower := strings.ToLower(comp.Status.Message)
+	isCand := strings.HasPrefix(msgLower, "failed to load candidate") ||
+		strings.HasPrefix(msgLower, "candidate log path") ||
+		strings.HasPrefix(msgLower, "failed to parse candidate")
+
+	role := "Baseline"
+	target := "baseline"
+	if isCand {
+		role = "Candidate"
+		target = "candidate"
+	}
+
+	var shortSHA string
+	if !isCand {
+		if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.BaseSHA != "" {
+			shortSHA = comp.Spec.PullRequest.BaseSHA
+		} else if baseRun != nil && baseRun.Spec.Repo.Commit != "" {
+			shortSHA = baseRun.Spec.Repo.Commit
+		}
+	} else {
+		if comp.Spec.PullRequest != nil && comp.Spec.PullRequest.HeadSHA != "" {
+			shortSHA = comp.Spec.PullRequest.HeadSHA
+		} else if candRun != nil && candRun.Spec.Repo.Commit != "" {
+			shortSHA = candRun.Spec.Repo.Commit
+		}
+	}
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+
+	if shortSHA != "" {
+		headline = fmt.Sprintf("%s results for `%s` are unavailable; eval-runner will need to re-run the %s.", role, shortSHA, target)
+	} else {
+		headline = fmt.Sprintf("%s results are unavailable; eval-runner will need to re-run the %s.", role, target)
+	}
+
+	techError = SanitizeArtifactPaths(comp.Status.Message, baseRun, candRun)
+	return headline, techError
 }
 
 // PlannedSamples returns the planned total samples for a Run, computed as limit x tasks.
@@ -99,9 +224,7 @@ func taskLabelCounts(comp *v1alpha1.Comparison) string {
 
 // CheckRunStateForComparison maps a Comparison and its candidate/baseline Runs
 // to the CheckRunState for the "eval-runner / evals" check run across all 5 verdicts.
-// An optional inconclusivePolicy ("neutral" default, or "failure") governs the conclusion
-// when verdict is INCONCLUSIVE.
-func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, inconclusivePolicy ...string) CheckRunState {
+func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, inconclusivePolicy string, uiBaseURL string) CheckRunState {
 	state := CheckRunState{
 		Name: CheckRunName,
 	}
@@ -113,8 +236,23 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 	}
 
 	policy := configkeys.InconclusivePolicyNeutral
-	if len(inconclusivePolicy) > 0 && inconclusivePolicy[0] != "" {
-		policy = strings.ToLower(strings.TrimSpace(inconclusivePolicy[0]))
+	if inconclusivePolicy != "" {
+		policy = strings.ToLower(strings.TrimSpace(inconclusivePolicy))
+	}
+
+	if IsScoringFailure(comp) {
+		headline, techErr := ScoringFailureDetails(comp, baseRun, candRun)
+		state.Status = "completed"
+		if policy == configkeys.InconclusivePolicyFailure {
+			state.Conclusion = "failure"
+		} else {
+			state.Conclusion = "neutral"
+		}
+		state.Title = headline
+		state.Summary = headline
+		state.Text = techErr
+		state.DetailsURL = CheckRunDetailsURL(comp, uiBaseURL, baseRun, candRun)
+		return state
 	}
 
 	counts := taskLabelCounts(comp)
@@ -238,6 +376,8 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 			state.Summary = strings.Join(lines, "\n")
 		}
 	}
+
+	state.DetailsURL = CheckRunDetailsURL(comp, uiBaseURL, baseRun, candRun)
 
 	return state
 }

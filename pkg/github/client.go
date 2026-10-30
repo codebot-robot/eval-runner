@@ -609,11 +609,13 @@ func (c *HTTPClient) UpdateIssueComment(ctx context.Context, owner, repo string,
 type checkRunOutput struct {
 	Title   string `json:"title"`
 	Summary string `json:"summary"`
+	Text    string `json:"text,omitempty"`
 }
 
 type checkRunCreatePayload struct {
 	Name       string          `json:"name"`
 	HeadSHA    string          `json:"head_sha"`
+	DetailsURL string          `json:"details_url,omitempty"`
 	Status     string          `json:"status"`
 	Conclusion string          `json:"conclusion,omitempty"`
 	Output     *checkRunOutput `json:"output,omitempty"`
@@ -621,6 +623,7 @@ type checkRunCreatePayload struct {
 
 type checkRunUpdatePayload struct {
 	Name       string          `json:"name"`
+	DetailsURL string          `json:"details_url,omitempty"`
 	Status     string          `json:"status"`
 	Conclusion string          `json:"conclusion,omitempty"`
 	Output     *checkRunOutput `json:"output,omitempty"`
@@ -635,11 +638,13 @@ func (c *HTTPClient) CreateCheckRun(ctx context.Context, owner, repo string, hea
 	payload := checkRunCreatePayload{
 		Name:       state.Name,
 		HeadSHA:    headSHA,
+		DetailsURL: state.DetailsURL,
 		Status:     state.Status,
 		Conclusion: state.Conclusion,
 		Output: &checkRunOutput{
 			Title:   state.Title,
 			Summary: state.Summary,
+			Text:    state.Text,
 		},
 	}
 	var resp checkRunResponse
@@ -653,11 +658,13 @@ func (c *HTTPClient) UpdateCheckRun(ctx context.Context, owner, repo string, che
 	path := fmt.Sprintf("/repos/%s/%s/check-runs/%d", owner, repo, checkRunID)
 	payload := checkRunUpdatePayload{
 		Name:       state.Name,
+		DetailsURL: state.DetailsURL,
 		Status:     state.Status,
 		Conclusion: state.Conclusion,
 		Output: &checkRunOutput{
 			Title:   state.Title,
 			Summary: state.Summary,
+			Text:    state.Text,
 		},
 	}
 	return c.doRequest(ctx, http.MethodPatch, path, payload, nil)
