@@ -65,6 +65,10 @@ func HashContent(markdown string, state CheckRunState) string {
 	h.Write([]byte(state.Title))
 	h.Write([]byte{0})
 	h.Write([]byte(state.Summary))
+	h.Write([]byte{0})
+	h.Write([]byte(state.Text))
+	h.Write([]byte{0})
+	h.Write([]byte(state.DetailsURL))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -85,7 +89,7 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	owner, repo := parts[0], parts[1]
 
 	markdown := RenderComparisonMarkdown(comp, baseRun, candRun, r.UIBaseURL)
-	checkState := CheckRunStateForComparison(comp, baseRun, candRun, r.InconclusivePolicy)
+	checkState := CheckRunStateForComparison(comp, baseRun, candRun, r.InconclusivePolicy, r.UIBaseURL)
 	hash := HashContent(markdown, checkState)
 
 	commentID := int64(0)

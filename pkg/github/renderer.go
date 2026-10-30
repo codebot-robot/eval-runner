@@ -164,7 +164,14 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	}
 
 	// Notes under the verdict line
-	if notes := ComparisonNotes(comp); notes != "" {
+	if IsScoringFailure(comp) {
+		headline, techErr := ScoringFailureDetails(comp, baseRun, candRun)
+		header.WriteString(headline)
+		header.WriteString("\n\n")
+		header.WriteString("<details>\n<summary>Error details</summary>\n\n```\n")
+		header.WriteString(techErr)
+		header.WriteString("\n```\n</details>\n\n")
+	} else if notes := ComparisonNotes(comp); notes != "" {
 		header.WriteString(EscapeCell(notes))
 		header.WriteString("\n\n")
 	}
@@ -175,7 +182,8 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	hasTokens := false
 	hasAffinity := false
 	hasPImprovement := false
-	rows := ui.ComparisonRowsWithRuns(comp, baseRun, candRun, ui.RepoRef{}, "")
+	repoRef, _ := ui.ComparisonRepoRef(comp, baseRun, candRun)
+	rows := ui.ComparisonRowsWithRuns(comp, baseRun, candRun, repoRef, "")
 	for _, row := range rows {
 		if row.Tokens != nil {
 			hasTokens = true
@@ -336,6 +344,7 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	webPath := fmt.Sprintf("/comparisons/%s/%s", comp.Namespace, comp.Name)
 	linkStr := fmt.Sprintf("`%s`", webPath)
 	if trimmedUIBaseURL != "" {
+		webPath = ComparisonWebPath(comp, repoRef)
 		linkStr = fmt.Sprintf("[web view](%s%s)", trimmedUIBaseURL, webPath)
 	}
 
@@ -363,7 +372,11 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		footerParts = append(footerParts, fmt.Sprintf("budget $%.2f / $%.2f", spent, *comp.Spec.BudgetUSD))
 	}
 	if trimmedUIBaseURL != "" && summary.CandRun != "" {
-		footerParts = append(footerParts, fmt.Sprintf("[trajectories](%s/runs/%s/%s/tasks)", trimmedUIBaseURL, comp.Namespace, summary.CandRun))
+		trajectoriesPath := fmt.Sprintf("/runs/%s/%s/tasks", comp.Namespace, summary.CandRun)
+		if repoRef.Host != "" {
+			trajectoriesPath = ui.RepoLink(repoRef, fmt.Sprintf("/runs/%s/tasks", summary.CandRun), "")
+		}
+		footerParts = append(footerParts, fmt.Sprintf("[trajectories](%s%s)", trimmedUIBaseURL, trajectoriesPath))
 	}
 	footerParts = append(footerParts, linkStr)
 	if comp.Status.SummaryPath != "" {

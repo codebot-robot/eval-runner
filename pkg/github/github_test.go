@@ -427,7 +427,7 @@ func TestRenderComparisonMarkdown_Golden_BudgetReached(t *testing.T) {
 
 func TestCheckRunStateForComparison_BudgetSummaryLine(t *testing.T) {
 	comp, baseRun, candRun := budgetComparisonFixture()
-	state := CheckRunStateForComparison(comp, baseRun, candRun, "")
+	state := CheckRunStateForComparison(comp, baseRun, candRun, "", "")
 	bIdx := strings.Index(state.Summary, "budget $0.52 / $0.50")
 	hIdx := strings.Index(state.Summary, "budget reached; comment `/eval more 16` to exceed it")
 	if bIdx == -1 {
@@ -443,7 +443,7 @@ func TestCheckRunStateForComparison_BudgetSummaryLine(t *testing.T) {
 	// Test unenforced budget displays "(not enforced)" in check-run and PR footer
 	comp.Status.Budget.Enforced = false
 	comp.Status.Budget.Note = "cost unknown for custom-model; budget not enforced"
-	stateUnenforced := CheckRunStateForComparison(comp, baseRun, candRun, "")
+	stateUnenforced := CheckRunStateForComparison(comp, baseRun, candRun, "", "")
 	if !strings.Contains(stateUnenforced.Summary, "budget $0.52 / $0.50 (not enforced)") {
 		t.Errorf("expected check-run summary to contain 'budget $0.52 / $0.50 (not enforced)', got %q", stateUnenforced.Summary)
 	}
@@ -652,6 +652,12 @@ func statisticsComparisonFixture() (*v1alpha1.Comparison, *v1alpha1.Run, *v1alph
 			Candidate: v1alpha1.ComparisonRunRef{
 				Run: "run-pr-418-3f9c2e1",
 			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     418,
+				HeadSHA:    "3f9c2e1222222222222222222222222222222222",
+				BaseSHA:    "a81d0c4111111111111111111111111111111111",
+			},
 		},
 		Status: v1alpha1.ComparisonStatus{
 			Phase:        v1alpha1.ComparisonPhaseCompleted,
@@ -789,11 +795,14 @@ func TestRenderComparisonMarkdown_TrajectoriesAndTaskLinksOnlyWithUIBaseURL(t *t
 
 	// 1. With uiBaseURL
 	gotWith := RenderComparisonMarkdown(comp, baseRun, candRun, "https://eval.example.com")
-	if !strings.Contains(gotWith, "[trajectories](https://eval.example.com/runs/eval-runner/run-pr-418-3f9c2e1/tasks)") {
+	if !strings.Contains(gotWith, "[trajectories](https://eval.example.com/github.com/gke-labs/eval-runner/runs/run-pr-418-3f9c2e1/tasks)") {
 		t.Errorf("expected trajectories link with uiBaseURL, got:\n%s", gotWith)
 	}
-	if !strings.Contains(gotWith, "[triage/runbook\\_lookup](https://eval.example.com/runs/eval-runner/run-pr-418-3f9c2e1/tasks/triage%2Frunbook_lookup/samples)") {
+	if !strings.Contains(gotWith, "[triage/runbook\\_lookup](https://eval.example.com/github.com/gke-labs/eval-runner/runs/run-pr-418-3f9c2e1/tasks/triage%2Frunbook_lookup/samples)") {
 		t.Errorf("expected task link with uiBaseURL, got:\n%s", gotWith)
+	}
+	if strings.Contains(gotWith, "/runs/eval-runner/") || strings.Contains(gotWith, "/comparisons/eval-runner/") {
+		t.Errorf("expected no legacy namespaced routes in output, got:\n%s", gotWith)
 	}
 	if !strings.Contains(gotWith, "cost per sample −61% · p50 latency −38%") {
 		t.Errorf("expected cost and latency footer, got:\n%s", gotWith)
@@ -1120,7 +1129,7 @@ func TestCheckRunStateForComparison_Matrix(t *testing.T) {
 				}
 			}
 
-			state := CheckRunStateForComparison(comp, baseRun, candRun)
+			state := CheckRunStateForComparison(comp, baseRun, candRun, "", "")
 			if state.Name != CheckRunName {
 				t.Errorf("Name = %q, want %q", state.Name, CheckRunName)
 			}
@@ -1213,7 +1222,7 @@ func TestCheckRunStateForComparison_TitleCountsMixed(t *testing.T) {
 					Tasks:   tt.tasks,
 				},
 			}
-			state := CheckRunStateForComparison(comp, nil, nil)
+			state := CheckRunStateForComparison(comp, nil, nil, "", "")
 			if state.Title != tt.expectedTitle {
 				t.Errorf("Title = %q, want %q", state.Title, tt.expectedTitle)
 			}
@@ -1280,12 +1289,7 @@ func TestCheckRunStateForComparison_InconclusivePolicy(t *testing.T) {
 					Verdict: tt.verdict,
 				},
 			}
-			var state CheckRunState
-			if tt.policy != "" {
-				state = CheckRunStateForComparison(comp, nil, nil, tt.policy)
-			} else {
-				state = CheckRunStateForComparison(comp, nil, nil)
-			}
+			state := CheckRunStateForComparison(comp, nil, nil, tt.policy, "")
 			if state.Status != tt.expectedStatus {
 				t.Errorf("Status = %q, want %q", state.Status, tt.expectedStatus)
 			}
@@ -1310,7 +1314,7 @@ func TestCheckRunStateForComparison_SummaryHints(t *testing.T) {
 				},
 			},
 		}
-		state := CheckRunStateForComparison(comp, nil, nil)
+		state := CheckRunStateForComparison(comp, nil, nil, "", "")
 		expectedSummary := "INCONCLUSIVE: 1 inconclusive\n\n- comment `/eval more 12` to run 12 more samples"
 		if state.Summary != expectedSummary {
 			t.Errorf("Summary = %q, want %q", state.Summary, expectedSummary)
@@ -1335,7 +1339,7 @@ func TestCheckRunStateForComparison_SummaryHints(t *testing.T) {
 				},
 			},
 		}
-		state := CheckRunStateForComparison(comp, nil, nil)
+		state := CheckRunStateForComparison(comp, nil, nil, "", "")
 		expectedSummary := "INCONCLUSIVE: 2 inconclusive\n\n- comment `/eval more 8` to run 8 more samples (task-a)\n- comment `/eval more 16` to run 16 more samples (task-b)"
 		if state.Summary != expectedSummary {
 			t.Errorf("Summary = %q, want %q", state.Summary, expectedSummary)
@@ -1360,7 +1364,7 @@ func TestCheckRunStateForComparison_SummaryHints(t *testing.T) {
 				},
 			},
 		}
-		state := CheckRunStateForComparison(comp, nil, nil)
+		state := CheckRunStateForComparison(comp, nil, nil, "", "")
 		expectedSummary := "candidate task failed: task-a\n\n- comment `/eval more 10` to run 10 more samples (task-b)"
 		if state.Summary != expectedSummary {
 			t.Errorf("Summary = %q, want %q", state.Summary, expectedSummary)
@@ -1382,7 +1386,7 @@ func TestCheckRunStateForComparison_SummaryHints(t *testing.T) {
 				Tasks:   tasks,
 			},
 		}
-		state := CheckRunStateForComparison(comp, nil, nil)
+		state := CheckRunStateForComparison(comp, nil, nil, "", "")
 		if !strings.Contains(state.Summary, "- ... and 5 more inconclusive tasks (see the Comparison view)") {
 			t.Errorf("expected overflow notice in Summary, got:\n%s", state.Summary)
 		}
@@ -1903,10 +1907,10 @@ func TestRenderComparisonMarkdown_UIBaseURL(t *testing.T) {
 		t.Errorf("unexpected '[web view]' when uiBaseURL is empty")
 	}
 
-	// 2. With uiBaseURL: link is rendered as absolute markdown link
+	// 2. With uiBaseURL: link is rendered as absolute markdown link with repo-scoped pull page
 	uiURL := "https://eval.example.com"
 	gotURL := RenderComparisonMarkdown(comp, baseRun, candRun, uiURL)
-	expectedLink := "[web view](https://eval.example.com/comparisons/eval-runner/docs-eval-same-commit)"
+	expectedLink := "[web view](https://eval.example.com/github.com/gke-labs/eval-runner/pulls/98)"
 	if !strings.Contains(gotURL, expectedLink) {
 		t.Errorf("expected %q when uiBaseURL is set, got:\n%s", expectedLink, gotURL)
 	}
@@ -1917,7 +1921,7 @@ func TestRenderComparisonMarkdown_UIBaseURL(t *testing.T) {
 		t.Errorf("expected trailing slash to be normalized to %q, got:\n%s", expectedLink, gotTrailing)
 	}
 
-	// 4. Reporter passes UIBaseURL through to markdown
+	// 4. Reporter passes UIBaseURL through to markdown and check run details_url
 	server := NewFakeGitHubServer()
 	defer server.Close()
 	client := server.Client("token")
@@ -1935,6 +1939,13 @@ func TestRenderComparisonMarkdown_UIBaseURL(t *testing.T) {
 	}
 	if !strings.Contains(comments[0].Body, expectedLink) {
 		t.Errorf("expected comment on server to contain %q, got:\n%s", expectedLink, comments[0].Body)
+	}
+	checkRuns := server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(checkRuns))
+	}
+	if checkRuns[0].DetailsURL != "https://eval.example.com/github.com/gke-labs/eval-runner/pulls/98" {
+		t.Errorf("expected check run DetailsURL to be repo-scoped pull URL, got %q", checkRuns[0].DetailsURL)
 	}
 	_ = status
 }
@@ -2699,11 +2710,14 @@ func TestRenderComparisonMarkdown_WithAffinity(t *testing.T) {
 	if !strings.Contains(markdown, "| eval | affinity | base | this PR | Δ (95% CI) | label | samples | W/L/T |") {
 		t.Errorf("expected affinity column in markdown table header, got:\n%s", markdown)
 	}
-	if !strings.Contains(markdown, "[docs/readme](https://eval-ui.example.com/runs/eval-runner/cand-run/tasks/docs%2Freadme/samples) | matched |") {
+	if !strings.Contains(markdown, "[docs/readme](https://eval-ui.example.com/github.com/gke-labs/eval-runner/runs/cand-run/tasks/docs%2Freadme/samples) | matched |") {
 		t.Errorf("expected row with matched affinity, got:\n%s", markdown)
 	}
-	if !strings.Contains(markdown, "[src/logic](https://eval-ui.example.com/runs/eval-runner/cand-run/tasks/src%2Flogic/samples) | unmatched |") {
+	if !strings.Contains(markdown, "[src/logic](https://eval-ui.example.com/github.com/gke-labs/eval-runner/runs/cand-run/tasks/src%2Flogic/samples) | unmatched |") {
 		t.Errorf("expected row with unmatched affinity, got:\n%s", markdown)
+	}
+	if strings.Contains(markdown, "/runs/eval-runner/") || strings.Contains(markdown, "/comparisons/eval-runner/") {
+		t.Errorf("expected no legacy namespaced routes in markdown, got:\n%s", markdown)
 	}
 	if !strings.Contains(markdown, "1 matched") {
 		t.Errorf("expected footer to mention '1 matched', got:\n%s", markdown)
@@ -3030,5 +3044,403 @@ func TestHTTPClient_CloseBodyError(t *testing.T) {
 	var permErr *PermanentError
 	if !errors.As(err2, &permErr) || permErr.StatusCode != http.StatusNotFound {
 		t.Errorf("expected PermanentError with 404, got %v", err2)
+	}
+}
+
+func TestCheckRunDetailsURL(t *testing.T) {
+	const uiBase = "https://eval.example.com"
+
+	// 1. Comparison with PullRequest spec
+	compWithPR := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-pr", Namespace: "eval-ns"},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     416,
+			},
+		},
+	}
+	got := CheckRunDetailsURL(compWithPR, uiBase)
+	want := "https://eval.example.com/github.com/gke-labs/eval-runner/pulls/416"
+	if got != want {
+		t.Errorf("CheckRunDetailsURL(compWithPR) = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "/comparisons/eval-ns") || strings.Contains(got, "/runs/eval-ns") {
+		t.Errorf("expected no namespaced paths in DetailsURL, got %q", got)
+	}
+
+	// 2. Comparison with no PR spec, but target-repo label
+	compWithTargetRepo := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-no-pr",
+			Namespace: "eval-ns",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/target-repo": "gke-labs_eval-runner",
+			},
+		},
+	}
+	gotNoPR := CheckRunDetailsURL(compWithTargetRepo, uiBase)
+	wantNoPR := "https://eval.example.com/github.com/gke-labs/eval-runner/comparisons/comp-no-pr"
+	if gotNoPR != wantNoPR {
+		t.Errorf("CheckRunDetailsURL(compWithTargetRepo) = %q, want %q", gotNoPR, wantNoPR)
+	}
+
+	// 3. Comparison with no PR and no repo label falls back to namespaced comparison route
+	compBare := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-bare", Namespace: "eval-ns"},
+	}
+	gotBare := CheckRunDetailsURL(compBare, uiBase)
+	wantBare := "https://eval.example.com/comparisons/eval-ns/comp-bare"
+	if gotBare != wantBare {
+		t.Errorf("CheckRunDetailsURL(compBare) = %q, want %q", gotBare, wantBare)
+	}
+
+	// 4. Empty uiBaseURL produces empty string
+	if gotEmpty := CheckRunDetailsURL(compWithPR, ""); gotEmpty != "" {
+		t.Errorf("expected empty string for empty uiBaseURL, got %q", gotEmpty)
+	}
+}
+
+func TestSanitizeArtifactPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		runs []*v1alpha1.Run
+		want string
+	}{
+		{
+			name: "local on-disk path with /tmp/",
+			in:   `failed to load baseline log for task "task1" (/tmp/artifacts/runs/dd24bfd/inspect.json): artifact not found: open /tmp/artifacts/runs/dd24bfd/inspect.json: no such file or directory`,
+			want: `failed to load baseline log for task "task1" (inspect.json): artifact not found: open inspect.json: no such file or directory`,
+		},
+		{
+			name: "GCS gs:// URI",
+			in:   `failed to load baseline log for task "task1" (gs://eval-bucket/runs/dd24bfd/inspect.json): artifact not found: storage: object doesn't exist`,
+			want: `failed to load baseline log for task "task1" (inspect.json): artifact not found: storage: object doesn't exist`,
+		},
+		{
+			name: "prefix mismatch message with /tmp/",
+			in:   `baseline log path "/tmp/artifacts/runs/other/log.json" does not match commit prefix "dd24bfd"`,
+			want: `baseline log path "log.json" does not match commit prefix "dd24bfd"`,
+		},
+		{
+			name: "prefix mismatch message with gs://",
+			in:   `candidate log path "gs://eval-bucket/runs/other/log.json" does not match commit prefix "dd24bfd"`,
+			want: `candidate log path "log.json" does not match commit prefix "dd24bfd"`,
+		},
+		{
+			name: "task ID with multiple slashes is not mangled",
+			in:   `failed to load baseline log for task "a/b/c" (/tmp/artifacts/runs/dd24bfd/x.json): artifact not found`,
+			want: `failed to load baseline log for task "a/b/c" (x.json): artifact not found`,
+		},
+		{
+			name: "arbitrary HTTPS URLs in error are not corrupted",
+			in:   `failed to fetch: Get "https://storage.googleapis.com/bucket/runs/abc1234/inspect.json": dial tcp: i/o timeout`,
+			want: `failed to fetch: Get "https://storage.googleapis.com/bucket/runs/abc1234/inspect.json": dial tcp: i/o timeout`,
+		},
+		{
+			name: "known run task LogPath replaced",
+			in:   `failed to load baseline log for task "evals/task1" (https://custom.storage.com/runs/123/eval.json): not found`,
+			runs: []*v1alpha1.Run{
+				{
+					Status: v1alpha1.RunStatus{
+						Tasks: []v1alpha1.TaskStatus{
+							{ID: "evals/task1", LogPath: "https://custom.storage.com/runs/123/eval.json"},
+						},
+					},
+				},
+			},
+			want: `failed to load baseline log for task "evals/task1" (eval.json): not found`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeArtifactPaths(tc.in, tc.runs...)
+			if got != tc.want {
+				t.Errorf("SanitizeArtifactPaths() = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "/tmp/") {
+				t.Errorf("SanitizeArtifactPaths() output contains '/tmp/': %q", got)
+			}
+			if strings.Contains(got, "gs://") {
+				t.Errorf("SanitizeArtifactPaths() output contains 'gs://': %q", got)
+			}
+		})
+	}
+}
+
+func TestCheckRunStateForComparison_ScoringFailure(t *testing.T) {
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-fail", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{Run: "base-run-dd24bfd"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     416,
+				BaseSHA:    "dd24bfd11111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			Message: `failed to load baseline log for task "triage/lookup" (/tmp/artifacts/runs/dd24bfd/inspect.json): artifact not found: open /tmp/artifacts/runs/dd24bfd/inspect.json: no such file or directory`,
+			Conditions: []metav1.Condition{
+				{
+					Type:   v1alpha1.ConditionTypeArtifactsReadable,
+					Status: metav1.ConditionFalse,
+					Reason: v1alpha1.ConditionReasonNotFound,
+				},
+			},
+		},
+	}
+
+	state := CheckRunStateForComparison(comp, nil, nil, "", "https://eval.example.com")
+
+	wantHeadline := "Baseline results for `dd24bfd` are unavailable; eval-runner will need to re-run the baseline."
+	if state.Title != wantHeadline {
+		t.Errorf("state.Title = %q, want %q", state.Title, wantHeadline)
+	}
+	if state.Summary != wantHeadline {
+		t.Errorf("state.Summary = %q, want %q", state.Summary, wantHeadline)
+	}
+	wantText := `failed to load baseline log for task "triage/lookup" (inspect.json): artifact not found: open inspect.json: no such file or directory`
+	if state.Text != wantText {
+		t.Errorf("state.Text = %q, want %q", state.Text, wantText)
+	}
+	if strings.Contains(state.Title, "/tmp/") || strings.Contains(state.Summary, "/tmp/") || strings.Contains(state.Text, "/tmp/") {
+		t.Errorf("expected no '/tmp/' in check run state: %+v", state)
+	}
+	if strings.Contains(state.Title, "gs://") || strings.Contains(state.Summary, "gs://") || strings.Contains(state.Text, "gs://") {
+		t.Errorf("expected no 'gs://' in check run state: %+v", state)
+	}
+	wantDetails := "https://eval.example.com/github.com/gke-labs/eval-runner/pulls/416"
+	if state.DetailsURL != wantDetails {
+		t.Errorf("state.DetailsURL = %q, want %q", state.DetailsURL, wantDetails)
+	}
+	if strings.Contains(state.DetailsURL, "/comparisons/eval-runner") || strings.Contains(state.DetailsURL, "/runs/eval-runner") {
+		t.Errorf("expected no namespaced paths in DetailsURL, got %q", state.DetailsURL)
+	}
+}
+
+func TestCheckRunStateForComparison_TransientErrorDoesNotTriggerScoringFailure(t *testing.T) {
+	// A comparison in phase Running with a temporary error message (e.g. transient network timeout)
+	// must not be treated as a scoring failure when ConditionTypeArtifactsReadable is not ConditionFalse.
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-running", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline: v1alpha1.ComparisonRunRef{Run: "base-run"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     416,
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseRunning,
+			Verdict: v1alpha1.ComparisonVerdictRunning,
+			Message: "failed to load candidate log: connection timeout",
+		},
+	}
+
+	state := CheckRunStateForComparison(comp, nil, nil, "", "https://eval.example.com")
+	if state.Status != "in_progress" {
+		t.Errorf("expected status 'in_progress' for transient error, got %q", state.Status)
+	}
+	if strings.Contains(state.Title, "unavailable") {
+		t.Errorf("unexpected failure headline for running comparison with transient error: %q", state.Title)
+	}
+}
+
+func TestScoringFailureDetails_TaskNamedCandidateNotMisclassified(t *testing.T) {
+	comp := &v1alpha1.Comparison{
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     416,
+				BaseSHA:    "dd24bfd11111111111111111111111111111111",
+				HeadSHA:    "3f9c2e1111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			Message: `failed to load baseline log for task "candidate/feature_test" (/tmp/artifacts/runs/dd24bfd/inspect.json): artifact not found`,
+			Conditions: []metav1.Condition{
+				{
+					Type:   v1alpha1.ConditionTypeArtifactsReadable,
+					Status: metav1.ConditionFalse,
+					Reason: v1alpha1.ConditionReasonNotFound,
+				},
+			},
+		},
+	}
+
+	headline, _ := ScoringFailureDetails(comp, nil, nil)
+	wantHeadline := "Baseline results for `dd24bfd` are unavailable; eval-runner will need to re-run the baseline."
+	if headline != wantHeadline {
+		t.Errorf("headline = %q, want %q", headline, wantHeadline)
+	}
+}
+
+func TestRenderComparisonMarkdown_ScoringFailure(t *testing.T) {
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-scoring-fail", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-dd24bfd"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-3f9c2e1"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     416,
+				BaseSHA:    "dd24bfd22222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseCompleted,
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			Message: `failed to load baseline log for task "docs/readme" (/tmp/artifacts/runs/dd24bfd/inspect.json): artifact not found: open /tmp/artifacts/runs/dd24bfd/inspect.json: no such file or directory`,
+			Conditions: []metav1.Condition{
+				{
+					Type:   v1alpha1.ConditionTypeArtifactsReadable,
+					Status: metav1.ConditionFalse,
+					Reason: v1alpha1.ConditionReasonNotFound,
+				},
+			},
+		},
+	}
+
+	// 1. With uiBaseURL
+	gotWith := RenderComparisonMarkdown(comp, nil, nil, "https://eval.example.com")
+	wantHeadline := "Baseline results for `dd24bfd` are unavailable; eval-runner will need to re-run the baseline."
+	if !strings.Contains(gotWith, wantHeadline) {
+		t.Errorf("expected comment to contain user-facing headline %q, got:\n%s", wantHeadline, gotWith)
+	}
+	if !strings.Contains(gotWith, "<details>") || !strings.Contains(gotWith, "</details>") {
+		t.Errorf("expected comment to contain collapsed <details> block, got:\n%s", gotWith)
+	}
+	if !strings.Contains(gotWith, `failed to load baseline log for task "docs/readme" (inspect.json): artifact not found: open inspect.json: no such file or directory`) {
+		t.Errorf("expected sanitized error inside details block, got:\n%s", gotWith)
+	}
+	if strings.Contains(gotWith, "/tmp/") {
+		t.Errorf("expected no '/tmp/' in comment output, got:\n%s", gotWith)
+	}
+	if strings.Contains(gotWith, "gs://") {
+		t.Errorf("expected no 'gs://' in comment output, got:\n%s", gotWith)
+	}
+	if strings.Contains(gotWith, "/comparisons/eval-runner/") || strings.Contains(gotWith, "/runs/eval-runner/") {
+		t.Errorf("expected no legacy namespaced routes in comment output, got:\n%s", gotWith)
+	}
+	wantWebLink := "[web view](https://eval.example.com/github.com/gke-labs/eval-runner/pulls/416)"
+	if !strings.Contains(gotWith, wantWebLink) {
+		t.Errorf("expected web view link %q, got:\n%s", wantWebLink, gotWith)
+	}
+
+	// 2. Without uiBaseURL (existing behavior stays code-formatted plain path)
+	gotWithout := RenderComparisonMarkdown(comp, nil, nil, "")
+	if !strings.Contains(gotWithout, "`/comparisons/eval-runner/comp-scoring-fail`") {
+		t.Errorf("expected plain code-formatted path when uiBaseURL is empty, got:\n%s", gotWithout)
+	}
+	if strings.Contains(gotWithout, "[web view]") {
+		t.Errorf("unexpected '[web view]' when uiBaseURL is empty, got:\n%s", gotWithout)
+	}
+	if strings.Contains(gotWithout, "/tmp/") || strings.Contains(gotWithout, "gs://") {
+		t.Errorf("expected no '/tmp/' or 'gs://' even without uiBaseURL, got:\n%s", gotWithout)
+	}
+}
+
+func TestReporter_ScoringFailureAndDetailsURL(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+	client := server.Client("token")
+
+	reporter := NewReporter(client, ReporterOptions{
+		UIBaseURL: "https://eval.example.com",
+	})
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-scoring-fail-rep", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run-dd24bfd"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-3f9c2e1"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     416,
+				HeadSHA:    "3f9c2e1111111111111111111111111111111111",
+				BaseSHA:    "dd24bfd22222222222222222222222222222222",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseCompleted,
+			Verdict: v1alpha1.ComparisonVerdictInconclusive,
+			Message: `failed to load baseline log for task "triage/lookup" (gs://eval-bucket/runs/dd24bfd/inspect.json): artifact not found: storage: object doesn't exist`,
+			Conditions: []metav1.Condition{
+				{
+					Type:   v1alpha1.ConditionTypeArtifactsReadable,
+					Status: metav1.ConditionFalse,
+					Reason: v1alpha1.ConditionReasonNotFound,
+				},
+			},
+		},
+	}
+
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-3f9c2e1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{Commit: "3f9c2e1111111111111111111111111111111111"},
+		},
+	}
+
+	status, err := reporter.Report(t.Context(), comp, nil, candRun)
+	if err != nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+	if status == nil || status.CheckRunID == 0 {
+		t.Fatalf("expected non-zero check run ID, got %+v", status)
+	}
+
+	checkRuns := server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(checkRuns))
+	}
+	cr := checkRuns[0]
+
+	wantDetailsURL := "https://eval.example.com/github.com/gke-labs/eval-runner/pulls/416"
+	if cr.DetailsURL != wantDetailsURL {
+		t.Errorf("cr.DetailsURL = %q, want %q", cr.DetailsURL, wantDetailsURL)
+	}
+	wantHeadline := "Baseline results for `dd24bfd` are unavailable; eval-runner will need to re-run the baseline."
+	if cr.Title != wantHeadline {
+		t.Errorf("cr.Title = %q, want %q", cr.Title, wantHeadline)
+	}
+	if cr.Summary != wantHeadline {
+		t.Errorf("cr.Summary = %q, want %q", cr.Summary, wantHeadline)
+	}
+	wantText := `failed to load baseline log for task "triage/lookup" (inspect.json): artifact not found: storage: object doesn't exist`
+	if cr.Text != wantText {
+		t.Errorf("cr.Text = %q, want %q", cr.Text, wantText)
+	}
+	if strings.Contains(cr.Title, "gs://") || strings.Contains(cr.Summary, "gs://") || strings.Contains(cr.Text, "gs://") {
+		t.Errorf("expected no 'gs://' in check run output, got %+v", cr)
+	}
+	if strings.Contains(cr.DetailsURL, "/comparisons/eval-runner") || strings.Contains(cr.DetailsURL, "/runs/eval-runner") {
+		t.Errorf("expected no namespaced paths in DetailsURL, got %q", cr.DetailsURL)
+	}
+
+	comments := server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	c := comments[0]
+	if !strings.Contains(c.Body, wantHeadline) {
+		t.Errorf("expected comment to contain headline %q, got:\n%s", wantHeadline, c.Body)
+	}
+	if !strings.Contains(c.Body, "<details>") {
+		t.Errorf("expected comment to contain <details> block, got:\n%s", c.Body)
+	}
+	if !strings.Contains(c.Body, wantText) {
+		t.Errorf("expected comment to contain sanitized text %q, got:\n%s", wantText, c.Body)
+	}
+	if strings.Contains(c.Body, "gs://") || strings.Contains(c.Body, "/tmp/") {
+		t.Errorf("expected no 'gs://' or '/tmp/' in comment body, got:\n%s", c.Body)
+	}
+	if strings.Contains(c.Body, "/comparisons/eval-runner") || strings.Contains(c.Body, "/runs/eval-runner") {
+		t.Errorf("expected no namespaced paths in comment body, got:\n%s", c.Body)
 	}
 }

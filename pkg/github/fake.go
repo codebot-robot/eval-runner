@@ -35,6 +35,8 @@ type FakeCheckRun struct {
 	Conclusion string
 	Title      string
 	Summary    string
+	Text       string
+	DetailsURL string
 }
 
 // FakeGitHubServer is an in-memory httptest fake simulating the GitHub REST API.
@@ -542,10 +544,12 @@ func (f *FakeGitHubServer) handleCreateCheckRun(w http.ResponseWriter, r *http.R
 		HeadSHA:    payload.HeadSHA,
 		Status:     payload.Status,
 		Conclusion: payload.Conclusion,
+		DetailsURL: payload.DetailsURL,
 	}
 	if payload.Output != nil {
 		cr.Title = payload.Output.Title
 		cr.Summary = payload.Output.Summary
+		cr.Text = payload.Output.Text
 	}
 	f.checkRuns[cr.ID] = cr
 
@@ -582,9 +586,13 @@ func (f *FakeGitHubServer) handleUpdateCheckRun(w http.ResponseWriter, r *http.R
 	cr.Name = payload.Name
 	cr.Status = payload.Status
 	cr.Conclusion = payload.Conclusion
+	if payload.DetailsURL != "" {
+		cr.DetailsURL = payload.DetailsURL
+	}
 	if payload.Output != nil {
 		cr.Title = payload.Output.Title
 		cr.Summary = payload.Output.Summary
+		cr.Text = payload.Output.Text
 	}
 
 	writeJSONResponse(w, http.StatusOK, checkRunResponse{ID: cr.ID})
