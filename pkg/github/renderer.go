@@ -171,6 +171,9 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		header.WriteString("<details>\n<summary>Error details</summary>\n\n```\n")
 		header.WriteString(techErr)
 		header.WriteString("\n```\n</details>\n\n")
+	} else if strings.HasPrefix(comp.Status.Message, "re-running") {
+		header.WriteString(comp.Status.Message)
+		header.WriteString("\n\n")
 	} else if notes := ComparisonNotes(comp); notes != "" {
 		header.WriteString(EscapeCell(notes))
 		header.WriteString("\n\n")

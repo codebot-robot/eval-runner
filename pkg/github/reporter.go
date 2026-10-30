@@ -92,11 +92,20 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	checkState := CheckRunStateForComparison(comp, baseRun, candRun, r.InconclusivePolicy, r.UIBaseURL)
 	hash := HashContent(markdown, checkState)
 
+	headSHA := comp.Spec.PullRequest.HeadSHA
+	if headSHA == "" && candRun != nil {
+		headSHA = candRun.Spec.Repo.Commit
+	}
+
 	commentID := int64(0)
 	checkRunID := int64(0)
 	if comp.Status.Reporting != nil {
 		commentID = comp.Status.Reporting.CommentID
-		checkRunID = comp.Status.Reporting.CheckRunID
+		if comp.Status.Reporting.CheckRunIDs != nil && headSHA != "" {
+			checkRunID = comp.Status.Reporting.CheckRunIDs[headSHA]
+		} else {
+			checkRunID = comp.Status.Reporting.CheckRunID
+		}
 		if comp.Status.Reporting.LastPostedHash == hash && commentID != 0 {
 			// Idempotent: content has not changed
 			return comp.Status.Reporting.DeepCopy(), nil
@@ -149,17 +158,23 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 		}
 	}
 
+	var checkRunIDs map[string]int64
+	if comp.Status.Reporting != nil && comp.Status.Reporting.CheckRunIDs != nil {
+		checkRunIDs = make(map[string]int64, len(comp.Status.Reporting.CheckRunIDs)+1)
+		for k, v := range comp.Status.Reporting.CheckRunIDs {
+			checkRunIDs[k] = v
+		}
+	} else if headSHA != "" {
+		checkRunIDs = make(map[string]int64)
+	}
+
 	partialStatus := &v1alpha1.ComparisonReportingStatus{
-		CommentID:  commentID,
-		CheckRunID: checkRunID,
+		CommentID:   commentID,
+		CheckRunID:  checkRunID,
+		CheckRunIDs: checkRunIDs,
 	}
 
 	// 2. Check run upsert
-	headSHA := comp.Spec.PullRequest.HeadSHA
-	if headSHA == "" && candRun != nil {
-		headSHA = candRun.Spec.Repo.Commit
-	}
-
 	if headSHA != "" {
 		if checkRunID != 0 {
 			err := r.Client.UpdateCheckRun(ctx, owner, repo, checkRunID, checkState)
@@ -191,6 +206,10 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 			checkRunID = id
 			partialStatus.CheckRunID = checkRunID
 		}
+		if partialStatus.CheckRunIDs == nil {
+			partialStatus.CheckRunIDs = make(map[string]int64)
+		}
+		partialStatus.CheckRunIDs[headSHA] = checkRunID
 	}
 
 	partialStatus.LastPostedHash = hash

@@ -3444,3 +3444,92 @@ func TestReporter_ScoringFailureAndDetailsURL(t *testing.T) {
 		t.Errorf("expected no namespaced paths in comment body, got:\n%s", c.Body)
 	}
 }
+
+func TestRenderComparisonMarkdown_ReRunningHeadline(t *testing.T) {
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-415", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-2"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     415,
+				HeadSHA:    "3f9c2e1234567890",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseRunning,
+			Verdict: v1alpha1.ComparisonVerdictRunning,
+			Message: "re-running for `3f9c2e1`",
+		},
+	}
+
+	got := RenderComparisonMarkdown(comp, nil, nil, "")
+	wantHeadline := "re-running for `3f9c2e1`"
+	if !strings.Contains(got, wantHeadline) {
+		t.Errorf("expected comment to contain headline %q, got:\n%s", wantHeadline, got)
+	}
+	if !strings.Contains(got, "## RUNNING\n\nre-running for `3f9c2e1`\n\n") {
+		t.Errorf("expected ## RUNNING followed by headline, got:\n%s", got)
+	}
+}
+
+func TestReporter_CheckRunIDsKeyedByCommitSHA(t *testing.T) {
+	ctx := t.Context()
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	reporter := NewReporter(server.Client("fake-token"), ReporterOptions{})
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-415", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-1"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     415,
+				HeadSHA:    "sha1111111111111111111111111111111111111",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Phase:   v1alpha1.ComparisonPhaseCompleted,
+			Verdict: v1alpha1.ComparisonVerdictImproved,
+		},
+	}
+
+	// 1. Report for sha1
+	status1, err := reporter.Report(ctx, comp, nil, nil)
+	if err != nil {
+		t.Fatalf("first report failed: %v", err)
+	}
+	if status1.CheckRunIDs == nil || status1.CheckRunIDs[comp.Spec.PullRequest.HeadSHA] == 0 {
+		t.Fatalf("expected CheckRunIDs to contain sha1 ID, got: %+v", status1.CheckRunIDs)
+	}
+	sha1CheckRunID := status1.CheckRunIDs[comp.Spec.PullRequest.HeadSHA]
+
+	// 2. Change head to sha2 and reset
+	comp.Spec.Candidate.Run = "cand-run-2"
+	comp.Spec.PullRequest.HeadSHA = "sha2222222222222222222222222222222222222"
+	comp.Status.Reporting = status1.DeepCopy()
+	comp.Status.Reporting.CheckRunID = 0 // reset current check run ID
+	comp.Status.Reporting.LastPostedHash = ""
+
+	status2, err := reporter.Report(ctx, comp, nil, nil)
+	if err != nil {
+		t.Fatalf("second report failed: %v", err)
+	}
+	sha2CheckRunID := status2.CheckRunIDs[comp.Spec.PullRequest.HeadSHA]
+	if sha2CheckRunID == 0 {
+		t.Fatalf("expected CheckRunIDs to contain sha2 ID, got: %+v", status2.CheckRunIDs)
+	}
+	if sha2CheckRunID == sha1CheckRunID {
+		t.Errorf("expected different check run IDs for different SHAs: %d vs %d", sha1CheckRunID, sha2CheckRunID)
+	}
+	if status2.CheckRunIDs["sha1111111111111111111111111111111111111"] != sha1CheckRunID {
+		t.Errorf("expected sha1 check run ID to be preserved in CheckRunIDs map")
+	}
+	if status2.CommentID != status1.CommentID {
+		t.Errorf("expected commentID to be preserved: %d vs %d", status1.CommentID, status2.CommentID)
+	}
+}
