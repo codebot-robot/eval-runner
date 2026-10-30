@@ -48,6 +48,9 @@ const (
 	// LabelBranch tracks the branch name on created baseline Runs.
 	LabelBranch = "evalrunner.gke-labs.dev/branch"
 
+	// LabelTopUp tracks the top-up window/epoch index (e.g. "2", "3") on top-up baseline Runs.
+	LabelTopUp = "evalrunner.gke-labs.dev/topup"
+
 	// AnnotationCommitTime tracks the commit timestamp (RFC3339) on created baseline Runs.
 	AnnotationCommitTime = "evalrunner.gke-labs.dev/commit-time"
 

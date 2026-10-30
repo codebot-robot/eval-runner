@@ -1041,6 +1041,9 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 			configkeys.ConfigMapKeyDefaultBudgetUSD:         "0.50",
 			configkeys.ConfigMapKeyCommandUsers:             "user1,user2",
 			ConfigMapKeySandboxEgressHosts:                  "*.googleapis.com,github.com",
+			configkeys.ConfigMapKeyHeadTopUpInterval:        "6h",
+			configkeys.ConfigMapKeyHeadTargetCIHalfWidth:    "0.05",
+			configkeys.ConfigMapKeyHeadMaxSamplesPerTask:    "64",
 		},
 	}
 	if unknown := UnknownConfigMapKeys(cmRecognized); unknown != nil {
@@ -2877,5 +2880,127 @@ func TestConfigReloader_ProbeCredentials_UnavailableOnFailure(t *testing.T) {
 	_, isUnavail = artifacts.IsUnavailable(reloadableSink)
 	if isUnavail {
 		t.Fatalf("expected sink to be available after working probe")
+	}
+}
+
+func TestResolveConfig_HeadTopUpKeys(t *testing.T) {
+	// 1. Defaults when unset: interval=0 (disabled), ci=0.05, maxSamples=64
+	emptyCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+		Data:       map[string]string{},
+	}
+	cfg, err := ResolveConfig(emptyCM, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.HeadTopUpInterval != 0 {
+		t.Errorf("expected HeadTopUpInterval=0, got %v", cfg.HeadTopUpInterval)
+	}
+	if cfg.HeadTargetCIHalfWidth != DefaultHeadTargetCIHalfWidth {
+		t.Errorf("expected HeadTargetCIHalfWidth=%v, got %v", DefaultHeadTargetCIHalfWidth, cfg.HeadTargetCIHalfWidth)
+	}
+	if cfg.HeadMaxSamplesPerTask != 64 {
+		t.Errorf("expected HeadMaxSamplesPerTask=64, got %v", cfg.HeadMaxSamplesPerTask)
+	}
+
+	// 2. Custom valid values
+	customCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyHeadTopUpInterval:     "4h",
+			configkeys.ConfigMapKeyHeadTargetCIHalfWidth: "0.03",
+			configkeys.ConfigMapKeyHeadMaxSamplesPerTask: "32",
+		},
+	}
+	cfg, err = ResolveConfig(customCM, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.HeadTopUpInterval != 4*time.Hour {
+		t.Errorf("expected HeadTopUpInterval=4h, got %v", cfg.HeadTopUpInterval)
+	}
+	if cfg.HeadTargetCIHalfWidth != 0.03 {
+		t.Errorf("expected HeadTargetCIHalfWidth=0.03, got %v", cfg.HeadTargetCIHalfWidth)
+	}
+	if cfg.HeadMaxSamplesPerTask != 32 {
+		t.Errorf("expected HeadMaxSamplesPerTask=32, got %v", cfg.HeadMaxSamplesPerTask)
+	}
+
+	// 3. Disabling interval via "0" or "none"
+	disabledCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyHeadTopUpInterval: "none",
+		},
+	}
+	cfg, err = ResolveConfig(disabledCM, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.HeadTopUpInterval != 0 {
+		t.Errorf("expected HeadTopUpInterval=0 for 'none', got %v", cfg.HeadTopUpInterval)
+	}
+
+	// 4. headMaxSamplesPerTask inherits defaultMaxSamplesPerTask if not set explicitly
+	inheritCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyDefaultMaxSamplesPerTask: "128",
+		},
+	}
+	cfg, err = ResolveConfig(inheritCM, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.HeadMaxSamplesPerTask != 128 {
+		t.Errorf("expected HeadMaxSamplesPerTask=128 (inherited), got %v", cfg.HeadMaxSamplesPerTask)
+	}
+
+	// 5. Invalid values
+	invalidCases := []struct {
+		name string
+		data map[string]string
+	}{
+		{
+			name: "negative interval",
+			data: map[string]string{configkeys.ConfigMapKeyHeadTopUpInterval: "-1h"},
+		},
+		{
+			name: "invalid interval duration",
+			data: map[string]string{configkeys.ConfigMapKeyHeadTopUpInterval: "not-a-duration"},
+		},
+		{
+			name: "zero ci half-width",
+			data: map[string]string{configkeys.ConfigMapKeyHeadTargetCIHalfWidth: "0"},
+		},
+		{
+			name: "negative ci half-width",
+			data: map[string]string{configkeys.ConfigMapKeyHeadTargetCIHalfWidth: "-0.05"},
+		},
+		{
+			name: "ci half-width >= 1",
+			data: map[string]string{configkeys.ConfigMapKeyHeadTargetCIHalfWidth: "1.0"},
+		},
+		{
+			name: "zero max samples per task",
+			data: map[string]string{configkeys.ConfigMapKeyHeadMaxSamplesPerTask: "0"},
+		},
+		{
+			name: "negative max samples per task",
+			data: map[string]string{configkeys.ConfigMapKeyHeadMaxSamplesPerTask: "-5"},
+		},
+	}
+
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+				Data:       tc.data,
+			}
+			_, err := ResolveConfig(cm, RawFlags{})
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+		})
 	}
 }

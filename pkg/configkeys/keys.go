@@ -96,6 +96,12 @@ const (
 	ConfigMapKeyFullReconcileInterval = "fullReconcileInterval"
 	// ConfigMapKeyRateLimitFloorPercent is the ConfigMap key for GitHub rate limit floor percentage (default "10").
 	ConfigMapKeyRateLimitFloorPercent = "rateLimitFloorPercent"
+	// ConfigMapKeyHeadTopUpInterval is the ConfigMap key for periodic head top-up interval (default "0" = disabled).
+	ConfigMapKeyHeadTopUpInterval = "headTopUpInterval"
+	// ConfigMapKeyHeadTargetCIHalfWidth is the ConfigMap key for target 95% CI half-width for head top-ups (default "0.05").
+	ConfigMapKeyHeadTargetCIHalfWidth = "headTargetCIHalfWidth"
+	// ConfigMapKeyHeadMaxSamplesPerTask is the ConfigMap key for maximum samples per task for head top-ups (defaults to defaultMaxSamplesPerTask).
+	ConfigMapKeyHeadMaxSamplesPerTask = "headMaxSamplesPerTask"
 )
 
 const (

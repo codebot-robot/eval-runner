@@ -103,6 +103,9 @@ const (
 
 	// DefaultInconclusivePolicy is the default check-run conclusion policy for inconclusive comparisons.
 	DefaultInconclusivePolicy = configkeys.InconclusivePolicyNeutral
+
+	// DefaultHeadTargetCIHalfWidth is the default target 95% CI half-width for head top-ups (0.05).
+	DefaultHeadTargetCIHalfWidth = 0.05
 )
 
 // KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
@@ -140,6 +143,9 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyLsRemoteInterval:         {},
 	configkeys.ConfigMapKeyFullReconcileInterval:    {},
 	configkeys.ConfigMapKeyRateLimitFloorPercent:    {},
+	configkeys.ConfigMapKeyHeadTopUpInterval:        {},
+	configkeys.ConfigMapKeyHeadTargetCIHalfWidth:    {},
+	configkeys.ConfigMapKeyHeadMaxSamplesPerTask:    {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -197,6 +203,9 @@ type ClusterConfig struct {
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
 	DefaultBudgetUSD         *float64
+	HeadTopUpInterval        time.Duration
+	HeadTargetCIHalfWidth    float64
+	HeadMaxSamplesPerTask    int
 	LsRemoteInterval         time.Duration
 	FullReconcileInterval    time.Duration
 	RateLimitFloorPercent    int
@@ -261,6 +270,9 @@ func DefaultClusterConfig() ClusterConfig {
 		DefaultCohort:            "default",
 		DefaultBatchSize:         8,
 		DefaultMaxSamplesPerTask: 64,
+		HeadTopUpInterval:        0,
+		HeadTargetCIHalfWidth:    DefaultHeadTargetCIHalfWidth,
+		HeadMaxSamplesPerTask:    64,
 		LsRemoteInterval:         syncer.DefaultLsRemoteInterval,
 		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
 		RateLimitFloorPercent:    syncer.DefaultRateFloorPercent,
@@ -694,6 +706,51 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.RateLimitFloorPercent = pct
 			}
 		}
+
+		// 22. headTopUpInterval
+		if val, ok := cm.Data[configkeys.ConfigMapKeyHeadTopUpInterval]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) || trimmed == "0" || trimmed == "0s" {
+					cfg.HeadTopUpInterval = 0
+				} else {
+					d, err := time.ParseDuration(trimmed)
+					if err != nil {
+						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %w", configkeys.ConfigMapKeyHeadTopUpInterval, val, ns, name, err)
+					}
+					if d < 0 {
+						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: duration cannot be negative", configkeys.ConfigMapKeyHeadTopUpInterval, val, ns, name)
+					}
+					cfg.HeadTopUpInterval = d
+				}
+			}
+		}
+
+		// 23. headTargetCIHalfWidth
+		if val, ok := cm.Data[configkeys.ConfigMapKeyHeadTargetCIHalfWidth]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				f, err := strconv.ParseFloat(trimmed, 64)
+				if err != nil || f <= 0 || f >= 1 {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be a float between 0 and 1", configkeys.ConfigMapKeyHeadTargetCIHalfWidth, val, ns, name)
+				}
+				cfg.HeadTargetCIHalfWidth = f
+			}
+		}
+
+		// 24. headMaxSamplesPerTask
+		if val, ok := cm.Data[configkeys.ConfigMapKeyHeadMaxSamplesPerTask]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				n, err := strconv.Atoi(trimmed)
+				if err != nil || n <= 0 {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must be a positive integer", configkeys.ConfigMapKeyHeadMaxSamplesPerTask, val, ns, name)
+				}
+				cfg.HeadMaxSamplesPerTask = n
+			}
+		} else if cfg.DefaultMaxSamplesPerTask > 0 {
+			cfg.HeadMaxSamplesPerTask = cfg.DefaultMaxSamplesPerTask
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -909,6 +966,9 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"sandboxdImage", resolved.SandboxdImage,
 		"taskGracePeriod", resolved.TaskGracePeriod,
 		"sandboxEgressHosts", strings.Join(resolved.SandboxEgressHosts, ","),
+		"headTopUpInterval", resolved.HeadTopUpInterval,
+		"headTargetCIHalfWidth", resolved.HeadTargetCIHalfWidth,
+		"headMaxSamplesPerTask", resolved.HeadMaxSamplesPerTask,
 	)
 }
 
@@ -922,6 +982,7 @@ type ConfigReloaderOptions struct {
 	CompReconciler *ComparisonReconciler
 	Syncer         *syncer.Syncer
 	Consumer       *consumer.Consumer
+	TopUpRunner    *HeadTopUpRunner
 	InitialConfig  *ClusterConfig
 	FQDNSyncFunc   func(ctx context.Context, hosts []string) error
 	GitHubClient   *github.HTTPClient
@@ -938,6 +999,7 @@ type ConfigReloader struct {
 	compReconciler *ComparisonReconciler
 	syncer         *syncer.Syncer
 	consumer       *consumer.Consumer
+	topUpRunner    *HeadTopUpRunner
 	fqdnSyncFunc   func(ctx context.Context, hosts []string) error
 	gitHubClient   *github.HTTPClient
 	lastConfig     *ClusterConfig
@@ -958,6 +1020,7 @@ func NewConfigReloader(opts ConfigReloaderOptions) *ConfigReloader {
 		compReconciler: opts.CompReconciler,
 		syncer:         opts.Syncer,
 		consumer:       opts.Consumer,
+		topUpRunner:    opts.TopUpRunner,
 		fqdnSyncFunc:   opts.FQDNSyncFunc,
 		gitHubClient:   opts.GitHubClient,
 	}
@@ -1081,6 +1144,10 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 			}
 		}
 		r.syncer.UpdateConfig(resolved.Repositories, resolved.LsRemoteInterval, resolved.FullReconcileInterval, resolved.RateLimitFloorPercent)
+	}
+
+	if r.topUpRunner != nil {
+		r.topUpRunner.UpdateConfig(resolved)
 	}
 
 	fqdnChanged := r.lastConfig == nil || !reflect.DeepEqual(r.lastConfig.SandboxEgressHosts, resolved.SandboxEgressHosts)
