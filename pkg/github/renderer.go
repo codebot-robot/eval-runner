@@ -24,9 +24,39 @@ import (
 )
 
 const (
-	MaxCommentBytes = 60000
-	MaxIDList       = stats.MaxIDList
+	MaxCommentBytes      = 60000
+	MaxCheckRunTextBytes = 65000
+	MaxDetailsBlockBytes = 8192
+	MaxIDList            = stats.MaxIDList
 )
+
+// CapDetailsBlock caps a collapsed <details> error details block to maxBytes,
+// preserving the <details> and code block wrapping with an explicit truncation notice.
+func CapDetailsBlock(block string, maxBytes int) string {
+	if len(block) <= maxBytes {
+		return block
+	}
+	const prefix = "<details>\n<summary>Error details</summary>\n\n```\n"
+	const suffix = "\n... (truncated)\n```\n</details>"
+	if len(prefix)+len(suffix) >= maxBytes {
+		if maxBytes > 0 {
+			return block[:maxBytes]
+		}
+		return ""
+	}
+	available := maxBytes - len(prefix) - len(suffix)
+	inner := block
+	if strings.HasPrefix(inner, prefix) {
+		inner = strings.TrimPrefix(inner, prefix)
+	}
+	if strings.HasSuffix(inner, "\n```\n</details>") {
+		inner = strings.TrimSuffix(inner, "\n```\n</details>")
+	}
+	if len(inner) > available {
+		inner = inner[:available]
+	}
+	return prefix + inner + suffix
+}
 
 // FormatIDList formats a slice of task IDs, truncating to maxIDs if exceeded,
 // appending an explicit "... and N more" marker. Aliased from pkg/stats.
@@ -136,49 +166,22 @@ func ComparisonNotes(comp *v1alpha1.Comparison) string {
 	return TruncateNoteIDLists(notes)
 }
 
-// RenderComparisonMarkdown renders a GitHub pull request comment for a Comparison,
-// using ui.ComparisonRows and ui.ComparisonSummary so the comment matches the web view.
-// If uiBaseURL is provided, the web-view link is rendered as an absolute Markdown link;
-// otherwise it renders as code text.
-// The rendered body is guaranteed not to exceed maxCommentBytes (60000 bytes).
-func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, uiBaseURL string) string {
-	if comp == nil {
+// RenderScoringFailureDetailsBlock returns the collapsed markdown details block for scoring failures,
+// or empty string if comp is not a scoring failure.
+func RenderScoringFailureDetailsBlock(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) string {
+	if !IsScoringFailure(comp) {
 		return ""
 	}
+	_, techErr := ScoringFailureDetails(comp, baseRun, candRun)
+	return fmt.Sprintf("<details>\n<summary>Error details</summary>\n\n```\n%s\n```\n</details>", techErr)
+}
 
-	var header strings.Builder
-
-	// 1. Hidden marker comment
-	header.WriteString(ComparisonMarker(comp.Namespace, comp.Name))
-	header.WriteString("\n\n")
-
-	// 2. Verdict line
-	verdict := string(comp.Status.Verdict)
-	if verdict == "" {
-		verdict = string(v1alpha1.ComparisonVerdictRunning)
-	}
-	if comp.Status.PImprovement != nil {
-		header.WriteString(fmt.Sprintf("## %s · P(improvement) = %.2f\n\n", verdict, *comp.Status.PImprovement))
-	} else {
-		header.WriteString(fmt.Sprintf("## %s\n\n", verdict))
+// BuildComparisonTable constructs the markdown table header and row strings for a Comparison.
+func BuildComparisonTable(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, uiBaseURL string) (string, []string) {
+	if comp == nil {
+		return "", nil
 	}
 
-	// Notes under the verdict line
-	if IsScoringFailure(comp) {
-		headline, techErr := ScoringFailureDetails(comp, baseRun, candRun)
-		header.WriteString(headline)
-		header.WriteString("\n\n")
-		header.WriteString("<details>\n<summary>Error details</summary>\n\n```\n")
-		header.WriteString(techErr)
-		header.WriteString("\n```\n</details>\n\n")
-	} else if notes := ComparisonNotes(comp); notes != "" {
-		header.WriteString(EscapeCell(notes))
-		header.WriteString("\n\n")
-	}
-
-	headerStr := header.String()
-
-	// 3. Table
 	hasTokens := false
 	hasAffinity := false
 	hasPImprovement := false
@@ -324,7 +327,18 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		rowStrings[i] = fmt.Sprintf("| %s |\n", strings.Join(cells, " | "))
 	}
 
-	// 4. Footer & Actions
+	return tableHeader, rowStrings
+}
+
+// BuildComparisonFooter constructs the footer lines (samples, paired against, trajectories, web view) and action hints.
+func BuildComparisonFooter(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, uiBaseURL string) string {
+	if comp == nil {
+		return ""
+	}
+
+	repoRef, _ := ui.ComparisonRepoRef(comp, baseRun, candRun)
+	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+
 	var footerBuilder strings.Builder
 	summary := ui.ComparisonSummary(comp, baseRun, candRun)
 	samplesStr := summary.SamplesSummary
@@ -349,6 +363,13 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	}
 
 	footerParts := []string{samplesStr, pairedAgainstStr}
+	hasAffinity := false
+	for _, task := range comp.Status.Tasks {
+		if task.Affinity != "" {
+			hasAffinity = true
+			break
+		}
+	}
 	if hasAffinity && comp.Status.Summary != nil {
 		footerParts = append(footerParts, fmt.Sprintf("%d matched", comp.Status.Summary.AffinityMatched))
 	}
@@ -390,14 +411,62 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 		footerBuilder.WriteString("\n")
 	}
 
-	// 5. Actions (e.g. comment `/eval more <n>` to run N more samples for inconclusive tasks)
+	// Actions (e.g. comment `/eval more <n>` to run N more samples for inconclusive tasks)
 	lines := ActionHintLines(comp)
 	if len(lines) > 0 {
 		footerBuilder.WriteString("\n")
 		footerBuilder.WriteString(strings.Join(lines, "\n"))
 		footerBuilder.WriteString("\n")
 	}
-	footerAndActionsStr := footerBuilder.String()
+	return footerBuilder.String()
+}
+
+// RenderComparisonMarkdown renders a GitHub pull request comment for a Comparison,
+// using ui.ComparisonRows and ui.ComparisonSummary so the comment matches the web view.
+// If uiBaseURL is provided, the web-view link is rendered as an absolute Markdown link;
+// otherwise it renders as code text.
+// The rendered body is guaranteed not to exceed maxCommentBytes (60000 bytes).
+func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, uiBaseURL string) string {
+	if comp == nil {
+		return ""
+	}
+
+	var header strings.Builder
+
+	// 1. Hidden marker comment
+	header.WriteString(ComparisonMarker(comp.Namespace, comp.Name))
+	header.WriteString("\n\n")
+
+	// 2. Verdict line
+	verdict := string(comp.Status.Verdict)
+	if verdict == "" {
+		verdict = string(v1alpha1.ComparisonVerdictRunning)
+	}
+	if comp.Status.PImprovement != nil {
+		header.WriteString(fmt.Sprintf("## %s · P(improvement) = %.2f\n\n", verdict, *comp.Status.PImprovement))
+	} else {
+		header.WriteString(fmt.Sprintf("## %s\n\n", verdict))
+	}
+
+	// Notes under the verdict line
+	if IsScoringFailure(comp) {
+		headline, _ := ScoringFailureDetails(comp, baseRun, candRun)
+		header.WriteString(headline)
+		header.WriteString("\n\n")
+		header.WriteString(RenderScoringFailureDetailsBlock(comp, baseRun, candRun))
+		header.WriteString("\n\n")
+	} else if notes := ComparisonNotes(comp); notes != "" {
+		header.WriteString(EscapeCell(notes))
+		header.WriteString("\n\n")
+	}
+
+	headerStr := header.String()
+
+	// 3. Table
+	tableHeader, rowStrings := BuildComparisonTable(comp, baseRun, candRun, uiBaseURL)
+
+	// 4. Footer & Actions
+	footerAndActionsStr := BuildComparisonFooter(comp, baseRun, candRun, uiBaseURL)
 
 	// Assemble full comment
 	var fullSB strings.Builder
@@ -453,6 +522,93 @@ func RenderComparisonMarkdown(comp *v1alpha1.Comparison, baseRun, candRun *v1alp
 	sb.WriteString("\n")
 	sb.WriteString(footerAndActionsStr)
 	return sb.String()
+}
+
+// RenderCheckRunText renders the markdown text body for a GitHub Check Run:
+// the per-task table, followed by footer links (web view, trajectories),
+// and for failures the collapsed technical details that #417 introduced.
+// If the body exceeds MaxCheckRunTextBytes, it safely truncates table rows from the bottom
+// with "… N more rows (see web view)".
+func RenderCheckRunText(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, uiBaseURL string) string {
+	if comp == nil {
+		return ""
+	}
+
+	tableHeader, rowStrings := BuildComparisonTable(comp, baseRun, candRun, uiBaseURL)
+	footerStr := BuildComparisonFooter(comp, baseRun, candRun, uiBaseURL)
+
+	var detailsBlock string
+	if IsScoringFailure(comp) {
+		rawBlock := RenderScoringFailureDetailsBlock(comp, baseRun, candRun)
+		detailsBlock = CapDetailsBlock(rawBlock, MaxDetailsBlockBytes)
+	}
+
+	var footerAndDetails strings.Builder
+	footerAndDetails.WriteString(footerStr)
+	if detailsBlock != "" {
+		if footerStr != "" {
+			footerAndDetails.WriteString("\n")
+		}
+		footerAndDetails.WriteString(detailsBlock)
+		footerAndDetails.WriteString("\n")
+	}
+	footerAndDetailsStr := footerAndDetails.String()
+
+	var fullSB strings.Builder
+	if len(rowStrings) > 0 || tableHeader != "" {
+		fullSB.WriteString(tableHeader)
+		for _, rStr := range rowStrings {
+			fullSB.WriteString(rStr)
+		}
+		fullSB.WriteString("\n")
+	}
+	fullSB.WriteString(footerAndDetailsStr)
+	fullText := fullSB.String()
+
+	if len(fullText) <= MaxCheckRunTextBytes {
+		return fullText
+	}
+
+	prefixLens := make([]int, len(rowStrings)+1)
+	for i := 0; i < len(rowStrings); i++ {
+		prefixLens[i+1] = prefixLens[i] + len(rowStrings[i])
+	}
+
+	baseLen := len(tableHeader) + 1 + 1 + len(footerAndDetailsStr)
+	k := 0
+	for candidates := len(rowStrings) - 1; candidates >= 0; candidates-- {
+		dropped := len(rowStrings) - candidates
+		rowWord := "rows"
+		if dropped == 1 {
+			rowWord = "row"
+		}
+		markerLine := fmt.Sprintf("… %d more %s (see web view)\n", dropped, rowWord)
+		if baseLen+prefixLens[candidates]+len(markerLine) <= MaxCheckRunTextBytes {
+			k = candidates
+			break
+		}
+	}
+
+	dropped := len(rowStrings) - k
+	rowWord := "rows"
+	if dropped == 1 {
+		rowWord = "row"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(tableHeader)
+	for i := 0; i < k; i++ {
+		sb.WriteString(rowStrings[i])
+	}
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("… %d more %s (see web view)\n", dropped, rowWord))
+	sb.WriteString("\n")
+	sb.WriteString(footerAndDetailsStr)
+	res := sb.String()
+	if len(res) > MaxCheckRunTextBytes {
+		res = res[:MaxCheckRunTextBytes]
+	}
+	return res
 }
 
 // ActionHintLines returns formatted bulleted action hints for inconclusive tasks in a Comparison,

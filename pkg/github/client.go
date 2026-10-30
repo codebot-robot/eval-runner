@@ -607,9 +607,11 @@ func (c *HTTPClient) UpdateIssueComment(ctx context.Context, owner, repo string,
 }
 
 type checkRunOutput struct {
-	Title   string `json:"title"`
-	Summary string `json:"summary"`
-	Text    string `json:"text,omitempty"`
+	Title       string               `json:"title"`
+	Summary     string               `json:"summary"`
+	Text        string               `json:"text,omitempty"`
+	Images      []CheckRunImage      `json:"images,omitempty"`
+	Annotations []CheckRunAnnotation `json:"annotations,omitempty"`
 }
 
 type checkRunCreatePayload struct {
@@ -642,9 +644,11 @@ func (c *HTTPClient) CreateCheckRun(ctx context.Context, owner, repo string, hea
 		Status:     state.Status,
 		Conclusion: state.Conclusion,
 		Output: &checkRunOutput{
-			Title:   state.Title,
-			Summary: state.Summary,
-			Text:    state.Text,
+			Title:       state.Title,
+			Summary:     state.Summary,
+			Text:        state.Text,
+			Images:      state.Images,
+			Annotations: state.Annotations,
 		},
 	}
 	var resp checkRunResponse
@@ -662,9 +666,11 @@ func (c *HTTPClient) UpdateCheckRun(ctx context.Context, owner, repo string, che
 		Status:     state.Status,
 		Conclusion: state.Conclusion,
 		Output: &checkRunOutput{
-			Title:   state.Title,
-			Summary: state.Summary,
-			Text:    state.Text,
+			Title:       state.Title,
+			Summary:     state.Summary,
+			Text:        state.Text,
+			Images:      state.Images,
+			Annotations: state.Annotations,
 		},
 	}
 	return c.doRequest(ctx, http.MethodPatch, path, payload, nil)

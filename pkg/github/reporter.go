@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -31,6 +32,7 @@ import (
 type ReporterOptions struct {
 	UIBaseURL          string
 	InconclusivePolicy string
+	Annotations        []CheckRunAnnotation
 }
 
 // Reporter handles posting Comparison results to a GitHub pull request and check run.
@@ -38,6 +40,7 @@ type Reporter struct {
 	Client             Client
 	UIBaseURL          string
 	InconclusivePolicy string
+	Annotations        []CheckRunAnnotation
 }
 
 // NewReporter creates a new GitHub Reporter.
@@ -50,6 +53,7 @@ func NewReporter(client Client, opts ReporterOptions) *Reporter {
 		Client:             client,
 		UIBaseURL:          opts.UIBaseURL,
 		InconclusivePolicy: policy,
+		Annotations:        opts.Annotations,
 	}
 }
 
@@ -69,6 +73,30 @@ func HashContent(markdown string, state CheckRunState) string {
 	h.Write([]byte(state.Text))
 	h.Write([]byte{0})
 	h.Write([]byte(state.DetailsURL))
+	for _, img := range state.Images {
+		h.Write([]byte{0})
+		h.Write([]byte(img.Alt))
+		h.Write([]byte{0})
+		h.Write([]byte(img.ImageURL))
+		h.Write([]byte{0})
+		h.Write([]byte(img.Caption))
+	}
+	for _, ann := range state.Annotations {
+		h.Write([]byte{0})
+		h.Write([]byte(ann.Path))
+		h.Write([]byte{0})
+		h.Write([]byte(strconv.Itoa(ann.StartLine)))
+		h.Write([]byte{0})
+		h.Write([]byte(strconv.Itoa(ann.EndLine)))
+		h.Write([]byte{0})
+		h.Write([]byte(ann.AnnotationLevel))
+		h.Write([]byte{0})
+		h.Write([]byte(ann.Message))
+		h.Write([]byte{0})
+		h.Write([]byte(ann.Title))
+		h.Write([]byte{0})
+		h.Write([]byte(ann.RawDetails))
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -88,8 +116,13 @@ func (r *Reporter) Report(ctx context.Context, comp *v1alpha1.Comparison, baseRu
 	}
 	owner, repo := parts[0], parts[1]
 
+	var crOpts []CheckRunOption
+	if len(r.Annotations) > 0 {
+		crOpts = append(crOpts, WithAnnotations(r.Annotations))
+	}
+
 	markdown := RenderComparisonMarkdown(comp, baseRun, candRun, r.UIBaseURL)
-	checkState := CheckRunStateForComparison(comp, baseRun, candRun, r.InconclusivePolicy, r.UIBaseURL)
+	checkState := CheckRunStateForComparison(comp, baseRun, candRun, r.InconclusivePolicy, r.UIBaseURL, crOpts...)
 	hash := HashContent(markdown, checkState)
 
 	commentID := int64(0)
