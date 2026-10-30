@@ -101,8 +101,12 @@ type RepoScores struct {
 // collectRepoObservations lists runs in namespace and builds RepoObservations for the repository and branch.
 // Enforces at most one List of Runs per request.
 func (s *Server) collectRepoObservations(ctx context.Context, ns string, ref RepoRef, branch string, cohort ...string) (*RepoObservations, error) {
+	reader := s.readerFor(ns)
+	if reader == nil {
+		return nil, fmt.Errorf("no kubernetes reader configured for namespace %q", ns)
+	}
 	var allRuns v1alpha1.RunList
-	if err := s.readerFor(ns).List(ctx, &allRuns, client.InNamespace(ns)); err != nil {
+	if err := reader.List(ctx, &allRuns, client.InNamespace(ns)); err != nil {
 		return nil, err
 	}
 	cFilter := ""
@@ -588,6 +592,43 @@ func (obs *RepoObservations) SuiteSparklineItems(suiteName string, sparklineComm
 			sItem.SuccessRate = &meanScore
 			sItem.CI = &ci
 			sItem.ObsCount = obsInSuite
+		}
+		items = append(items, sItem)
+	}
+	return items
+}
+
+// OverallSparklineItems generates series items pooled across all evals over the given sparkline commits.
+func (obs *RepoObservations) OverallSparklineItems(sparklineCommits []CommitEntry) []SeriesItem {
+	var items []SeriesItem
+	for _, sc := range sparklineCommits {
+		sItem := SeriesItem{
+			CommitSHA:      sc.SHA,
+			CommitSHAShort: ShortCommit(sc.SHA),
+			CommitTime:     sc.CommitTime,
+		}
+		var cTasks []stats.TaskCounts
+		for _, obsList := range obs.ByCommit {
+			for _, o := range obsList[sc.SHA] {
+				cTasks = append(cTasks, stats.TaskCounts{
+					Successes: o.Successes,
+					Samples:   o.Samples,
+				})
+			}
+		}
+		if len(cTasks) > 0 {
+			cEst := stats.PooledWilson(cTasks, 0.95)
+			p := cEst.Point
+			ci := v1alpha1.ConfidenceInterval{
+				Lower:      cEst.CI.Lower,
+				Upper:      cEst.CI.Upper,
+				Confidence: cEst.Confidence,
+				Method:     cEst.Method,
+			}
+			sItem.HasPoint = true
+			sItem.SuccessRate = &p
+			sItem.CI = &ci
+			sItem.ObsCount = len(cTasks)
 		}
 		items = append(items, sItem)
 	}

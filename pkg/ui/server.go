@@ -325,6 +325,9 @@ func (s *Server) routes() {
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{$}", s.handleRepoSeries)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/series/{branch...}", s.handleRepoSeries)
 	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/evals/{suite...}", s.handleRepoEvalSuiteDetail)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/badge.svg", s.handleRepoBadgeSVG)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/sparkline.svg", s.handleRepoSparklineSVG)
+	s.repoMux.HandleFunc("GET /{host}/{owner}/{repo}/badge.json", s.handleRepoBadgeJSON)
 }
 
 func (s *Server) handleRepoScoped(w http.ResponseWriter, r *http.Request) {
