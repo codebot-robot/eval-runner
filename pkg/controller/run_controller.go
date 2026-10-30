@@ -34,6 +34,7 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -269,6 +270,34 @@ type RunReconciler struct {
 	// ControllerVersion is the version or revision of the eval-runner controller.
 	// If empty, falls back to version.String().
 	ControllerVersion string
+
+	// GitHubTokenSecret is the name of a Secret containing a personal access token for GitHub reporting.
+	GitHubTokenSecret string
+
+	// GitHubAppSecret is the name of a Secret containing GitHub App credentials for check run reporting.
+	GitHubAppSecret string
+
+	// UIBaseURL is the base URL of the eval-runner UI for links in check runs.
+	UIBaseURL string
+
+	// GitHubBaseURL is an optional base URL override for the GitHub API (used in tests).
+	GitHubBaseURL string
+
+	// GitHubClientFactory creates a github.Client from credentials. If nil, uses default HTTP client.
+	GitHubClientFactory func(creds GitHubCredentials) github.Client
+
+	// GitHubClient overrides GitHub client creation (useful for testing).
+	GitHubClient github.Client
+
+	// HeadTopUpInterval is the interval between periodic head top-up Runs.
+	HeadTopUpInterval time.Duration
+
+	noCredsLoggedMu sync.Mutex
+	noCredsLogged   bool
+
+	cachedAppMu   sync.Mutex
+	cachedAppKey  string
+	cachedAppAuth *github.AppTokenProvider
 
 	pkiMu sync.Mutex
 
@@ -725,6 +754,10 @@ func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.ModelPrices = cfg.ModelPrices
 	r.ModelPriceSources = cfg.ModelPriceSources
 	r.ModelPricesDisabled = cfg.ModelPricesDisabled
+	r.GitHubTokenSecret = cfg.GitHubTokenSecret
+	r.GitHubAppSecret = cfg.GitHubAppSecret
+	r.UIBaseURL = cfg.UIBaseURL
+	r.HeadTopUpInterval = cfg.HeadTopUpInterval
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
@@ -991,7 +1024,14 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete leftover sandboxes for terminal run", "sandbox", sandboxName)
 		}
+		if err := r.reportBranchHeadTerminal(ctx, &run); err != nil {
+			logger.Error(err, "failed to report branch-head check run for terminal run", "run", run.Name)
+		}
 		return ctrl.Result{}, nil
+	}
+
+	if err := r.reportBranchHeadInProgress(ctx, &run); err != nil {
+		logger.Error(err, "failed to report branch head in-progress check run", "run", run.Name)
 	}
 
 	// Validate RunSpec constraints (mutual exclusivity of limit and sampleRange, valid range bounds).
