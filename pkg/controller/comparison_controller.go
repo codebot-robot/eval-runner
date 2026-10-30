@@ -855,7 +855,7 @@ func (r *ComparisonReconciler) reportToGitHub(
 	}
 
 	markdown := github.RenderComparisonMarkdown(comp, baseRun, candRun, r.uiBaseURL())
-	checkState := github.CheckRunStateForComparison(comp, baseRun, candRun, r.inconclusivePolicy())
+	checkState := github.CheckRunStateForComparison(comp, baseRun, candRun, r.inconclusivePolicy(), r.uiBaseURL())
 	hash := github.HashContent(markdown, checkState)
 
 	commentID := int64(0)
@@ -904,7 +904,8 @@ func (r *ComparisonReconciler) reportToGitHub(
 			State:       checkState.Conclusion,
 			Context:     checkState.Name,
 			Description: checkState.Summary,
-			TargetURL:   r.uiBaseURL(),
+			Text:        checkState.Text,
+			TargetURL:   checkState.DetailsURL,
 			CheckRunID:  checkRunID,
 		}
 		newCheckRunID, err := rep.SetStatus(ctx, repoRef, headSHA, st)
