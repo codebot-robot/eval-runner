@@ -258,3 +258,8 @@ type ArtifactSink interface {
 	// Close releases any resources held by the sink (e.g. underlying network connections or storage clients).
 	Close() error
 }
+
+// AccessChecker is implemented by storage sinks that support probing credential and storage accessibility.
+type AccessChecker interface {
+	CheckAccess(ctx context.Context) error
+}

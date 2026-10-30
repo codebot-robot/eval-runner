@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
@@ -32,6 +33,9 @@ import (
 const (
 	// DefaultMaxUploadBytes is the default cap on uploaded artifact size (10 MiB).
 	DefaultMaxUploadBytes int64 = 10 * 1024 * 1024
+
+	// DefaultMaxRetryDuration is the maximum duration for retrying GCS operations (60s).
+	DefaultMaxRetryDuration = 60 * time.Second
 )
 
 // StorageClient defines the interface for interacting with GCS.
@@ -39,11 +43,17 @@ type StorageClient interface {
 	WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error
 	WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, metadata map[string]string, data []byte) error
 	ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error)
+	CheckAccess(ctx context.Context, bucket string) error
 	Close() error
 }
 
 type realStorageClient struct {
 	client *storage.Client
+}
+
+func (c *realStorageClient) CheckAccess(ctx context.Context, bucket string) error {
+	_, err := c.client.Bucket(bucket).Attrs(ctx)
+	return err
 }
 
 func (c *realStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
@@ -101,6 +111,7 @@ type GCSSink struct {
 }
 
 var _ artifacts.ArtifactSink = (*GCSSink)(nil)
+var _ artifacts.AccessChecker = (*GCSSink)(nil)
 
 // Option configures GCSSink.
 type Option func(*GCSSink)
@@ -139,10 +150,22 @@ func New(ctx context.Context, bucket string, opts ...Option) (*GCSSink, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create GCS client: %w", err)
 		}
+		sc.SetRetry(storage.WithMaxRetryDuration(DefaultMaxRetryDuration))
 		sink.client = &realStorageClient{client: sc}
 	}
 
 	return sink, nil
+}
+
+// CheckAccess probes credentials and bucket access by querying Bucket.Attrs on the target bucket.
+func (s *GCSSink) CheckAccess(ctx context.Context) error {
+	if s.bucket == "" {
+		return fmt.Errorf("bucket name is empty")
+	}
+	if s.client == nil {
+		return fmt.Errorf("storage client is nil")
+	}
+	return s.client.CheckAccess(ctx, s.bucket)
 }
 
 // Bucket returns the target bucket name.
@@ -211,7 +234,7 @@ func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata,
 			return fmt.Sprintf("gs://%s/%s", s.bucket, manifestObject), nil
 		}
 	} else if !isObjectNotFound(err) {
-		return "", fmt.Errorf("failed to check existing manifest at gs://%s/%s: %w", s.bucket, manifestObject, err)
+		return "", fmt.Errorf("store manifest to gs://%s/%s: failed to check existing manifest: %w", s.bucket, manifestObject, err)
 	}
 
 	metaMap := map[string]string{
@@ -221,7 +244,7 @@ func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata,
 	}
 
 	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, manifestObject, "application/json", metaMap, data); err != nil {
-		return "", fmt.Errorf("failed to upload manifest to gs://%s/%s: %w", s.bucket, manifestObject, err)
+		return "", fmt.Errorf("store manifest to gs://%s/%s: %w", s.bucket, manifestObject, err)
 	}
 
 	return fmt.Sprintf("gs://%s/%s", s.bucket, manifestObject), nil
@@ -248,7 +271,7 @@ func (s *GCSSink) StoreComparison(ctx context.Context, comparisonName string, da
 
 	compObject := fmt.Sprintf("comparisons/%s.json", comparisonName)
 	if err := s.client.WriteObject(ctx, s.bucket, compObject, "application/json", uploadData); err != nil {
-		return "", fmt.Errorf("failed to upload comparison to gs://%s/%s: %w", s.bucket, compObject, err)
+		return "", fmt.Errorf("store comparison to gs://%s/%s: %w", s.bucket, compObject, err)
 	}
 
 	return fmt.Sprintf("gs://%s/%s", s.bucket, compObject), nil
@@ -297,7 +320,7 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 		if isObjectNotFound(err) {
 			return nil, fmt.Errorf("%w: failed to read artifact from gs://%s/%s: %v", artifacts.ErrNotFound, bucket, object, err)
 		}
-		return nil, fmt.Errorf("failed to read artifact from gs://%s/%s: %w", bucket, object, err)
+		return nil, fmt.Errorf("load artifact from gs://%s/%s: %w", bucket, object, err)
 	}
 
 	return data, nil
@@ -329,7 +352,7 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 
 	logObject := fmt.Sprintf("runs/%s/%s/%s", meta.Commit, meta.TaskID, filename)
 	if err := s.client.WriteObject(ctx, s.bucket, logObject, "application/json", uploadData); err != nil {
-		return "", fmt.Errorf("failed to upload inspect log to gs://%s/%s: %w", s.bucket, logObject, err)
+		return "", fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
 	}
 
 	sampleList := meta.Samples
@@ -379,7 +402,7 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 
 	summaryObject := fmt.Sprintf("runs/%s/%s/summary.json", meta.Commit, meta.TaskID)
 	if err := s.client.WriteObject(ctx, s.bucket, summaryObject, "application/json", summaryBytes); err != nil {
-		return "", fmt.Errorf("failed to upload summary.json to gs://%s/%s: %w", s.bucket, summaryObject, err)
+		return "", fmt.Errorf("store summary to gs://%s/%s: %w", s.bucket, summaryObject, err)
 	}
 
 	return fmt.Sprintf("gs://%s/%s", s.bucket, logObject), nil

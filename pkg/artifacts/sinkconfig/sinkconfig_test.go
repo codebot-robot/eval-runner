@@ -508,3 +508,40 @@ func TestWatchNamedObject_BookmarkAndError(t *testing.T) {
 		t.Fatal("timed out waiting for second watch RV")
 	}
 }
+
+func TestProbeArtifactSink(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("nil sink", func(t *testing.T) {
+		if err := ProbeArtifactSink(ctx, nil); err != nil {
+			t.Fatalf("expected nil for nil sink, got %v", err)
+		}
+	})
+
+	t.Run("in-memory sink", func(t *testing.T) {
+		mem := artifacts.NewInMemorySink()
+		if err := ProbeArtifactSink(ctx, mem); err != nil {
+			t.Fatalf("expected nil for in-memory sink, got %v", err)
+		}
+	})
+
+	t.Run("local dir sink", func(t *testing.T) {
+		dir := &artifacts.LocalDirSink{BaseDir: "/tmp"}
+		if err := ProbeArtifactSink(ctx, dir); err != nil {
+			t.Fatalf("expected nil for local dir sink, got %v", err)
+		}
+	})
+
+	t.Run("unavailable sink", func(t *testing.T) {
+		expectedErr := errors.New("metadata unreachable")
+		unavail := artifacts.NewUnavailableSink("my-bucket", expectedErr)
+		if err := ProbeArtifactSink(ctx, unavail); !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %v, got %v", expectedErr, err)
+		}
+
+		reloadable := artifacts.NewReloadableSink(unavail)
+		if err := ProbeArtifactSink(ctx, reloadable); !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %v from reloadable, got %v", expectedErr, err)
+		}
+	})
+}
