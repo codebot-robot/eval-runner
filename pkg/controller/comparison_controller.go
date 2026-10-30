@@ -858,11 +858,20 @@ func (r *ComparisonReconciler) reportToGitHub(
 	checkState := github.CheckRunStateForComparison(comp, baseRun, candRun, r.inconclusivePolicy(), r.uiBaseURL())
 	hash := github.HashContent(markdown, checkState)
 
+	headSHA := comp.Spec.PullRequest.HeadSHA
+	if headSHA == "" && candRun != nil {
+		headSHA = candRun.Spec.Repo.Commit
+	}
+
 	commentID := int64(0)
 	checkRunID := int64(0)
 	if comp.Status.Reporting != nil {
 		commentID = comp.Status.Reporting.CommentID
-		checkRunID = comp.Status.Reporting.CheckRunID
+		if comp.Status.Reporting.CheckRunIDs != nil && headSHA != "" {
+			checkRunID = comp.Status.Reporting.CheckRunIDs[headSHA]
+		} else {
+			checkRunID = comp.Status.Reporting.CheckRunID
+		}
 		if comp.Status.Reporting.LastPostedHash == hash && commentID != 0 {
 			// Idempotent: content has not changed
 			return nil
@@ -893,10 +902,6 @@ func (r *ComparisonReconciler) reportToGitHub(
 	}
 	comp.Status.Reporting.CommentID = commentID
 
-	headSHA := comp.Spec.PullRequest.HeadSHA
-	if headSHA == "" && candRun != nil {
-		headSHA = candRun.Spec.Repo.Commit
-	}
 	if headSHA != "" {
 		st := forge.Status{
 			Status:      checkState.Status,
@@ -925,6 +930,10 @@ func (r *ComparisonReconciler) reportToGitHub(
 			}
 		} else {
 			comp.Status.Reporting.CheckRunID = newCheckRunID
+			if comp.Status.Reporting.CheckRunIDs == nil {
+				comp.Status.Reporting.CheckRunIDs = make(map[string]int64)
+			}
+			comp.Status.Reporting.CheckRunIDs[headSHA] = newCheckRunID
 			comp.Status.Reporting.Message = ""
 		}
 	}
@@ -1183,53 +1192,60 @@ func (r *ComparisonReconciler) ensureBatchRun(
 	runName := fmt.Sprintf("%s-b%d-%s", comp.Name, batchIndex, roleSuffix)
 
 	var existingRun v1alpha1.Run
-	if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: runName}, &existingRun); apierrors.IsNotFound(err) {
-		spec := templateRun.Spec.DeepCopy()
-		spec.Tasks = tasks
-		spec.SampleRange = &window
-		spec.Limit = nil
+	err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: runName}, &existingRun)
+	if err == nil {
+		if existingRun.DeletionTimestamp != nil {
+			return "", fmt.Errorf("batch run %q is terminating: waiting for cleanup", runName)
+		}
+		return existingRun.Name, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("failed looking up existing batch run %q: %w", runName, err)
+	}
 
-		labels := map[string]string{
-			LabelComparison: comp.Name,
-			LabelBatch:      strconv.Itoa(batchIndex),
-			LabelRole:       role,
-		}
-		if role == RoleBaseline {
-			labels[LabelBatchKey] = ComputeBatchKey(templateRun.Spec.Repo.URL, templateRun.Spec.Repo.Commit, templateRun.Spec.Model, tasks, window)
-		}
-		// Copy target-repo, repo, pr, and head-sha labels from templateRun if present
-		for _, k := range []string{LabelTargetRepo, LabelRepo, LabelPR, LabelHeadSHA} {
-			if v, ok := templateRun.Labels[k]; ok && v != "" {
-				labels[k] = v
-			}
-		}
-		if _, ok := labels[LabelTargetRepo]; !ok && comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Repository != "" {
-			labels[LabelTargetRepo] = consumer.SanitizeLabelValue(comp.Spec.PullRequest.Repository)
-		}
+	spec := templateRun.Spec.DeepCopy()
+	spec.Tasks = tasks
+	spec.SampleRange = &window
+	spec.Limit = nil
 
-		clone := &v1alpha1.Run{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      runName,
-				Namespace: comp.Namespace,
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion:         v1alpha1.GroupVersion.String(),
-						Kind:               "Comparison",
-						Name:               comp.Name,
-						UID:                comp.UID,
-						Controller:         ptr.To(isController),
-						BlockOwnerDeletion: ptr.To(true),
-					},
+	labels := map[string]string{
+		LabelComparison: comp.Name,
+		LabelBatch:      strconv.Itoa(batchIndex),
+		LabelRole:       role,
+	}
+	if role == RoleBaseline {
+		labels[LabelBatchKey] = ComputeBatchKey(templateRun.Spec.Repo.URL, templateRun.Spec.Repo.Commit, templateRun.Spec.Model, tasks, window)
+	}
+	// Copy target-repo, repo, pr, and head-sha labels from templateRun if present
+	for _, k := range []string{LabelTargetRepo, LabelRepo, LabelPR, LabelHeadSHA} {
+		if v, ok := templateRun.Labels[k]; ok && v != "" {
+			labels[k] = v
+		}
+	}
+	if _, ok := labels[LabelTargetRepo]; !ok && comp.Spec.PullRequest != nil && comp.Spec.PullRequest.Repository != "" {
+		labels[LabelTargetRepo] = consumer.SanitizeLabelValue(comp.Spec.PullRequest.Repository)
+	}
+
+	clone := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: comp.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         v1alpha1.GroupVersion.String(),
+					Kind:               "Comparison",
+					Name:               comp.Name,
+					UID:                comp.UID,
+					Controller:         ptr.To(isController),
+					BlockOwnerDeletion: ptr.To(true),
 				},
-				Labels: labels,
 			},
-			Spec: *spec,
-		}
-		if err := r.Create(ctx, clone); err != nil && !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("failed to create %s batch run: %w", role, err)
-		}
-	} else if err != nil {
-		return "", fmt.Errorf("failed looking up %s run %q: %w", role, runName, err)
+			Labels: labels,
+		},
+		Spec: *spec,
+	}
+	if err := r.Create(ctx, clone); err != nil && !apierrors.IsAlreadyExists(err) {
+		return "", fmt.Errorf("failed to create %s batch run: %w", role, err)
 	}
 
 	return runName, nil
@@ -1698,6 +1714,114 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		return ctrl.Result{}, nil
 	}
 
+	// Detect if candidate or baseline Run changed compared to what status was computed from.
+	// If so, reset scoring state and start over for the new candidate/baseline.
+	observedCandidate := comp.Status.ObservedCandidateRun
+	if observedCandidate == "" && len(comp.Status.Batches) > 0 {
+		observedCandidate = comp.Status.Batches[0].CandidateRun
+	}
+	observedBaseline := comp.Status.ObservedBaselineRun
+	if observedBaseline == "" && len(comp.Status.Batches) > 0 {
+		observedBaseline = comp.Status.Batches[0].BaselineRun
+	}
+
+	candChanged := observedCandidate != "" && comp.Spec.Candidate.Run != "" && comp.Spec.Candidate.Run != observedCandidate
+	baseChanged := observedBaseline != "" && comp.Spec.Baseline.Run != "" && comp.Spec.Baseline.Run != observedBaseline
+
+	if candChanged || baseChanged {
+		logger.Info("candidate or baseline Run changed; resetting comparison scoring state",
+			"comparison", comp.Name,
+			"oldCandidate", observedCandidate, "newCandidate", comp.Spec.Candidate.Run,
+			"oldBaseline", observedBaseline, "newBaseline", comp.Spec.Baseline.Run,
+		)
+
+		// 1. Clean up any subsequent batch runs from the previous candidate
+		var batchRuns v1alpha1.RunList
+		if err := r.List(ctx, &batchRuns, client.InNamespace(comp.Namespace), client.MatchingLabels{LabelComparison: comp.Name}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed listing batch runs for comparison %s: %w", comp.Name, err)
+		}
+		for i := range batchRuns.Items {
+			rItem := &batchRuns.Items[i]
+			if rItem.DeletionTimestamp != nil {
+				continue
+			}
+			role := rItem.Labels[LabelRole]
+			if role == RoleCandidate || (baseChanged && role == RoleBaseline) {
+				if err := r.Delete(ctx, rItem); err != nil && !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("failed deleting old batch run %s: %w", rItem.Name, err)
+				}
+			}
+		}
+
+		// 2. Derive short SHA for re-running headline
+		var bRun, cRun *v1alpha1.Run
+		var bRunObj, cRunObj v1alpha1.Run
+		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Baseline.Run}, &bRunObj); err == nil {
+			bRun = &bRunObj
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed looking up baseline run %s: %w", comp.Spec.Baseline.Run, err)
+		}
+
+		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Candidate.Run}, &cRunObj); err == nil {
+			cRun = &cRunObj
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed looking up candidate run %s: %w", comp.Spec.Candidate.Run, err)
+		}
+
+		headSHA := ""
+		if comp.Spec.PullRequest != nil {
+			headSHA = comp.Spec.PullRequest.HeadSHA
+		}
+		if headSHA == "" && cRun != nil && cRun.Spec.Repo.Commit != "" {
+			headSHA = cRun.Spec.Repo.Commit
+		}
+		shortSHA := headSHA
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		reRunMsg := "re-running"
+		if shortSHA != "" {
+			reRunMsg = fmt.Sprintf("re-running for `%s`", shortSHA)
+		}
+
+		// 3. Reset scoring state and immediately report to GitHub (posting an in-progress check run
+		// on the new head SHA and editing the PR comment in place with the re-running headline).
+		if _, err := r.updateComparisonStatus(ctx, &comp, bRun, cRun, func(status *v1alpha1.ComparisonStatus) {
+			status.Phase = v1alpha1.ComparisonPhaseRunning
+			status.CompletionTime = nil
+			status.Verdict = v1alpha1.ComparisonVerdictRunning
+			status.Summary = nil
+			status.Batches = nil
+			status.Tasks = nil
+			status.ExtraSamplesApplied = 0
+			status.CostUSD = nil
+			status.PossibleSamples = 0
+			status.PImprovement = nil
+			status.SummaryPath = ""
+			status.Conditions = nil
+			status.Message = reRunMsg
+			status.ObservedCandidateRun = comp.Spec.Candidate.Run
+			status.ObservedBaselineRun = comp.Spec.Baseline.Run
+			status.ObservedGeneration = comp.Generation
+			if status.Reporting != nil {
+				status.Reporting.LastPostedHash = ""
+				if candChanged {
+					status.Reporting.CheckRunID = 0
+					if headSHA != "" && status.Reporting.CheckRunIDs != nil {
+						delete(status.Reporting.CheckRunIDs, headSHA)
+					}
+				}
+			}
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed resetting comparison status for %s: %w", comp.Name, err)
+		}
+
+		// Re-fetch comp to continue with the fresh state
+		if err := r.Get(ctx, req.NamespacedName, &comp); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Process pending review comment commands (e.g. /eval more <n>)
 	if len(comp.Status.PendingCommands) > 0 {
 		if err := r.processPendingCommands(ctx, &comp); err != nil {
@@ -1807,6 +1931,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			missing = append(missing, fmt.Sprintf("candidate run %q", comp.Spec.Candidate.Run))
 		}
 		msg := fmt.Sprintf("Waiting for %s to be created", strings.Join(missing, " and "))
+		if strings.HasPrefix(comp.Status.Message, "re-running") {
+			msg = fmt.Sprintf("%s; %s", comp.Status.Message, msg)
+		}
 		return r.updateComparisonStatus(ctx, &comp, nil, nil, func(status *v1alpha1.ComparisonStatus) {
 			status.Phase = v1alpha1.ComparisonPhaseRunning
 			status.CompletionTime = nil
@@ -1850,6 +1977,9 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			}
 			break
 		}
+		if cRun.DeletionTimestamp != nil {
+			break
+		}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseName}, &bRun); err != nil {
 			if !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("failed looking up batch run %q: %w", baseName, err)
@@ -1867,6 +1997,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 					}
 				}
 			}
+		} else if bRun.DeletionTimestamp != nil {
+			break
 		}
 		batches = append(batches, v1alpha1.ComparisonBatchStatus{
 			Index:        k,
@@ -2066,7 +2198,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 
 		msg := "Runs are still executing"
-		if comp.Status.Message != "" && (strings.HasPrefix(comp.Status.Message, "Running batch") || strings.HasPrefix(comp.Status.Message, "Running extra batch")) {
+		if comp.Status.Message != "" && (strings.HasPrefix(comp.Status.Message, "Running batch") || strings.HasPrefix(comp.Status.Message, "Running extra batch") || strings.HasPrefix(comp.Status.Message, "re-running")) {
 			msg = comp.Status.Message
 		} else if len(batches) > 1 && runningBatchIndex > 0 {
 			msg = fmt.Sprintf("Running batch %d (%d tasks continuing)", runningBatchIndex, len(runningTasks))
@@ -3633,6 +3765,13 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 	if latest.Status.Phase == v1alpha1.ComparisonPhaseRunning {
 		latest.Status.CompletionTime = nil
 	}
+	if latest.Status.ObservedCandidateRun == "" && latest.Spec.Candidate.Run != "" {
+		latest.Status.ObservedCandidateRun = latest.Spec.Candidate.Run
+	}
+	if latest.Status.ObservedBaselineRun == "" && latest.Spec.Baseline.Run != "" {
+		latest.Status.ObservedBaselineRun = latest.Spec.Baseline.Run
+	}
+	latest.Status.ObservedGeneration = latest.Generation
 
 	// 2. Perform GitHub reporting ONCE outside the RetryOnConflict loop
 	var reportErr error
@@ -3653,6 +3792,13 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 		if current.Status.Phase == v1alpha1.ComparisonPhaseRunning {
 			current.Status.CompletionTime = nil
 		}
+		if current.Status.ObservedCandidateRun == "" && current.Spec.Candidate.Run != "" {
+			current.Status.ObservedCandidateRun = current.Spec.Candidate.Run
+		}
+		if current.Status.ObservedBaselineRun == "" && current.Spec.Baseline.Run != "" {
+			current.Status.ObservedBaselineRun = current.Spec.Baseline.Run
+		}
+		current.Status.ObservedGeneration = current.Generation
 		if latest.Spec.PullRequest != nil {
 			current.Status.Reporting = reportingStatus.DeepCopy()
 		}
