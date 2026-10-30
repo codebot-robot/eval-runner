@@ -16,30 +16,232 @@ package github
 
 import (
 	"fmt"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/affinity"
+	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"github.com/gke-labs/eval-runner/pkg/forge"
 	"github.com/gke-labs/eval-runner/pkg/ui"
 )
 
 // CheckRunName is the standardized check run name for eval verdicts.
 const CheckRunName = "eval-runner / evals"
 
+// CheckRunImage represents an image attached to a check run.
+type CheckRunImage = forge.CheckRunImage
+
+// CheckRunAnnotation represents a file annotation on a check run.
+type CheckRunAnnotation = forge.CheckRunAnnotation
+
+// TaskSampleFailure records a failing sample for an evaluation task.
+type TaskSampleFailure struct {
+	SampleID string
+	Score    float64
+}
+
 // CheckRunState represents the payload state of a GitHub Check Run.
 type CheckRunState struct {
-	Name       string
-	Status     string // "in_progress" or "completed"
-	Conclusion string // "success", "neutral", "failure", or "" (when in_progress)
-	Title      string // short state summary
-	Summary    string // detailed summary text
-	Text       string // technical details text (e.g. collapsed error details)
-	DetailsURL string // URL of the details page
+	Name        string
+	Status      string // "in_progress" or "completed"
+	Conclusion  string // "success", "neutral", "failure", or "" (when in_progress)
+	Title       string // short state summary
+	Summary     string // detailed summary text
+	Text        string // technical details text (e.g. collapsed error details)
+	DetailsURL  string // URL of the details page
+	Images      []CheckRunImage
+	Annotations []CheckRunAnnotation
+}
+
+// CheckRunOption configures CheckRunStateForComparison.
+type CheckRunOption func(*checkRunOptions)
+
+type checkRunOptions struct {
+	annotations []CheckRunAnnotation
+}
+
+// WithAnnotations sets the annotations for the check run.
+func WithAnnotations(annotations []CheckRunAnnotation) CheckRunOption {
+	return func(o *checkRunOptions) {
+		o.annotations = annotations
+	}
+}
+
+// BuildCheckRunImages builds the images array for a Check Run:
+//   - PR comparisons: repo-scoped sparkline for the base branch:
+//     {uiBaseURL}/{host}/{owner}/{repo}/sparkline.svg?branch=<base>&w=600&h=80, caption "<base>, last 20 commits".
+//   - When the comparison table has <= 3 tasks (and > 0), one image per task with ?eval= is also emitted
+//     with caption "<taskID> (<base>, last 20 commits)".
+//
+// Returns nil if uiBaseURL is empty or repo identity cannot be resolved.
+func BuildCheckRunImages(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, uiBaseURL string) []CheckRunImage {
+	if comp == nil || strings.TrimSpace(uiBaseURL) == "" {
+		return nil
+	}
+	repoRef, ok := ui.ComparisonRepoRef(comp, baseRun, candRun)
+	if !ok || repoRef.Host == "" || repoRef.Owner == "" || repoRef.Name == "" {
+		return nil
+	}
+
+	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+
+	baseBranch := "main"
+	if baseRun != nil && baseRun.Labels != nil && baseRun.Labels[configkeys.LabelBranch] != "" {
+		baseBranch = baseRun.Labels[configkeys.LabelBranch]
+	} else if comp.Labels != nil && comp.Labels[configkeys.LabelBranch] != "" {
+		baseBranch = comp.Labels[configkeys.LabelBranch]
+	}
+
+	caption := fmt.Sprintf("%s, last 20 commits", baseBranch)
+
+	overallURL := fmt.Sprintf("%s%s/sparkline.svg?branch=%s&w=600&h=80",
+		trimmedUIBaseURL, repoRef.Path(), url.QueryEscape(baseBranch))
+	images := []CheckRunImage{
+		{
+			Alt:      caption,
+			ImageURL: overallURL,
+			Caption:  caption,
+		},
+	}
+
+	rows := ui.ComparisonRowsWithRuns(comp, baseRun, candRun, repoRef, "")
+	if len(rows) > 0 && len(rows) <= 3 {
+		for _, row := range rows {
+			imgURL := fmt.Sprintf("%s%s/sparkline.svg?branch=%s&eval=%s&w=600&h=80",
+				trimmedUIBaseURL, repoRef.Path(), url.QueryEscape(baseBranch), url.QueryEscape(row.ID))
+			taskCaption := fmt.Sprintf("%s (%s, last 20 commits)", row.ID, baseBranch)
+			images = append(images, CheckRunImage{
+				Alt:      row.ID,
+				ImageURL: imgURL,
+				Caption:  taskCaption,
+			})
+		}
+	}
+
+	return images
+}
+
+// HasGlobMeta reports whether pattern contains any glob metacharacters (*, ?, [, {).
+func HasGlobMeta(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?[{")
+}
+
+// ResolveTaskFilePaths matches declared task path globs against changed files.
+// If changedFiles is non-empty, it returns all changed files that match any declared glob pattern.
+// If changedFiles is empty, it returns only declared paths that are concrete file paths (contain no glob metacharacters).
+func ResolveTaskFilePaths(taskPaths []string, changedFiles []string) []string {
+	if len(taskPaths) == 0 {
+		return nil
+	}
+	if len(changedFiles) > 0 {
+		var matched []string
+		seen := make(map[string]bool)
+		for _, f := range changedFiles {
+			normFile := affinity.Normalize(f)
+			for _, pat := range taskPaths {
+				normPat := affinity.Normalize(pat)
+				m, err := doublestar.Match(normPat, normFile)
+				if err == nil && m {
+					if !seen[normFile] {
+						seen[normFile] = true
+						matched = append(matched, f)
+					}
+					break
+				}
+			}
+		}
+		return matched
+	}
+
+	// No changed files provided: keep only literal concrete file paths without glob metacharacters.
+	var concrete []string
+	for _, p := range taskPaths {
+		if !HasGlobMeta(p) {
+			concrete = append(concrete, p)
+		}
+	}
+	return concrete
+}
+
+// BuildCheckRunAnnotationsFromFailures emits up to 50 notice-level annotations on the task's
+// resolved paths with the sample id and score, so the Files tab of the PR shows where the evals point.
+// Skip when resolved paths is empty.
+func BuildCheckRunAnnotationsFromFailures(tasks []v1alpha1.ManifestTask, changedFiles []string, failures map[string][]TaskSampleFailure) []CheckRunAnnotation {
+	if len(tasks) == 0 || len(failures) == 0 {
+		return nil
+	}
+
+	var annotations []CheckRunAnnotation
+	for _, task := range tasks {
+		resolvedPaths := ResolveTaskFilePaths(task.Paths, changedFiles)
+		if len(resolvedPaths) == 0 {
+			continue
+		}
+		taskFailures, ok := failures[task.ID]
+		if !ok || len(taskFailures) == 0 {
+			continue
+		}
+		for _, failure := range taskFailures {
+			if failure.Score >= 1.0 {
+				continue
+			}
+			for _, p := range resolvedPaths {
+				if len(annotations) >= 50 {
+					return annotations
+				}
+				annotations = append(annotations, CheckRunAnnotation{
+					Path:            p,
+					StartLine:       1,
+					EndLine:         1,
+					AnnotationLevel: "notice",
+					Title:           task.ID,
+					Message:         fmt.Sprintf("sample %s: score %.2f", failure.SampleID, failure.Score),
+				})
+			}
+		}
+	}
+	return annotations
+}
+
+// BuildCheckRunAnnotations extracts sample-level failures from task Inspect logs and emits
+// up to 50 notice-level annotations on the task's resolved paths.
+func BuildCheckRunAnnotations(tasks []v1alpha1.ManifestTask, changedFiles []string, taskLogs map[string][]byte) []CheckRunAnnotation {
+	if len(tasks) == 0 || len(taskLogs) == 0 {
+		return nil
+	}
+
+	failures := make(map[string][]TaskSampleFailure)
+	for _, task := range tasks {
+		resolvedPaths := ResolveTaskFilePaths(task.Paths, changedFiles)
+		if len(resolvedPaths) == 0 {
+			continue
+		}
+		logBytes, ok := taskLogs[task.ID]
+		if !ok || len(logBytes) == 0 {
+			continue
+		}
+		scores, err := artifacts.ParseInspectSampleScores(logBytes)
+		if err != nil {
+			continue
+		}
+		for _, s := range scores {
+			if s.Score < 1.0 {
+				failures[task.ID] = append(failures[task.ID], TaskSampleFailure{
+					SampleID: s.ID,
+					Score:    s.Score,
+				})
+			}
+		}
+	}
+	return BuildCheckRunAnnotationsFromFailures(tasks, changedFiles, failures)
 }
 
 // ComparisonWebPath returns the web path for a Comparison:
@@ -224,7 +426,7 @@ func taskLabelCounts(comp *v1alpha1.Comparison) string {
 
 // CheckRunStateForComparison maps a Comparison and its candidate/baseline Runs
 // to the CheckRunState for the "eval-runner / evals" check run across all 5 verdicts.
-func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, inconclusivePolicy string, uiBaseURL string) CheckRunState {
+func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, inconclusivePolicy string, uiBaseURL string, extraOpts ...CheckRunOption) CheckRunState {
 	state := CheckRunState{
 		Name: CheckRunName,
 	}
@@ -235,13 +437,25 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 		return state
 	}
 
+	var opts checkRunOptions
+	for _, opt := range extraOpts {
+		if opt != nil {
+			opt(&opts)
+		}
+	}
+
+	state.Annotations = opts.annotations
+	state.Images = BuildCheckRunImages(comp, baseRun, candRun, uiBaseURL)
+	state.Text = RenderCheckRunText(comp, baseRun, candRun, uiBaseURL)
+	state.DetailsURL = CheckRunDetailsURL(comp, uiBaseURL, baseRun, candRun)
+
 	policy := configkeys.InconclusivePolicyNeutral
 	if inconclusivePolicy != "" {
 		policy = strings.ToLower(strings.TrimSpace(inconclusivePolicy))
 	}
 
 	if IsScoringFailure(comp) {
-		headline, techErr := ScoringFailureDetails(comp, baseRun, candRun)
+		headline, _ := ScoringFailureDetails(comp, baseRun, candRun)
 		state.Status = "completed"
 		if policy == configkeys.InconclusivePolicyFailure {
 			state.Conclusion = "failure"
@@ -250,8 +464,6 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 		}
 		state.Title = headline
 		state.Summary = headline
-		state.Text = techErr
-		state.DetailsURL = CheckRunDetailsURL(comp, uiBaseURL, baseRun, candRun)
 		return state
 	}
 

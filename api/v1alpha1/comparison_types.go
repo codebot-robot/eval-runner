@@ -401,6 +401,15 @@ type ComparisonReportingStatus struct {
 	// If nil or in the past, reporting is eligible immediately.
 	// +optional
 	NextAttemptAt *metav1.Time `json:"nextAttemptAt,omitempty"`
+
+	// AnnotationsPosted indicates whether sample failure annotations have already been posted to the check run.
+	// GitHub appends annotations on each check run update, so they are only posted once when the comparison completes.
+	// +optional
+	AnnotationsPosted bool `json:"annotationsPosted,omitempty"`
+
+	// AnnotationsHash is the hash of the annotations posted to the check run.
+	// +optional
+	AnnotationsHash string `json:"annotationsHash,omitempty"`
 }
 
 const (

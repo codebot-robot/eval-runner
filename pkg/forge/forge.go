@@ -110,14 +110,36 @@ type Commit struct {
 	Title   string    `json:"title"`
 }
 
+// CheckRunImage represents an image attached to a check run.
+type CheckRunImage struct {
+	Alt      string `json:"alt"`
+	ImageURL string `json:"image_url"`
+	Caption  string `json:"caption,omitempty"`
+}
+
+// CheckRunAnnotation represents a file annotation on a check run.
+type CheckRunAnnotation struct {
+	Path            string `json:"path"`
+	StartLine       int    `json:"start_line"`
+	EndLine         int    `json:"end_line"`
+	StartColumn     *int   `json:"start_column,omitempty"`
+	EndColumn       *int   `json:"end_column,omitempty"`
+	AnnotationLevel string `json:"annotation_level"` // "notice", "warning", "failure"
+	Message         string `json:"message"`
+	Title           string `json:"title,omitempty"`
+	RawDetails      string `json:"raw_details,omitempty"`
+}
+
 // Status represents a commit status check or check run posted back to a forge.
 type Status struct {
-	Status      string `json:"status,omitempty"`
-	Conclusion  string `json:"conclusion,omitempty"`
-	State       string `json:"state,omitempty"`
-	Context     string `json:"context"`
-	Description string `json:"description"`
-	Text        string `json:"text,omitempty"`
-	TargetURL   string `json:"target_url"`
-	CheckRunID  int64  `json:"check_run_id,omitempty"`
+	Status      string               `json:"status,omitempty"`
+	Conclusion  string               `json:"conclusion,omitempty"`
+	State       string               `json:"state,omitempty"`
+	Context     string               `json:"context"`
+	Description string               `json:"description"`
+	Text        string               `json:"text,omitempty"`
+	TargetURL   string               `json:"target_url"`
+	CheckRunID  int64                `json:"check_run_id,omitempty"`
+	Images      []CheckRunImage      `json:"images,omitempty"`
+	Annotations []CheckRunAnnotation `json:"annotations,omitempty"`
 }

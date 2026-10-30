@@ -117,3 +117,8 @@ const (
 	// AffinityModePrune drops unmatched tasks from evaluation.
 	AffinityModePrune = "prune"
 )
+
+const (
+	// LabelBranch tracks the branch name on created baseline Runs and Comparisons.
+	LabelBranch = "evalrunner.gke-labs.dev/branch"
+)

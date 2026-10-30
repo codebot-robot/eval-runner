@@ -3204,8 +3204,17 @@ func TestCheckRunStateForComparison_ScoringFailure(t *testing.T) {
 		t.Errorf("state.Summary = %q, want %q", state.Summary, wantHeadline)
 	}
 	wantText := `failed to load baseline log for task "triage/lookup" (inspect.json): artifact not found: open inspect.json: no such file or directory`
-	if state.Text != wantText {
-		t.Errorf("state.Text = %q, want %q", state.Text, wantText)
+	if !strings.Contains(state.Text, wantText) {
+		t.Errorf("state.Text expected to contain %q, got %q", wantText, state.Text)
+	}
+	if !strings.Contains(state.Text, "<details>") {
+		t.Errorf("state.Text expected to contain collapsed details, got %q", state.Text)
+	}
+	if !strings.Contains(state.Text, "| eval |") {
+		t.Errorf("state.Text expected to contain table, got %q", state.Text)
+	}
+	if strings.Contains(state.Text, "/comparisons/eval-runner") || strings.Contains(state.Text, "/runs/eval-runner") {
+		t.Errorf("expected no namespaced paths in state.Text, got %q", state.Text)
 	}
 	if strings.Contains(state.Title, "/tmp/") || strings.Contains(state.Summary, "/tmp/") || strings.Contains(state.Text, "/tmp/") {
 		t.Errorf("expected no '/tmp/' in check run state: %+v", state)
@@ -3413,8 +3422,14 @@ func TestReporter_ScoringFailureAndDetailsURL(t *testing.T) {
 		t.Errorf("cr.Summary = %q, want %q", cr.Summary, wantHeadline)
 	}
 	wantText := `failed to load baseline log for task "triage/lookup" (inspect.json): artifact not found: storage: object doesn't exist`
-	if cr.Text != wantText {
-		t.Errorf("cr.Text = %q, want %q", cr.Text, wantText)
+	if !strings.Contains(cr.Text, wantText) {
+		t.Errorf("cr.Text expected to contain %q, got %q", wantText, cr.Text)
+	}
+	if !strings.Contains(cr.Text, "<details>") {
+		t.Errorf("cr.Text expected to contain collapsed details, got %q", cr.Text)
+	}
+	if !strings.Contains(cr.Text, "| eval |") {
+		t.Errorf("cr.Text expected to contain table, got %q", cr.Text)
 	}
 	if strings.Contains(cr.Title, "gs://") || strings.Contains(cr.Summary, "gs://") || strings.Contains(cr.Text, "gs://") {
 		t.Errorf("expected no 'gs://' in check run output, got %+v", cr)
@@ -3442,5 +3457,521 @@ func TestReporter_ScoringFailureAndDetailsURL(t *testing.T) {
 	}
 	if strings.Contains(c.Body, "/comparisons/eval-runner") || strings.Contains(c.Body, "/runs/eval-runner") {
 		t.Errorf("expected no namespaced paths in comment body, got:\n%s", c.Body)
+	}
+}
+
+func TestCheckRunState_RichOutput(t *testing.T) {
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "comp-rich-test",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     425,
+				HeadSHA:    "3f9c2e1b",
+				BaseSHA:    "a81d0c4e",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictImproved,
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{
+					ID:     "docs/readme",
+					Label:  v1alpha1.ComparisonTaskLabelImproved,
+					Pairs:  10,
+					Wins:   8,
+					Losses: 1,
+					Ties:   1,
+				},
+				{
+					ID:     "triage/lookup",
+					Label:  v1alpha1.ComparisonTaskLabelUnchanged,
+					Pairs:  10,
+					Wins:   5,
+					Losses: 5,
+					Ties:   0,
+				},
+			},
+		},
+	}
+	candRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "cand-run-3f9c2e1",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "3f9c2e1b",
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "base-run-a81d0c4",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "a81d0c4e",
+			},
+		},
+	}
+
+	// 1. With uiBaseURL
+	stateWithUI := CheckRunStateForComparison(comp, baseRun, candRun, "", "https://eval.example.com")
+
+	// Table assertions
+	if !strings.Contains(stateWithUI.Text, "| eval | base | this PR |") {
+		t.Errorf("expected state.Text to contain table header, got:\n%s", stateWithUI.Text)
+	}
+	if !strings.Contains(stateWithUI.Text, "docs/readme") || !strings.Contains(stateWithUI.Text, "triage/lookup") {
+		t.Errorf("expected state.Text to contain task rows, got:\n%s", stateWithUI.Text)
+	}
+	if !strings.Contains(stateWithUI.Text, "[web view](https://eval.example.com/github.com/gke-labs/eval-runner/pulls/425)") {
+		t.Errorf("expected state.Text to contain web view link, got:\n%s", stateWithUI.Text)
+	}
+	if !strings.Contains(stateWithUI.Text, "[trajectories](https://eval.example.com/github.com/gke-labs/eval-runner/runs/cand-run-3f9c2e1/tasks)") {
+		t.Errorf("expected state.Text to contain trajectories link, got:\n%s", stateWithUI.Text)
+	}
+	if strings.Contains(stateWithUI.Text, "/comparisons/eval-runner") || strings.Contains(stateWithUI.Text, "/runs/eval-runner") {
+		t.Errorf("expected no legacy namespaced routes in state.Text, got:\n%s", stateWithUI.Text)
+	}
+	if strings.Contains(stateWithUI.Text, "/tmp/") || strings.Contains(stateWithUI.Text, "gs://") {
+		t.Errorf("expected no internal paths in state.Text, got:\n%s", stateWithUI.Text)
+	}
+
+	// Images assertions: 2 tasks (<= 3 tasks) -> overall sparkline + one image per task with ?eval=
+	if len(stateWithUI.Images) != 3 {
+		t.Fatalf("expected 3 images (overall + 2 tasks), got %d", len(stateWithUI.Images))
+	}
+	wantOverallURL := "https://eval.example.com/github.com/gke-labs/eval-runner/sparkline.svg?branch=main&w=600&h=80"
+	wantImg0URL := "https://eval.example.com/github.com/gke-labs/eval-runner/sparkline.svg?branch=main&eval=docs%2Freadme&w=600&h=80"
+	wantImg1URL := "https://eval.example.com/github.com/gke-labs/eval-runner/sparkline.svg?branch=main&eval=triage%2Flookup&w=600&h=80"
+	if stateWithUI.Images[0].ImageURL != wantOverallURL {
+		t.Errorf("Images[0].ImageURL = %q, want %q", stateWithUI.Images[0].ImageURL, wantOverallURL)
+	}
+	if stateWithUI.Images[0].Caption != "main, last 20 commits" {
+		t.Errorf("Images[0].Caption = %q, want 'main, last 20 commits'", stateWithUI.Images[0].Caption)
+	}
+	if stateWithUI.Images[1].ImageURL != wantImg0URL {
+		t.Errorf("Images[1].ImageURL = %q, want %q", stateWithUI.Images[1].ImageURL, wantImg0URL)
+	}
+	if stateWithUI.Images[1].Caption != "docs/readme (main, last 20 commits)" {
+		t.Errorf("Images[1].Caption = %q, want 'docs/readme (main, last 20 commits)'", stateWithUI.Images[1].Caption)
+	}
+	if stateWithUI.Images[2].ImageURL != wantImg1URL {
+		t.Errorf("Images[2].ImageURL = %q, want %q", stateWithUI.Images[2].ImageURL, wantImg1URL)
+	}
+	if stateWithUI.Images[2].Caption != "triage/lookup (main, last 20 commits)" {
+		t.Errorf("Images[2].Caption = %q, want 'triage/lookup (main, last 20 commits)'", stateWithUI.Images[2].Caption)
+	}
+
+	// 2. Without uiBaseURL: images omitted
+	stateWithoutUI := CheckRunStateForComparison(comp, baseRun, candRun, "", "")
+	if len(stateWithoutUI.Images) != 0 {
+		t.Errorf("expected Images to be omitted when uiBaseURL is empty, got %+v", stateWithoutUI.Images)
+	}
+	if strings.Contains(stateWithoutUI.Text, "[web view]") {
+		t.Errorf("unexpected '[web view]' link when uiBaseURL is empty in state.Text")
+	}
+}
+
+func TestCheckRunState_SparklineOverallFourTasks(t *testing.T) {
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "comp-4tasks",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     425,
+				HeadSHA:    "3f9c2e1b",
+				BaseSHA:    "a81d0c4e",
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictUnchanged,
+			Tasks: []v1alpha1.ComparisonTaskStatus{
+				{ID: "task1", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+				{ID: "task2", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+				{ID: "task3", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+				{ID: "task4", Label: v1alpha1.ComparisonTaskLabelUnchanged},
+			},
+		},
+	}
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "base-run",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/branch": "release-2.0",
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: "a81d0c4e",
+			},
+		},
+	}
+
+	state := CheckRunStateForComparison(comp, baseRun, nil, "", "https://eval.example.com")
+	if len(state.Images) != 1 {
+		t.Fatalf("expected 1 overall image for >3 tasks, got %d", len(state.Images))
+	}
+	wantURL := "https://eval.example.com/github.com/gke-labs/eval-runner/sparkline.svg?branch=release-2.0&w=600&h=80"
+	if state.Images[0].ImageURL != wantURL {
+		t.Errorf("Images[0].ImageURL = %q, want %q", state.Images[0].ImageURL, wantURL)
+	}
+	wantCaption := "release-2.0, last 20 commits"
+	if state.Images[0].Caption != wantCaption {
+		t.Errorf("Images[0].Caption = %q, want %q", state.Images[0].Caption, wantCaption)
+	}
+}
+
+func TestCheckRunText_TruncationAtRowBoundary(t *testing.T) {
+	var tasks []v1alpha1.ComparisonTaskStatus
+	for i := 0; i < 1500; i++ {
+		tasks = append(tasks, v1alpha1.ComparisonTaskStatus{
+			ID:     fmt.Sprintf("suite/subsystem_evaluation_task_long_name_%04d", i),
+			Label:  v1alpha1.ComparisonTaskLabelUnchanged,
+			Pairs:  32,
+			Wins:   16,
+			Losses: 16,
+			Ties:   0,
+		})
+	}
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      "comp-huge",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     425,
+			},
+		},
+		Status: v1alpha1.ComparisonStatus{
+			Verdict: v1alpha1.ComparisonVerdictUnchanged,
+			Tasks:   tasks,
+		},
+	}
+
+	text := RenderCheckRunText(comp, nil, nil, "https://eval.example.com")
+	if len(text) > MaxCheckRunTextBytes {
+		t.Errorf("len(text) = %d, expected <= %d", len(text), MaxCheckRunTextBytes)
+	}
+	if !strings.Contains(text, "more rows (see web view)") {
+		t.Errorf("expected text to contain truncation marker 'more rows (see web view)', got:\n%s", text)
+	}
+	if !strings.Contains(text, "… ") {
+		t.Errorf("expected truncation marker to use ellipsis character '…', got:\n%s", text)
+	}
+	if !strings.Contains(text, "[web view](https://eval.example.com/github.com/gke-labs/eval-runner/pulls/425)") {
+		t.Errorf("expected footer with web view link to be retained after truncation")
+	}
+}
+
+func TestBuildCheckRunAnnotations(t *testing.T) {
+	manifestTasks := []v1alpha1.ManifestTask{
+		{
+			ID:    "docs/readme",
+			Spec:  "eval.py@docs",
+			Paths: []string{"docs/readme.md", "README.md"},
+		},
+		{
+			ID:    "triage/lookup",
+			Spec:  "eval.py@triage",
+			Paths: []string{}, // Empty paths should be skipped
+		},
+	}
+
+	failures := map[string][]TaskSampleFailure{
+		"docs/readme": {
+			{SampleID: "sample-1", Score: 0.0},
+			{SampleID: "sample-2", Score: 0.5},
+			{SampleID: "sample-3", Score: 1.0}, // Success, should not be annotated
+		},
+		"triage/lookup": {
+			{SampleID: "sample-a", Score: 0.0}, // Task has empty paths, skipped
+		},
+	}
+
+	anns := BuildCheckRunAnnotationsFromFailures(manifestTasks, nil, failures)
+	// 2 failed samples * 2 paths = 4 annotations
+	if len(anns) != 4 {
+		t.Fatalf("expected 4 annotations, got %d: %+v", len(anns), anns)
+	}
+
+	for _, ann := range anns {
+		if ann.StartLine != 1 || ann.EndLine != 1 {
+			t.Errorf("expected line 1, got start %d end %d", ann.StartLine, ann.EndLine)
+		}
+		if ann.AnnotationLevel != "notice" {
+			t.Errorf("expected level 'notice', got %q", ann.AnnotationLevel)
+		}
+		if ann.Title != "docs/readme" {
+			t.Errorf("expected title 'docs/readme', got %q", ann.Title)
+		}
+	}
+	if anns[0].Path != "docs/readme.md" || anns[0].Message != "sample sample-1: score 0.00" {
+		t.Errorf("unexpected ann[0]: %+v", anns[0])
+	}
+	if anns[1].Path != "README.md" || anns[1].Message != "sample sample-1: score 0.00" {
+		t.Errorf("unexpected ann[1]: %+v", anns[1])
+	}
+	if anns[2].Path != "docs/readme.md" || anns[2].Message != "sample sample-2: score 0.50" {
+		t.Errorf("unexpected ann[2]: %+v", anns[2])
+	}
+	if anns[3].Path != "README.md" || anns[3].Message != "sample sample-2: score 0.50" {
+		t.Errorf("unexpected ann[3]: %+v", anns[3])
+	}
+
+	// Test cap at 50 annotations
+	var manyFailures []TaskSampleFailure
+	for i := 0; i < 60; i++ {
+		manyFailures = append(manyFailures, TaskSampleFailure{
+			SampleID: fmt.Sprintf("sample-%d", i),
+			Score:    0.0,
+		})
+	}
+	cappedAnns := BuildCheckRunAnnotationsFromFailures([]v1alpha1.ManifestTask{
+		{
+			ID:    "task-many",
+			Paths: []string{"file.go"},
+		},
+	}, nil, map[string][]TaskSampleFailure{"task-many": manyFailures})
+	if len(cappedAnns) != 50 {
+		t.Errorf("expected capped annotations to be 50, got %d", len(cappedAnns))
+	}
+}
+
+func TestBuildCheckRunAnnotations_ResolvesGlobsAgainstChangedFiles(t *testing.T) {
+	manifestTasks := []v1alpha1.ManifestTask{
+		{
+			ID:    "docs/readme",
+			Spec:  "eval.py@docs",
+			Paths: []string{"docs/**", "evals/**"},
+		},
+		{
+			ID:    "src/core",
+			Spec:  "eval.py@src",
+			Paths: []string{"pkg/core/**"},
+		},
+	}
+
+	failures := map[string][]TaskSampleFailure{
+		"docs/readme": {
+			{SampleID: "s1", Score: 0.0},
+		},
+		"src/core": {
+			{SampleID: "s2", Score: 0.0},
+		},
+	}
+
+	changedFiles := []string{"docs/index.md", "docs/api.md", "cmd/main.go"}
+
+	anns := BuildCheckRunAnnotationsFromFailures(manifestTasks, changedFiles, failures)
+	// docs/** matches docs/index.md and docs/api.md; pkg/core/** matches nothing -> skipped
+	if len(anns) != 2 {
+		t.Fatalf("expected 2 annotations on matched changed files, got %d: %+v", len(anns), anns)
+	}
+	if anns[0].Path != "docs/index.md" {
+		t.Errorf("anns[0].Path = %q, want 'docs/index.md'", anns[0].Path)
+	}
+	if anns[1].Path != "docs/api.md" {
+		t.Errorf("anns[1].Path = %q, want 'docs/api.md'", anns[1].Path)
+	}
+	for _, ann := range anns {
+		if strings.ContainsAny(ann.Path, "*?[{") {
+			t.Errorf("annotation path must not contain glob metacharacters: %q", ann.Path)
+		}
+	}
+
+	// Without changed files: globs are skipped entirely
+	annsNoFiles := BuildCheckRunAnnotationsFromFailures(manifestTasks, nil, failures)
+	if len(annsNoFiles) != 0 {
+		t.Errorf("expected 0 annotations when globs cannot be resolved to files, got %+v", annsNoFiles)
+	}
+}
+
+func TestCapDetailsBlock(t *testing.T) {
+	shortBlock := "<details>\n<summary>Error details</summary>\n\n```\nshort error\n```\n</details>"
+	if got := CapDetailsBlock(shortBlock, 8192); got != shortBlock {
+		t.Errorf("CapDetailsBlock modified short block: %s", got)
+	}
+
+	hugeErr := strings.Repeat("error stack trace line\n", 1000)
+	hugeBlock := fmt.Sprintf("<details>\n<summary>Error details</summary>\n\n```\n%s\n```\n</details>", hugeErr)
+	capped := CapDetailsBlock(hugeBlock, 1024)
+	if len(capped) > 1024 {
+		t.Errorf("len(capped) = %d, want <= 1024", len(capped))
+	}
+	if !strings.Contains(capped, "... (truncated)") {
+		t.Errorf("expected truncation notice in capped block: %s", capped)
+	}
+	if !strings.HasPrefix(capped, "<details>") || !strings.HasSuffix(capped, "</details>") {
+		t.Errorf("expected valid details tag wrapping: %s", capped)
+	}
+}
+
+func TestBuildCheckRunAnnotations_FromTaskLogs(t *testing.T) {
+	manifestTasks := []v1alpha1.ManifestTask{
+		{
+			ID:    "docs/readme",
+			Spec:  "eval.py@docs",
+			Paths: []string{"README.md"},
+		},
+	}
+	logJSON := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"scorers": [{"name": "exact"}]},
+		"samples": [
+			{"id": "sample-1", "scores": {"exact": {"value": 0.0}}},
+			{"id": "sample-2", "scores": {"exact": {"value": 1.0}}},
+			{"id": "sample-3", "scores": {"exact": {"value": 0.25}}}
+		]
+	}`
+
+	anns := BuildCheckRunAnnotations(manifestTasks, nil, map[string][]byte{
+		"docs/readme": []byte(logJSON),
+	})
+	if len(anns) != 2 {
+		t.Fatalf("expected 2 annotations (sample-1 and sample-3), got %d", len(anns))
+	}
+	if anns[0].Message != "sample sample-1: score 0.00" {
+		t.Errorf("anns[0].Message = %q, want sample sample-1: score 0.00", anns[0].Message)
+	}
+	if anns[1].Message != "sample sample-3: score 0.25" {
+		t.Errorf("anns[1].Message = %q, want sample sample-3: score 0.25", anns[1].Message)
+	}
+}
+
+func TestFakeGitHubServer_RecordsTextImagesAnnotations(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("token")
+
+	initialState := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "in_progress",
+		Title:      "running",
+		Summary:    "running",
+		Text:       "Initial markdown body",
+		DetailsURL: "https://eval.example.com/details",
+		Images: []CheckRunImage{
+			{Alt: "sparkline", ImageURL: "https://eval.example.com/sparkline1.svg", Caption: "main, last 20 commits"},
+		},
+		Annotations: []CheckRunAnnotation{
+			{Path: "README.md", StartLine: 1, EndLine: 1, AnnotationLevel: "notice", Message: "sample 1: score 0.00"},
+		},
+	}
+
+	crID, err := client.CreateCheckRun(t.Context(), "gke-labs", "eval-runner", "abcdef1234", initialState)
+	if err != nil {
+		t.Fatalf("CreateCheckRun failed: %v", err)
+	}
+
+	runs := server.CheckRuns()
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(runs))
+	}
+	r := runs[0]
+	if r.Text != "Initial markdown body" {
+		t.Errorf("r.Text = %q, want 'Initial markdown body'", r.Text)
+	}
+	if len(r.Images) != 1 || r.Images[0].ImageURL != "https://eval.example.com/sparkline1.svg" {
+		t.Errorf("r.Images = %+v", r.Images)
+	}
+	if len(r.Annotations) != 1 || r.Annotations[0].Message != "sample 1: score 0.00" {
+		t.Errorf("r.Annotations = %+v", r.Annotations)
+	}
+
+	// Update check run: GitHub's API appends annotations on update
+	updatedState := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "completed",
+		Conclusion: "success",
+		Title:      "IMPROVED",
+		Summary:    "IMPROVED",
+		Text:       "Updated markdown body with table",
+		DetailsURL: "https://eval.example.com/details/updated",
+		Images: []CheckRunImage{
+			{Alt: "sparkline2", ImageURL: "https://eval.example.com/sparkline2.svg", Caption: "main, last 20 commits"},
+		},
+		Annotations: []CheckRunAnnotation{
+			{Path: "docs/readme.md", StartLine: 1, EndLine: 1, AnnotationLevel: "notice", Message: "sample 2: score 0.50"},
+		},
+	}
+	if err := client.UpdateCheckRun(t.Context(), "gke-labs", "eval-runner", crID, updatedState); err != nil {
+		t.Fatalf("UpdateCheckRun failed: %v", err)
+	}
+
+	runs = server.CheckRuns()
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(runs))
+	}
+	r = runs[0]
+	if r.Text != "Updated markdown body with table" {
+		t.Errorf("r.Text = %q, want 'Updated markdown body with table'", r.Text)
+	}
+	if len(r.Images) != 1 || r.Images[0].ImageURL != "https://eval.example.com/sparkline2.svg" {
+		t.Errorf("r.Images = %+v", r.Images)
+	}
+	// GitHub appends annotations on update: 1 initial + 1 updated = 2 annotations
+	if len(r.Annotations) != 2 {
+		t.Fatalf("expected 2 annotations after update (appended), got %d: %+v", len(r.Annotations), r.Annotations)
+	}
+	if r.Annotations[0].Path != "README.md" || r.Annotations[1].Path != "docs/readme.md" {
+		t.Errorf("unexpected annotations: %+v", r.Annotations)
+	}
+}
+
+func TestHashContent_ChangesWithImageURLAndAnnotations(t *testing.T) {
+	baseState := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "completed",
+		Conclusion: "success",
+		Title:      "IMPROVED",
+		Summary:    "IMPROVED",
+		Text:       "markdown text",
+		DetailsURL: "https://eval.example.com/pulls/425",
+		Images: []CheckRunImage{
+			{Alt: "trend", ImageURL: "https://eval.example.com/sparkline.svg?branch=main&w=600&h=80", Caption: "main, last 20 commits"},
+		},
+		Annotations: []CheckRunAnnotation{
+			{Path: "README.md", StartLine: 1, EndLine: 1, AnnotationLevel: "notice", Message: "sample 1: score 0.00"},
+		},
+	}
+	markdown := "markdown content"
+
+	h1 := HashContent(markdown, baseState)
+
+	// Change image URL -> hash must change
+	stateChangedImg := baseState
+	stateChangedImg.Images = []CheckRunImage{
+		{Alt: "trend", ImageURL: "https://eval.example.com/sparkline.svg?branch=release&w=600&h=80", Caption: "main, last 20 commits"},
+	}
+	h2 := HashContent(markdown, stateChangedImg)
+	if h1 == h2 {
+		t.Errorf("HashContent did not change when image URL changed: %q vs %q", h1, h2)
+	}
+
+	// Change annotation message -> hash must change
+	stateChangedAnn := baseState
+	stateChangedAnn.Annotations = []CheckRunAnnotation{
+		{Path: "README.md", StartLine: 1, EndLine: 1, AnnotationLevel: "notice", Message: "sample 1: score 0.20"},
+	}
+	h3 := HashContent(markdown, stateChangedAnn)
+	if h1 == h3 {
+		t.Errorf("HashContent did not change when annotation message changed: %q vs %q", h1, h3)
 	}
 }

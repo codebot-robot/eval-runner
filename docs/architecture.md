@@ -349,6 +349,10 @@ When `spec.pullRequest` is configured on a `Comparison`, the controller reports 
   - `INCONCLUSIVE`: status `completed`, conclusion `neutral`, description `INCONCLUSIVE · more samples recommended` (`neutral` avoids blocking PR merges by default)
   - `REGRESSED`: status `completed`, conclusion `failure`, description `REGRESSED`
 - Descriptions differ from the original concept mockup as listed above. Authentication uses GitHub App credentials (preferred) or a personal access token stored in the controller namespace.
+- **Rich Check Run Output**:
+  - `output.text`: The complete per-task comparison table formatted identically to the PR comment, followed by deep links (`[web view]`, `[trajectories]`), and collapsed error details on scoring failures (`<details><summary>Error details</summary>`). Safe row-boundary truncation (`… N more rows (see web view)`) ensures the body never exceeds GitHub's 65535-character limit.
+  - `output.images`: Repo-scoped SVG sparklines for the base branch (`sparkline.svg?branch=<base>&w=600&h=80`, caption `<base>, last 20 commits`), with additional `?eval=` variants when the comparison has $\le 3$ tasks.
+  - `output.annotations`: Up to 50 `notice`-level annotations attached to files changed in the PR that map to sample failures reported in task logs, posted once when the comparison reaches a terminal phase.
 
 #### Tracked-Branch Head Check Run Reporting
 

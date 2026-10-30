@@ -17,6 +17,7 @@ package consumer
 import (
 	"strings"
 
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/forge"
 )
 
@@ -46,7 +47,7 @@ const (
 	LabelHeadSHA = "evalrunner.gke-labs.dev/head-sha"
 
 	// LabelBranch tracks the branch name on created baseline Runs.
-	LabelBranch = "evalrunner.gke-labs.dev/branch"
+	LabelBranch = configkeys.LabelBranch
 
 	// LabelTopUp tracks the top-up window/epoch index (e.g. "2", "3") on top-up baseline Runs.
 	LabelTopUp = "evalrunner.gke-labs.dev/topup"
