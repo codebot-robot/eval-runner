@@ -1718,14 +1718,31 @@ func BuildSeriesSVG(items []SeriesItem) SeriesSVG {
 
 // BuildSparklineSVG generates a compact SVG sparkline over the last <= 20 points.
 func BuildSparklineSVG(items []SeriesItem) SparklineSVG {
-	const (
-		viewBox = "0 0 120 28"
-		x0      = 4.0
-		x1      = 116.0
-		y0      = 4.0
-		y1      = 24.0
-		circleR = 2.0
-	)
+	return BuildSparklineSVGWithOptions(items, 120, 28)
+}
+
+// BuildSparklineSVGWithOptions generates a compact SVG sparkline over the last <= 20 points
+// with customizable width and height.
+func BuildSparklineSVGWithOptions(items []SeriesItem, width, height int) SparklineSVG {
+	if width <= 0 {
+		width = 120
+	}
+	if height <= 0 {
+		height = 28
+	}
+	viewBox := fmt.Sprintf("0 0 %d %d", width, height)
+
+	x0 := 4.0
+	x1 := float64(width) - 4.0
+	if x1 <= x0 {
+		x1 = x0 + 1.0
+	}
+	y0 := 4.0
+	y1 := float64(height) - 4.0
+	if y1 <= y0 {
+		y1 = y0 + 1.0
+	}
+	circleR := 2.0
 
 	if len(items) > 20 {
 		items = items[len(items)-20:]
@@ -1754,14 +1771,17 @@ func BuildSparklineSVG(items []SeriesItem) SparklineSVG {
 		}
 	}
 
+	tickHalfHeight := math.Min(3.5, (y1-y0)/2.0)
+	tickStep := math.Min(2.5, (x1-x0)/float64(math.Max(1, float64(len(items)))))
+
 	opts := ChartGeometryOptions{
 		X0:             x0,
 		X1:             x1,
 		Y0:             y0,
 		Y1:             y1,
 		CircleR:        circleR,
-		TickHalfHeight: 3.5,
-		TickStep:       2.5,
+		TickHalfHeight: tickHalfHeight,
+		TickStep:       tickStep,
 	}
 
 	res := computeChartGeometry(lines, ticksAtCommit, len(items), opts)
