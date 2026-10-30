@@ -703,7 +703,7 @@ func collectSeries(runs []v1alpha1.Run, ref RepoRef, branch, cohort string) []se
 			continue
 		}
 
-		cTime, fallback := runCommitTime(run)
+		cTime, fallback := pooling.RunCommitTime(run)
 		matched = append(matched, seriesRun{
 			run:        run,
 			commitTime: cTime,
@@ -854,7 +854,7 @@ func (s *Server) renderRepoOverview(w http.ResponseWriter, r *http.Request, ns s
 
 	newestOverallTime := scores.NewestTime
 	if newestOverallTime.IsZero() && scores.NewestRun != nil {
-		newestOverallTime, _ = runCommitTime(scores.NewestRun)
+		newestOverallTime, _ = pooling.RunCommitTime(scores.NewestRun)
 		if newestOverallTime.IsZero() {
 			newestOverallTime = scores.NewestRun.CreationTimestamp.Time
 		}
@@ -2737,93 +2737,6 @@ func runRepository(run *v1alpha1.Run) string {
 	return ""
 }
 
-func runCommitTime(run *v1alpha1.Run) (time.Time, bool) {
-	if run.Annotations != nil {
-		if raw, ok := run.Annotations["evalrunner.gke-labs.dev/commit-time"]; ok && raw != "" {
-			t, err := time.Parse(time.RFC3339, raw)
-			if err != nil {
-				return run.CreationTimestamp.Time, true
-			}
-			return t, false
-		}
-	}
-	return run.CreationTimestamp.Time, true
-}
-
-func computeSeriesLastMove(runs []*v1alpha1.Run) (*stats.DeltaEstimate, string, string, string) {
-	if len(runs) < 2 {
-		return nil, "—", "", ""
-	}
-
-	type timedRun struct {
-		run        *v1alpha1.Run
-		commitTime time.Time
-	}
-	var timedRuns []timedRun
-	for _, r := range runs {
-		ct, _ := runCommitTime(r)
-		timedRuns = append(timedRuns, timedRun{run: r, commitTime: ct})
-	}
-	sort.Slice(timedRuns, func(i, j int) bool {
-		if !timedRuns[i].commitTime.Equal(timedRuns[j].commitTime) {
-			return timedRuns[i].commitTime.Before(timedRuns[j].commitTime)
-		}
-		return timedRuns[i].run.Name < timedRuns[j].run.Name
-	})
-
-	taskSet := make(map[string]bool)
-	for _, tr := range timedRuns {
-		for _, t := range tr.run.Status.Tasks {
-			if t.ID != "" {
-				taskSet[t.ID] = true
-			}
-		}
-		for _, tid := range tr.run.Spec.Tasks {
-			if tid != "" {
-				taskSet[tid] = true
-			}
-		}
-	}
-	var allTaskIDs []string
-	for tid := range taskSet {
-		allTaskIDs = append(allTaskIDs, tid)
-	}
-	sort.Strings(allTaskIDs)
-	if len(allTaskIDs) == 0 {
-		return nil, "—", "", ""
-	}
-	selectedTask := allTaskIDs[0]
-
-	var prevEst *stats.Estimate
-	var lastMove *stats.DeltaEstimate
-	for _, tr := range timedRuns {
-		var matchedTask *v1alpha1.TaskStatus
-		for idx := range tr.run.Status.Tasks {
-			if tr.run.Status.Tasks[idx].ID == selectedTask {
-				matchedTask = &tr.run.Status.Tasks[idx]
-				break
-			}
-		}
-		if matchedTask != nil && matchedTask.Phase == v1alpha1.TaskPhaseCompleted && matchedTask.SuccessRate != nil {
-			curEst := estimateFromTaskStatus(matchedTask)
-			if prevEst != nil {
-				delta := stats.DifferenceUnpaired(curEst, *prevEst, 0.95)
-				lastMove = &delta
-			}
-			prevEst = &curEst
-		}
-	}
-
-	if lastMove == nil {
-		return nil, "—", "", ""
-	}
-
-	chip := DeltaChipClass(lastMove.CI)
-	str := FormatDeltaCI(lastMove.Delta, lastMove.CI.Lower, lastMove.CI.Upper)
-	tooltip := fmt.Sprintf("%s · %s", selectedTask, FormatMethodTooltip(lastMove.Method))
-	return lastMove, str, chip, tooltip
-}
-
 func (s *Server) handleSeriesList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.namespaceFor(r)
@@ -2885,7 +2798,7 @@ func (s *Server) handleSeriesList(w http.ResponseWriter, r *http.Request) {
 			link += "?" + q.Encode()
 		}
 
-		lastMove, lastMoveStr, lastMoveChip, lastMoveMethod := computeSeriesLastMove(runs)
+		lastMove, lastMoveStr, lastMoveChip, lastMoveMethod := pooling.ComputeSeriesLastMove(runs)
 
 		seriesRows = append(seriesRows, SeriesListRow{
 			Repository:     gk.repo,
@@ -3100,7 +3013,7 @@ func (s *Server) renderSeriesDetailWithList(w http.ResponseWriter, r *http.Reque
 			matchedRepoHash = h
 		}
 
-		cTime, fallback := runCommitTime(run)
+		cTime, fallback := pooling.RunCommitTime(run)
 		matched = append(matched, runWithTime{
 			run:        run,
 			commitTime: cTime,

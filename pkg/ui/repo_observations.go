@@ -273,7 +273,7 @@ func suiteScores(obs *RepoObservations) RepoScores {
 				}
 			}
 			if newestTime.IsZero() && latestRun != nil {
-				newestTime, _ = runCommitTime(latestRun)
+				newestTime, _ = pooling.RunCommitTime(latestRun)
 				if newestTime.IsZero() {
 					newestTime = latestRun.CreationTimestamp.Time
 				}
