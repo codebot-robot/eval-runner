@@ -17561,3 +17561,429 @@ func (b *blockingSinkComparison) IsDurable() bool {
 func (b *blockingSinkComparison) Close() error {
 	return nil
 }
+
+type headMoveFixture struct {
+	reconciler *ComparisonReconciler
+	client     client.Client
+	server     *github.FakeGitHubServer
+	sink       *artifacts.LocalDirSink
+	req        ctrl.Request
+	comp       *v1alpha1.Comparison
+	baseRun    *v1alpha1.Run
+	candRun1   *v1alpha1.Run
+	candRun2   *v1alpha1.Run
+}
+
+func setupHeadMoveFixture(t *testing.T, compName string, extraObjs ...client.Object) *headMoveFixture {
+	scheme := setupScheme(t)
+	server := github.NewFakeGitHubServer()
+	tempDir := t.TempDir()
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+
+	taskID := "docs/readme_comprehension"
+	baseCommit := "base111111111111111111111111111111111111"
+	candCommit1 := "cand111111111111111111111111111111111111"
+	candCommit2 := "cand222222222222222222222222222222222222"
+
+	var b1Scores []stats.SampleScore
+	for i := 1; i <= 8; i++ {
+		b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.8})
+	}
+
+	baseLogPath, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       baseCommit,
+		RunName:      "base-run",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "log.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("failed to store base artifact: %v", err)
+	}
+
+	cand1LogPath, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       candCommit1,
+		RunName:      "cand-run-1",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "log.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("failed to store cand1 artifact: %v", err)
+	}
+
+	cand2LogPath, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+		Commit:       candCommit2,
+		RunName:      "cand-run-2",
+		RunNamespace: "eval-runner",
+		TaskID:       taskID,
+	}, "log.json", makeSyntheticInspectLog(taskID, b1Scores))
+	if err != nil {
+		t.Fatalf("failed to store cand2 artifact: %v", err)
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "https://github.com/gke-labs/eval-runner.git", Commit: baseCommit},
+			Model:       "mockllm/model",
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: baseLogPath}},
+		},
+	}
+
+	candRun1 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-1", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "https://github.com/gke-labs/eval-runner.git", Commit: candCommit1},
+			Model:       "mockllm/model",
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: cand1LogPath}},
+		},
+	}
+
+	candRun2 := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand-run-2", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "https://github.com/gke-labs/eval-runner.git", Commit: candCommit2},
+			Model:       "mockllm/model",
+			Tasks:       []string{taskID},
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: cand2LogPath}},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: compName, Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run-1"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         8,
+				MaxSamplesPerTask: 32,
+			},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     437,
+				HeadSHA:    candCommit1,
+				BaseSHA:    baseCommit,
+			},
+		},
+	}
+
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data:       map[string][]byte{"token": []byte("test-gh-token")},
+	}
+
+	objs := []client.Object{baseRun, candRun1, candRun2, comp, tokenSecret}
+	objs = append(objs, extraObjs...)
+
+	statusObjs := []client.Object{baseRun, candRun1, candRun2, comp}
+	statusObjs = append(statusObjs, extraObjs...)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithStatusSubresource(statusObjs...).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		Now:                 func() time.Time { return now },
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		CommandUsers:        []string{"reviewer"},
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client(creds.Token)
+		},
+	}
+
+	return &headMoveFixture{
+		reconciler: reconciler,
+		client:     cl,
+		server:     server,
+		sink:       sink,
+		req:        ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: compName}},
+		comp:       comp,
+		baseRun:    baseRun,
+		candRun1:   candRun1,
+		candRun2:   candRun2,
+	}
+}
+
+func TestComparisonReconciler_HeadMove_CandidateChanged(t *testing.T) {
+	f := setupHeadMoveFixture(t, "comp-pr-437")
+
+	// 1. Initial reconcile to completion on candCommit1
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+
+	var updated v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &updated); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Fatalf("expected phase Completed, got %s", updated.Status.Phase)
+	}
+	comments := f.server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	origCommentID := comments[0].ID
+
+	// 2. Candidate moves: update spec.candidate.run and spec.pullRequest.headSHA
+	updated.Spec.Candidate.Run = "cand-run-2"
+	updated.Spec.PullRequest.HeadSHA = "cand222222222222222222222222222222222222"
+	if err := f.client.Update(t.Context(), &updated); err != nil {
+		t.Fatalf("failed to update comparison spec: %v", err)
+	}
+
+	// 3. Reconcile detects the move and resets status
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("reset reconcile error: %v", err)
+	}
+
+	var resetComp v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &resetComp); err != nil {
+		t.Fatalf("get error after reset: %v", err)
+	}
+	if resetComp.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+		t.Errorf("expected phase Running after reset, got %s", resetComp.Status.Phase)
+	}
+	if resetComp.Status.Verdict != v1alpha1.ComparisonVerdictRunning {
+		t.Errorf("expected verdict Running after reset, got %s", resetComp.Status.Verdict)
+	}
+	if resetComp.Status.CompletionTime != nil {
+		t.Errorf("expected completionTime nil after reset, got %v", resetComp.Status.CompletionTime)
+	}
+	if len(resetComp.Status.Batches) != 0 {
+		t.Errorf("expected batches cleared on reset, got %v", resetComp.Status.Batches)
+	}
+
+	// Single comment edited in place
+	commentsAfterReset := f.server.Comments()
+	if len(commentsAfterReset) != 1 {
+		t.Fatalf("expected 1 comment edited in place, got %d", len(commentsAfterReset))
+	}
+	if commentsAfterReset[0].ID != origCommentID {
+		t.Errorf("expected comment ID %d preserved, got %d", origCommentID, commentsAfterReset[0].ID)
+	}
+
+	// 4. Next reconcile evaluates the new candidate and scores batch 1
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("new candidate reconcile error: %v", err)
+	}
+
+	var scoredComp v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &scoredComp); err != nil {
+		t.Fatalf("get error after scoring new candidate: %v", err)
+	}
+	if scoredComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("expected phase Completed after scoring, got %s", scoredComp.Status.Phase)
+	}
+	if len(scoredComp.Status.Batches) != 1 {
+		t.Fatalf("expected 1 batch for new candidate, got %d", len(scoredComp.Status.Batches))
+	}
+	if scoredComp.Status.Batches[0].CandidateRun != "cand-run-2" {
+		t.Errorf("expected batch CandidateRun 'cand-run-2', got %q", scoredComp.Status.Batches[0].CandidateRun)
+	}
+	if scoredComp.Status.Batches[0].BaselineRun != "base-run" {
+		t.Errorf("expected batch BaselineRun 'base-run', got %q", scoredComp.Status.Batches[0].BaselineRun)
+	}
+}
+
+func TestComparisonReconciler_HeadMove_CandidateOnlyDoesNotRerunBaseline(t *testing.T) {
+	f := setupHeadMoveFixture(t, "comp-base-reuse")
+
+	// 1. Initial complete
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("initial reconcile error: %v", err)
+	}
+
+	// 2. Candidate changes only
+	var current v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &current); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+	current.Spec.Candidate.Run = "cand-run-2"
+	current.Spec.PullRequest.HeadSHA = "cand222222222222222222222222222222222222"
+	if err := f.client.Update(t.Context(), &current); err != nil {
+		t.Fatalf("update error: %v", err)
+	}
+
+	// 3. Reset reconcile
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("reset reconcile error: %v", err)
+	}
+
+	// 4. Rescore reconcile
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("rescore reconcile error: %v", err)
+	}
+
+	var allRuns v1alpha1.RunList
+	if err := f.client.List(t.Context(), &allRuns); err != nil {
+		t.Fatalf("list runs error: %v", err)
+	}
+
+	baselineRunsCount := 0
+	for _, r := range allRuns.Items {
+		if r.Spec.Repo.Commit == "base111111111111111111111111111111111111" {
+			baselineRunsCount++
+		}
+	}
+	if baselineRunsCount != 1 {
+		t.Errorf("expected exactly 1 baseline run on cluster (no new baseline run created), found %d", baselineRunsCount)
+	}
+}
+
+func TestComparisonReconciler_HeadMove_StaleExtensionRunNotAdopted(t *testing.T) {
+	// Pre-create stale b2-cand with the old commit (candCommit1), NO DeletionTimestamp
+	staleB2Cand := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "comp-stale-b2-cand",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				LabelComparison: "comp-stale",
+				LabelBatch:      "2",
+				LabelRole:       RoleCandidate,
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "https://github.com/gke-labs/eval-runner.git", Commit: "cand111111111111111111111111111111111111"},
+			Model:       "mockllm/model",
+			Tasks:       []string{"docs/readme_comprehension"},
+			SampleRange: &v1alpha1.SampleRange{Start: 9, End: 16},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+		},
+	}
+
+	f := setupHeadMoveFixture(t, "comp-stale", staleB2Cand)
+
+	// 1. Initial complete on cand 1
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("initial reconcile error: %v", err)
+	}
+
+	// 2. Candidate moves to cand 2
+	var cur v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &cur); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+	cur.Spec.Candidate.Run = "cand-run-2"
+	cur.Spec.PullRequest.HeadSHA = "cand222222222222222222222222222222222222"
+	if err := f.client.Update(t.Context(), &cur); err != nil {
+		t.Fatalf("update error: %v", err)
+	}
+
+	// 3. Reset reconcile
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("reset reconcile error: %v", err)
+	}
+
+	// 4. Batch discovery and scoring reconcile
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("scoring reconcile error: %v", err)
+	}
+
+	var scored v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &scored); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+
+	// Verify stale b2-cand with old commit was NOT adopted into batches
+	for _, b := range scored.Status.Batches {
+		if b.Index == 2 {
+			t.Errorf("expected stale extension run not to be adopted into batches, found: %+v", b)
+		}
+	}
+	if len(scored.Status.Batches) != 1 {
+		t.Fatalf("expected exactly 1 batch (batch 1), got %d", len(scored.Status.Batches))
+	}
+}
+
+func TestComparisonReconciler_HeadMove_EvalMoreAfterReset(t *testing.T) {
+	f := setupHeadMoveFixture(t, "comp-eval-more")
+
+	// 1. Initial complete on cand 1
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+
+	// 2. Candidate moves to cand 2
+	var cur v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &cur); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+	cur.Spec.Candidate.Run = "cand-run-2"
+	cur.Spec.PullRequest.HeadSHA = "cand222222222222222222222222222222222222"
+	if err := f.client.Update(t.Context(), &cur); err != nil {
+		t.Fatalf("update error: %v", err)
+	}
+
+	// 3. Reset reconcile
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("reset reconcile error: %v", err)
+	}
+
+	// 4. Score cand 2 to completion
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("score reconcile error: %v", err)
+	}
+
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &cur); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+	if cur.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Fatalf("expected phase Completed after scoring cand 2, got %s", cur.Status.Phase)
+	}
+
+	// 5. Post /eval more 8
+	cur.Status.PendingCommands = append(cur.Status.PendingCommands, v1alpha1.ComparisonPendingCommand{
+		CommentID:  9999,
+		Login:      "reviewer",
+		Requested:  8,
+		ReceivedAt: metav1.NewTime(time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)),
+	})
+	if err := f.client.Status().Update(t.Context(), &cur); err != nil {
+		t.Fatalf("update status error: %v", err)
+	}
+
+	// 6. Reconcile processes pending command and schedules extra batch
+	if _, err := f.reconciler.Reconcile(t.Context(), f.req); err != nil {
+		t.Fatalf("extra samples reconcile error: %v", err)
+	}
+
+	var afterExtra v1alpha1.Comparison
+	if err := f.client.Get(t.Context(), f.req.NamespacedName, &afterExtra); err != nil {
+		t.Fatalf("get error after extra samples: %v", err)
+	}
+	if afterExtra.Status.ExtraSamplesApplied != 8 {
+		t.Errorf("expected ExtraSamplesApplied = 8, got %d", afterExtra.Status.ExtraSamplesApplied)
+	}
+	if afterExtra.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+		t.Errorf("expected phase Running while evaluating extra batch, got %s", afterExtra.Status.Phase)
+	}
+	if len(afterExtra.Status.Batches) != 2 {
+		t.Fatalf("expected 2 batches after extra samples scheduled, got %d", len(afterExtra.Status.Batches))
+	}
+	if afterExtra.Status.Batches[1].CandidateRun != "comp-eval-more-b2-cand" {
+		t.Errorf("expected batch 2 CandidateRun 'comp-eval-more-b2-cand', got %q", afterExtra.Status.Batches[1].CandidateRun)
+	}
+}
