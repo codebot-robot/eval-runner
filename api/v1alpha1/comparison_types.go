@@ -572,6 +572,14 @@ type ComparisonStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ObservedCandidateRun is the candidate Run from which current status was computed.
+	// +optional
+	ObservedCandidateRun string `json:"observedCandidateRun,omitempty"`
+
+	// ObservedBaselineRun is the baseline Run from which current status was computed.
+	// +optional
+	ObservedBaselineRun string `json:"observedBaselineRun,omitempty"`
 }
 
 // +kubebuilder:object:root=true
