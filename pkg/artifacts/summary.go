@@ -21,50 +21,6 @@ import (
 	"strings"
 )
 
-// DefaultInspectLogFilename is the canonical filename for inspect evaluation logs in artifact storage.
-const DefaultInspectLogFilename = "inspect.json"
-
-// ArtifactMeta describes repository, commit, task ID, and artifact prefix metadata for locating artifacts.
-type ArtifactMeta struct {
-	Repo           string
-	Commit         string
-	TaskID         string
-	ArtifactPrefix string
-	Filename       string
-}
-
-// ExpectedLogPath derives the expected log storage location for a task deterministically
-// from ArtifactMeta (repo, commit, task ID, and artifact prefix).
-func ExpectedLogPath(meta ArtifactMeta) string {
-	prefix := strings.TrimSpace(meta.ArtifactPrefix)
-	taskID := strings.TrimSpace(meta.TaskID)
-	if taskID == "" {
-		return ""
-	}
-	taskID = strings.Trim(taskID, "/")
-	filename := strings.TrimSpace(meta.Filename)
-	if filename == "" {
-		filename = DefaultInspectLogFilename
-	}
-	filename = strings.TrimPrefix(filename, "/")
-
-	if prefix != "" {
-		if !strings.HasSuffix(prefix, "/") {
-			prefix += "/"
-		}
-		return prefix + taskID + "/" + filename
-	}
-	if meta.Commit != "" {
-		return fmt.Sprintf("runs/%s/%s/%s", meta.Commit, taskID, filename)
-	}
-	return ""
-}
-
-// TaskLogPath is an alias for ExpectedLogPath.
-func TaskLogPath(meta ArtifactMeta) string {
-	return ExpectedLogPath(meta)
-}
-
 // TaskSummaryURI resolves the summary.json URI or path for a given artifact or log URI.
 // If uri is already a summary.json URI or path, it is returned trimmed.
 func TaskSummaryURI(uri string) string {
