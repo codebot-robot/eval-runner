@@ -1337,6 +1337,13 @@ func (r *ComparisonReconciler) ensureBatchRun(
 		}
 	} else if err != nil {
 		return "", fmt.Errorf("failed looking up %s run %q: %w", role, runName, err)
+	} else {
+		if existingRun.DeletionTimestamp != nil {
+			return "", fmt.Errorf("batch run %q is terminating: waiting for cleanup", runName)
+		}
+		if role == RoleCandidate && templateRun.Spec.Repo.Commit != "" && existingRun.Spec.Repo.Commit != templateRun.Spec.Repo.Commit {
+			return "", fmt.Errorf("stale batch run %q exists for commit %s (want %s); cleanup pending", runName, existingRun.Spec.Repo.Commit, templateRun.Spec.Repo.Commit)
+		}
 	}
 
 	return runName, nil
@@ -1846,6 +1853,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 
 		if _, err := r.updateComparisonStatus(ctx, &comp, bRun, cRun, func(status *v1alpha1.ComparisonStatus) {
+			// Reset all scoring state for the new head commit while preserving reporting.commentID to edit in place.
 			status.Phase = v1alpha1.ComparisonPhaseRunning
 			status.CompletionTime = nil
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
@@ -2273,6 +2281,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			status.CompletionTime = nil
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
 			status.Batches = batches
+			status.ObservedCandidateRun = comp.Spec.Candidate.Run
+			status.ObservedBaselineRun = comp.Spec.Baseline.Run
 			status.Tasks = tasks
 			status.Summary = &v1alpha1.ComparisonSummary{
 				Tasks:   fmt.Sprintf("%d/%d", completedTasks, len(tasks)-prunedTasksCount),
@@ -2993,6 +3003,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				status.CompletionTime = nil
 				status.Verdict = v1alpha1.ComparisonVerdictRunning
 				status.Batches = batches
+				status.ObservedCandidateRun = comp.Spec.Candidate.Run
+				status.ObservedBaselineRun = comp.Spec.Baseline.Run
 				status.Tasks = partialStatuses
 				status.CostUSD = partialCompCost
 				if partialPossibleSamples > 0 {
@@ -3178,6 +3190,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				status.CompletionTime = nil
 				status.Verdict = v1alpha1.ComparisonVerdictRunning
 				status.Batches = batches
+				status.ObservedCandidateRun = comp.Spec.Candidate.Run
+				status.ObservedBaselineRun = comp.Spec.Baseline.Run
 				status.Tasks = partialStatuses
 				status.ExtraSamplesApplied = newExtraApplied
 				status.CostUSD = partialCompCost
@@ -3600,6 +3614,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		status.Verdict = v1alpha1.ComparisonVerdict(runVerdict.Verdict)
 		status.PImprovement = &pImp
 		status.Batches = batches
+		status.ObservedCandidateRun = comp.Spec.Candidate.Run
+		status.ObservedBaselineRun = comp.Spec.Baseline.Run
 		status.Tasks = taskStatuses
 		status.CostUSD = compCost
 		if totalPossibleSamples > 0 {
@@ -3765,6 +3781,8 @@ func (r *ComparisonReconciler) completeInconclusiveArtifactsUnreadable(
 		status.Phase = v1alpha1.ComparisonPhaseCompleted
 		status.CompletionTime = compTime
 		status.Verdict = v1alpha1.ComparisonVerdictInconclusive
+		status.ObservedCandidateRun = comp.Spec.Candidate.Run
+		status.ObservedBaselineRun = comp.Spec.Baseline.Run
 		if comp.Spec.ExtraSamples > status.ExtraSamplesApplied {
 			status.ExtraSamplesApplied = comp.Spec.ExtraSamples
 		}
@@ -3830,11 +3848,11 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 		latest.Status.CompletionTime = nil
 	}
 	if len(latest.Status.Batches) > 0 {
-		if latest.Status.ObservedCandidateRun == "" && latest.Spec.Candidate.Run != "" {
-			latest.Status.ObservedCandidateRun = latest.Spec.Candidate.Run
+		if latest.Status.ObservedCandidateRun == "" && comp.Spec.Candidate.Run != "" {
+			latest.Status.ObservedCandidateRun = comp.Spec.Candidate.Run
 		}
-		if latest.Status.ObservedBaselineRun == "" && latest.Spec.Baseline.Run != "" {
-			latest.Status.ObservedBaselineRun = latest.Spec.Baseline.Run
+		if latest.Status.ObservedBaselineRun == "" && comp.Spec.Baseline.Run != "" {
+			latest.Status.ObservedBaselineRun = comp.Spec.Baseline.Run
 		}
 	}
 
@@ -3858,11 +3876,11 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 			current.Status.CompletionTime = nil
 		}
 		if len(current.Status.Batches) > 0 {
-			if current.Status.ObservedCandidateRun == "" && current.Spec.Candidate.Run != "" {
-				current.Status.ObservedCandidateRun = current.Spec.Candidate.Run
+			if current.Status.ObservedCandidateRun == "" && comp.Spec.Candidate.Run != "" {
+				current.Status.ObservedCandidateRun = comp.Spec.Candidate.Run
 			}
-			if current.Status.ObservedBaselineRun == "" && current.Spec.Baseline.Run != "" {
-				current.Status.ObservedBaselineRun = current.Spec.Baseline.Run
+			if current.Status.ObservedBaselineRun == "" && comp.Spec.Baseline.Run != "" {
+				current.Status.ObservedBaselineRun = comp.Spec.Baseline.Run
 			}
 		}
 		if latest.Spec.PullRequest != nil {
