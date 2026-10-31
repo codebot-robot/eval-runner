@@ -2382,7 +2382,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	var readyTasks []readyTaskItem
 	terminalFailures := make(map[string]string)
 	type rescuedTaskInfo struct {
-		agg *artifacts.TaskAggregates
+		agg     *artifacts.TaskAggregates
+		logPath string
 	}
 	rescuedTasks := make(map[string]rescuedTaskInfo)
 	waitingInGracePeriod := false
@@ -2454,18 +2455,46 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			reqWindow := taskRequestedWindowSize(run.Spec, t)
 			rescued := false
 			var rescuedAgg *artifacts.TaskAggregates
+			var rescuedLogPath string
 
 			if t.Samples > 0 && (reqWindow <= 0 || t.Samples >= reqWindow) {
 				rescued = true
-			} else if t.LogPath != "" {
-				loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
-				data, loadErr := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), t.LogPath)
-				loadCancel()
-				if loadErr == nil && len(data) > 0 {
-					if agg, parseErr := artifacts.ParseInspectLog(data); parseErr == nil && agg.Samples > 0 {
-						if reqWindow <= 0 || agg.Samples >= reqWindow || (t.PossibleSamples > 0 && agg.Samples >= t.PossibleSamples) {
-							rescued = true
-							rescuedAgg = agg
+			} else {
+				targetPath := t.LogPath
+				if targetPath == "" {
+					prefix := run.Status.Artifacts
+					if prefix == "" && r.artifactSink() != nil {
+						prefix = r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit)
+					}
+					targetPath = artifacts.ExpectedLogPath(artifacts.ArtifactMeta{
+						Repo:           run.Spec.Repo.URL,
+						Commit:         run.Spec.Repo.Commit,
+						TaskID:         t.ID,
+						ArtifactPrefix: prefix,
+					})
+				}
+				if targetPath != "" {
+					loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
+					data, loadErr := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), targetPath)
+					loadCancel()
+					if loadErr != nil {
+						if !artifacts.IsNotFound(loadErr) {
+							logger.V(1).Info("probed artifact sink for restart rescue failed", "task", t.ID, "path", targetPath, "error", loadErr)
+							return ctrl.Result{}, fmt.Errorf("probe artifact sink for task %s log: %w", t.ID, loadErr)
+						}
+						logger.V(1).Info("probed artifact sink for restart rescue: log not found", "task", t.ID, "path", targetPath)
+					} else if len(data) > 0 {
+						if agg, parseErr := artifacts.ParseInspectLog(data); parseErr == nil && agg.Samples > 0 {
+							if reqWindow <= 0 || agg.Samples >= reqWindow || (t.PossibleSamples > 0 && agg.Samples >= t.PossibleSamples) {
+								logger.V(1).Info("probed artifact sink for restart rescue: found complete log", "task", t.ID, "path", targetPath, "samples", agg.Samples)
+								rescued = true
+								rescuedAgg = agg
+								rescuedLogPath = targetPath
+							} else {
+								logger.V(1).Info("probed artifact sink for restart rescue: log partial", "task", t.ID, "path", targetPath, "samples", agg.Samples, "requested", reqWindow)
+							}
+						} else {
+							logger.V(1).Info("probed artifact sink for restart rescue: log unparseable", "task", t.ID, "path", targetPath, "error", parseErr)
 						}
 					}
 				}
@@ -2477,7 +2506,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					sampleCount = rescuedAgg.Samples
 				}
 				logger.Info("restart rescue", "task", t.ID, "run", run.Name, "samples", sampleCount)
-				rescuedTasks[t.ID] = rescuedTaskInfo{agg: rescuedAgg}
+				rescuedTasks[t.ID] = rescuedTaskInfo{agg: rescuedAgg, logPath: rescuedLogPath}
 				continue
 			}
 
@@ -2536,6 +2565,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 						status.Tasks[i].Message = "restart rescue"
 					} else if !strings.Contains(status.Tasks[i].Message, "restart rescue") {
 						status.Tasks[i].Message = status.Tasks[i].Message + " (restart rescue)"
+					}
+					if status.Tasks[i].LogPath == "" && info.logPath != "" {
+						status.Tasks[i].LogPath = info.logPath
 					}
 					if info.agg != nil {
 						if status.Tasks[i].Samples == 0 {
@@ -2601,10 +2633,13 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			if msg, failed := terminalFailures[tid]; failed {
 				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
 				run.Status.Tasks[i].Message = msg
-			} else if _, ok := rescuedTasks[tid]; ok {
+			} else if info, ok := rescuedTasks[tid]; ok {
 				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
 				if run.Status.Tasks[i].Message == "" {
 					run.Status.Tasks[i].Message = "restart rescue"
+				}
+				if run.Status.Tasks[i].LogPath == "" && info.logPath != "" {
+					run.Status.Tasks[i].LogPath = info.logPath
 				}
 			}
 		}
