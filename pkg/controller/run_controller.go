@@ -307,6 +307,9 @@ type RunReconciler struct {
 	discoveryTrackerMu sync.Mutex
 	discoveryTrackers  map[types.NamespacedName]*discoveryAttemptTracker
 
+	branchReportMu    sync.Mutex
+	branchReportLocks map[string]*sync.Mutex
+
 	mu     sync.RWMutex
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
 
@@ -3697,6 +3700,11 @@ func (r *RunReconciler) StartDiscoveryWatchdog(ctx context.Context) error {
 func (r *RunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.Add(manager.RunnableFunc(r.StartDiscoveryWatchdog)); err != nil {
 		return fmt.Errorf("failed to add discovery watchdog runnable: %w", err)
+	}
+	if err := mgr.Add(&BranchHeadBackfillRunnable{
+		Reconciler: r,
+	}); err != nil {
+		return fmt.Errorf("failed to add branch-head backfill runnable: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 4}).

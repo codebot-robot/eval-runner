@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -271,6 +272,21 @@ func (r *RunReconciler) reportBranchHeadInProgress(ctx context.Context, run *v1a
 	})
 }
 
+func (r *RunReconciler) branchLock(repoRef forge.RepoRef, branch string) *sync.Mutex {
+	r.branchReportMu.Lock()
+	defer r.branchReportMu.Unlock()
+	if r.branchReportLocks == nil {
+		r.branchReportLocks = make(map[string]*sync.Mutex)
+	}
+	key := fmt.Sprintf("%s/%s/%s@%s", repoRef.Host, repoRef.Owner, repoRef.Name, branch)
+	mu, ok := r.branchReportLocks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		r.branchReportLocks[key] = mu
+	}
+	return mu
+}
+
 func (r *RunReconciler) reportBranchHeadTerminal(ctx context.Context, run *v1alpha1.Run) error {
 	if !isTrackedBranchRun(run) {
 		return nil
@@ -286,6 +302,14 @@ func (r *RunReconciler) reportBranchHeadTerminal(ctx context.Context, run *v1alp
 		return nil
 	}
 	branch := run.Labels[consumer.LabelBranch]
+	if branch == "" {
+		return nil
+	}
+
+	mu := r.branchLock(repoRef, branch)
+	mu.Lock()
+	defer mu.Unlock()
+
 	currentCommitSHA := pooling.RunCommitSHA(run)
 	if currentCommitSHA == "" {
 		return nil
@@ -393,11 +417,13 @@ func (r *RunReconciler) reportBranchHeadTerminal(ctx context.Context, run *v1alp
 		nextTopUpIn,
 	)
 
-	hash := github.HashCheckRunState(state)
-	if seedRun.Status.Reporting != nil && seedRun.Status.Reporting.CheckRunID != 0 && seedRun.Status.Reporting.LastPostedHash == hash {
-		// Content unchanged, skip update
-		return nil
+	// Ensure we inspect the freshest status of seedRun
+	var freshSeed v1alpha1.Run
+	seedKey := types.NamespacedName{Namespace: seedRun.Namespace, Name: seedRun.Name}
+	if err := r.Get(ctx, seedKey, &freshSeed); err != nil {
+		return fmt.Errorf("getting fresh seed run status: %w", err)
 	}
+	seedRun = &freshSeed
 
 	checkRunID := int64(0)
 	if seedRun.Status.Reporting != nil {
@@ -407,14 +433,19 @@ func (r *RunReconciler) reportBranchHeadTerminal(ctx context.Context, run *v1alp
 		checkRunID = run.Status.Reporting.CheckRunID
 	}
 
+	hash := github.HashCheckRunState(state)
+	if checkRunID != 0 && seedRun.Status.Reporting != nil && seedRun.Status.Reporting.LastPostedHash == hash {
+		// Content unchanged, skip update
+		return nil
+	}
+
 	rep := github.NewReporter(ghClient, github.ReporterOptions{UIBaseURL: r.uiBaseURL()})
 	newCheckRunID, postedHash, err := rep.ReportBranchHead(ctx, repoRef, headCommitSHA, state, checkRunID)
 	if err != nil {
 		return fmt.Errorf("reporting branch head check run: %w", err)
 	}
 
-	seedRunKey := types.NamespacedName{Namespace: seedRun.Namespace, Name: seedRun.Name}
-	if err := r.updateRunStatus(ctx, seedRunKey, func(status *v1alpha1.RunStatus, gen int64) {
+	if err := r.updateRunStatus(ctx, seedKey, func(status *v1alpha1.RunStatus, gen int64) {
 		status.Reporting = &v1alpha1.RunReportingStatus{
 			CheckRunID:     newCheckRunID,
 			LastPostedHash: postedHash,
@@ -436,4 +467,187 @@ func (r *RunReconciler) reportBranchHeadTerminal(ctx context.Context, run *v1alp
 	}
 
 	return nil
+}
+
+// BackfillBranchHeadCheckRuns runs a single backfill pass over all tracked repository x branch targets.
+// For the newest head commit on each branch only, if the seed Run is terminal and status.reporting.checkRunID
+// is unset, it posts a check run to GitHub and updates the Run status.
+// Bounding to the newest head per branch ensures a controller restart does not post check runs for historical commits.
+// Returns the count of backfilled check runs.
+func (r *RunReconciler) BackfillBranchHeadCheckRuns(ctx context.Context) (int, error) {
+	ghClient, err := r.getGitHubClient(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("getting github client for backfill: %w", err)
+	}
+	if ghClient == nil {
+		return 0, nil
+	}
+
+	var runList v1alpha1.RunList
+	if err := r.List(ctx, &runList, client.InNamespace(r.controllerNamespace())); err != nil {
+		return 0, fmt.Errorf("listing runs for branch head backfill: %w", err)
+	}
+
+	type repoBranchKey struct {
+		host   string
+		owner  string
+		repo   string
+		branch string
+	}
+	runsByTarget := make(map[repoBranchKey][]*v1alpha1.Run)
+	for i := range runList.Items {
+		run := &runList.Items[i]
+		if !isTrackedBranchRun(run) {
+			continue
+		}
+		repoRef := resolveRunRepoRef(run)
+		if repoRef.Owner == "" || repoRef.Name == "" {
+			continue
+		}
+		host := repoRef.Host
+		if host == "" {
+			host = "github.com"
+		}
+		branch := run.Labels[consumer.LabelBranch]
+		key := repoBranchKey{
+			host:   host,
+			owner:  repoRef.Owner,
+			repo:   repoRef.Name,
+			branch: branch,
+		}
+		runsByTarget[key] = append(runsByTarget[key], run)
+	}
+
+	var keys []repoBranchKey
+	for k := range runsByTarget {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].host != keys[j].host {
+			return keys[i].host < keys[j].host
+		}
+		if keys[i].owner != keys[j].owner {
+			return keys[i].owner < keys[j].owner
+		}
+		if keys[i].repo != keys[j].repo {
+			return keys[i].repo < keys[j].repo
+		}
+		return keys[i].branch < keys[j].branch
+	})
+
+	count := 0
+	for _, key := range keys {
+		targetRuns := runsByTarget[key]
+		runsByCommit := make(map[string][]*v1alpha1.Run)
+		type commitInfo struct {
+			sha  string
+			time time.Time
+		}
+		var commits []commitInfo
+		seenCommits := make(map[string]bool)
+
+		for _, item := range targetRuns {
+			sha := pooling.RunCommitSHA(item)
+			if sha == "" {
+				continue
+			}
+			runsByCommit[sha] = append(runsByCommit[sha], item)
+			if !seenCommits[sha] {
+				seenCommits[sha] = true
+				ct, _ := pooling.RunCommitTime(item)
+				commits = append(commits, commitInfo{sha: sha, time: ct})
+			}
+		}
+		if len(commits) == 0 {
+			continue
+		}
+
+		sort.Slice(commits, func(i, j int) bool {
+			if !commits[i].time.Equal(commits[j].time) {
+				return commits[i].time.Before(commits[j].time)
+			}
+			return commits[i].sha < commits[j].sha
+		})
+
+		headCommitSHA := commits[len(commits)-1].sha
+		headRuns := runsByCommit[headCommitSHA]
+		var seedRun *v1alpha1.Run
+		for _, hr := range headRuns {
+			if hr.Labels == nil || hr.Labels[consumer.LabelTopUp] == "" {
+				seedRun = hr
+				break
+			}
+		}
+		if seedRun == nil {
+			seedRun = headRuns[0]
+		}
+
+		if seedRun.Status.Phase != v1alpha1.RunPhaseCompleted && seedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+			continue
+		}
+
+		var freshSeed v1alpha1.Run
+		seedKey := types.NamespacedName{Namespace: seedRun.Namespace, Name: seedRun.Name}
+		if err := r.Get(ctx, seedKey, &freshSeed); err != nil {
+			logf.FromContext(ctx).Error(err, "failed getting fresh seed run for backfill", "seed", seedKey)
+			continue
+		}
+		seedRun = &freshSeed
+
+		if seedRun.Status.Reporting != nil && seedRun.Status.Reporting.CheckRunID != 0 {
+			continue
+		}
+
+		alreadyReported := false
+		for _, hr := range headRuns {
+			if hr.Status.Reporting != nil && hr.Status.Reporting.CheckRunID != 0 {
+				alreadyReported = true
+				break
+			}
+		}
+		if alreadyReported {
+			continue
+		}
+
+		if err := r.reportBranchHeadTerminal(ctx, seedRun); err != nil {
+			logf.FromContext(ctx).Error(err, "failed backfilling branch-head check run",
+				"repo", fmt.Sprintf("%s/%s", key.owner, key.repo),
+				"branch", key.branch,
+				"commit", headCommitSHA,
+			)
+			continue
+		}
+
+		var postSeed v1alpha1.Run
+		if err := r.Get(ctx, seedKey, &postSeed); err != nil {
+			logf.FromContext(ctx).Error(err, "failed getting post-reporting seed run for backfill", "seed", seedKey)
+			continue
+		}
+		if postSeed.Status.Reporting != nil && postSeed.Status.Reporting.CheckRunID != 0 &&
+			(freshSeed.Status.Reporting == nil || postSeed.Status.Reporting.CheckRunID != freshSeed.Status.Reporting.CheckRunID) {
+			count++
+		}
+	}
+
+	logf.FromContext(ctx).Info("backfilled branch-head check runs", "count", count)
+	return count, nil
+}
+
+// BranchHeadBackfillRunnable executes a single backfill pass after leader election.
+type BranchHeadBackfillRunnable struct {
+	Reconciler *RunReconciler
+}
+
+func (b *BranchHeadBackfillRunnable) Start(ctx context.Context) error {
+	count, err := b.Reconciler.BackfillBranchHeadCheckRuns(ctx)
+	if err != nil && ctx.Err() == nil {
+		logf.FromContext(ctx).Error(err, "branch-head check run backfill pass failed")
+	} else if err == nil {
+		logf.FromContext(ctx).Info("branch-head check run backfill pass completed", "count", count)
+	}
+	return nil
+}
+
+func (b *BranchHeadBackfillRunnable) NeedLeaderElection() bool {
+	return true
 }

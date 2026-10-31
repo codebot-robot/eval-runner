@@ -30,6 +30,7 @@ type PooledTask struct {
 	SuccessRate *float64
 	Estimate    stats.Estimate
 	Tokens      *v1alpha1.TaskTokens
+	CostUSD     *float64
 	Phase       v1alpha1.TaskPhase
 	Message     string
 	RunName     string
@@ -96,6 +97,7 @@ func PoolRunsForCommit(runs []*v1alpha1.Run) *CommitPool {
 		totalSamples := obsPool.SamplesPerTask[tid]
 
 		var totalTokens *v1alpha1.TaskTokens
+		var totalCostUSD *float64
 		var lastPhase v1alpha1.TaskPhase
 		var lastMsg string
 		var lastRunName string
@@ -128,6 +130,12 @@ func PoolRunsForCommit(runs []*v1alpha1.Run) *CommitPool {
 						totalTokens.Output += t.Tokens.Output
 						totalTokens.Total += t.Tokens.Total
 						totalTokens.Reasoning += t.Tokens.Reasoning
+					}
+					if t.CostUSD != nil {
+						if totalCostUSD == nil {
+							totalCostUSD = new(float64)
+						}
+						*totalCostUSD += *t.CostUSD
 					}
 					if len(counts) == 1 && t.SuccessRateCI != nil {
 						singleRunCI = t.SuccessRateCI
@@ -171,6 +179,7 @@ func PoolRunsForCommit(runs []*v1alpha1.Run) *CommitPool {
 				pt.Estimate = stats.PooledWilson(counts, 0.95)
 			}
 			pt.Tokens = totalTokens
+			pt.CostUSD = totalCostUSD
 			pool.CompletedTasks++
 		} else if allFailed {
 			pt.Phase = v1alpha1.TaskPhaseFailed
