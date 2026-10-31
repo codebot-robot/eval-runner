@@ -20,6 +20,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -221,14 +222,17 @@ func (f *FakeGitHubServer) Comments() []*IssueComment {
 	return res
 }
 
-// CheckRuns returns all stored check runs.
+// CheckRuns returns all stored check runs sorted by ID ascending (creation order).
 func (f *FakeGitHubServer) CheckRuns() []*FakeCheckRun {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var res []*FakeCheckRun
+	res := make([]*FakeCheckRun, 0, len(f.checkRuns))
 	for _, cr := range f.checkRuns {
 		res = append(res, cr)
 	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].ID < res[j].ID
+	})
 	return res
 }
 

@@ -3975,3 +3975,30 @@ func TestHashContent_ChangesWithImageURLAndAnnotations(t *testing.T) {
 		t.Errorf("HashContent did not change when annotation message changed: %q vs %q", h1, h3)
 	}
 }
+
+func TestFakeGitHubServer_CheckRunsSortedByID(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("token")
+
+	for i := 0; i < 10; i++ {
+		_, err := client.CreateCheckRun(t.Context(), "gke-labs", "eval-runner", fmt.Sprintf("sha%d", i), CheckRunState{
+			Name:   fmt.Sprintf("check-%d", i),
+			Status: "in_progress",
+		})
+		if err != nil {
+			t.Fatalf("CreateCheckRun failed: %v", err)
+		}
+	}
+
+	runs := server.CheckRuns()
+	if len(runs) != 10 {
+		t.Fatalf("expected 10 check runs, got %d", len(runs))
+	}
+	for i := 1; i < len(runs); i++ {
+		if runs[i].ID <= runs[i-1].ID {
+			t.Errorf("check runs not sorted by ID: runs[%d].ID=%d <= runs[%d].ID=%d", i, runs[i].ID, i-1, runs[i-1].ID)
+		}
+	}
+}
