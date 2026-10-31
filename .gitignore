@@ -14,5 +14,4 @@ go.work.sum
 __pycache__/
 *.py[cod]
 .venv/
-**/.venv/
 
