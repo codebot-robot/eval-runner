@@ -364,7 +364,8 @@ In addition to PR comparison reporting, the controller posts and updates an `eva
   - **Summary**: Per-task markdown table (eval, score, samples, tokens) plus `"pooled from N Runs; next top-up in ~... "` when top-ups are enabled.
   - **Conclusions**: `success` when the estimate exists; `neutral` while only partial; `failure` only if every task failed to run. Branch heads are never "regressed" by themselves; the Δ vs parent is informational.
   - **Details URL**: Points to the repo-scoped series page for that branch, e.g. `{uiBaseURL}/{host}/{owner}/{repo}/series/{branch}`.
-- **Idempotency & Restarts**: The check-run ID is persisted in the seed Run's `status.reporting.checkRunID` along with `status.reporting.lastPostedHash`. Controller restarts and re-reconciles compute the state hash and avoid redundant GitHub API PATCH calls.
+  - **Rich Output**: Completed check runs populate `output.text` with the per-task table across pooled commit observations (eval, samples, successes, rate with 95% CI, tokens, cost) and a footer link to the series page, and attach the branch sparkline image to `output.images` (`{uiBaseURL}/{host}/{owner}/{repo}/sparkline.svg?branch=<branch>&w=600&h=80`, caption `<branch>, last 20 commits`).
+- **Idempotency & Restarts**: The check-run ID is persisted in the seed Run's `status.reporting.checkRunID` along with `status.reporting.lastPostedHash`. Controller restarts and re-reconciles compute the state hash and avoid redundant GitHub API PATCH calls; on startup after leader election, a single backfill pass reports any terminal seed Run with an unset check-run ID for the newest head commit of each tracked repository and branch.
 
 ### The Forge Abstraction (`pkg/forge`)
 
