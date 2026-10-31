@@ -521,6 +521,14 @@ type ComparisonStatus struct {
 	// +optional
 	ExtraSamplesApplied int `json:"extraSamplesApplied,omitempty"`
 
+	// ObservedCandidateRun records the candidate Run from which the current status was computed.
+	// +optional
+	ObservedCandidateRun string `json:"observedCandidateRun,omitempty"`
+
+	// ObservedBaselineRun records the baseline Run from which the current status was computed.
+	// +optional
+	ObservedBaselineRun string `json:"observedBaselineRun,omitempty"`
+
 	// Tasks records the status and paired comparison results for each evaluated task.
 	// +optional
 	Tasks []ComparisonTaskStatus `json:"tasks,omitempty"`
