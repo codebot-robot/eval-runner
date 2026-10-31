@@ -388,6 +388,14 @@ func HashCheckRunState(state CheckRunState) string {
 		h.Write([]byte{0})
 		h.Write([]byte(img.Caption))
 	}
+	for _, act := range state.Actions {
+		h.Write([]byte{0})
+		h.Write([]byte(act.Label))
+		h.Write([]byte{0})
+		h.Write([]byte(act.Description))
+		h.Write([]byte{0})
+		h.Write([]byte(act.Identifier))
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
