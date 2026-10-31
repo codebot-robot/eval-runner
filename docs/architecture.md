@@ -133,8 +133,13 @@ The `Comparison` custom resource pairs two `Run` resources, evaluates statistica
   - `pImprovement`: Aggregate posterior probability of net improvement.
   - `tasks`: Per-task paired metrics (`ComparisonTaskStatus`): `baseRate`, `candidateRate`, `delta`, `deltaCI` (95% bootstrap percentile interval with normal-approximation fallback), `pairs`, `wins`, `losses`, `ties`, `dropped: {candidate, baseline}`, `label`, `decision`, `samplesRun`, `suggestedNext`, and `tokens`.
   - `batches`: List of completed and in-flight evaluation batch records (`ComparisonBatchStatus` structs with `index`, `sampleRange`, `candidateRun`, `baselineRun`, and `phase`).
+  - `observedCandidateRun`: Candidate `Run` resource from which current status was computed.
+  - `observedBaselineRun`: Baseline `Run` resource from which current status was computed.
   - `summaryPath`: Storage path or URI where `comparisons/<name>.json` was written to the artifact sink.
   - `message`: Human-readable summary of verdicts, task notes, or candidate-task failure caps.
+
+**Comparison Re-scoring on Head Move**:
+When a pull request gets a new head commit, forge consumers create a candidate Run for the new commit and update `spec.candidate.run` (and `spec.pullRequest.headSHA`) on the existing Comparison. The Comparison controller detects the change against `status.observedCandidateRun` (or initial batch records), resets the scoring state (phase, verdict, summary, batches, completion time, extra samples applied, and per-task results), and re-scores against the new candidate Run while preserving `status.reporting.commentID` to edit the existing PR comment in place. Existing completed baseline Runs are reused without re-execution.
 
 ### Webhook Service (`cmd/eval-runner-webhook`)
 
