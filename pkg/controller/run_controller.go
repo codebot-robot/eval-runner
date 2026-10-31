@@ -2234,6 +2234,20 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 	}
 
+	// Clean up lingering sandboxes for tasks already in a terminal phase (e.g. from a crash before sandbox deletion)
+	for _, t := range run.Status.Tasks {
+		if t.Phase == v1alpha1.TaskPhaseCompleted || t.Phase == v1alpha1.TaskPhaseFailed {
+			if sb, ok := sandboxesByTask[t.ID]; ok {
+				sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
+					logger.Error(err, "failed to delete lingering task sandbox", "task", t.ID)
+				}
+				r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, t.ID, sbKey)
+				delete(sandboxesByTask, t.ID)
+			}
+		}
+	}
+
 	// Count active running tasks
 	runningCount := 0
 	for _, t := range run.Status.Tasks {
@@ -2364,6 +2378,10 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 	var readyTasks []readyTaskItem
 	terminalFailures := make(map[string]string)
+	type rescuedTaskInfo struct {
+		agg *artifacts.TaskAggregates
+	}
+	rescuedTasks := make(map[string]rescuedTaskInfo)
 	waitingInGracePeriod := false
 	var minGraceRemaining time.Duration
 
@@ -2430,6 +2448,36 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				}
 			}
 
+			reqWindow := taskRequestedWindowSize(run.Spec, t)
+			rescued := false
+			var rescuedAgg *artifacts.TaskAggregates
+
+			if t.Samples > 0 && (reqWindow <= 0 || t.Samples >= reqWindow) {
+				rescued = true
+			} else if t.LogPath != "" {
+				loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
+				data, loadErr := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), t.LogPath)
+				loadCancel()
+				if loadErr == nil && len(data) > 0 {
+					if agg, parseErr := artifacts.ParseInspectLog(data); parseErr == nil && agg.Samples > 0 {
+						if reqWindow <= 0 || agg.Samples >= reqWindow || (t.PossibleSamples > 0 && agg.Samples >= t.PossibleSamples) {
+							rescued = true
+							rescuedAgg = agg
+						}
+					}
+				}
+			}
+
+			if rescued {
+				sampleCount := t.Samples
+				if sampleCount == 0 && rescuedAgg != nil {
+					sampleCount = rescuedAgg.Samples
+				}
+				logger.Info("restart rescue", "task", t.ID, "run", run.Name, "samples", sampleCount)
+				rescuedTasks[t.ID] = rescuedTaskInfo{agg: rescuedAgg}
+				continue
+			}
+
 			terminalFailures[t.ID] = "task sandbox missing while in Running phase"
 			continue
 		}
@@ -2472,18 +2520,90 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 	}
 
-	if len(terminalFailures) > 0 {
+	if len(terminalFailures) > 0 || len(rescuedTasks) > 0 {
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			for i := range status.Tasks {
-				if msg, failed := terminalFailures[status.Tasks[i].ID]; failed {
+				tid := status.Tasks[i].ID
+				if msg, failed := terminalFailures[tid]; failed {
 					status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
 					status.Tasks[i].Message = msg
+				} else if info, ok := rescuedTasks[tid]; ok {
+					status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
+					if status.Tasks[i].Message == "" {
+						status.Tasks[i].Message = "restart rescue"
+					} else if !strings.Contains(status.Tasks[i].Message, "restart rescue") {
+						status.Tasks[i].Message = status.Tasks[i].Message + " (restart rescue)"
+					}
+					if info.agg != nil {
+						if status.Tasks[i].Samples == 0 {
+							status.Tasks[i].Samples = info.agg.Samples
+							status.Tasks[i].Successes = info.agg.Successes
+							status.Tasks[i].MeanScore = info.agg.MeanScore
+						}
+						if status.Tasks[i].SuccessRate == nil && info.agg.Samples > 0 {
+							if info.agg.IsBinary() {
+								est := stats.Proportion(info.agg.Successes, info.agg.Samples, 0.95)
+								rate := est.Point
+								status.Tasks[i].SuccessRate = &rate
+								status.Tasks[i].SuccessRateCI = &v1alpha1.ConfidenceInterval{
+									Lower:      est.CI.Lower,
+									Upper:      est.CI.Upper,
+									Confidence: 0.95,
+									Method:     "wilson",
+								}
+							} else {
+								est := stats.Mean(info.agg.Scores, 0.95)
+								rate := est.Point
+								status.Tasks[i].SuccessRate = &rate
+								status.Tasks[i].SuccessRateCI = &v1alpha1.ConfidenceInterval{
+									Lower:      est.CI.Lower,
+									Upper:      est.CI.Upper,
+									Confidence: 0.95,
+									Method:     "t",
+								}
+								status.Tasks[i].SuccessRateSD = est.SD
+							}
+						}
+					}
+					if status.Tasks[i].MeanScore == nil && status.Tasks[i].Samples > 0 {
+						mean := float64(status.Tasks[i].Successes) / float64(status.Tasks[i].Samples)
+						status.Tasks[i].MeanScore = &mean
+					}
+					if status.Tasks[i].SuccessRate == nil && status.Tasks[i].Samples > 0 {
+						rate := float64(status.Tasks[i].Successes) / float64(status.Tasks[i].Samples)
+						status.Tasks[i].SuccessRate = &rate
+					}
+					if status.Tasks[i].SuccessRateCI == nil && status.Tasks[i].Samples > 0 {
+						est := stats.Proportion(status.Tasks[i].Successes, status.Tasks[i].Samples, 0.95)
+						status.Tasks[i].SuccessRateCI = &v1alpha1.ConfidenceInterval{
+							Lower:      est.CI.Lower,
+							Upper:      est.CI.Upper,
+							Confidence: 0.95,
+							Method:     "wilson",
+						}
+					}
+					if status.Tasks[i].SamplesDone < status.Tasks[i].Samples {
+						status.Tasks[i].SamplesDone = status.Tasks[i].Samples
+					}
 				}
 			}
 			status.Summary = ComputeRunSummary(status.Tasks)
 		})
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+
+		for i := range run.Status.Tasks {
+			tid := run.Status.Tasks[i].ID
+			if msg, failed := terminalFailures[tid]; failed {
+				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
+				run.Status.Tasks[i].Message = msg
+			} else if _, ok := rescuedTasks[tid]; ok {
+				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
+				if run.Status.Tasks[i].Message == "" {
+					run.Status.Tasks[i].Message = "restart rescue"
+				}
+			}
 		}
 
 		for tid := range terminalFailures {
@@ -2496,9 +2616,22 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			}
 			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
 		}
+		for tid := range rescuedTasks {
+			sbName := discovery.TaskSandboxNameForRun(run.Name, tid)
+			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
+			if sb, ok := sandboxesByTask[tid]; ok {
+				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
+					logger.Error(err, "failed to delete task sandbox on restart rescue", "task", tid)
+				}
+			}
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
+		}
 	}
 
 	if len(readyTasks) == 0 {
+		if len(terminalFailures) > 0 || len(rescuedTasks) > 0 {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		requeueAfter := 1 * time.Second
 		if waitingInGracePeriod && minGraceRemaining > 0 && minGraceRemaining < requeueAfter {
 			requeueAfter = minGraceRemaining
@@ -3517,6 +3650,36 @@ func computeSamplesPlanned(sampleRange *v1alpha1.SampleRange, limit *int, datase
 		planned = datasetSamples
 	}
 	return planned
+}
+
+// taskRequestedWindowSize returns the number of samples requested for a task based on
+// task or run SampleRange, spec Limit, task SamplesPlanned, or task PossibleSamples.
+func taskRequestedWindowSize(spec v1alpha1.RunSpec, t v1alpha1.TaskStatus) int {
+	effRange := t.SampleRange
+	if effRange == nil {
+		effRange = EffectiveSampleRange(spec)
+	}
+	if effRange != nil {
+		planned := effRange.End - effRange.Start + 1
+		if t.PossibleSamples > 0 && t.PossibleSamples < planned {
+			planned = t.PossibleSamples
+		}
+		return planned
+	}
+	if spec.Limit != nil && *spec.Limit > 0 {
+		planned := *spec.Limit
+		if t.PossibleSamples > 0 && t.PossibleSamples < planned {
+			planned = t.PossibleSamples
+		}
+		return planned
+	}
+	if t.SamplesPlanned > 0 {
+		return t.SamplesPlanned
+	}
+	if t.PossibleSamples > 0 {
+		return t.PossibleSamples
+	}
+	return 0
 }
 
 // InspectEvalArgs builds the CLI arguments for inspect eval.

@@ -4750,6 +4750,649 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 	}
 }
 
+func TestReconcileRunningTask_RestartRescue(t *testing.T) {
+	scheme := setupScheme(t)
+
+	t.Run("Running task with Samples == requested and no sandbox -> Completed", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "task-rescued", Spec: "eval.py@rescued"},
+			},
+		}
+
+		limit := 8
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-rescue-complete",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Model: "mockllm/model",
+				Limit: &limit,
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         1,
+					EligibleTaskCount: 1,
+					TaskIDs:           []string{"task-rescued"},
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:             "task-rescued",
+						Phase:          v1alpha1.TaskPhaseRunning,
+						Samples:        8,
+						Successes:      8,
+						SamplesPlanned: 8,
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-rescue-complete"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+		if !res.Requeue {
+			t.Errorf("Expected Requeue after restart rescue")
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+
+		if len(updatedRun.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task, got %d", len(updatedRun.Status.Tasks))
+		}
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task to be Completed via restart rescue, got phase %s (msg: %s)", task.Phase, task.Message)
+		}
+		if !strings.Contains(task.Message, "restart rescue") {
+			t.Errorf("Expected note 'restart rescue' in message, got %q", task.Message)
+		}
+		if task.Samples != 8 || task.Successes != 8 {
+			t.Errorf("Expected 8 samples and 8 successes, got samples=%d successes=%d", task.Samples, task.Successes)
+		}
+		if task.SuccessRate == nil || *task.SuccessRate != 1.0 {
+			t.Errorf("Expected successRate 1.0, got %v", task.SuccessRate)
+		}
+
+		// Reconcile again to verify Run reaches Completed
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Second reconcile error: %v", err)
+		}
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+			t.Errorf("Expected Run phase to be Completed, got %s", updatedRun.Status.Phase)
+		}
+	})
+
+	t.Run("Running task with Samples == 0 and no sandbox -> Failed", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "task-zero", Spec: "eval.py@zero"},
+			},
+		}
+
+		limit := 8
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-rescue-fail",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Model: "mockllm/model",
+				Limit: &limit,
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         1,
+					EligibleTaskCount: 1,
+					TaskIDs:           []string{"task-zero"},
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:             "task-zero",
+						Phase:          v1alpha1.TaskPhaseRunning,
+						Samples:        0,
+						SamplesPlanned: 8,
+					},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-rescue-fail"}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+
+		if len(updatedRun.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task, got %d", len(updatedRun.Status.Tasks))
+		}
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task to fail with Samples==0, got phase %s", task.Phase)
+		}
+		if !strings.Contains(task.Message, "task sandbox missing") {
+			t.Errorf("Expected failure message to mention sandbox missing, got: %s", task.Message)
+		}
+	})
+}
+
+type orderRecordingClient struct {
+	client.Client
+	events []string
+	mu     sync.Mutex
+}
+
+func (c *orderRecordingClient) record(event string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, event)
+}
+
+func (c *orderRecordingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+		c.record("delete-sandbox:" + sb.Name)
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+func (c *orderRecordingClient) Status() client.SubResourceWriter {
+	return &orderRecordingStatusWriter{
+		SubResourceWriter: c.Client.Status(),
+		parent:            c,
+	}
+}
+
+type orderRecordingStatusWriter struct {
+	client.SubResourceWriter
+	parent *orderRecordingClient
+}
+
+func (w *orderRecordingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if run, ok := obj.(*v1alpha1.Run); ok {
+		for _, t := range run.Status.Tasks {
+			if t.Phase == v1alpha1.TaskPhaseCompleted {
+				w.parent.record(fmt.Sprintf("status-update-task-completed:%s:samples=%d", t.ID, t.Samples))
+			}
+		}
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+func TestReconcileTaskCompletion_StatusWritePrecedesSandboxDelete(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-1", Spec: "eval.py@task1"},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-order",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{"task-1"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"status": "started",
+		"eval": {"task": "task-1"},
+		"samples": [
+			{"id": "s1", "scores": {"accuracy": {"value": 1.0}}},
+			{"id": "s2", "scores": {"accuracy": {"value": 0.0}}}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	baseClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	recClient := &orderRecordingClient{
+		Client: baseClient,
+	}
+
+	reconciler := &RunReconciler{
+		Client:           recClient,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-order"}}
+
+	// Turn 1: Starts pending task, creates task sandbox
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 1 error: %v", err)
+	}
+
+	var sbList sandboxv1beta1.SandboxList
+	if err := recClient.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox")); err != nil {
+		t.Fatalf("Failed to list sandboxes: %v", err)
+	}
+	if len(sbList.Items) != 1 {
+		t.Fatalf("Expected 1 task sandbox created, got %d", len(sbList.Items))
+	}
+	taskSB := sbList.Items[0]
+
+	// Add backing ready Pod for task sandbox
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskSB.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.12",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	if err := recClient.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Failed to create pod: %v", err)
+	}
+
+	// Turn 2: Executes task, writes Completed status, and deletes sandbox
+	res, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue after executing task")
+	}
+
+	statusEvent := "status-update-task-completed:task-1:samples=2"
+	deleteEvent := "delete-sandbox:" + taskSB.Name
+
+	statusIdx := -1
+	deleteIdx := -1
+	for idx, ev := range recClient.events {
+		if ev == statusEvent && statusIdx == -1 {
+			statusIdx = idx
+		}
+		if ev == deleteEvent && deleteIdx == -1 {
+			deleteIdx = idx
+		}
+	}
+
+	if statusIdx == -1 {
+		t.Fatalf("Expected event %q in client events, got: %v", statusEvent, recClient.events)
+	}
+	if deleteIdx == -1 {
+		t.Fatalf("Expected event %q in client events, got: %v", deleteEvent, recClient.events)
+	}
+	if statusIdx >= deleteIdx {
+		t.Errorf("Expected status write (idx %d) to precede sandbox delete (idx %d), events: %v", statusIdx, deleteIdx, recClient.events)
+	}
+}
+
+func TestReconcileRunningTask_LingeringSandboxCleanedOnNextReconcile(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-completed", Spec: "eval.py@done"},
+			{ID: "task-running", Spec: "eval.py@run"},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-lingering",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         2,
+				EligibleTaskCount: 2,
+				TaskIDs:           []string{"task-completed", "task-running"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:      "task-completed",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					Samples: 8,
+				},
+				{
+					ID:    "task-running",
+					Phase: v1alpha1.TaskPhaseRunning,
+				},
+			},
+		},
+	}
+
+	// Lingering sandbox for task-completed
+	sbDone := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun(run.Name, "task-completed"),
+			Namespace: "eval-runner-sandbox",
+			Labels: map[string]string{
+				discovery.LabelRunName:      run.Name,
+				discovery.LabelRunNamespace: run.Namespace,
+				discovery.LabelRole:         discovery.RoleSample,
+			},
+			Annotations: map[string]string{
+				discovery.AnnotationTaskID: "task-completed",
+			},
+		},
+	}
+
+	// Sandbox and Pod for task-running
+	sbRun := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun(run.Name, "task-running"),
+			Namespace: "eval-runner-sandbox",
+			Labels: map[string]string{
+				discovery.LabelRunName:      run.Name,
+				discovery.LabelRunNamespace: run.Namespace,
+				discovery.LabelRole:         discovery.RoleSample,
+			},
+			Annotations: map[string]string{
+				discovery.AnnotationTaskID: "task-running",
+			},
+		},
+	}
+	podRun := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbRun.Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.15",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	inspectLog := `{
+		"version": 2,
+		"status": "started",
+		"eval": {"task": "task-running"},
+		"samples": [
+			{"id": "s1", "scores": {"accuracy": {"value": 1.0}}}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		InspectLog: []byte(inspectLog),
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sbDone, sbRun, podRun).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-lingering"}}
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	// Verify that lingering sandbox for task-completed was deleted
+	var checkSBDone sandboxv1beta1.Sandbox
+	err = cl.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner-sandbox", Name: sbDone.Name}, &checkSBDone)
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Errorf("Expected lingering sandbox %s to be deleted, got err: %v", sbDone.Name, err)
+	}
+}
+
+func TestReconcileRunningTask_RestartRescueFromReadableLog(t *testing.T) {
+	scheme := setupScheme(t)
+
+	inspectLog := `{
+		"version": 2,
+		"status": "started",
+		"eval": {"task": "task-log-rescue"},
+		"samples": [
+			{"id": "s1", "scores": {"accuracy": {"value": 1.0}}},
+			{"id": "s2", "scores": {"accuracy": {"value": 1.0}}}
+		]
+	}`
+
+	t.Run("Readable LogPath rescues task with Samples == 0", func(t *testing.T) {
+		sink := artifacts.NewInMemorySink()
+		meta := artifacts.RunMetadata{
+			RunName:      "test-run-log-rescue",
+			RunNamespace: "eval-runner",
+			TaskID:       "task-log-rescue",
+			Commit:       "c0ffee1",
+		}
+		logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(inspectLog))
+		if err != nil {
+			t.Fatalf("Failed to store artifact: %v", err)
+		}
+
+		limit := 2
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-log-rescue",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Model: "mockllm/model",
+				Limit: &limit,
+				Repo: v1alpha1.RepoSpec{
+					Commit: "c0ffee1",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         1,
+					EligibleTaskCount: 1,
+					TaskIDs:           []string{"task-log-rescue"},
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:             "task-log-rescue",
+						Phase:          v1alpha1.TaskPhaseRunning,
+						Samples:        0,
+						SamplesPlanned: 2,
+						LogPath:        logURI,
+					},
+				},
+			},
+		}
+
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "task-log-rescue", Spec: "eval.py@log"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			ArtifactSink:     sink,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-log-rescue"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+		if !res.Requeue {
+			t.Errorf("Expected Requeue after log rescue")
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task to be Completed via log rescue, got %s (msg: %s)", task.Phase, task.Message)
+		}
+		if !strings.Contains(task.Message, "restart rescue") {
+			t.Errorf("Expected message to contain 'restart rescue', got %q", task.Message)
+		}
+		if task.Samples != 2 || task.Successes != 2 {
+			t.Errorf("Expected 2 samples and 2 successes from log, got samples=%d successes=%d", task.Samples, task.Successes)
+		}
+	})
+
+	t.Run("Missing LogPath fails task with Samples == 0", func(t *testing.T) {
+		sink := artifacts.NewInMemorySink()
+		limit := 2
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-missing-log",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Model: "mockllm/model",
+				Limit: &limit,
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         1,
+					EligibleTaskCount: 1,
+					TaskIDs:           []string{"task-missing-log"},
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:             "task-missing-log",
+						Phase:          v1alpha1.TaskPhaseRunning,
+						Samples:        0,
+						SamplesPlanned: 2,
+						LogPath:        "mem://runs/nonexistent/inspect.json",
+					},
+				},
+			},
+		}
+
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "task-missing-log", Spec: "eval.py@log"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			ArtifactSink:     sink,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-missing-log"}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task to fail with missing log, got %s", task.Phase)
+		}
+	})
+}
+
 func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
 	scheme := setupScheme(t)
 
