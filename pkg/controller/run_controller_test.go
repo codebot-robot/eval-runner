@@ -5447,25 +5447,25 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 		]
 	}`
 
-	t.Run("Running task with no Samples/LogPath and complete log at derived path -> Completed with correct counts", func(t *testing.T) {
+	t.Run("Running task with no Samples/LogPath and complete summary at derived path -> Completed with correct counts", func(t *testing.T) {
 		sink := artifacts.NewInMemorySink()
+		rate := 1.0
 		meta := artifacts.RunMetadata{
-			RunName:      "test-run-probe-rescue",
-			RunNamespace: "eval-runner",
-			TaskID:       "task-probe-rescue",
-			Commit:       "c0ffee1",
+			RunName:         "test-run-probe-rescue",
+			RunNamespace:    "eval-runner",
+			TaskID:          "task-probe-rescue",
+			Commit:          "c0ffee1",
+			SampleCount:     2,
+			Successes:       2,
+			MeanScore:       &rate,
+			SuccessRate:     &rate,
+			PossibleSamples: 2,
+			SampleRange:     &artifacts.SampleRange{Start: 1, End: 2},
 		}
-		expectedPath := artifacts.ExpectedLogPath(artifacts.ArtifactMeta{
-			Commit:         "c0ffee1",
-			TaskID:         "task-probe-rescue",
-			ArtifactPrefix: sink.ArtifactPrefix("c0ffee1"),
-		})
-		logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(completeInspectLog))
+		logFilename := "2026-10-31T15-27-47-00-00_task-probe-rescue_ByhDsNK8zVf5BWpRqxd9Y9.json"
+		expectedLogPath, err := sink.StoreArtifact(t.Context(), meta, logFilename, []byte(completeInspectLog))
 		if err != nil {
 			t.Fatalf("Failed to store artifact: %v", err)
-		}
-		if logURI != expectedPath {
-			t.Fatalf("Expected stored artifact URI %q to match derived path %q", logURI, expectedPath)
 		}
 
 		limit := 2
@@ -5544,12 +5544,114 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 		if task.Samples != 2 || task.Successes != 2 {
 			t.Errorf("Expected 2 samples and 2 successes, got samples=%d successes=%d", task.Samples, task.Successes)
 		}
-		if task.LogPath != expectedPath {
-			t.Errorf("Expected task LogPath to be %q, got %q", expectedPath, task.LogPath)
+		if task.LogPath != expectedLogPath {
+			t.Errorf("Expected task LogPath to be %q, got %q", expectedLogPath, task.LogPath)
+		}
+		if task.PossibleSamples != 2 {
+			t.Errorf("Expected task PossibleSamples to be 2, got %d", task.PossibleSamples)
+		}
+		if task.SampleRange == nil || task.SampleRange.Start != 1 || task.SampleRange.End != 2 {
+			t.Errorf("Expected task SampleRange to be [1, 2], got %+v", task.SampleRange)
 		}
 	})
 
-	t.Run("Running task with no Samples/LogPath and missing log -> Failed as before", func(t *testing.T) {
+	t.Run("LocalDirSink with hierarchical taskID rescues and unescapes path properly", func(t *testing.T) {
+		tempDir := t.TempDir()
+		localSink := &artifacts.LocalDirSink{BaseDir: tempDir}
+		rate := 1.0
+		meta := artifacts.RunMetadata{
+			RunName:         "test-run-local-rescue",
+			RunNamespace:    "eval-runner",
+			TaskID:          "docs/readme_comprehension",
+			Commit:          "c0ffee1",
+			SampleCount:     2,
+			Successes:       2,
+			MeanScore:       &rate,
+			SuccessRate:     &rate,
+			PossibleSamples: 2,
+		}
+		logFilename := "2026-10-31T15-27-47-00-00_readme-comprehension_ByhDsNK8zVf5BWpRqxd9Y9.json"
+		expectedLogPath, err := localSink.StoreArtifact(t.Context(), meta, logFilename, []byte(completeInspectLog))
+		if err != nil {
+			t.Fatalf("Failed to store artifact in LocalDirSink: %v", err)
+		}
+
+		limit := 2
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-local-rescue",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Model: "mockllm/model",
+				Limit: &limit,
+				Repo: v1alpha1.RepoSpec{
+					Commit: "c0ffee1",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         1,
+					EligibleTaskCount: 1,
+					TaskIDs:           []string{"docs/readme_comprehension"},
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:             "docs/readme_comprehension",
+						Phase:          v1alpha1.TaskPhaseRunning,
+						Samples:        0,
+						SamplesPlanned: 2,
+						LogPath:        "",
+					},
+				},
+			},
+		}
+
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "docs/readme_comprehension", Spec: "eval.py@rescue"},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			ArtifactSink:     localSink,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-local-rescue"}}
+		res, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+		if !res.Requeue {
+			t.Errorf("Expected Requeue after restart rescue")
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task to be Completed via restart rescue, got %s (msg: %s)", task.Phase, task.Message)
+		}
+		if task.LogPath != expectedLogPath {
+			t.Errorf("Expected task LogPath to be %q, got %q", expectedLogPath, task.LogPath)
+		}
+	})
+
+	t.Run("Running task with no Samples/LogPath and missing summary -> Failed as before", func(t *testing.T) {
 		sink := artifacts.NewInMemorySink()
 		limit := 2
 		run := &v1alpha1.Run{
@@ -5623,15 +5725,21 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 		}
 	})
 
-	t.Run("Running task with no Samples/LogPath and partial log -> Failed as before", func(t *testing.T) {
+	t.Run("Running task with no Samples/LogPath and partial summary -> Failed as before", func(t *testing.T) {
 		sink := artifacts.NewInMemorySink()
+		rate := 1.0
 		meta := artifacts.RunMetadata{
 			RunName:      "test-run-probe-partial",
 			RunNamespace: "eval-runner",
 			TaskID:       "task-probe-rescue",
 			Commit:       "c0ffee1",
+			SampleCount:  1,
+			Successes:    1,
+			MeanScore:    &rate,
+			SuccessRate:  &rate,
 		}
-		_, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(partialInspectLog))
+		logFilename := "2026-10-31T15-27-47-00-00_task-probe-rescue_ByhDsNK8zVf5BWpRqxd9Y9.json"
+		_, err := sink.StoreArtifact(t.Context(), meta, logFilename, []byte(partialInspectLog))
 		if err != nil {
 			t.Fatalf("Failed to store artifact: %v", err)
 		}
