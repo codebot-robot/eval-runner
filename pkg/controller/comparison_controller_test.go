@@ -17561,3 +17561,650 @@ func (b *blockingSinkComparison) IsDurable() bool {
 func (b *blockingSinkComparison) Close() error {
 	return nil
 }
+
+func TestComparisonReconciler_HeadMove_RescoresAgainstNewCandidate(t *testing.T) {
+	ctx := t.Context()
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("failed to create GCS sink: %v", err)
+	}
+
+	cand1SHA := "1111111111111111111111111111111111111111"
+	cand2SHA := "2222222222222222222222222222222222222222"
+	baseSHA := "0000000000000000000000000000000000000000"
+
+	baseInspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 0.0}})
+	cand1Inspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 0.0}})
+	cand2Inspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 1.0}})
+
+	baseLogPath := "gs://eval-bucket/runs/" + baseSHA + "/" + taskID + "/inspect.json"
+	cand1LogPath := "gs://eval-bucket/runs/" + cand1SHA + "/" + taskID + "/inspect.json"
+	cand2LogPath := "gs://eval-bucket/runs/" + cand2SHA + "/" + taskID + "/inspect.json"
+
+	fakeGCS.Objects["eval-bucket/runs/"+baseSHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: baseInspect}
+	fakeGCS.Objects["eval-bucket/runs/"+cand1SHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: cand1Inspect}
+	fakeGCS.Objects["eval-bucket/runs/"+cand2SHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: cand2Inspect}
+
+	server := github.NewFakeGitHubServer()
+	defer server.Close()
+
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate test RSA key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+	})
+	appSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data: map[string][]byte{
+			"app-id":          []byte("12345"),
+			"installation-id": []byte("67890"),
+			"private-key":     pemBytes,
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: baseSHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: baseLogPath, Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+	cand1Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand1-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: cand1SHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: cand1LogPath, Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+	cand2Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand2-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: cand2SHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: cand2LogPath, Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-437", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand1-run"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     437,
+				HeadSHA:    cand1SHA,
+				BaseSHA:    baseSHA,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cand1Run, cand2Run, baseRun, comp, appSecret).
+		WithStatusSubresource(cand1Run, cand2Run, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client("app-inst-token")
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "pr-437"}}
+
+	// 1. Initial reconcile: cand1 is evaluated and completes
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+
+	var curComp v1alpha1.Comparison
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp failed: %v", err)
+	}
+	if curComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Fatalf("expected phase Completed on first run, got %v", curComp.Status.Phase)
+	}
+	if curComp.Status.ObservedCandidateRun != "cand1-run" {
+		t.Errorf("expected ObservedCandidateRun 'cand1-run', got %q", curComp.Status.ObservedCandidateRun)
+	}
+	if curComp.Status.Reporting == nil || curComp.Status.Reporting.CommentID == 0 {
+		t.Fatalf("expected non-zero commentID in status.reporting")
+	}
+	origCommentID := curComp.Status.Reporting.CommentID
+
+	comments := server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment after first reconcile, got %d", len(comments))
+	}
+
+	// 2. Head moves to cand2: forge consumer updates spec.candidate.run and spec.pullRequest.headSHA
+	curComp.Spec.Candidate.Run = "cand2-run"
+	curComp.Spec.PullRequest.HeadSHA = cand2SHA
+	if err := cl.Update(ctx, &curComp); err != nil {
+		t.Fatalf("update comp failed: %v", err)
+	}
+
+	// Reconcile: should detect candidate change, reset status, create new batch against cand2,
+	// and update the existing PR comment in place.
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp after head-move failed: %v", err)
+	}
+	if curComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("expected completed phase for cand2, got %v", curComp.Status.Phase)
+	}
+	if curComp.Status.ObservedCandidateRun != "cand2-run" {
+		t.Errorf("expected ObservedCandidateRun 'cand2-run', got %q", curComp.Status.ObservedCandidateRun)
+	}
+	if len(curComp.Status.Batches) == 0 || curComp.Status.Batches[0].CandidateRun != "cand2-run" {
+		t.Errorf("expected batch 0 CandidateRun 'cand2-run', got %+v", curComp.Status.Batches)
+	}
+	if curComp.Status.Reporting == nil || curComp.Status.Reporting.CommentID != origCommentID {
+		t.Errorf("expected commentID preserved (%d), got %+v", origCommentID, curComp.Status.Reporting)
+	}
+
+	// Comments: single comment updated in place
+	comments = server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment updated in place, got %d", len(comments))
+	}
+	if comments[0].ID != origCommentID {
+		t.Errorf("expected comment ID %d, got %d", origCommentID, comments[0].ID)
+	}
+
+	// Baseline run was NOT rerun: exactly 1 baseline run exists
+	var runList v1alpha1.RunList
+	if err := cl.List(ctx, &runList); err != nil {
+		t.Fatalf("list runs failed: %v", err)
+	}
+	baselineRuns := 0
+	for _, r := range runList.Items {
+		if r.Spec.Repo.Commit == baseSHA {
+			baselineRuns++
+		}
+	}
+	if baselineRuns != 1 {
+		t.Errorf("expected exactly 1 baseline run, got %d", baselineRuns)
+	}
+}
+
+func TestComparisonReconciler_BatchDiscovery_StaleExtensionRunWithDifferentCommitNotAdopted(t *testing.T) {
+	ctx := t.Context()
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("failed to create GCS sink: %v", err)
+	}
+
+	cand2SHA := "2222222222222222222222222222222222222222"
+	baseSHA := "0000000000000000000000000000000000000000"
+
+	baseInspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 0.0}})
+	cand2Inspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 1.0}})
+
+	fakeGCS.Objects["eval-bucket/runs/"+baseSHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: baseInspect}
+	fakeGCS.Objects["eval-bucket/runs/"+cand2SHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: cand2Inspect}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: baseSHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/" + baseSHA + "/" + taskID + "/inspect.json", Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+	cand2Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand2-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: cand2SHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/" + cand2SHA + "/" + taskID + "/inspect.json", Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+
+	// Pre-existing extension Run from previous head with stale commit "old-cand-commit"
+	staleBatch2Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-200-b2-cand", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "old-cand-commit"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 2, End: 2},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-200", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand2-run"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cand2Run, baseRun, staleBatch2Run, comp).
+		WithStatusSubresource(cand2Run, baseRun, staleBatch2Run, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ControllerNamespace: "eval-runner",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "pr-200"}}
+
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var curComp v1alpha1.Comparison
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp failed: %v", err)
+	}
+
+	// Verify stale batch 2 run was NOT adopted into batches
+	if len(curComp.Status.Batches) != 1 {
+		t.Errorf("expected exactly 1 batch (stale b2-cand ignored), got %d: %+v", len(curComp.Status.Batches), curComp.Status.Batches)
+	}
+}
+
+func TestComparisonReconciler_HeadMove_ExtraSamplesWorksAfterReset(t *testing.T) {
+	ctx := t.Context()
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("failed to create GCS sink: %v", err)
+	}
+
+	var b1Cand, b1Base []stats.SampleScore
+	for i := 1; i <= 8; i++ {
+		b1Cand = append(b1Cand, stats.SampleScore{ID: fmt.Sprint(i), Score: 1.0})
+		b1Base = append(b1Base, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.0})
+	}
+
+	baseInspect := makeSyntheticInspectLog(taskID, b1Base)
+	cand1Inspect := makeSyntheticInspectLog(taskID, b1Cand)
+	cand2Inspect := makeSyntheticInspectLog(taskID, b1Cand)
+
+	fakeGCS.Objects["eval-bucket/runs/base/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: baseInspect}
+	fakeGCS.Objects["eval-bucket/runs/cand1/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: cand1Inspect}
+	fakeGCS.Objects["eval-bucket/runs/cand2/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: cand2Inspect}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "base"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/base/" + taskID + "/inspect.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 8},
+		},
+	}
+	cand1Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand1-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand1"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/cand1/" + taskID + "/inspect.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 8},
+		},
+	}
+	cand2Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand2-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:        v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand2"},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/cand2/" + taskID + "/inspect.json", Samples: 8, SampleRange: &v1alpha1.SampleRange{Start: 1, End: 8}},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 8},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-300", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand1-run"},
+			Sampling: &v1alpha1.ComparisonSamplingSpec{
+				BatchSize:         8,
+				MaxSamplesPerTask: 32,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cand1Run, cand2Run, baseRun, comp).
+		WithStatusSubresource(cand1Run, cand2Run, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ControllerNamespace: "eval-runner",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "pr-300"}}
+
+	// 1. Initial reconcile: cand1 batch 1 completes
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+
+	var curComp v1alpha1.Comparison
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp failed: %v", err)
+	}
+	if curComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Fatalf("expected phase Completed on first run, got %v", curComp.Status.Phase)
+	}
+
+	// 2. Head moves to cand2: forge consumer updates spec.candidate.run
+	curComp.Spec.Candidate.Run = "cand2-run"
+	if err := cl.Update(ctx, &curComp); err != nil {
+		t.Fatalf("update comp failed: %v", err)
+	}
+
+	// Reconcile: status resets, cand2 batch 1 evaluates and completes
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp after reset failed: %v", err)
+	}
+	if curComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("expected phase Completed for cand2, got %v", curComp.Status.Phase)
+	}
+	if curComp.Status.ObservedCandidateRun != "cand2-run" {
+		t.Errorf("expected ObservedCandidateRun 'cand2-run', got %q", curComp.Status.ObservedCandidateRun)
+	}
+	if curComp.Status.ExtraSamplesApplied != 0 {
+		t.Errorf("expected ExtraSamplesApplied 0 after reset, got %d", curComp.Status.ExtraSamplesApplied)
+	}
+	if len(curComp.Status.Batches) != 1 {
+		t.Errorf("expected 1 batch for cand2 before extra samples, got %d", len(curComp.Status.Batches))
+	}
+
+	// 3. User requests /eval more after reset: spec.extraSamples = 8
+	curComp.Spec.ExtraSamples = 8
+	if err := cl.Update(ctx, &curComp); err != nil {
+		t.Fatalf("update extra samples failed: %v", err)
+	}
+
+	// Reconcile: extra batch 2 is scheduled for cand2!
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("third reconcile failed: %v", err)
+	}
+
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp after extra samples failed: %v", err)
+	}
+	if curComp.Status.ExtraSamplesApplied != 8 {
+		t.Errorf("expected ExtraSamplesApplied 8 for cand2, got %d", curComp.Status.ExtraSamplesApplied)
+	}
+	if len(curComp.Status.Batches) != 2 {
+		t.Errorf("expected 2 batches for cand2, got %d", len(curComp.Status.Batches))
+	}
+
+	var cand2B2 v1alpha1.Run
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "eval-runner", Name: "pr-300-b2-cand"}, &cand2B2); err != nil {
+		t.Fatalf("expected new batch 2 run for cand2: %v", err)
+	}
+	if cand2B2.Spec.Repo.Commit != "cand2" {
+		t.Errorf("expected new batch 2 run to have commit 'cand2', got %q", cand2B2.Spec.Repo.Commit)
+	}
+}
+
+func TestComparisonReconciler_HeadMove_CandidateRunNotFound(t *testing.T) {
+	ctx := t.Context()
+	scheme := setupScheme(t)
+
+	taskID := "docs/readme_comprehension"
+	fakeGCS := fakes.NewFakeStorageClient()
+	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	if err != nil {
+		t.Fatalf("failed to create GCS sink: %v", err)
+	}
+
+	cand1SHA := "1111111111111111111111111111111111111111"
+	cand2SHA := "2222222222222222222222222222222222222222"
+	baseSHA := "0000000000000000000000000000000000000000"
+
+	baseInspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 0.0}})
+	cand1Inspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 1.0}})
+	cand2Inspect := makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 1.0}})
+
+	fakeGCS.Objects["eval-bucket/runs/"+baseSHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: baseInspect}
+	fakeGCS.Objects["eval-bucket/runs/"+cand1SHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: cand1Inspect}
+	fakeGCS.Objects["eval-bucket/runs/"+cand2SHA+"/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: cand2Inspect}
+
+	server := github.NewFakeGitHubServer()
+	defer server.Close()
+
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate test RSA key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+	})
+	appSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "eval-runner"},
+		Data: map[string][]byte{
+			"app-id":          []byte("12345"),
+			"installation-id": []byte("67890"),
+			"private-key":     pemBytes,
+		},
+	}
+
+	baseRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: baseSHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/" + baseSHA + "/" + taskID + "/inspect.json", Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+	cand1Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand1-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: cand1SHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/" + cand1SHA + "/" + taskID + "/inspect.json", Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-400", Namespace: "eval-runner"},
+		Spec: v1alpha1.ComparisonSpec{
+			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
+			Candidate: v1alpha1.ComparisonRunRef{Run: "cand1-run"},
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				Number:     400,
+				HeadSHA:    cand1SHA,
+				BaseSHA:    baseSHA,
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cand1Run, baseRun, comp, appSecret).
+		WithStatusSubresource(cand1Run, baseRun, comp).
+		Build()
+
+	reconciler := &ComparisonReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		ArtifactSink:        sink,
+		ControllerNamespace: "eval-runner",
+		GitHubTokenSecret:   "github-token",
+		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
+			return server.Client("app-inst-token")
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "pr-400"}}
+
+	// 1. Initial reconcile completes
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+
+	// 2. Candidate changes to cand2-run, but cand2-run does NOT exist yet in the cluster
+	var curComp v1alpha1.Comparison
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp failed: %v", err)
+	}
+	curComp.Spec.Candidate.Run = "cand2-run"
+	curComp.Spec.PullRequest.HeadSHA = cand2SHA
+	if err := cl.Update(ctx, &curComp); err != nil {
+		t.Fatalf("update comp failed: %v", err)
+	}
+
+	// Reconcile: must reset status, keep Running with message "waiting for candidate run",
+	// pass nil to renderer (no panic), and edit comment in place.
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp failed: %v", err)
+	}
+	if curComp.Status.Phase != v1alpha1.ComparisonPhaseRunning {
+		t.Errorf("expected phase Running, got %v", curComp.Status.Phase)
+	}
+	if curComp.Status.Verdict != v1alpha1.ComparisonVerdictRunning {
+		t.Errorf("expected verdict RUNNING, got %v", curComp.Status.Verdict)
+	}
+	if curComp.Status.Message != "waiting for candidate run" {
+		t.Errorf("expected message 'waiting for candidate run', got %q", curComp.Status.Message)
+	}
+
+	comments := server.Comments()
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment updated in place, got %d", len(comments))
+	}
+	if !strings.Contains(comments[0].Body, "waiting for candidate run") {
+		t.Errorf("expected comment body to contain 'waiting for candidate run', got:\n%s", comments[0].Body)
+	}
+
+	// 3. Now cand2-run is created and completed
+	cand2Run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cand2-run", Namespace: "eval-runner"},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: cand2SHA},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: "gs://eval-bucket/runs/" + cand2SHA + "/" + taskID + "/inspect.json", Samples: 1},
+			},
+			Summary: &v1alpha1.RunSummary{TotalSamples: 1},
+		},
+	}
+	if err := cl.Create(ctx, cand2Run); err != nil {
+		t.Fatalf("create cand2 failed: %v", err)
+	}
+
+	// Reconcile again: should score cand2 and complete
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("third reconcile failed: %v", err)
+	}
+
+	if err := cl.Get(ctx, req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp final failed: %v", err)
+	}
+	if curComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Errorf("expected phase Completed, got %v", curComp.Status.Phase)
+	}
+}

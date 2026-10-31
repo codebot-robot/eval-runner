@@ -1805,6 +1805,78 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		return ctrl.Result{}, nil
 	}
 
+	// Detect if candidate or baseline Run changed compared to what status was computed from.
+	// If so, reset scoring state and start over for the new candidate/baseline.
+	observedCandidate := comp.Status.ObservedCandidateRun
+	if observedCandidate == "" && len(comp.Status.Batches) > 0 {
+		observedCandidate = comp.Status.Batches[0].CandidateRun
+	}
+	observedBaseline := comp.Status.ObservedBaselineRun
+	if observedBaseline == "" && len(comp.Status.Batches) > 0 {
+		observedBaseline = comp.Status.Batches[0].BaselineRun
+	}
+
+	candChanged := observedCandidate != "" && comp.Spec.Candidate.Run != "" && comp.Spec.Candidate.Run != observedCandidate
+	baseChanged := observedBaseline != "" && comp.Spec.Baseline.Run != "" && comp.Spec.Baseline.Run != observedBaseline
+
+	if candChanged || baseChanged {
+		logger.Info("candidate or baseline Run changed; resetting comparison scoring state",
+			"comparison", comp.Name,
+			"oldCandidate", observedCandidate, "newCandidate", comp.Spec.Candidate.Run,
+			"oldBaseline", observedBaseline, "newBaseline", comp.Spec.Baseline.Run,
+		)
+
+		var bRun, cRun *v1alpha1.Run
+		var bRunObj, cRunObj v1alpha1.Run
+		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Baseline.Run}, &bRunObj); err == nil {
+			bRun = &bRunObj
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed looking up baseline run %s: %w", comp.Spec.Baseline.Run, err)
+		}
+
+		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: comp.Spec.Candidate.Run}, &cRunObj); err == nil {
+			cRun = &cRunObj
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed looking up candidate run %s: %w", comp.Spec.Candidate.Run, err)
+		}
+
+		msg := ""
+		if cRun == nil {
+			msg = "waiting for candidate run"
+		}
+
+		if _, err := r.updateComparisonStatus(ctx, &comp, bRun, cRun, func(status *v1alpha1.ComparisonStatus) {
+			status.Phase = v1alpha1.ComparisonPhaseRunning
+			status.CompletionTime = nil
+			status.Verdict = v1alpha1.ComparisonVerdictRunning
+			status.Summary = nil
+			status.Batches = nil
+			status.Tasks = nil
+			status.ExtraSamplesApplied = 0
+			status.CostUSD = nil
+			status.PossibleSamples = 0
+			status.PImprovement = nil
+			status.SummaryPath = ""
+			status.Conditions = nil
+			status.Message = msg
+			status.ObservedCandidateRun = comp.Spec.Candidate.Run
+			status.ObservedBaselineRun = comp.Spec.Baseline.Run
+			if status.Reporting != nil {
+				status.Reporting.LastPostedHash = ""
+			}
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed resetting comparison status for %s: %w", comp.Name, err)
+		}
+
+		if cRun == nil {
+			return ctrl.Result{}, nil
+		}
+
+		if err := r.Get(ctx, req.NamespacedName, &comp); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Process pending review comment commands (e.g. /eval more <n>)
 	if len(comp.Status.PendingCommands) > 0 {
 		if err := r.processPendingCommands(ctx, &comp); err != nil {
@@ -1914,7 +1986,18 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			missing = append(missing, fmt.Sprintf("candidate run %q", comp.Spec.Candidate.Run))
 		}
 		msg := fmt.Sprintf("Waiting for %s to be created", strings.Join(missing, " and "))
-		return r.updateComparisonStatus(ctx, &comp, nil, nil, func(status *v1alpha1.ComparisonStatus) {
+		if apierrors.IsNotFound(errCand) && !apierrors.IsNotFound(errBase) {
+			msg = "waiting for candidate run"
+		}
+		var bRun *v1alpha1.Run
+		if errBase == nil {
+			bRun = &baselineRun
+		}
+		var cRun *v1alpha1.Run
+		if errCand == nil {
+			cRun = &candidateRun
+		}
+		return r.updateComparisonStatus(ctx, &comp, bRun, cRun, func(status *v1alpha1.ComparisonStatus) {
 			status.Phase = v1alpha1.ComparisonPhaseRunning
 			status.CompletionTime = nil
 			status.Verdict = v1alpha1.ComparisonVerdictRunning
@@ -1955,6 +2038,12 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			if !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("failed looking up batch run %q: %w", candName, err)
 			}
+			break
+		}
+		if candidateRun.Spec.Repo.Commit != "" && cRun.Spec.Repo.Commit != candidateRun.Spec.Repo.Commit {
+			break
+		}
+		if cRun.DeletionTimestamp != nil {
 			break
 		}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: comp.Namespace, Name: baseName}, &bRun); err != nil {
@@ -3740,6 +3829,14 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 	if latest.Status.Phase == v1alpha1.ComparisonPhaseRunning {
 		latest.Status.CompletionTime = nil
 	}
+	if len(latest.Status.Batches) > 0 {
+		if latest.Status.ObservedCandidateRun == "" && latest.Spec.Candidate.Run != "" {
+			latest.Status.ObservedCandidateRun = latest.Spec.Candidate.Run
+		}
+		if latest.Status.ObservedBaselineRun == "" && latest.Spec.Baseline.Run != "" {
+			latest.Status.ObservedBaselineRun = latest.Spec.Baseline.Run
+		}
+	}
 
 	// 2. Perform GitHub reporting ONCE outside the RetryOnConflict loop
 	var reportErr error
@@ -3759,6 +3856,14 @@ func (r *ComparisonReconciler) updateComparisonStatus(
 		mutate(&current.Status)
 		if current.Status.Phase == v1alpha1.ComparisonPhaseRunning {
 			current.Status.CompletionTime = nil
+		}
+		if len(current.Status.Batches) > 0 {
+			if current.Status.ObservedCandidateRun == "" && current.Spec.Candidate.Run != "" {
+				current.Status.ObservedCandidateRun = current.Spec.Candidate.Run
+			}
+			if current.Status.ObservedBaselineRun == "" && current.Spec.Baseline.Run != "" {
+				current.Status.ObservedBaselineRun = current.Spec.Baseline.Run
+			}
 		}
 		if latest.Spec.PullRequest != nil {
 			current.Status.Reporting = reportingStatus.DeepCopy()
