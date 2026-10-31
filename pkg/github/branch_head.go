@@ -74,6 +74,147 @@ func formatApproxDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", secs)
 }
 
+// branchHeadTaskSampleLink returns the repo-scoped link to the task samples page.
+func branchHeadTaskSampleLink(uiBaseURL string, repoRef forge.RepoRef, runName, taskID string) string {
+	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+	if trimmedUIBaseURL == "" || runName == "" || repoRef.Owner == "" || repoRef.Name == "" {
+		return ""
+	}
+	host := repoRef.Host
+	if host == "" {
+		host = "github.com"
+	}
+	return fmt.Sprintf("%s/%s/%s/%s/runs/%s/tasks/%s/samples",
+		trimmedUIBaseURL, host, repoRef.Owner, repoRef.Name, runName, url.PathEscape(taskID))
+}
+
+// formatTaskRateWithCI formats a pooled task's rate as percent plus CI, matching FormatTitle.
+func formatTaskRateWithCI(t pooling.PooledTask) string {
+	if t.SuccessRate == nil {
+		if t.Phase == v1alpha1.TaskPhaseFailed {
+			return "failed"
+		}
+		return "—"
+	}
+	pct := int(math.Round(*t.SuccessRate * 100))
+	if t.Estimate.CI.Upper > t.Estimate.CI.Lower || t.Samples > 0 {
+		halfWidth := int(math.Round(((t.Estimate.CI.Upper - t.Estimate.CI.Lower) / 2.0) * 100))
+		return fmt.Sprintf("%d%% ± %d", pct, halfWidth)
+	}
+	return fmt.Sprintf("%d%%", pct)
+}
+
+type branchHeadCol struct {
+	header string
+	cell   func(t pooling.PooledTask) string
+}
+
+func branchHeadColumns(pool *pooling.CommitPool, uiBaseURL string, repoRef forge.RepoRef) []branchHeadCol {
+	hasTokens := false
+	hasCost := false
+	for _, t := range pool.Tasks {
+		if t.Tokens != nil && t.Tokens.Total > 0 {
+			hasTokens = true
+		}
+		if t.CostUSD != nil {
+			hasCost = true
+		}
+	}
+
+	cols := []branchHeadCol{
+		{
+			header: "eval",
+			cell: func(t pooling.PooledTask) string {
+				escapedID := EscapeCell(t.ID)
+				if link := branchHeadTaskSampleLink(uiBaseURL, repoRef, t.RunName, t.ID); link != "" {
+					return fmt.Sprintf("[%s](%s)", escapedID, link)
+				}
+				return escapedID
+			},
+		},
+		{
+			header: "samples",
+			cell: func(t pooling.PooledTask) string {
+				if t.Samples > 0 {
+					return fmt.Sprintf("%d", t.Samples)
+				}
+				return "—"
+			},
+		},
+		{
+			header: "successes",
+			cell: func(t pooling.PooledTask) string {
+				if t.Samples > 0 || t.Phase == v1alpha1.TaskPhaseCompleted {
+					return fmt.Sprintf("%d", t.Successes)
+				}
+				return "—"
+			},
+		},
+		{
+			header: "rate (95% CI)",
+			cell:   formatTaskRateWithCI,
+		},
+	}
+
+	if hasTokens {
+		cols = append(cols, branchHeadCol{
+			header: "tokens",
+			cell: func(t pooling.PooledTask) string {
+				if t.Tokens != nil && t.Tokens.Total > 0 {
+					if t.Tokens.Reasoning > 0 {
+						return fmt.Sprintf("%d (+R %d)", t.Tokens.Total, t.Tokens.Reasoning)
+					}
+					return fmt.Sprintf("%d", t.Tokens.Total)
+				}
+				return "—"
+			},
+		})
+	}
+
+	if hasCost {
+		cols = append(cols, branchHeadCol{
+			header: "cost",
+			cell: func(t pooling.PooledTask) string {
+				if t.CostUSD != nil {
+					return fmt.Sprintf("$%.4f", *t.CostUSD)
+				}
+				return "—"
+			},
+		})
+	}
+
+	return cols
+}
+
+// BuildBranchHeadTable constructs the markdown table header and row strings for a branch-head CommitPool:
+// columns: eval, samples, successes, rate (95% CI), tokens (if present), cost (if present).
+func BuildBranchHeadTable(pool *pooling.CommitPool, uiBaseURL string, repoRef forge.RepoRef) (string, []string) {
+	if pool == nil || len(pool.Tasks) == 0 {
+		return "", nil
+	}
+
+	cols := branchHeadColumns(pool, uiBaseURL, repoRef)
+
+	headers := make([]string, len(cols))
+	seps := make([]string, len(cols))
+	for j, col := range cols {
+		headers[j] = col.header
+		seps[j] = "---"
+	}
+	tableHeader := fmt.Sprintf("| %s |\n| %s |\n", strings.Join(headers, " | "), strings.Join(seps, " | "))
+
+	rowStrings := make([]string, len(pool.Tasks))
+	for i, t := range pool.Tasks {
+		cells := make([]string, len(cols))
+		for j, col := range cols {
+			cells[j] = col.cell(t)
+		}
+		rowStrings[i] = fmt.Sprintf("| %s |\n", strings.Join(cells, " | "))
+	}
+
+	return tableHeader, rowStrings
+}
+
 // RenderBranchHeadSummary renders the per-task table and top-up line for a branch-head check run.
 func RenderBranchHeadSummary(
 	pool *pooling.CommitPool,
@@ -87,96 +228,12 @@ func RenderBranchHeadSummary(
 		return "No task evaluations recorded."
 	}
 
-	trimmedUIBaseURL := strings.TrimRight(uiBaseURL, "/")
-
-	hasTokens := false
-	for _, t := range pool.Tasks {
-		if t.Tokens != nil && t.Tokens.Total > 0 {
-			hasTokens = true
-			break
-		}
-	}
-
-	type summaryCol struct {
-		header string
-		cell   func(t pooling.PooledTask) string
-	}
-
-	var cols []summaryCol
-	cols = append(cols, summaryCol{
-		header: "eval",
-		cell: func(t pooling.PooledTask) string {
-			escapedID := EscapeCell(t.ID)
-			if trimmedUIBaseURL != "" && t.RunName != "" {
-				host := repoRef.Host
-				if host == "" {
-					host = "github.com"
-				}
-				samplesLink := fmt.Sprintf("/%s/%s/%s/runs/%s/tasks/%s/samples",
-					host, repoRef.Owner, repoRef.Name, t.RunName, url.PathEscape(t.ID))
-				return fmt.Sprintf("[%s](%s%s)", escapedID, trimmedUIBaseURL, samplesLink)
-			}
-			return escapedID
-		},
-	})
-
-	cols = append(cols,
-		summaryCol{
-			header: "score",
-			cell: func(t pooling.PooledTask) string {
-				if t.SuccessRate != nil {
-					return fmt.Sprintf("%.2f", *t.SuccessRate)
-				}
-				if t.Phase == v1alpha1.TaskPhaseFailed {
-					return "failed"
-				}
-				return "—"
-			},
-		},
-		summaryCol{
-			header: "samples",
-			cell: func(t pooling.PooledTask) string {
-				if t.Samples > 0 {
-					return fmt.Sprintf("%d", t.Samples)
-				}
-				return "—"
-			},
-		},
-	)
-
-	if hasTokens {
-		cols = append(cols, summaryCol{
-			header: "tokens",
-			cell: func(t pooling.PooledTask) string {
-				if t.Tokens != nil && t.Tokens.Total > 0 {
-					return fmt.Sprintf("%d", t.Tokens.Total)
-				}
-				return "—"
-			},
-		})
-	}
+	tableHeader, rowStrings := BuildBranchHeadTable(pool, uiBaseURL, repoRef)
 
 	var sb strings.Builder
-	var headerParts []string
-	var sepParts []string
-	for _, col := range cols {
-		headerParts = append(headerParts, col.header)
-		sepParts = append(sepParts, "---")
-	}
-	sb.WriteString("| ")
-	sb.WriteString(strings.Join(headerParts, " | "))
-	sb.WriteString(" |\n| ")
-	sb.WriteString(strings.Join(sepParts, " | "))
-	sb.WriteString(" |\n")
-
-	for _, t := range pool.Tasks {
-		var rowParts []string
-		for _, col := range cols {
-			rowParts = append(rowParts, col.cell(t))
-		}
-		sb.WriteString("| ")
-		sb.WriteString(strings.Join(rowParts, " | "))
-		sb.WriteString(" |\n")
+	sb.WriteString(tableHeader)
+	for _, rStr := range rowStrings {
+		sb.WriteString(rStr)
 	}
 
 	numRuns := len(pool.Runs)
@@ -244,9 +301,11 @@ func CheckRunStateForBranchHead(
 
 		if pool != nil && len(pool.Tasks) > 0 {
 			state.Summary = RenderBranchHeadSummary(pool, uiBaseURL, repoRef, branch, topUpsEnabled, nextTopUpIn)
+			state.Text = RenderBranchHeadText(pool, uiBaseURL, repoRef, branch)
 		} else {
 			state.Summary = state.Title
 		}
+		state.Images = BuildBranchHeadImages(uiBaseURL, repoRef, branch)
 		return state
 	}
 
@@ -259,7 +318,39 @@ func CheckRunStateForBranchHead(
 
 	state.Title = pooling.FormatTitle(pool.OverallEstimate, lastMove)
 	state.Summary = RenderBranchHeadSummary(pool, uiBaseURL, repoRef, branch, topUpsEnabled, nextTopUpIn)
+	state.Text = RenderBranchHeadText(pool, uiBaseURL, repoRef, branch)
+	state.Images = BuildBranchHeadImages(uiBaseURL, repoRef, branch)
 	return state
+}
+
+// BuildBranchHeadImages builds the images array for a branch-head check run.
+func BuildBranchHeadImages(uiBaseURL string, repoRef forge.RepoRef, branch string) []CheckRunImage {
+	return sparklineImage(uiBaseURL, repoRef, branch)
+}
+
+// RenderBranchHeadText renders the markdown text body for a GitHub Check Run on a branch-head commit:
+// the per-task table followed by a footer link to the series page.
+func RenderBranchHeadText(
+	pool *pooling.CommitPool,
+	uiBaseURL string,
+	repoRef forge.RepoRef,
+	branch string,
+) string {
+	if pool == nil || len(pool.Tasks) == 0 {
+		return ""
+	}
+
+	tableHeader, rowStrings := BuildBranchHeadTable(pool, uiBaseURL, repoRef)
+
+	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+	var footerStr string
+	if trimmedUIBaseURL != "" && repoRef.Owner != "" && repoRef.Name != "" && branch != "" {
+		seriesURL := BranchHeadDetailsURL(uiBaseURL, repoRef, branch)
+		footerStr = fmt.Sprintf("[series](%s)\n", seriesURL)
+	}
+
+	res := renderTableText(tableHeader, rowStrings, footerStr, "see series view")
+	return SanitizeArtifactPaths(res)
 }
 
 // HashCheckRunState computes a stable content hash for check run state,
@@ -289,6 +380,14 @@ func HashCheckRunState(state CheckRunState) string {
 	h.Write([]byte(state.Text))
 	h.Write([]byte{0})
 	h.Write([]byte(state.DetailsURL))
+	for _, img := range state.Images {
+		h.Write([]byte{0})
+		h.Write([]byte(img.ImageURL))
+		h.Write([]byte{0})
+		h.Write([]byte(img.Alt))
+		h.Write([]byte{0})
+		h.Write([]byte(img.Caption))
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

@@ -177,6 +177,139 @@ func TestHashCheckRunState_NoCountdownChurn(t *testing.T) {
 	}
 }
 
+func TestHashCheckRunState_ImageURLChanges(t *testing.T) {
+	state1 := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "completed",
+		Conclusion: "success",
+		Title:      "100% ± 0 · n=10",
+		Summary:    "all passed",
+		Images: []CheckRunImage{
+			{
+				ImageURL: "https://dotevals.com/github.com/gke-labs/eval-runner/sparkline.svg?branch=main&w=600&h=80",
+				Alt:      "main, last 20 commits",
+				Caption:  "main, last 20 commits",
+			},
+		},
+	}
+	state2 := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "completed",
+		Conclusion: "success",
+		Title:      "100% ± 0 · n=10",
+		Summary:    "all passed",
+		Images: []CheckRunImage{
+			{
+				ImageURL: "https://dotevals.com/github.com/gke-labs/eval-runner/sparkline.svg?branch=dev&w=600&h=80",
+				Alt:      "dev, last 20 commits",
+				Caption:  "dev, last 20 commits",
+			},
+		},
+	}
+
+	hash1 := HashCheckRunState(state1)
+	hash2 := HashCheckRunState(state2)
+
+	if hash1 == hash2 {
+		t.Errorf("expected hash to change when image URL changes, got same hash: %s", hash1)
+	}
+}
+
+func TestCheckRunStateForBranchHead_RichOutput(t *testing.T) {
+	ref := forge.RepoRef{
+		Host:  "github.com",
+		Owner: "gke-labs",
+		Name:  "eval-runner",
+	}
+	rate := 10.0 / 16.0
+	cost := 0.0512
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "base-head1",
+			Labels: map[string]string{
+				"evalrunner.gke-labs.dev/head-sha": "head1111",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "task-1",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     16,
+					Successes:   10,
+					SuccessRate: &rate,
+					Tokens: &v1alpha1.TaskTokens{
+						Total:     500,
+						Reasoning: 100,
+					},
+					CostUSD: &cost,
+				},
+			},
+		},
+	}
+	pool := pooling.PoolRunsForCommit([]*v1alpha1.Run{run})
+
+	// 1. With uiBaseURL
+	state := CheckRunStateForBranchHead(pool, nil, "https://dotevals.com", ref, "main", v1alpha1.RunPhaseCompleted, false, 0)
+
+	// Images assertions
+	if len(state.Images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(state.Images))
+	}
+	wantSparklineURL := "https://dotevals.com/github.com/gke-labs/eval-runner/sparkline.svg?branch=main&w=600&h=80"
+	if state.Images[0].ImageURL != wantSparklineURL {
+		t.Errorf("ImageURL = %q, want %q", state.Images[0].ImageURL, wantSparklineURL)
+	}
+	wantCaption := "main, last 20 commits"
+	if state.Images[0].Caption != wantCaption {
+		t.Errorf("Caption = %q, want %q", state.Images[0].Caption, wantCaption)
+	}
+	if state.Images[0].Alt != wantCaption {
+		t.Errorf("Alt = %q, want %q", state.Images[0].Alt, wantCaption)
+	}
+
+	// Text assertions: table columns, cells, and footer link
+	if !strings.Contains(state.Text, "| eval | samples | successes | rate (95% CI) | tokens | cost |") {
+		t.Errorf("expected table header with all columns in state.Text, got:\n%s", state.Text)
+	}
+	if !strings.Contains(state.Text, "[task-1](https://dotevals.com/github.com/gke-labs/eval-runner/runs/base-head1/tasks/task-1/samples)") {
+		t.Errorf("expected repo-scoped sample link in state.Text, got:\n%s", state.Text)
+	}
+	if !strings.Contains(state.Text, "500 (+R 100)") {
+		t.Errorf("expected reasoning tokens in state.Text, got:\n%s", state.Text)
+	}
+	if !strings.Contains(state.Text, "$0.0512") {
+		t.Errorf("expected cost cell in state.Text, got:\n%s", state.Text)
+	}
+	if !strings.Contains(state.Text, "[series](https://dotevals.com/github.com/gke-labs/eval-runner/series/main)") {
+		t.Errorf("expected footer link to series in state.Text, got:\n%s", state.Text)
+	}
+
+	// Safety: no /tmp/, gs://, or namespaced routes
+	if strings.Contains(state.Text, "/tmp/") || strings.Contains(state.Text, "gs://") {
+		t.Errorf("forbidden artifact paths (/tmp/, gs://) found in state.Text:\n%s", state.Text)
+	}
+	if strings.Contains(state.Text, "/runs/eval-runner") || strings.Contains(state.Text, "/comparisons/eval-runner") {
+		t.Errorf("namespaced routes found in state.Text:\n%s", state.Text)
+	}
+
+	// 2. Without uiBaseURL: images omitted, links omitted
+	stateNoUI := CheckRunStateForBranchHead(pool, nil, "", ref, "main", v1alpha1.RunPhaseCompleted, false, 0)
+	if len(stateNoUI.Images) != 0 {
+		t.Errorf("expected images omitted when uiBaseURL is empty, got %+v", stateNoUI.Images)
+	}
+	if strings.Contains(stateNoUI.Text, "[series]") {
+		t.Errorf("expected '[series]' link omitted when uiBaseURL is empty, got:\n%s", stateNoUI.Text)
+	}
+	if strings.Contains(stateNoUI.Text, "[task-1]") {
+		t.Errorf("expected markdown link for task-1 omitted when uiBaseURL is empty, got:\n%s", stateNoUI.Text)
+	}
+	if !strings.Contains(stateNoUI.Text, "task-1") {
+		t.Errorf("expected task-1 plain text in stateNoUI.Text, got:\n%s", stateNoUI.Text)
+	}
+}
+
 func TestReportBranchHead_RecreateOn404(t *testing.T) {
 	server := NewFakeGitHubServer()
 	defer server.Close()

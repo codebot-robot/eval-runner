@@ -75,6 +75,38 @@ func WithAnnotations(annotations []CheckRunAnnotation) CheckRunOption {
 	}
 }
 
+// SparklineBranchCaptionFormat is the caption format for branch sparkline images.
+const SparklineBranchCaptionFormat = "%s, last 20 commits"
+
+// sparklineImage constructs the default branch sparkline CheckRunImage.
+// Returns nil if uiBaseURL is empty or repo identity cannot be resolved.
+func sparklineImage(uiBaseURL string, repoRef forge.RepoRef, branch string) []CheckRunImage {
+	if strings.TrimSpace(uiBaseURL) == "" {
+		return nil
+	}
+	if repoRef.Owner == "" || repoRef.Name == "" {
+		return nil
+	}
+	if repoRef.Host == "" {
+		repoRef.Host = "github.com"
+	}
+	branchName := branch
+	if branchName == "" {
+		branchName = "main"
+	}
+	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
+	caption := fmt.Sprintf(SparklineBranchCaptionFormat, branchName)
+	sparklineURL := fmt.Sprintf("%s%s/sparkline.svg?branch=%s&w=600&h=80",
+		trimmedUIBaseURL, repoRef.Path(), url.QueryEscape(branchName))
+	return []CheckRunImage{
+		{
+			Alt:      caption,
+			ImageURL: sparklineURL,
+			Caption:  caption,
+		},
+	}
+}
+
 // BuildCheckRunImages builds the images array for a Check Run:
 //   - PR comparisons: repo-scoped sparkline for the base branch:
 //     {uiBaseURL}/{host}/{owner}/{repo}/sparkline.svg?branch=<base>&w=600&h=80, caption "<base>, last 20 commits".
@@ -91,8 +123,6 @@ func BuildCheckRunImages(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.R
 		return nil
 	}
 
-	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
-
 	baseBranch := "main"
 	if baseRun != nil && baseRun.Labels != nil && baseRun.Labels[configkeys.LabelBranch] != "" {
 		baseBranch = baseRun.Labels[configkeys.LabelBranch]
@@ -100,24 +130,18 @@ func BuildCheckRunImages(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.R
 		baseBranch = comp.Labels[configkeys.LabelBranch]
 	}
 
-	caption := fmt.Sprintf("%s, last 20 commits", baseBranch)
-
-	overallURL := fmt.Sprintf("%s%s/sparkline.svg?branch=%s&w=600&h=80",
-		trimmedUIBaseURL, repoRef.Path(), url.QueryEscape(baseBranch))
-	images := []CheckRunImage{
-		{
-			Alt:      caption,
-			ImageURL: overallURL,
-			Caption:  caption,
-		},
+	images := sparklineImage(uiBaseURL, repoRef, baseBranch)
+	if images == nil {
+		return nil
 	}
 
+	trimmedUIBaseURL := strings.TrimRight(strings.TrimSpace(uiBaseURL), "/")
 	rows := ui.ComparisonRowsWithRuns(comp, baseRun, candRun, repoRef, "")
 	if len(rows) > 0 && len(rows) <= 3 {
 		for _, row := range rows {
 			imgURL := fmt.Sprintf("%s%s/sparkline.svg?branch=%s&eval=%s&w=600&h=80",
 				trimmedUIBaseURL, repoRef.Path(), url.QueryEscape(baseBranch), url.QueryEscape(row.ID))
-			taskCaption := fmt.Sprintf("%s (%s, last 20 commits)", row.ID, baseBranch)
+			taskCaption := fmt.Sprintf("%s (%s)", row.ID, fmt.Sprintf(SparklineBranchCaptionFormat, baseBranch))
 			images = append(images, CheckRunImage{
 				Alt:      row.ID,
 				ImageURL: imgURL,

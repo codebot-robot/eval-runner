@@ -552,8 +552,13 @@ func RenderCheckRunText(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Ru
 		footerAndDetails.WriteString(detailsBlock)
 		footerAndDetails.WriteString("\n")
 	}
-	footerAndDetailsStr := footerAndDetails.String()
 
+	return renderTableText(tableHeader, rowStrings, footerAndDetails.String(), "see web view")
+}
+
+// renderTableText renders a markdown table with rows and footer, safely truncating
+// rows from the bottom if the total exceeds MaxCheckRunTextBytes.
+func renderTableText(tableHeader string, rowStrings []string, footer string, overflowHint string) string {
 	var fullSB strings.Builder
 	if len(rowStrings) > 0 || tableHeader != "" {
 		fullSB.WriteString(tableHeader)
@@ -562,7 +567,9 @@ func RenderCheckRunText(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Ru
 		}
 		fullSB.WriteString("\n")
 	}
-	fullSB.WriteString(footerAndDetailsStr)
+	if footer != "" {
+		fullSB.WriteString(footer)
+	}
 	fullText := fullSB.String()
 
 	if len(fullText) <= MaxCheckRunTextBytes {
@@ -574,7 +581,7 @@ func RenderCheckRunText(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Ru
 		prefixLens[i+1] = prefixLens[i] + len(rowStrings[i])
 	}
 
-	baseLen := len(tableHeader) + 1 + 1 + len(footerAndDetailsStr)
+	baseLen := len(tableHeader) + 1 + 1 + len(footer)
 	k := 0
 	for candidates := len(rowStrings) - 1; candidates >= 0; candidates-- {
 		dropped := len(rowStrings) - candidates
@@ -582,7 +589,7 @@ func RenderCheckRunText(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Ru
 		if dropped == 1 {
 			rowWord = "row"
 		}
-		markerLine := fmt.Sprintf("… %d more %s (see web view)\n", dropped, rowWord)
+		markerLine := fmt.Sprintf("… %d more %s (%s)\n", dropped, rowWord, overflowHint)
 		if baseLen+prefixLens[candidates]+len(markerLine) <= MaxCheckRunTextBytes {
 			k = candidates
 			break
@@ -601,9 +608,11 @@ func RenderCheckRunText(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Ru
 		sb.WriteString(rowStrings[i])
 	}
 	sb.WriteString("\n")
-	sb.WriteString(fmt.Sprintf("… %d more %s (see web view)\n", dropped, rowWord))
+	sb.WriteString(fmt.Sprintf("… %d more %s (%s)\n", dropped, rowWord, overflowHint))
 	sb.WriteString("\n")
-	sb.WriteString(footerAndDetailsStr)
+	if footer != "" {
+		sb.WriteString(footer)
+	}
 	res := sb.String()
 	if len(res) > MaxCheckRunTextBytes {
 		res = res[:MaxCheckRunTextBytes]
