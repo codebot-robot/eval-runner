@@ -508,6 +508,27 @@ func taskLabelCounts(comp *v1alpha1.Comparison) string {
 	return strings.Join(parts, ", ")
 }
 
+func hasPreviousCheckRun(reporting *v1alpha1.ComparisonReportingStatus, currentCommitSHA string) bool {
+	if reporting == nil {
+		return false
+	}
+	if len(reporting.CheckRunIDs) > 1 {
+		return true
+	}
+	for recordedSHA, checkRunIdentifier := range reporting.CheckRunIDs {
+		if checkRunIdentifier == 0 {
+			continue
+		}
+		if currentCommitSHA == "" || (!strings.HasPrefix(recordedSHA, currentCommitSHA) && !strings.HasPrefix(currentCommitSHA, recordedSHA)) {
+			return true
+		}
+	}
+	if reporting.CheckRunID != 0 && len(reporting.CheckRunIDs) == 0 {
+		return true
+	}
+	return false
+}
+
 // CheckRunStateForComparison maps a Comparison and its candidate/baseline Runs
 // to the CheckRunState for the "eval-runner / evals" check run across all 5 verdicts.
 func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run, inconclusivePolicy string, uiBaseURL string, extraOpts ...CheckRunOption) CheckRunState {
@@ -626,7 +647,7 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 			} else {
 				state.Title = fmt.Sprintf("running · %d samples", completed)
 			}
-		} else if comp.Status.Reporting != nil && len(comp.Status.Reporting.CheckRunIDs) > 1 {
+		} else if comp.Status.Reporting != nil {
 			sha := ""
 			if comp.Spec.PullRequest != nil {
 				sha = comp.Spec.PullRequest.HeadSHA
@@ -634,11 +655,12 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 			if sha == "" && candRun != nil {
 				sha = candRun.Spec.Repo.Commit
 			}
-			if len(sha) > 7 {
-				sha = sha[:7]
+			sha7 := sha
+			if len(sha7) > 7 {
+				sha7 = sha7[:7]
 			}
-			if sha != "" {
-				state.Title = fmt.Sprintf("re-running for %s", sha)
+			if sha7 != "" && hasPreviousCheckRun(comp.Status.Reporting, sha) {
+				state.Title = fmt.Sprintf("re-running for %s", sha7)
 			} else {
 				state.Title = "running"
 			}
