@@ -65,16 +65,18 @@ func ExtractTaskCounts(t v1alpha1.TaskStatus) (stats.TaskCounts, bool) {
 
 // CommitObservationPool aggregates completed task counts and spend across Runs for a specific commit.
 type CommitObservationPool struct {
-	CommitSHA        string
-	Runs             []*v1alpha1.Run
-	TaskCounts       map[string][]stats.TaskCounts // taskID -> list of task counts
-	SamplesPerTask   map[string]int                // taskID -> total samples
-	TotalSamples     int
-	TotalSuccesses   int
-	AllTasks         []stats.TaskCounts // flattened task counts for overall pooling
-	TotalCostUSD     float64
-	HasCost          bool
-	ObservationCount int // Counts pooled task observations (one per Run that contributed the task).
+	CommitSHA      string
+	Runs           []*v1alpha1.Run
+	TaskCounts     map[string][]stats.TaskCounts // taskID -> list of task counts
+	SamplesPerTask map[string]int                // taskID -> total samples
+	TotalSamples   int
+	TotalSuccesses int
+	AllTasks       []stats.TaskCounts // flattened task counts for overall pooling
+	TotalCostUSD   float64
+	HasCost        bool
+
+	// ObservationCount counts pooled task observations, one per Run that contributed the task.
+	ObservationCount int
 }
 
 // PoolCommitRuns pools completed task observations from runs matching the given commit.

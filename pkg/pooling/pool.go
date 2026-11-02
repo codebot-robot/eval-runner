@@ -24,32 +24,36 @@ import (
 
 // PooledTask contains pooled results for a single task at a commit.
 type PooledTask struct {
-	ID               string
-	Samples          int
-	Successes        int
-	SuccessRate      *float64
-	Estimate         stats.Estimate
-	Tokens           *v1alpha1.TaskTokens
-	CostUSD          *float64
-	Phase            v1alpha1.TaskPhase
-	Message          string
-	RunName          string
-	ObservationCount int // Counts pooled task observations (one per Run that contributed the task).
+	ID          string
+	Samples     int
+	Successes   int
+	SuccessRate *float64
+	Estimate    stats.Estimate
+	Tokens      *v1alpha1.TaskTokens
+	CostUSD     *float64
+	Phase       v1alpha1.TaskPhase
+	Message     string
+	RunName     string
+
+	// ObservationCount counts pooled task observations, one per Run that contributed the task.
+	ObservationCount int
 }
 
 // CommitPool contains pooled evaluation observations across all Runs for a single commit,
 // layered on top of CommitObservationPool.
 type CommitPool struct {
-	CommitSHA        string
-	CommitTime       time.Time
-	Runs             []*v1alpha1.Run
-	Tasks            []PooledTask
-	OverallEstimate  *stats.Estimate
-	CompletedTasks   int
-	TotalTasks       int
-	FailedTasks      int
-	ObservationPool  *CommitObservationPool
-	ObservationCount int // Counts pooled task observations (one per Run that contributed the task).
+	CommitSHA       string
+	CommitTime      time.Time
+	Runs            []*v1alpha1.Run
+	Tasks           []PooledTask
+	OverallEstimate *stats.Estimate
+	CompletedTasks  int
+	TotalTasks      int
+	FailedTasks     int
+	ObservationPool *CommitObservationPool
+
+	// ObservationCount counts pooled task observations, one per Run that contributed the task.
+	ObservationCount int
 }
 
 // PoolRunsForCommit combines task results across all Runs (seed and top-up) for a single commit,
