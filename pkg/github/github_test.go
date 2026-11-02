@@ -4276,3 +4276,114 @@ func TestFakeGitHubServer_CheckRunsSortedByID(t *testing.T) {
 		}
 	}
 }
+
+func TestListCheckRunsForRef(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("token")
+	ctx := t.Context()
+
+	// 1. Create two check runs for commit1 with different names
+	_, err := client.CreateCheckRun(ctx, "gke-labs", "eval-runner", "commit1", CheckRunState{
+		Name:   CheckRunName,
+		Status: "in_progress",
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRun 1 failed: %v", err)
+	}
+
+	_, err = client.CreateCheckRun(ctx, "gke-labs", "eval-runner", "commit1", CheckRunState{
+		Name:   "other-check",
+		Status: "completed",
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRun 2 failed: %v", err)
+	}
+
+	// 2. Create a check run for commit2
+	_, err = client.CreateCheckRun(ctx, "gke-labs", "eval-runner", "commit2", CheckRunState{
+		Name:   CheckRunName,
+		Status: "completed",
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRun 3 failed: %v", err)
+	}
+
+	// 3. List check runs for commit1 filtered by CheckRunName
+	runs, err := client.ListCheckRunsForRef(ctx, "gke-labs", "eval-runner", "commit1", CheckRunName)
+	if err != nil {
+		t.Fatalf("ListCheckRunsForRef failed: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(runs))
+	}
+	if runs[0].Name != CheckRunName || runs[0].HeadSHA != "commit1" {
+		t.Errorf("unexpected check run: %+v", runs[0])
+	}
+	if runs[0].AppSlug != "eval-runner" || runs[0].AppID != 1 {
+		t.Errorf("unexpected app on check run: AppSlug=%q, AppID=%d", runs[0].AppSlug, runs[0].AppID)
+	}
+
+	// 4. List check runs for commit1 with empty checkName -> returns both
+	allRuns, err := client.ListCheckRunsForRef(ctx, "gke-labs", "eval-runner", "commit1", "")
+	if err != nil {
+		t.Fatalf("ListCheckRunsForRef (all) failed: %v", err)
+	}
+	if len(allRuns) != 2 {
+		t.Fatalf("expected 2 check runs, got %d", len(allRuns))
+	}
+
+	// 5. List for non-existent commit -> returns 0
+	emptyRuns, err := client.ListCheckRunsForRef(ctx, "gke-labs", "eval-runner", "nonexistent", "")
+	if err != nil {
+		t.Fatalf("ListCheckRunsForRef (nonexistent) failed: %v", err)
+	}
+	if len(emptyRuns) != 0 {
+		t.Fatalf("expected 0 check runs, got %d", len(emptyRuns))
+	}
+}
+
+func TestIsCheckRunFromApp(t *testing.T) {
+	evalRunnerCR := CheckRunRef{
+		ID:      1,
+		Name:    CheckRunName,
+		HeadSHA: "sha1",
+		AppID:   1,
+		AppSlug: "eval-runner",
+	}
+	foreignCR := CheckRunRef{
+		ID:      2,
+		Name:    CheckRunName,
+		HeadSHA: "sha1",
+		AppID:   2,
+		AppSlug: "other-app",
+	}
+
+	// 1. App user matches its own slug
+	if !IsCheckRunFromApp(evalRunnerCR, "eval-runner[bot]") {
+		t.Errorf("expected eval-runner[bot] to match eval-runner check run")
+	}
+	if IsCheckRunFromApp(foreignCR, "eval-runner[bot]") {
+		t.Errorf("expected eval-runner[bot] not to match other-app check run")
+	}
+
+	// 2. Custom app matches custom slug
+	customCR := CheckRunRef{AppSlug: "custom-app"}
+	if !IsCheckRunFromApp(customCR, "custom-app[bot]") {
+		t.Errorf("expected custom-app[bot] to match custom-app check run")
+	}
+	if IsCheckRunFromApp(evalRunnerCR, "custom-app[bot]") {
+		t.Errorf("expected custom-app[bot] not to match eval-runner check run")
+	}
+
+	// 3. Test token user (non-App token) does not filter by app
+	if !IsCheckRunFromApp(evalRunnerCR, "test-user") || !IsCheckRunFromApp(foreignCR, "test-user") {
+		t.Errorf("expected non-App token user not to filter check runs by app")
+	}
+
+	// 4. Empty user returns false so foreign check runs are never adopted
+	if IsCheckRunFromApp(evalRunnerCR, "") || IsCheckRunFromApp(foreignCR, "") {
+		t.Errorf("expected empty user not to adopt any check run")
+	}
+}
