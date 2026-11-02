@@ -325,8 +325,8 @@ func (r *HeadTopUpRunner) RunTopUpPass(ctx context.Context) ([]*v1alpha1.Run, er
 			}
 		}
 
-		prevRun := findLatestCompletedRun(progressRuns)
-		nextSampleRange := determineNextSampleRange(prevRun, batchSize)
+		previousRun := findLatestCompletedRun(progressRuns)
+		nextSampleRange := determineNextSampleRange(previousRun, batchSize)
 
 		labels := make(map[string]string)
 		for k, v := range seedRun.Labels {
