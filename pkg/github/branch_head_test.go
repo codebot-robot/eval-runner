@@ -386,3 +386,51 @@ func TestReportBranchHead_RecreateOn404(t *testing.T) {
 		t.Errorf("expected new check run ID after 404 recreate, got same ID %d", newID)
 	}
 }
+
+func TestReportBranchHead_ListBeforeCreate_UpdatesExisting(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("test-token")
+	rep := NewReporter(client, ReporterOptions{UIBaseURL: "https://dotevals.com"})
+
+	ref := forge.RepoRef{
+		Host:  "github.com",
+		Owner: "gke-labs",
+		Name:  "eval-runner",
+	}
+
+	state := CheckRunState{
+		Name:    CheckRunName,
+		Status:  "in_progress",
+		Title:   "running",
+		Summary: "evaluating",
+	}
+
+	// 1. Initial report creates check run
+	firstID, _, err := rep.ReportBranchHead(t.Context(), ref, "c0ffee1", state, 0)
+	if err != nil {
+		t.Fatalf("first ReportBranchHead failed: %v", err)
+	}
+
+	// 2. Second report with checkRunID == 0 (e.g. status write was lost)
+	// should find existing check run via ListCheckRunsForRef and update in place.
+	state.Status = "completed"
+	state.Conclusion = "success"
+	state.Title = "passed"
+	secondID, _, err := rep.ReportBranchHead(t.Context(), ref, "c0ffee1", state, 0)
+	if err != nil {
+		t.Fatalf("second ReportBranchHead failed: %v", err)
+	}
+	if secondID != firstID {
+		t.Errorf("secondID = %d, want firstID %d", secondID, firstID)
+	}
+
+	checkRuns := server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("expected exactly 1 check run, got %d", len(checkRuns))
+	}
+	if checkRuns[0].Status != "completed" || checkRuns[0].Conclusion != "success" {
+		t.Errorf("check run was not updated: %+v", checkRuns[0])
+	}
+}

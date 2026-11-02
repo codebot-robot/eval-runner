@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,17 @@ type IssueComment struct {
 	User IssueCommentUser `json:"user"`
 }
 
+// CheckRunRef represents an existing GitHub Check Run reference.
+type CheckRunRef struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	HeadSHA    string `json:"head_sha"`
+	Status     string `json:"status,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	AppID      int64  `json:"app_id,omitempty"`
+	AppSlug    string `json:"app_slug,omitempty"`
+}
+
 // Client defines the interface for interacting with GitHub's PR comments and Check Runs.
 type Client interface {
 	CurrentUser(ctx context.Context) (string, error)
@@ -49,6 +61,7 @@ type Client interface {
 	UpdateIssueComment(ctx context.Context, owner, repo string, commentID int64, body string) error
 	CreateCheckRun(ctx context.Context, owner, repo string, headSHA string, state CheckRunState) (int64, error)
 	UpdateCheckRun(ctx context.Context, owner, repo string, checkRunID int64, state CheckRunState) error
+	ListCheckRunsForRef(ctx context.Context, owner, repo, ref, checkName string) ([]CheckRunRef, error)
 	GetRepoPermission(ctx context.Context, owner, repo string, username string) (string, error)
 	CreateCommentReaction(ctx context.Context, owner, repo string, commentID int64, reaction string) error
 }
@@ -678,6 +691,67 @@ func (c *HTTPClient) UpdateCheckRun(ctx context.Context, owner, repo string, che
 		Actions: SanitizeCheckRunActions(state.Actions),
 	}
 	return c.doRequest(ctx, http.MethodPatch, path, payload, nil)
+}
+
+type checkRunAppResponse struct {
+	ID   int64  `json:"id"`
+	Slug string `json:"slug"`
+}
+
+type checkRunItemResponse struct {
+	ID         int64                `json:"id"`
+	Name       string               `json:"name"`
+	HeadSHA    string               `json:"head_sha"`
+	Status     string               `json:"status"`
+	Conclusion string               `json:"conclusion"`
+	App        *checkRunAppResponse `json:"app"`
+}
+
+type listCheckRunsResponse struct {
+	TotalCount int                    `json:"total_count"`
+	CheckRuns  []checkRunItemResponse `json:"check_runs"`
+}
+
+// ListCheckRunsForRef lists check runs for a commit ref and optional check name with filter=latest.
+func (c *HTTPClient) ListCheckRunsForRef(ctx context.Context, owner, repo, ref, checkName string) ([]CheckRunRef, error) {
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?filter=latest", owner, repo, ref)
+	if checkName != "" {
+		path = fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?check_name=%s&filter=latest", owner, repo, ref, url.QueryEscape(checkName))
+	}
+	var resp listCheckRunsResponse
+	if err := c.doRequest(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	checkRuns := make([]CheckRunRef, 0, len(resp.CheckRuns))
+	for _, item := range resp.CheckRuns {
+		checkRun := CheckRunRef{
+			ID:         item.ID,
+			Name:       item.Name,
+			HeadSHA:    item.HeadSHA,
+			Status:     item.Status,
+			Conclusion: item.Conclusion,
+		}
+		if item.App != nil {
+			checkRun.AppID = item.App.ID
+			checkRun.AppSlug = item.App.Slug
+		}
+		checkRuns = append(checkRuns, checkRun)
+	}
+	return checkRuns, nil
+}
+
+// IsCheckRunFromApp reports whether a check run belongs to the authenticated GitHub App or identity.
+// If the identity is a GitHub App (ends with "[bot]"), it matches only check runs from the same app slug.
+// For a non-App token, check runs are not filtered by app.
+// If currentUser is empty (identity unknown), it returns false so foreign check runs are never adopted.
+func IsCheckRunFromApp(checkRun CheckRunRef, currentUser string) bool {
+	if currentUser == "" {
+		return false
+	}
+	if strings.HasSuffix(currentUser, "[bot]") {
+		return strings.EqualFold(checkRun.AppSlug, strings.TrimSuffix(currentUser, "[bot]"))
+	}
+	return true
 }
 
 type repoPermissionResponse struct {

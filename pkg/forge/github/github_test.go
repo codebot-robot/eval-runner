@@ -724,3 +724,96 @@ func TestConvertPullResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubForge_Reporter_SetStatus_ListBeforeCreate_UpdatesExisting(t *testing.T) {
+	var mu sync.Mutex
+	createdCount := 0
+	updatedCount := 0
+	lastStatus := ""
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.URL.Path == "/user" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"login":"eval-runner[bot]"}`)
+			return
+		}
+
+		if r.URL.Path == "/repos/gke-labs/eval-runner/commits/c0ffee1234/check-runs" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			if createdCount == 0 {
+				fmt.Fprint(w, `{"total_count":0,"check_runs":[]}`)
+				return
+			}
+			fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":999,"name":"eval-runner / evals","head_sha":"c0ffee1234","status":%q,"app":{"id":1,"slug":"eval-runner"}}]}`, lastStatus)
+			return
+		}
+
+		if r.URL.Path == "/repos/gke-labs/eval-runner/check-runs" && r.Method == http.MethodPost {
+			createdCount++
+			lastStatus = "in_progress"
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 999})
+			return
+		}
+
+		if r.URL.Path == "/repos/gke-labs/eval-runner/check-runs/999" && r.Method == http.MethodPatch {
+			updatedCount++
+			var req map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if s, ok := req["status"].(string); ok {
+				lastStatus = s
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 999})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	authForge := New(WithBaseURL(server.URL), WithToken("valid-token"))
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	// 1. First call with CheckRunID: 0 -> creates check run
+	id1, err := authForge.SetStatus(ctx, ref, "c0ffee1234", forge.Status{
+		State:   "in_progress",
+		Context: "eval-runner / evals",
+	})
+	if err != nil {
+		t.Fatalf("first SetStatus failed: %v", err)
+	}
+	if id1 != 999 {
+		t.Errorf("first SetStatus id = %d, want 999", id1)
+	}
+
+	// 2. Second call with CheckRunID: 0 (e.g. status write was lost)
+	// should list first, find check run 999, and update it instead of creating
+	id2, err := authForge.SetStatus(ctx, ref, "c0ffee1234", forge.Status{
+		State:      "completed",
+		Conclusion: "success",
+		Context:    "eval-runner / evals",
+	})
+	if err != nil {
+		t.Fatalf("second SetStatus failed: %v", err)
+	}
+	if id2 != 999 {
+		t.Errorf("second SetStatus id = %d, want 999", id2)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if createdCount != 1 {
+		t.Errorf("createdCount = %d, want 1", createdCount)
+	}
+	if updatedCount != 1 {
+		t.Errorf("updatedCount = %d, want 1", updatedCount)
+	}
+	if lastStatus != "completed" {
+		t.Errorf("lastStatus = %q, want completed", lastStatus)
+	}
+}

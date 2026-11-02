@@ -15,10 +15,12 @@
 package controller
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -29,10 +31,13 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/github"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestBranchHeadReporting_Lifecycle(t *testing.T) {
@@ -1081,5 +1086,108 @@ func TestBranchHeadReporting_BackfillConcurrentWithReconcile(t *testing.T) {
 	}
 	if updated.Status.Reporting == nil || updated.Status.Reporting.CheckRunID == 0 {
 		t.Fatalf("expected non-zero CheckRunID on seed run status, got %+v", updated.Status.Reporting)
+	}
+}
+
+func TestBranchHeadReporting_StatusConflictDoesNotDuplicateCheckRun(t *testing.T) {
+	scheme := setupScheme(t)
+	ghServer := github.NewFakeGitHubServer()
+	defer ghServer.Close()
+
+	ghClient := ghServer.Client("test-token")
+
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	headRate := 10.0 / 16.0
+	headSHA := "headconflict111"
+
+	seedRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "base-conflict111",
+			Namespace: "eval-runner",
+			Labels: map[string]string{
+				consumer.LabelTargetRepo: "gke-labs_eval-runner",
+				consumer.LabelBranch:     "main",
+				consumer.LabelHeadSHA:    headSHA,
+			},
+			Annotations: map[string]string{
+				consumer.AnnotationCommitTime: now.Format(time.RFC3339),
+			},
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/eval-runner.git",
+				Commit: headSHA,
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:          "task-1",
+					Phase:       v1alpha1.TaskPhaseCompleted,
+					Samples:     16,
+					Successes:   10,
+					SuccessRate: &headRate,
+				},
+			},
+		},
+	}
+
+	injectConflict := true
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(seedRun).
+		WithStatusSubresource(seedRun).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subResourceName == "status" && injectConflict {
+					if run, ok := obj.(*v1alpha1.Run); ok && run.Name == "base-conflict111" {
+						return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("runs").GroupResource(), run.Name, errors.New("conflict"))
+					}
+				}
+				return cl.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:              cl,
+		Scheme:              scheme,
+		SandboxClient:       &sandboxclient.FakeClient{},
+		SandboxNamespace:    "eval-runner-sandbox",
+		ControllerNamespace: "eval-runner",
+		GitHubClient:        ghClient,
+		UIBaseURL:           "https://dotevals.com",
+		Now:                 func() time.Time { return now },
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "base-conflict111"}}
+	// First reconcile: ReportBranchHead creates check run, but status update returns conflict error.
+	// Terminal reporting logs the status update error and returns nil, leaving status.reporting.checkRunID as 0 in storage.
+	_, _ = reconciler.Reconcile(t.Context(), req)
+
+	// Verify status write was rejected by the conflict interceptor
+	var midRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &midRun); err != nil {
+		t.Fatalf("failed to get run after first reconcile: %v", err)
+	}
+	if midRun.Status.Reporting != nil && midRun.Status.Reporting.CheckRunID != 0 {
+		t.Fatalf("expected CheckRunID to remain 0 after injected conflict, got %d", midRun.Status.Reporting.CheckRunID)
+	}
+
+	// Disable conflict injection for next reconcile
+	injectConflict = false
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	headCheckRuns := 0
+	for _, cr := range ghServer.CheckRuns() {
+		if cr.HeadSHA == headSHA {
+			headCheckRuns++
+		}
+	}
+	if headCheckRuns != 1 {
+		t.Fatalf("expected exactly 1 check run for head SHA %s, got %d (all check runs: %d)", headSHA, headCheckRuns, len(ghServer.CheckRuns()))
 	}
 }

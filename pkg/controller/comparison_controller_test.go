@@ -18072,7 +18072,7 @@ type headMoveFixture struct {
 	req        ctrl.Request
 }
 
-func newHeadMoveFixture(t *testing.T, withGitHub bool) *headMoveFixture {
+func newHeadMoveFixture(t *testing.T, withGitHub bool, interceptorFuncs ...interceptor.Funcs) *headMoveFixture {
 	t.Helper()
 	ctx := t.Context()
 	scheme := setupScheme(t)
@@ -18155,6 +18155,10 @@ func newHeadMoveFixture(t *testing.T, withGitHub bool) *headMoveFixture {
 		WithScheme(scheme).
 		WithObjects(cand1Run, cand2Run, baseRun, comp).
 		WithStatusSubresource(cand1Run, cand2Run, baseRun, comp)
+
+	if len(interceptorFuncs) > 0 {
+		builder.WithInterceptorFuncs(interceptorFuncs[0])
+	}
 
 	var server *github.FakeGitHubServer
 	reconciler := &ComparisonReconciler{
@@ -18403,6 +18407,76 @@ func TestComparisonReconciler_HeadMove_PostsNewCheckRun(t *testing.T) {
 	// New SHA is completed
 	if checkRuns[1].ID != cand2CheckRunID || checkRuns[1].Status != "completed" {
 		t.Errorf("new SHA check run was not completed: %+v", checkRuns[1])
+	}
+}
+
+func TestComparisonReconciler_HeadMove_StatusConflictDoesNotDuplicateCheckRun(t *testing.T) {
+	ctx := t.Context()
+	injectConflict := false
+	interceptorFunc := interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResourceName == "status" && injectConflict {
+				if comp, ok := obj.(*v1alpha1.Comparison); ok && comp.Name == "pr-test" {
+					return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("comparisons").GroupResource(), comp.Name, errors.New("conflict"))
+				}
+			}
+			return cl.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	}
+	f := newHeadMoveFixture(t, true, interceptorFunc)
+
+	// 1. Initial reconcile: cand1 is evaluated and completes
+	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+
+	var curComp v1alpha1.Comparison
+	if err := f.client.Get(ctx, f.req.NamespacedName, &curComp); err != nil {
+		t.Fatalf("get comp failed: %v", err)
+	}
+	if curComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+		t.Fatalf("expected phase Completed on first run, got %v", curComp.Status.Phase)
+	}
+	checkRuns := f.server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("expected 1 check run after first reconcile, got %d", len(checkRuns))
+	}
+
+	// 2. Head moves to cand2, which is still running
+	f.cand2Run.Status.Phase = v1alpha1.RunPhaseRunning
+	f.cand2Run.Status.Tasks[0].Phase = v1alpha1.TaskPhaseRunning
+	f.cand2Run.Status.Summary = nil
+	if err := f.client.Status().Update(ctx, f.cand2Run); err != nil {
+		t.Fatalf("failed updating cand2 status: %v", err)
+	}
+
+	curComp.Spec.Candidate.Run = "cand2-run"
+	curComp.Spec.PullRequest.HeadSHA = f.cand2SHA
+	if err := f.client.Update(ctx, &curComp); err != nil {
+		t.Fatalf("update comp failed: %v", err)
+	}
+
+	// Inject a status conflict for one reconcile after the head moves.
+	injectConflict = true
+	_, err := f.reconciler.Reconcile(ctx, f.req)
+	if err == nil {
+		t.Fatalf("expected status conflict error on head move reconcile, got nil")
+	}
+
+	// Next reconcile succeeds.
+	injectConflict = false
+	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
+		t.Fatalf("second reconcile after head move failed: %v", err)
+	}
+
+	cand2CheckRuns := 0
+	for _, cr := range f.server.CheckRuns() {
+		if cr.HeadSHA == f.cand2SHA {
+			cand2CheckRuns++
+		}
+	}
+	if cand2CheckRuns != 1 {
+		t.Fatalf("expected exactly 1 check run for new head SHA %s, got %d (all check runs: %d)", f.cand2SHA, cand2CheckRuns, len(f.server.CheckRuns()))
 	}
 }
 

@@ -427,6 +427,37 @@ func (r *Reporter) ReportBranchHead(
 		}
 	}
 
+	if checkRunID == 0 {
+		existingCheckRuns, err := r.Client.ListCheckRunsForRef(ctx, repoRef.Owner, repoRef.Name, commitSHA, state.Name)
+		if err != nil {
+			var pe *PermanentError
+			if !errors.As(err, &pe) || pe.StatusCode != http.StatusNotFound {
+				return 0, "", fmt.Errorf("listing check runs for %s: %w", commitSHA, err)
+			}
+		}
+		currentUser, err := r.Client.CurrentUser(ctx)
+		if err == nil {
+			var newestCheckRunID int64
+			for _, checkRun := range existingCheckRuns {
+				if checkRun.Name == state.Name && checkRun.HeadSHA == commitSHA && IsCheckRunFromApp(checkRun, currentUser) {
+					if checkRun.ID > newestCheckRunID {
+						newestCheckRunID = checkRun.ID
+					}
+				}
+			}
+			if newestCheckRunID != 0 {
+				err := r.Client.UpdateCheckRun(ctx, repoRef.Owner, repoRef.Name, newestCheckRunID, state)
+				if err == nil {
+					return newestCheckRunID, hash, nil
+				}
+				var pe *PermanentError
+				if !errors.As(err, &pe) || pe.StatusCode != http.StatusNotFound {
+					return 0, "", fmt.Errorf("updating check run %d: %w", newestCheckRunID, err)
+				}
+			}
+		}
+	}
+
 	createdID, err := r.Client.CreateCheckRun(ctx, repoRef.Owner, repoRef.Name, commitSHA, state)
 	if err != nil {
 		return 0, "", fmt.Errorf("creating check run: %w", err)

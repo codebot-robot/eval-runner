@@ -41,6 +41,8 @@ type FakeCheckRun struct {
 	Images      []CheckRunImage
 	Annotations []CheckRunAnnotation
 	Actions     []CheckRunAction
+	AppID       int64
+	AppSlug     string
 }
 
 // FakeGitHubServer is an in-memory httptest fake simulating the GitHub REST API.
@@ -351,6 +353,12 @@ func (f *FakeGitHubServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 3b. List check runs for commit: /repos/{owner}/{repo}/commits/{ref}/check-runs
+	if strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/commits/") && strings.HasSuffix(path, "/check-runs") && r.Method == http.MethodGet {
+		f.handleListCheckRunsForRef(w, r)
+		return
+	}
+
 	// 4. Update check run: /repos/{owner}/{repo}/check-runs/{check_run_id}
 	if strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/check-runs/") && r.Method == http.MethodPatch {
 		f.handleUpdateCheckRun(w, r)
@@ -552,6 +560,10 @@ func (f *FakeGitHubServer) handleCreateCheckRun(w http.ResponseWriter, r *http.R
 	}
 
 	f.nextCheckRunID++
+	appSlug := f.appSlug
+	if appSlug == "" {
+		appSlug = "eval-runner"
+	}
 	cr := &FakeCheckRun{
 		ID:         f.nextCheckRunID,
 		Name:       payload.Name,
@@ -560,6 +572,8 @@ func (f *FakeGitHubServer) handleCreateCheckRun(w http.ResponseWriter, r *http.R
 		Conclusion: payload.Conclusion,
 		DetailsURL: payload.DetailsURL,
 		Actions:    payload.Actions,
+		AppID:      1,
+		AppSlug:    appSlug,
 	}
 	if payload.Output != nil {
 		cr.Title = payload.Output.Title
@@ -571,6 +585,54 @@ func (f *FakeGitHubServer) handleCreateCheckRun(w http.ResponseWriter, r *http.R
 	f.checkRuns[cr.ID] = cr
 
 	writeJSONResponse(w, http.StatusCreated, checkRunResponse{ID: cr.ID})
+}
+
+func (f *FakeGitHubServer) handleListCheckRunsForRef(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 6 || parts[0] != "repos" || parts[3] != "commits" || parts[5] != "check-runs" {
+		http.NotFound(w, r)
+		return
+	}
+	ref := parts[4]
+	checkName := r.URL.Query().Get("check_name")
+
+	var matching []*FakeCheckRun
+	for _, run := range f.checkRuns {
+		if run.HeadSHA != ref {
+			continue
+		}
+		if checkName != "" && run.Name != checkName {
+			continue
+		}
+		matching = append(matching, run)
+	}
+
+	sort.Slice(matching, func(i, j int) bool {
+		return matching[i].ID < matching[j].ID
+	})
+
+	items := make([]checkRunItemResponse, 0, len(matching))
+	for _, run := range matching {
+		items = append(items, checkRunItemResponse{
+			ID:         run.ID,
+			Name:       run.Name,
+			HeadSHA:    run.HeadSHA,
+			Status:     run.Status,
+			Conclusion: run.Conclusion,
+			App: &checkRunAppResponse{
+				ID:   run.AppID,
+				Slug: run.AppSlug,
+			},
+		})
+	}
+
+	writeJSONResponse(w, http.StatusOK, listCheckRunsResponse{
+		TotalCount: len(items),
+		CheckRuns:  items,
+	})
 }
 
 func (f *FakeGitHubServer) handleUpdateCheckRun(w http.ResponseWriter, r *http.Request) {
