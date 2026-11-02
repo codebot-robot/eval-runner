@@ -263,28 +263,28 @@ func TestPoolCommitRuns_FailedTaskWithScoredSamples(t *testing.T) {
 	}
 
 	// 1. CommitObservationPool via PoolCommitRuns
-	obsPool := PoolCommitRuns([]*v1alpha1.Run{run}, "c0ffee1")
-	if obsPool.ObsCount != 1 {
-		t.Errorf("expected ObsCount=1 in CommitObservationPool, got %d", obsPool.ObsCount)
+	observationPool := PoolCommitRuns([]*v1alpha1.Run{run}, "c0ffee1")
+	if observationPool.ObservationCount != 1 {
+		t.Errorf("expected ObservationCount=1 in CommitObservationPool, got %d", observationPool.ObservationCount)
 	}
-	if obsPool.TotalSamples != 8 {
-		t.Errorf("expected TotalSamples=8, got %d", obsPool.TotalSamples)
+	if observationPool.TotalSamples != 8 {
+		t.Errorf("expected TotalSamples=8, got %d", observationPool.TotalSamples)
 	}
-	if obsPool.TotalSuccesses != 8 {
-		t.Errorf("expected TotalSuccesses=8, got %d", obsPool.TotalSuccesses)
+	if observationPool.TotalSuccesses != 8 {
+		t.Errorf("expected TotalSuccesses=8, got %d", observationPool.TotalSuccesses)
 	}
-	if len(obsPool.TaskCounts["taskFailed"]) != 1 {
-		t.Fatalf("expected 1 task count for taskFailed, got %d", len(obsPool.TaskCounts["taskFailed"]))
+	if len(observationPool.TaskCounts["taskFailed"]) != 1 {
+		t.Fatalf("expected 1 task count for taskFailed, got %d", len(observationPool.TaskCounts["taskFailed"]))
 	}
-	if obsPool.TaskCounts["taskFailed"][0].Samples != 8 || obsPool.TaskCounts["taskFailed"][0].Successes != 8 {
+	if observationPool.TaskCounts["taskFailed"][0].Samples != 8 || observationPool.TaskCounts["taskFailed"][0].Successes != 8 {
 		t.Errorf("expected taskFailed to contribute 8/8, got %d/%d",
-			obsPool.TaskCounts["taskFailed"][0].Successes, obsPool.TaskCounts["taskFailed"][0].Samples)
+			observationPool.TaskCounts["taskFailed"][0].Successes, observationPool.TaskCounts["taskFailed"][0].Samples)
 	}
-	if _, exists := obsPool.TaskCounts["taskRunning"]; exists {
+	if _, exists := observationPool.TaskCounts["taskRunning"]; exists {
 		t.Errorf("expected taskRunning not to contribute to TaskCounts")
 	}
 
-	est := obsPool.OverallEstimate()
+	est := observationPool.OverallEstimate()
 	if est.N != 8 {
 		t.Errorf("expected overall estimate N=8, got %d", est.N)
 	}
@@ -294,8 +294,8 @@ func TestPoolCommitRuns_FailedTaskWithScoredSamples(t *testing.T) {
 
 	// 2. CommitPool via PoolRunsForCommit
 	cPool := PoolRunsForCommit([]*v1alpha1.Run{run})
-	if cPool.ObsCount != 1 {
-		t.Errorf("expected ObsCount=1 in CommitPool, got %d", cPool.ObsCount)
+	if cPool.ObservationCount != 1 {
+		t.Errorf("expected ObservationCount=1 in CommitPool, got %d", cPool.ObservationCount)
 	}
 	if cPool.OverallEstimate == nil {
 		t.Fatalf("expected OverallEstimate to be populated")
@@ -323,8 +323,8 @@ func TestPoolCommitRuns_FailedTaskWithScoredSamples(t *testing.T) {
 	if ptFailed.Samples != 8 || ptFailed.Successes != 8 {
 		t.Errorf("expected ptFailed samples=8, succ=8, got %d, %d", ptFailed.Samples, ptFailed.Successes)
 	}
-	if ptFailed.ObsCount != 1 {
-		t.Errorf("expected ptFailed.ObsCount=1, got %d", ptFailed.ObsCount)
+	if ptFailed.ObservationCount != 1 {
+		t.Errorf("expected ptFailed.ObservationCount=1, got %d", ptFailed.ObservationCount)
 	}
 	if math.Abs(ptFailed.Estimate.Point-1.0) > 1e-6 {
 		t.Errorf("expected ptFailed.Estimate point 1.0, got %.4f", ptFailed.Estimate.Point)
@@ -355,14 +355,14 @@ func TestPoolCommitRuns_CompletedZeroSuccesses(t *testing.T) {
 		},
 	}
 
-	obsPool := PoolCommitRuns([]*v1alpha1.Run{run}, "d00d1e")
-	if obsPool.TotalSamples != 10 {
-		t.Errorf("expected TotalSamples=10, got %d", obsPool.TotalSamples)
+	observationPool := PoolCommitRuns([]*v1alpha1.Run{run}, "d00d1e")
+	if observationPool.TotalSamples != 10 {
+		t.Errorf("expected TotalSamples=10, got %d", observationPool.TotalSamples)
 	}
-	if obsPool.TotalSuccesses != 0 {
-		t.Errorf("expected TotalSuccesses=0, got %d", obsPool.TotalSuccesses)
+	if observationPool.TotalSuccesses != 0 {
+		t.Errorf("expected TotalSuccesses=0, got %d", observationPool.TotalSuccesses)
 	}
-	est := obsPool.OverallEstimate()
+	est := observationPool.OverallEstimate()
 	if est.N != 10 {
 		t.Errorf("expected N=10, got %d", est.N)
 	}

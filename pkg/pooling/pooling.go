@@ -74,7 +74,9 @@ type CommitObservationPool struct {
 	AllTasks       []stats.TaskCounts // flattened task counts for overall pooling
 	TotalCostUSD   float64
 	HasCost        bool
-	ObsCount       int
+
+	// ObservationCount counts pooled task observations, one per Run that contributed the task.
+	ObservationCount int
 }
 
 // PoolCommitRuns pools completed task observations from runs matching the given commit.
@@ -120,7 +122,7 @@ func PoolCommitRuns(runs []*v1alpha1.Run, commitSHA string) *CommitObservationPo
 			pool.TotalSamples += tc.Samples
 			pool.TotalSuccesses += tc.Successes
 			pool.AllTasks = append(pool.AllTasks, tc)
-			pool.ObsCount++
+			pool.ObservationCount++
 		}
 	}
 

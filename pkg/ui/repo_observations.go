@@ -539,7 +539,7 @@ func (obs *RepoObservations) EvalSparklineItems(evalID string, sparklineCommits 
 			sItem.HasPoint = true
 			sItem.SuccessRate = &p
 			sItem.CI = &ci
-			sItem.ObsCount = len(obsList)
+			sItem.ObservationCount = len(obsList)
 		}
 		items = append(items, sItem)
 	}
@@ -588,7 +588,7 @@ func (obs *RepoObservations) SuiteSparklineItems(suiteName string, sparklineComm
 			sItem.HasPoint = true
 			sItem.SuccessRate = &meanScore
 			sItem.CI = &ci
-			sItem.ObsCount = obsInSuite
+			sItem.ObservationCount = obsInSuite
 		}
 		items = append(items, sItem)
 	}
@@ -625,7 +625,7 @@ func (obs *RepoObservations) OverallSparklineItems(sparklineCommits []CommitEntr
 			sItem.HasPoint = true
 			sItem.SuccessRate = &p
 			sItem.CI = &ci
-			sItem.ObsCount = len(cTasks)
+			sItem.ObservationCount = len(cTasks)
 		}
 		items = append(items, sItem)
 	}

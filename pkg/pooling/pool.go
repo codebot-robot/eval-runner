@@ -34,7 +34,9 @@ type PooledTask struct {
 	Phase       v1alpha1.TaskPhase
 	Message     string
 	RunName     string
-	ObsCount    int
+
+	// ObservationCount counts pooled task observations, one per Run that contributed the task.
+	ObservationCount int
 }
 
 // CommitPool contains pooled evaluation observations across all Runs for a single commit,
@@ -48,8 +50,10 @@ type CommitPool struct {
 	CompletedTasks  int
 	TotalTasks      int
 	FailedTasks     int
-	ObsPool         *CommitObservationPool
-	ObsCount        int
+	ObservationPool *CommitObservationPool
+
+	// ObservationCount counts pooled task observations, one per Run that contributed the task.
+	ObservationCount int
 }
 
 // PoolRunsForCommit combines task results across all Runs (seed and top-up) for a single commit,
@@ -67,8 +71,8 @@ func PoolRunsForCommit(runs []*v1alpha1.Run) *CommitPool {
 	pool.CommitTime, _ = RunCommitTime(runs[0])
 
 	// Delegate statistical pooling of completed tasks to PoolCommitRuns
-	obsPool := PoolCommitRuns(runs, commitSHA)
-	pool.ObsPool = obsPool
+	observationPool := PoolCommitRuns(runs, commitSHA)
+	pool.ObservationPool = observationPool
 
 	// Gather all unique task IDs declared or present in status
 	taskSet := make(map[string]bool)
@@ -95,8 +99,8 @@ func PoolRunsForCommit(runs []*v1alpha1.Run) *CommitPool {
 	pool.TotalTasks = len(sortedTaskIDs)
 
 	for _, tid := range sortedTaskIDs {
-		counts := obsPool.TaskCounts[tid]
-		totalSamples := obsPool.SamplesPerTask[tid]
+		counts := observationPool.TaskCounts[tid]
+		totalSamples := observationPool.SamplesPerTask[tid]
 
 		var totalTokens *v1alpha1.TaskTokens
 		var totalCostUSD *float64
@@ -175,7 +179,7 @@ func PoolRunsForCommit(runs []*v1alpha1.Run) *CommitPool {
 			pt.Samples = totalSamples
 			pt.Successes = totalSuccesses
 			pt.SuccessRate = &rate
-			pt.ObsCount = len(counts)
+			pt.ObservationCount = len(counts)
 
 			if singleRunCI != nil && singleRunRate != nil {
 				pt.Estimate = stats.Estimate{
@@ -201,11 +205,11 @@ func PoolRunsForCommit(runs []*v1alpha1.Run) *CommitPool {
 		pool.Tasks = append(pool.Tasks, pt)
 	}
 
-	if len(obsPool.AllTasks) > 0 {
-		overall := obsPool.OverallEstimate()
+	if len(observationPool.AllTasks) > 0 {
+		overall := observationPool.OverallEstimate()
 		pool.OverallEstimate = &overall
 	}
-	pool.ObsCount = obsPool.ObsCount
+	pool.ObservationCount = observationPool.ObservationCount
 
 	return pool
 }

@@ -1507,7 +1507,7 @@ type SeriesItem struct {
 	DeltaPrevChip   string
 	DeltaPrevMethod string
 
-	ObsCount int // Number of observations represented at this commit
+	ObservationCount int // Number of observations represented at this commit
 }
 
 // Estimate converts the SeriesItem point and CI into a stats.Estimate.
@@ -1759,7 +1759,7 @@ func BuildSparklineSVGWithOptions(items []SeriesItem, width, height int) Sparkli
 	ticksAtCommit := make([][]ChartTick, len(items))
 	for i, it := range items {
 		if it.HasPoint && it.SuccessRate != nil {
-			count := it.ObsCount
+			count := it.ObservationCount
 			if count <= 0 {
 				count = 1
 			}
@@ -2832,7 +2832,7 @@ func LinesPerDimension(obs []EvalObservation, dim TrendDimension, commits []Comm
 				sItem.HasPoint = true
 				sItem.SuccessRate = &p
 				sItem.CI = &ci
-				sItem.ObsCount = len(matching)
+				sItem.ObservationCount = len(matching)
 			}
 			items = append(items, sItem)
 		}
