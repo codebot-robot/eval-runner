@@ -733,16 +733,16 @@ func (r *ComparisonReconciler) processPendingCommands(ctx context.Context, comp 
 				}
 			}
 
-			reqBy := cmd.RequestedBy
-			if reqBy == "" {
-				reqBy = cmd.Login
+			requestedBy := cmd.RequestedBy
+			if requestedBy == "" {
+				requestedBy = cmd.Login
 			}
 			handled := v1alpha1.ComparisonHandledCommand{
 				CommentID:   cmd.CommentID,
 				CheckRunID:  cmd.CheckRunID,
 				DeliveryID:  cmd.DeliveryID,
 				Login:       cmd.Login,
-				RequestedBy: reqBy,
+				RequestedBy: requestedBy,
 				Command:     cmd.Command,
 				Requested:   cmd.Requested,
 				ReceivedAt:  cmd.ReceivedAt,
@@ -772,16 +772,16 @@ func (r *ComparisonReconciler) processPendingCommands(ctx context.Context, comp 
 					r.reactToDeniedOrErroredCommand(ctx, ghClient, comp.Spec.PullRequest, cmd.CommentID)
 				}
 
-				reqBy := cmd.RequestedBy
-				if reqBy == "" {
-					reqBy = cmd.Login
+				requestedBy := cmd.RequestedBy
+				if requestedBy == "" {
+					requestedBy = cmd.Login
 				}
 				handled := v1alpha1.ComparisonHandledCommand{
 					CommentID:   cmd.CommentID,
 					CheckRunID:  cmd.CheckRunID,
 					DeliveryID:  cmd.DeliveryID,
 					Login:       cmd.Login,
-					RequestedBy: reqBy,
+					RequestedBy: requestedBy,
 					Command:     cmd.Command,
 					Requested:   cmd.Requested,
 					ReceivedAt:  cmd.ReceivedAt,
@@ -797,16 +797,16 @@ func (r *ComparisonReconciler) processPendingCommands(ctx context.Context, comp 
 				r.reactToDeniedOrErroredCommand(ctx, ghClient, comp.Spec.PullRequest, cmd.CommentID)
 			}
 
-			reqBy := cmd.RequestedBy
-			if reqBy == "" {
-				reqBy = cmd.Login
+			requestedBy := cmd.RequestedBy
+			if requestedBy == "" {
+				requestedBy = cmd.Login
 			}
 			handled := v1alpha1.ComparisonHandledCommand{
 				CommentID:   cmd.CommentID,
 				CheckRunID:  cmd.CheckRunID,
 				DeliveryID:  cmd.DeliveryID,
 				Login:       cmd.Login,
-				RequestedBy: reqBy,
+				RequestedBy: requestedBy,
 				Command:     cmd.Command,
 				Requested:   cmd.Requested,
 				ReceivedAt:  cmd.ReceivedAt,
@@ -1653,8 +1653,8 @@ func getRunPlannedTaskIDs(run *v1alpha1.Run) map[string]bool {
 // determineCompletedTaskIDs returns:
 // - taskIDs: only tasks executed by both Runs with phase Completed, filtered by comp.Spec.Tasks if specified.
 // - unexecuted: tasks in scope that were not executed by both runs.
-// - candFailed: tasks that completed in baselineRun but failed in candRun.
-func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) (taskIDs []string, unexecuted []string, candFailed []string) {
+// - candidateFailed: tasks that completed in baselineRun but failed in candRun.
+func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) (taskIDs []string, unexecuted []string, candidateFailed []string) {
 	candCompleted := make(map[string]bool)
 	for i := range candRun.Status.Tasks {
 		if candRun.Status.Tasks[i].Phase == v1alpha1.TaskPhaseCompleted {
@@ -1699,11 +1699,11 @@ func determineCompletedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1al
 			unexecuted = append(unexecuted, id)
 			candTask := findTaskStatus(candRun.Status.Tasks, id)
 			if candTask != nil && candTask.Phase == v1alpha1.TaskPhaseFailed && baseCompleted[id] {
-				candFailed = append(candFailed, id)
+				candidateFailed = append(candidateFailed, id)
 			}
 		}
 	}
-	return taskIDs, unexecuted, candFailed
+	return taskIDs, unexecuted, candidateFailed
 }
 
 func determineSkippedTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alpha1.Run) []string {
@@ -2618,7 +2618,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	// All current batch Runs are terminal; perform pairing and comparison
 	aff := r.resolveAffinity(ctx, &comp, &candidateRun, &baselineRun)
 
-	taskIDs, unexecuted, candFailed := determineCompletedTaskIDs(&comp, &baselineRun, &candidateRun)
+	taskIDs, unexecuted, candidateFailed := determineCompletedTaskIDs(&comp, &baselineRun, &candidateRun)
 	skippedNotPlanned := determineSkippedTaskIDs(&comp, &baselineRun, &candidateRun)
 
 	var prunedTasks []string
@@ -2733,8 +2733,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				// exactly as a seed-Run failure does via determineCompletedTaskIDs.
 				if candTask != nil && candTask.Phase == v1alpha1.TaskPhaseFailed &&
 					baseTask != nil && baseTask.Phase == v1alpha1.TaskPhaseCompleted &&
-					!containsTask(candFailed, taskID) {
-					candFailed = append(candFailed, taskID)
+					!containsTask(candidateFailed, taskID) {
+					candidateFailed = append(candidateFailed, taskID)
 				}
 				if (candTask != nil && candTask.Message == "no scored samples") ||
 					(baseTask != nil && baseTask.Message == "no scored samples") {
@@ -3752,8 +3752,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	}
 
 	runVerdict := stats.AggregateVerdict(reports)
-	sort.Strings(candFailed)
-	runVerdict, capped := stats.CapForCandidateFailures(runVerdict, candFailed)
+	sort.Strings(candidateFailed)
+	runVerdict, capped := stats.CapForCandidateFailures(runVerdict, candidateFailed)
 	pImp := runVerdict.PImprovement
 
 	var unexecutedNotes []string
@@ -3773,19 +3773,19 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("failed batch %s: %s", runWord, github.FormatIDList(failedBatchRuns, github.MaxIDList)))
 	}
-	if len(candFailed) > 0 && !capped {
+	if len(candidateFailed) > 0 && !capped {
 		taskWord := "task"
-		if len(candFailed) > 1 {
+		if len(candidateFailed) > 1 {
 			taskWord = "tasks"
 		}
-		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, github.FormatIDList(candFailed, github.MaxIDList)))
+		unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("candidate %s failed: %s", taskWord, github.FormatIDList(candidateFailed, github.MaxIDList)))
 	}
 	var failedBoth []string
 	var unattempted []string
 	var notBothExecuted []string
 	if len(unexecuted) > 0 {
 		for _, id := range unexecuted {
-			if containsTask(candFailed, id) {
+			if containsTask(candidateFailed, id) {
 				continue
 			}
 			candTask := findTaskStatus(candidateRun.Status.Tasks, id)
@@ -3895,7 +3895,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		NotExecuted:           unattempted,
 		NotExecutedByBothRuns: notBothExecuted,
 		FailedInBothRuns:      failedBoth,
-		CandidateFailed:       candFailed,
+		CandidateFailed:       candidateFailed,
 		Affinity:              aff.status,
 		AffinityMatched:       aff.matchedCount,
 		Budget:                compBudget,

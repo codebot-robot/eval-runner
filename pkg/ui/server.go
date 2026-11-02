@@ -3870,7 +3870,7 @@ func FormatArtifactFooter(sink artifacts.ArtifactSink) string {
 
 // parseRunTaskRest parses the {rest...} path segment and query parameters into taskID and sampleID.
 // It splits rest at the last "/samples" segment into (task, sample?).
-// Query parameters ?task=&sample= act as an explicit escape hatch.
+// Query parameters ?task=&sample= serve as an explicit escape hatch.
 func parseRunTaskRest(rest string, q url.Values, fragment, rawFragment string) (taskID string, sampleID string, ok bool) {
 	qTask := q.Get("task")
 	qSample := q.Get("sample")

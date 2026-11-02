@@ -97,13 +97,13 @@ func HashContent(markdown string, state CheckRunState, extraHash ...string) stri
 		h.Write([]byte{0})
 		h.Write([]byte(ann.RawDetails))
 	}
-	for _, act := range state.Actions {
+	for _, action := range state.Actions {
 		h.Write([]byte{0})
-		h.Write([]byte(act.Label))
+		h.Write([]byte(action.Label))
 		h.Write([]byte{0})
-		h.Write([]byte(act.Description))
+		h.Write([]byte(action.Description))
 		h.Write([]byte{0})
-		h.Write([]byte(act.Identifier))
+		h.Write([]byte(action.Identifier))
 	}
 	for _, eh := range extraHash {
 		h.Write([]byte{0})

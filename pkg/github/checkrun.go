@@ -689,12 +689,12 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 		}
 	}
 
-	candFailed := (candRun != nil && candRun.Status.Phase == v1alpha1.RunPhaseFailed) || (comp != nil && strings.Contains(comp.Status.Message, "candidate task failed"))
+	candidateFailed := (candRun != nil && candRun.Status.Phase == v1alpha1.RunPhaseFailed) || (comp != nil && strings.Contains(comp.Status.Message, "candidate task failed"))
 	baseFailed := (baseRun != nil && baseRun.Status.Phase == v1alpha1.RunPhaseFailed) || (comp != nil && strings.Contains(comp.Status.Message, "baseline task failed"))
 
-	if candFailed || baseFailed {
+	if candidateFailed || baseFailed {
 		var actions []CheckRunAction
-		if candFailed {
+		if candidateFailed {
 			actions = append(actions, ActionRerunCand)
 		}
 		if baseFailed {
