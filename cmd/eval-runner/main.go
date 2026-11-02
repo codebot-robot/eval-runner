@@ -503,6 +503,7 @@ func main() {
 
 	comparisonReconciler := &controller.ComparisonReconciler{
 		Client:              mgr.GetClient(),
+		APIReader:           mgr.GetAPIReader(),
 		Scheme:              mgr.GetScheme(),
 		ArtifactSink:        reloadableSink,
 		ControllerNamespace: evalRunnerNamespace,

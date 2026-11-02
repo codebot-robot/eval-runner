@@ -18480,67 +18480,147 @@ func TestComparisonReconciler_HeadMove_StatusConflictDoesNotDuplicateCheckRun(t 
 	}
 }
 
-func TestComparisonReconciler_HeadMove_EagerCreateFailure_FallsBackToCreateOnMiss(t *testing.T) {
+func TestComparisonReconciler_CachedComparisonLacksCheckRunID_UpdatesNotCreates(t *testing.T) {
 	ctx := t.Context()
-	f := newHeadMoveFixture(t, true)
+	fixture := newHeadMoveFixture(t, true)
 
 	// 1. Initial reconcile: cand1 completes
-	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
+	if _, err := fixture.reconciler.Reconcile(ctx, fixture.req); err != nil {
 		t.Fatalf("first reconcile failed: %v", err)
 	}
 
-	checkRuns := f.server.CheckRuns()
+	checkRuns := fixture.server.CheckRuns()
 	if len(checkRuns) != 1 {
 		t.Fatalf("expected 1 check run, got %d", len(checkRuns))
 	}
-	cand1CheckRunID := checkRuns[0].ID
-	cand1Title := checkRuns[0].Title
-	cand1Conclusion := checkRuns[0].Conclusion
+	cand1CheckRunIdentifier := checkRuns[0].ID
 
-	var curComp v1alpha1.Comparison
-	if err := f.client.Get(ctx, f.req.NamespacedName, &curComp); err != nil {
+	var currentComparison v1alpha1.Comparison
+	if err := fixture.client.Get(ctx, fixture.req.NamespacedName, &currentComparison); err != nil {
 		t.Fatalf("get comp failed: %v", err)
 	}
 
-	// 2. Head moves to cand2, but eager create check-run call fails with HTTP 500
-	f.server.InjectPathError("POST", "/repos/gke-labs/eval-runner/check-runs", http.StatusInternalServerError, `{"message":"internal error"}`)
+	// API server has the check run ID recorded for cand1SHA.
+	// Wire APIReader to return this authoritative copy.
+	fixture.reconciler.APIReader = fixture.client
 
-	curComp.Spec.Candidate.Run = "cand2-run"
-	curComp.Spec.PullRequest.HeadSHA = f.cand2SHA
-	if err := f.client.Update(ctx, &curComp); err != nil {
+	// Wrap fixture.reconciler.Client with an interceptor to simulate informer cache lagging
+	// behind the API server status write (lacking check-run ID for cand1SHA).
+	interceptorClient := fake.NewClientBuilder().
+		WithScheme(fixture.reconciler.Scheme).
+		WithObjects(&currentComparison, fixture.cand1Run, fixture.baseRun).
+		WithStatusSubresource(&currentComparison, fixture.cand1Run, fixture.baseRun).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, interceptorClient client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := interceptorClient.Get(ctx, key, obj, opts...); err != nil {
+					return err
+				}
+				if targetComparison, ok := obj.(*v1alpha1.Comparison); ok && targetComparison.Name == currentComparison.Name {
+					if targetComparison.Status.Reporting != nil {
+						targetComparison.Status.Reporting.CheckRunID = 0
+						if targetComparison.Status.Reporting.CheckRunIDs != nil {
+							delete(targetComparison.Status.Reporting.CheckRunIDs, fixture.cand1SHA)
+						}
+						// Clear hash gate so reportToGitHub runs
+						targetComparison.Status.Reporting.LastPostedHash = ""
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+	fixture.reconciler.Client = interceptorClient
+
+	// Reconcile: cached comparison lacks check run ID, but API server copy has it.
+	// Must perform an update, not a create.
+	if _, err := fixture.reconciler.Reconcile(ctx, fixture.req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Fake GitHub server must assert exactly one check run for the head (updated, not duplicated)
+	checkRuns = fixture.server.CheckRuns()
+	cand1CheckRunCount := 0
+	for _, checkRun := range checkRuns {
+		if checkRun.HeadSHA == fixture.cand1SHA {
+			cand1CheckRunCount++
+		}
+	}
+	if cand1CheckRunCount != 1 {
+		t.Fatalf("expected exactly 1 check run for head %s, got %d (all check runs: %d)", fixture.cand1SHA, cand1CheckRunCount, len(checkRuns))
+	}
+	if checkRuns[0].ID != cand1CheckRunIdentifier {
+		t.Errorf("expected check run ID %d to be preserved, got %d", cand1CheckRunIdentifier, checkRuns[0].ID)
+	}
+}
+
+func TestComparisonReconciler_HeadMove_ProducesExactlyOneCheckRun(t *testing.T) {
+	ctx := t.Context()
+	fixture := newHeadMoveFixture(t, true)
+
+	// 1. Initial reconcile: cand1 completes
+	if _, err := fixture.reconciler.Reconcile(ctx, fixture.req); err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+
+	checkRuns := fixture.server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("expected 1 check run after first reconcile, got %d", len(checkRuns))
+	}
+	cand1CheckRunIdentifier := checkRuns[0].ID
+
+	// 2. Head moves to cand2 (which is running)
+	fixture.cand2Run.Status.Phase = v1alpha1.RunPhaseRunning
+	fixture.cand2Run.Status.Tasks[0].Phase = v1alpha1.TaskPhaseRunning
+	fixture.cand2Run.Status.Summary = nil
+	if err := fixture.client.Status().Update(ctx, fixture.cand2Run); err != nil {
+		t.Fatalf("failed updating cand2 status: %v", err)
+	}
+
+	var currentComparison v1alpha1.Comparison
+	if err := fixture.client.Get(ctx, fixture.req.NamespacedName, &currentComparison); err != nil {
+		t.Fatalf("get comp failed: %v", err)
+	}
+	currentComparison.Spec.Candidate.Run = "cand2-run"
+	currentComparison.Spec.PullRequest.HeadSHA = fixture.cand2SHA
+	if err := fixture.client.Update(ctx, &currentComparison); err != nil {
 		t.Fatalf("update comp failed: %v", err)
 	}
 
-	// Reconcile: eager create fails, but status reset clears CheckRunID for new head.
-	// When candidate completes and reportToGitHub runs, missing checkRunID creates a new check run on cand2SHA.
-	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
+	// Reconcile on head move
+	if _, err := fixture.reconciler.Reconcile(ctx, fixture.req); err != nil {
 		t.Fatalf("head move reconcile failed: %v", err)
 	}
 
-	checkRuns = f.server.CheckRuns()
-	if len(checkRuns) != 2 {
-		t.Fatalf("expected 2 check runs (fallback created new check run on miss), got %d", len(checkRuns))
+	// Verify exactly 1 check run for the new head
+	cand2CheckRunCount := 0
+	for _, checkRun := range fixture.server.CheckRuns() {
+		if checkRun.HeadSHA == fixture.cand2SHA {
+			cand2CheckRunCount++
+		}
 	}
-	// Old SHA check run untouched
-	if checkRuns[0].ID != cand1CheckRunID || checkRuns[0].HeadSHA != f.cand1SHA || checkRuns[0].Status != "completed" || checkRuns[0].Title != cand1Title || checkRuns[0].Conclusion != cand1Conclusion {
-		t.Errorf("cand1 check run was modified: %+v", checkRuns[0])
-	}
-	// New SHA check run created on cand2SHA and completed
-	if checkRuns[1].ID == cand1CheckRunID {
-		t.Errorf("new check run should have a distinct ID from old check run %d", cand1CheckRunID)
-	}
-	if checkRuns[1].HeadSHA != f.cand2SHA {
-		t.Errorf("expected cand2 head SHA %s, got %s", f.cand2SHA, checkRuns[1].HeadSHA)
-	}
-	if checkRuns[1].Status != "completed" {
-		t.Errorf("expected cand2 check run status completed, got %s", checkRuns[1].Status)
+	if cand2CheckRunCount != 1 {
+		t.Fatalf("expected exactly 1 check run for new head %s, got %d", fixture.cand2SHA, cand2CheckRunCount)
 	}
 
-	if err := f.client.Get(ctx, f.req.NamespacedName, &curComp); err != nil {
-		t.Fatalf("get comp failed: %v", err)
+	// Additional reconcile while cand2 is still running (e.g. queued run events)
+	if _, err := fixture.reconciler.Reconcile(ctx, fixture.req); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
 	}
-	if curComp.Status.Reporting.CheckRunIDs[f.cand2SHA] != checkRuns[1].ID {
-		t.Errorf("expected CheckRunIDs[%s] = %d, got %v", f.cand2SHA, checkRuns[1].ID, curComp.Status.Reporting.CheckRunIDs)
+
+	// Still exactly 1 check run for the new head
+	cand2CheckRunCount = 0
+	for _, checkRun := range fixture.server.CheckRuns() {
+		if checkRun.HeadSHA == fixture.cand2SHA {
+			cand2CheckRunCount++
+		}
+	}
+	if cand2CheckRunCount != 1 {
+		t.Fatalf("expected still exactly 1 check run for new head %s after second reconcile, got %d", fixture.cand2SHA, cand2CheckRunCount)
+	}
+
+	// Old head check run remains untouched
+	if fixture.server.CheckRuns()[0].ID != cand1CheckRunIdentifier {
+		t.Errorf("expected cand1 check run ID %d, got %d", cand1CheckRunIdentifier, fixture.server.CheckRuns()[0].ID)
 	}
 }
 

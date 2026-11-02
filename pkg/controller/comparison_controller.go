@@ -108,6 +108,7 @@ type GitHubCredentials struct {
 // ComparisonReconciler reconciles a Comparison object.
 type ComparisonReconciler struct {
 	client.Client
+	APIReader              client.Reader
 	Scheme                 *runtime.Scheme
 	ArtifactSink           artifacts.ArtifactSink
 	ArtifactSinkTimeout    time.Duration
@@ -948,6 +949,61 @@ func pullRequestRepoRef(repo string) (forge.RepoRef, bool) {
 	return forge.ParseRepoURL(repo)
 }
 
+// getUncachedReportingCheckRunID returns the check run ID for headSHA from the uncached Comparison, if any.
+func (r *ComparisonReconciler) getUncachedReportingCheckRunID(uncachedComparison *v1alpha1.Comparison, headSHA string) int64 {
+	if uncachedComparison == nil || uncachedComparison.Status.Reporting == nil || headSHA == "" {
+		return 0
+	}
+	reporting := uncachedComparison.Status.Reporting
+	if reporting.CheckRunIDs != nil && reporting.CheckRunIDs[headSHA] != 0 {
+		return reporting.CheckRunIDs[headSHA]
+	}
+	if len(reporting.CheckRunIDs) == 0 && reporting.CheckRunID != 0 &&
+		uncachedComparison.Status.ObservedCandidateRun == uncachedComparison.Spec.Candidate.Run {
+		return reporting.CheckRunID
+	}
+	return 0
+}
+
+// refreshReportingFromAPIReader re-reads the Comparison via APIReader and, if the uncached copy has
+// an ID for headSHA, adopts that copy's status.reporting and returns the check run ID.
+func (r *ComparisonReconciler) refreshReportingFromAPIReader(ctx context.Context, comp *v1alpha1.Comparison, headSHA string) int64 {
+	if headSHA == "" {
+		return 0
+	}
+	var reader client.Reader
+	if r.APIReader != nil {
+		reader = r.APIReader
+	} else if r.Client != nil {
+		reader = r.Client
+	}
+	if reader == nil {
+		return 0
+	}
+	var uncachedComparison v1alpha1.Comparison
+	comparisonKey := types.NamespacedName{Namespace: comp.Namespace, Name: comp.Name}
+	if err := reader.Get(ctx, comparisonKey, &uncachedComparison); err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.FromContext(ctx).V(1).Info("failed to read comparison from APIReader", "comparison", comparisonKey, "error", err)
+		}
+		return 0
+	}
+	uncachedCheckRunID := r.getUncachedReportingCheckRunID(&uncachedComparison, headSHA)
+	if uncachedCheckRunID != 0 {
+		savedCommentID := int64(0)
+		if comp.Status.Reporting != nil {
+			savedCommentID = comp.Status.Reporting.CommentID
+		}
+		comp.Status.Reporting = uncachedComparison.Status.Reporting.DeepCopy()
+		if savedCommentID != 0 {
+			comp.Status.Reporting.CommentID = savedCommentID
+		}
+		migrateReportingCheckRunIDs(comp.Status.Reporting, headSHA)
+		return uncachedCheckRunID
+	}
+	return 0
+}
+
 // migrateReportingCheckRunIDs ensures CheckRunIDs is populated from legacy CheckRunID if needed.
 func migrateReportingCheckRunIDs(reporting *v1alpha1.ComparisonReportingStatus, headSHA string) {
 	if reporting == nil {
@@ -1049,10 +1105,6 @@ func (r *ComparisonReconciler) reportToGitHub(
 		return nil
 	}
 
-	markdown := github.RenderComparisonMarkdown(comp, baseRun, candRun, r.uiBaseURL())
-	checkState := github.CheckRunStateForComparison(comp, baseRun, candRun, r.inconclusivePolicy(), r.uiBaseURL())
-	baseHash := github.HashContent(markdown, checkState)
-
 	headSHA := comp.Spec.PullRequest.HeadSHA
 	if headSHA == "" && candRun != nil {
 		headSHA = candRun.Spec.Repo.Commit
@@ -1066,11 +1118,27 @@ func (r *ComparisonReconciler) reportToGitHub(
 		if comp.Status.Reporting.CheckRunIDs != nil && headSHA != "" {
 			checkRunID = comp.Status.Reporting.CheckRunIDs[headSHA]
 		}
-		if comp.Status.Reporting.LastPostedHash == baseHash && commentID != 0 {
-			// If not in a terminal phase, or if annotations have already been posted, short-circuit immediately.
-			if !isTerminalComparisonPhase(comp.Status.Phase) || comp.Status.Reporting.AnnotationsPosted {
-				return nil
+	}
+
+	// Before performing any external create (check run ID is zero for this head),
+	// re-read the Comparison with the uncached APIReader and use that copy's status.reporting.
+	if headSHA != "" && checkRunID == 0 {
+		if uncachedID := r.refreshReportingFromAPIReader(ctx, comp, headSHA); uncachedID != 0 {
+			checkRunID = uncachedID
+			if commentID == 0 && comp.Status.Reporting != nil {
+				commentID = comp.Status.Reporting.CommentID
 			}
+		}
+	}
+
+	markdown := github.RenderComparisonMarkdown(comp, baseRun, candRun, r.uiBaseURL())
+	checkState := github.CheckRunStateForComparison(comp, baseRun, candRun, r.inconclusivePolicy(), r.uiBaseURL())
+	baseHash := github.HashContent(markdown, checkState)
+
+	if comp.Status.Reporting != nil && comp.Status.Reporting.LastPostedHash == baseHash && commentID != 0 {
+		// If not in a terminal phase, or if annotations have already been posted, short-circuit immediately.
+		if !isTerminalComparisonPhase(comp.Status.Phase) || comp.Status.Reporting.AnnotationsPosted {
+			return nil
 		}
 	}
 
@@ -1108,6 +1176,12 @@ func (r *ComparisonReconciler) reportToGitHub(
 	comp.Status.Reporting.CommentID = commentID
 
 	if headSHA != "" {
+		if checkRunID == 0 {
+			if uncachedID := r.refreshReportingFromAPIReader(ctx, comp, headSHA); uncachedID != 0 {
+				checkRunID = uncachedID
+			}
+		}
+
 		st := forge.Status{
 			Status:      checkState.Status,
 			Conclusion:  checkState.Conclusion,
@@ -2126,37 +2200,6 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			headChanged = false
 		}
 
-		var newCheckRunID int64
-		if headChanged && comp.Spec.PullRequest != nil && newHeadSHA != "" {
-			repCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			rep, repoRef, repErr := r.getReporter(repCtx, &comp)
-			if repErr == nil && rep != nil {
-				sha7 := newHeadSHA
-				if len(sha7) > 7 {
-					sha7 = sha7[:7]
-				}
-				title := fmt.Sprintf("re-running for %s", sha7)
-				st := forge.Status{
-					Status:      "in_progress",
-					State:       "in_progress",
-					Context:     github.CheckRunName,
-					Title:       title,
-					Description: title,
-					Text:        title,
-					TargetURL:   github.CheckRunDetailsURL(&comp, r.uiBaseURL(), bRun, cRun),
-				}
-				id, err := rep.SetStatus(repCtx, repoRef, newHeadSHA, st)
-				if err == nil {
-					newCheckRunID = id
-				} else if errors.Is(err, forgegithub.ErrCheckRunsUnavailable) {
-					// Check runs unavailable with token auth
-				} else {
-					logger.Error(err, "failed creating check run on new head", "headSHA", newHeadSHA)
-				}
-			}
-			cancel()
-		}
-
 		if _, err := r.updateComparisonStatus(ctx, &comp, bRun, cRun, func(status *v1alpha1.ComparisonStatus) {
 			// Reset all scoring state for the new head commit while preserving reporting.commentID to edit in place.
 			status.Phase = v1alpha1.ComparisonPhaseRunning
@@ -2174,15 +2217,12 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 			status.Message = msg
 			status.ObservedCandidateRun = comp.Spec.Candidate.Run
 			status.ObservedBaselineRun = comp.Spec.Baseline.Run
-			if status.Reporting != nil || newCheckRunID != 0 {
-				if status.Reporting == nil {
-					status.Reporting = &v1alpha1.ComparisonReportingStatus{}
-				}
+			if comp.Spec.PullRequest != nil && status.Reporting == nil {
+				status.Reporting = &v1alpha1.ComparisonReportingStatus{}
+			}
+			if status.Reporting != nil {
 				migrateReportingCheckRunIDs(status.Reporting, oldHeadSHA)
-				if newCheckRunID != 0 {
-					status.Reporting.CheckRunIDs[newHeadSHA] = newCheckRunID
-					status.Reporting.CheckRunID = newCheckRunID
-				} else if headChanged {
+				if headChanged {
 					status.Reporting.CheckRunID = 0
 				}
 				status.Reporting.AnnotationsPosted = false
