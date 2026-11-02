@@ -602,7 +602,7 @@ func TestHeadTopUp_InFlightSkip(t *testing.T) {
 }
 
 // TestHeadTopUp_ControllerAndSeriesPoolingIntegration verifies that a second base-<sha>-2 Run
-// appears after the interval/pass and the series overview pools it with ObsCount 2.
+// appears after the interval/pass and the series overview pools it with ObservationCount 2.
 func TestHeadTopUp_ControllerAndSeriesPoolingIntegration(t *testing.T) {
 	s := setupScheme(t)
 	now := time.Now()

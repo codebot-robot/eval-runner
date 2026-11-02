@@ -612,10 +612,10 @@ func TestRepoOverview_Sparkline_Ticks(t *testing.T) {
 		rate := 0.75
 		items := []SeriesItem{
 			{
-				CommitSHA:   "1111111",
-				HasPoint:    true,
-				SuccessRate: &rate,
-				ObsCount:    1,
+				CommitSHA:        "1111111",
+				HasPoint:         true,
+				SuccessRate:      &rate,
+				ObservationCount: 1,
 			},
 		}
 		spark := BuildSparklineSVG(items)
@@ -641,9 +641,9 @@ func TestRepoOverview_Sparkline_Ticks(t *testing.T) {
 		rate2 := 0.60
 		rate3 := 0.70
 		items := []SeriesItem{
-			{CommitSHA: "c1", HasPoint: true, SuccessRate: &rate1, ObsCount: 2},
-			{CommitSHA: "c2", HasPoint: true, SuccessRate: &rate2, ObsCount: 1},
-			{CommitSHA: "c3", HasPoint: true, SuccessRate: &rate3, ObsCount: 3},
+			{CommitSHA: "c1", HasPoint: true, SuccessRate: &rate1, ObservationCount: 2},
+			{CommitSHA: "c2", HasPoint: true, SuccessRate: &rate2, ObservationCount: 1},
+			{CommitSHA: "c3", HasPoint: true, SuccessRate: &rate3, ObservationCount: 3},
 		}
 		spark := BuildSparklineSVG(items)
 		expectedTicks := 2 + 1 + 3
@@ -841,7 +841,7 @@ func TestRepoOverview_NamespaceLinks(t *testing.T) {
 	}
 }
 
-func TestRepoOverview_HeadTopUpObsCount2(t *testing.T) {
+func TestRepoOverview_HeadTopUpObservationCount2(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("failed to add v1alpha1 scheme: %v", err)
@@ -920,8 +920,8 @@ func TestRepoOverview_HeadTopUpObsCount2(t *testing.T) {
 	if len(sparklines) != 1 {
 		t.Fatalf("expected 1 commit sparkline item, got %d", len(sparklines))
 	}
-	if sparklines[0].ObsCount != 2 {
-		t.Errorf("expected ObsCount=2, got %d", sparklines[0].ObsCount)
+	if sparklines[0].ObservationCount != 2 {
+		t.Errorf("expected ObservationCount=2, got %d", sparklines[0].ObservationCount)
 	}
 	if sparklines[0].SuccessRate == nil {
 		t.Fatalf("expected SuccessRate to be set")

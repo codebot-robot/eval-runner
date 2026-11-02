@@ -3383,7 +3383,7 @@ func (s *Server) renderSeriesDetailWithList(w http.ResponseWriter, r *http.Reque
 					} else {
 						item.PhaseChip = "good"
 					}
-					item.ObsCount = 1
+					item.ObservationCount = 1
 				} else {
 					item.HasPoint = false
 					if matchedTask.Phase != "" {
