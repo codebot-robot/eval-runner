@@ -634,20 +634,37 @@ func (f *Forge) SetStatus(ctx context.Context, ref forge.RepoRef, sha string, st
 	}
 
 	if status.CheckRunID != 0 {
-		err := f.client.UpdateCheckRun(ctx, ref.Owner, ref.Name, status.CheckRunID, checkState)
-		if err == nil {
+		if err := f.client.UpdateCheckRun(ctx, ref.Owner, ref.Name, status.CheckRunID, checkState); err == nil {
 			return status.CheckRunID, nil
+		} else if checkError := mapCheckRunError(err); checkError != nil {
+			return 0, checkError
 		}
-		var pe *gh.PermanentError
-		if errors.As(err, &pe) {
-			if pe.StatusCode == http.StatusForbidden {
-				return 0, ErrCheckRunsUnavailable
+	}
+
+	if status.CheckRunID == 0 {
+		existingCheckRuns, err := f.client.ListCheckRunsForRef(ctx, ref.Owner, ref.Name, sha, checkState.Name)
+		if err != nil {
+			if checkError := mapCheckRunError(err); checkError != nil {
+				return 0, checkError
 			}
-			if pe.StatusCode != http.StatusNotFound {
-				return 0, mapError(err)
+		}
+		currentUser, err := f.client.CurrentUser(ctx)
+		if err == nil {
+			var newestCheckRunID int64
+			for _, run := range existingCheckRuns {
+				if run.Name == checkState.Name && run.HeadSHA == sha && gh.IsCheckRunFromApp(run, currentUser) {
+					if run.ID > newestCheckRunID {
+						newestCheckRunID = run.ID
+					}
+				}
 			}
-		} else {
-			return 0, mapError(err)
+			if newestCheckRunID != 0 {
+				if err := f.client.UpdateCheckRun(ctx, ref.Owner, ref.Name, newestCheckRunID, checkState); err == nil {
+					return newestCheckRunID, nil
+				} else if checkError := mapCheckRunError(err); checkError != nil {
+					return 0, checkError
+				}
+			}
 		}
 	}
 
@@ -660,6 +677,19 @@ func (f *Forge) SetStatus(ctx context.Context, ref forge.RepoRef, sha string, st
 		return 0, mapError(err)
 	}
 	return newID, nil
+}
+
+func mapCheckRunError(err error) error {
+	var pe *gh.PermanentError
+	if errors.As(err, &pe) {
+		if pe.StatusCode == http.StatusForbidden {
+			return ErrCheckRunsUnavailable
+		}
+		if pe.StatusCode == http.StatusNotFound {
+			return nil
+		}
+	}
+	return mapError(err)
 }
 
 func mapError(err error) error {
