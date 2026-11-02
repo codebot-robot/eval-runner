@@ -2454,13 +2454,13 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				}
 			}
 
-			reqWindow := taskRequestedWindowSize(run.Spec, t)
+			requestedWindow := taskRequestedWindowSize(run.Spec, t)
 			rescued := false
 			var rescuedAgg *artifacts.TaskAggregates
 			var rescuedSummary *artifacts.TaskSummary
 			var rescuedLogPath string
 
-			if t.Samples > 0 && (reqWindow <= 0 || t.Samples >= reqWindow) {
+			if t.Samples > 0 && (requestedWindow <= 0 || t.Samples >= requestedWindow) {
 				rescued = true
 			} else if t.LogPath != "" {
 				loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
@@ -2468,7 +2468,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				loadCancel()
 				if loadErr == nil && len(data) > 0 {
 					if agg, parseErr := artifacts.ParseInspectLog(data); parseErr == nil && agg.Samples > 0 {
-						if reqWindow <= 0 || agg.Samples >= reqWindow || (t.PossibleSamples > 0 && agg.Samples >= t.PossibleSamples) {
+						if requestedWindow <= 0 || agg.Samples >= requestedWindow || (t.PossibleSamples > 0 && agg.Samples >= t.PossibleSamples) {
 							rescued = true
 							rescuedAgg = agg
 							rescuedLogPath = t.LogPath
@@ -2490,7 +2490,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					var sum artifacts.TaskSummary
 					if parseErr := json.Unmarshal(data, &sum); parseErr != nil {
 						logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "unparseable", "error", parseErr)
-					} else if reqWindow <= 0 || sum.SampleCount >= reqWindow || (sum.PossibleSamples > 0 && sum.SampleCount >= sum.PossibleSamples) {
+					} else if requestedWindow <= 0 || sum.SampleCount >= requestedWindow || (sum.PossibleSamples > 0 && sum.SampleCount >= sum.PossibleSamples) {
 						if sum.SampleCount > 0 {
 							logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "complete", "samples", sum.SampleCount)
 							rescued = true
@@ -2502,7 +2502,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 							logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "empty", "samples", 0)
 						}
 					} else {
-						logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "partial", "samples", sum.SampleCount, "requested", reqWindow)
+						logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "partial", "samples", sum.SampleCount, "requested", requestedWindow)
 					}
 				}
 			}
