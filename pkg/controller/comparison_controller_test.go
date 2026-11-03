@@ -18144,7 +18144,7 @@ func newHeadMoveFixture(t *testing.T, withGitHub bool, interceptorFuncs ...inter
 	}
 
 	comp := &v1alpha1.Comparison{
-		ObjectMeta: metav1.ObjectMeta{Name: "pr-test", Namespace: "eval-runner"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-test", Namespace: "eval-runner", UID: "pr-test-uid"},
 		Spec: v1alpha1.ComparisonSpec{
 			Baseline:  v1alpha1.ComparisonRunRef{Run: "base-run"},
 			Candidate: v1alpha1.ComparisonRunRef{Run: "cand1-run"},
@@ -18814,6 +18814,47 @@ func TestComparisonReconciler_PreUpgradeMigration(t *testing.T) {
 	}
 	if curComp.Status.Reporting.CheckRunIDs[f.cand1SHA] != legacyID {
 		t.Errorf("expected CheckRunIDs[%s] = %d, got %v", f.cand1SHA, legacyID, curComp.Status.Reporting.CheckRunIDs)
+	}
+}
+
+func TestComparisonReconciler_CheckRunSetsDeterministicExternalID(t *testing.T) {
+	ctx := t.Context()
+	f := newHeadMoveFixture(t, true)
+
+	// Reconcile initial comparison
+	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	checkRuns := f.server.CheckRuns()
+	if len(checkRuns) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(checkRuns))
+	}
+	expectedExternalID := fmt.Sprintf("pr-test-uid/%s", f.cand1SHA)
+	if checkRuns[0].ExternalID != expectedExternalID {
+		t.Errorf("checkRun.ExternalID = %q, want %q", checkRuns[0].ExternalID, expectedExternalID)
+	}
+
+	// Reconcile to completion; external_id should remain intact on update
+	var currentComparison v1alpha1.Comparison
+	if err := f.client.Get(ctx, f.req.NamespacedName, &currentComparison); err != nil {
+		t.Fatalf("get comparison failed: %v", err)
+	}
+	currentComparison.Status.Phase = v1alpha1.ComparisonPhaseCompleted
+	currentComparison.Status.Verdict = v1alpha1.ComparisonVerdictUnchanged
+	if err := f.client.Status().Update(ctx, &currentComparison); err != nil {
+		t.Fatalf("update comparison failed: %v", err)
+	}
+
+	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+	checkRunsAfterUpdate := f.server.CheckRuns()
+	if len(checkRunsAfterUpdate) != 1 {
+		t.Fatalf("expected 1 check run after update, got %d", len(checkRunsAfterUpdate))
+	}
+	if checkRunsAfterUpdate[0].ExternalID != expectedExternalID {
+		t.Errorf("updated checkRun.ExternalID = %q, want %q", checkRunsAfterUpdate[0].ExternalID, expectedExternalID)
 	}
 }
 

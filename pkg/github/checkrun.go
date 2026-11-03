@@ -116,6 +116,7 @@ type CheckRunState struct {
 	Summary     string // detailed summary text
 	Text        string // technical details text (e.g. collapsed error details)
 	DetailsURL  string // URL of the details page
+	ExternalID  string // deterministic identifier for check run idempotency
 	Images      []CheckRunImage
 	Annotations []CheckRunAnnotation
 	Actions     []CheckRunAction
@@ -533,6 +534,15 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 	state.Text = RenderCheckRunText(comp, baseRun, candRun, uiBaseURL)
 	state.DetailsURL = CheckRunDetailsURL(comp, uiBaseURL, baseRun, candRun)
 
+	headSHA := ""
+	if comp.Spec.PullRequest != nil {
+		headSHA = comp.Spec.PullRequest.HeadSHA
+	}
+	if headSHA == "" && candRun != nil {
+		headSHA = candRun.Spec.Repo.Commit
+	}
+	state.ExternalID = ComparisonExternalID(string(comp.UID), headSHA)
+
 	policy := configkeys.InconclusivePolicyNeutral
 	if inconclusivePolicy != "" {
 		policy = strings.ToLower(strings.TrimSpace(inconclusivePolicy))
@@ -736,4 +746,12 @@ func isReRunningForNewHead(comparison *v1alpha1.Comparison, candidateRun *v1alph
 		}
 	}
 	return false
+}
+
+// ComparisonExternalID returns the deterministic external ID for a PR check run.
+func ComparisonExternalID(comparisonUID, headSHA string) string {
+	if comparisonUID == "" || headSHA == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/%s", comparisonUID, headSHA)
 }

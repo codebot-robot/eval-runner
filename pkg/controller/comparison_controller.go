@@ -1137,6 +1137,7 @@ func (r *ComparisonReconciler) reportToGitHub(
 			Description: checkState.Summary,
 			Text:        checkState.Text,
 			TargetURL:   checkState.DetailsURL,
+			ExternalID:  checkState.ExternalID,
 			CheckRunID:  checkRunID,
 			Images:      checkState.Images,
 			Annotations: checkState.Annotations,
