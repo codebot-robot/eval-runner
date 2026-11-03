@@ -18,7 +18,8 @@ cat <<'EOF'
   "tasks": [
     { "id": "triage/runbook_lookup",     "workdir": "evals", "spec": "runbook_lookup.py@runbook_lookup", "resources": [] },
     { "id": "triage/escalation_policy",  "workdir": "evals", "spec": "escalation.py@escalation_policy",   "resources": [] },
-    { "id": "triage/summary_quality",    "workdir": "evals", "spec": "summary.py@summary_quality", "cohort": "customer-reported", "resources": [] }
+    { "id": "triage/summary_quality",    "workdir": "evals", "spec": "summary.py@summary_quality", "cohort": "customer-reported", "resources": [] },
+    { "id": "triage/terminal_bench",     "workdir": "evals", "spec": "bench.py@eval_terminal", "image": "ghcr.io/example/support-agent-env:v1", "command": ["pytest", "-v"], "resources": [ { "type": "sandbox" } ] }
   ]
 }
 EOF
