@@ -613,7 +613,7 @@ The repository employs three testing tiers:
    - Automates downloading pinned versions of `kind` (v0.31.0) and `kubectl` (v1.35.0) into `.build/bin/`.
    - Automatically installs `agent-sandbox` v1.0.7, builds and loads images, deploys the controller and fixture `git-server`, and runs `TestRunDiscovery`.
    - Test cases in `tests/e2e/discovery_test.go`:
-     - `DiscoveredSuccess`: Verifies full discovery of 3 tasks from `examples/support-agent`, status manifest population, and sandbox pod deletion.
+     - `DiscoveredSuccess`: Verifies full discovery of 4 tasks from `examples/support-agent` (3 eligible, 1 per-sample sandbox), status manifest population, and sandbox pod deletion.
      - `BadCommitFails`: Verifies failure handling on non-existent commit SHA and sandbox cleanup.
      - `DeleteMidDiscovery`: Verifies that deleting a Run while discovery is running invokes the finalizer and cleanly deletes the sandbox.
 3. **Documentation Comprehension Evals (`./dev/tasks/test-evals`)**:

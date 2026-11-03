@@ -81,14 +81,14 @@ spec:
 		if run.Status.Discovery == nil {
 			t.Fatalf("Expected status.discovery to be populated")
 		}
-		if run.Status.Discovery.TaskCount != 3 {
-			t.Fatalf("Expected 3 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
+		if run.Status.Discovery.TaskCount != 4 {
+			t.Fatalf("Expected 4 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
 		}
 		if run.Status.Discovery.EligibleTaskCount != 3 {
 			t.Fatalf("Expected 3 eligible tasks, got %d", run.Status.Discovery.EligibleTaskCount)
 		}
-		if len(run.Status.Discovery.TaskIDs) != 3 {
-			t.Fatalf("Expected 3 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
+		if len(run.Status.Discovery.TaskIDs) != 4 {
+			t.Fatalf("Expected 4 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
 		}
 		if run.Status.Discovery.ManifestPath == "" || run.Status.Discovery.ManifestHash == "" {
 			t.Fatalf("Expected ManifestPath and ManifestHash populated, got: %+v", run.Status.Discovery)
@@ -98,9 +98,10 @@ spec:
 		}
 
 		expectedTasks := map[string]bool{
-			"triage/runbook_lookup":    false,
-			"triage/escalation_policy": false,
-			"triage/summary_quality":   false,
+			"triage/runbook_lookup":     false,
+			"triage/escalation_policy":  false,
+			"triage/summary_quality":    false,
+			"triage/per_sample_sandbox": false,
 		}
 		for _, id := range run.Status.Discovery.TaskIDs {
 			if _, ok := expectedTasks[id]; !ok {
@@ -132,8 +133,8 @@ spec:
 		if err := json.Unmarshal([]byte(manifestContent), &storedManifest); err != nil {
 			t.Fatalf("Failed to parse stored manifest JSON from kind node: %v", err)
 		}
-		if len(storedManifest.Tasks) != 3 {
-			t.Errorf("Expected 3 tasks in stored manifest, got %d", len(storedManifest.Tasks))
+		if len(storedManifest.Tasks) != 4 {
+			t.Errorf("Expected 4 tasks in stored manifest, got %d", len(storedManifest.Tasks))
 		}
 
 		// Assert sandbox was deleted from eval-runner-sandbox

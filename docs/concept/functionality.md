@@ -88,6 +88,8 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 | `tasks[].id` | Stable identifier, used everywhere in the UI, PR comment, storage paths and cohorts. |
 | `tasks[].workdir` | Directory to run the task from. |
 | `tasks[].spec` | Framework-specific task reference. For Inspect: `file.py@task_fn`. |
+| `tasks[].image` | Container image the task runs in. Empty means the shared sample-runner image. |
+| `tasks[].command` | Argv run inside the sandbox. Empty means the current inspect eval invocation. |
 | `tasks[].resources[]` | Declarative resource needs (see §3.2). Empty list means zero privilege. |
 | `tasks[].images[]` | Which built images the task needs available (e.g. pre-loaded into a kind cluster). |
 
@@ -140,6 +142,7 @@ standard environment contract into the sandbox, and tears it down afterwards.
 
 | `resources[].type` | What eval-runner provisions | Contract injected into the sandbox |
 |---|---|---|
+| `sandbox` | A per-sample sandbox from `image`, harness inside | Zero cluster credentials; harness runs inside the sandbox |
 | `kubernetes-namespace` | A fresh namespace, scoped credentials | `KUBECONFIG=/run/eval/kubeconfig` (scoped to e.g. `eval-ns-7f3a`) |
 | `kind` | A throwaway kind cluster with the task's `images` pre-loaded | `KUBECONFIG=/run/eval/kubeconfig` |
 | `docker` | A Docker daemon for the sample | `DOCKER_HOST=unix:///run/eval/docker.sock` |
