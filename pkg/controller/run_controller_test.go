@@ -3355,6 +3355,8 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 			{ID: "task-eligible-1", Spec: "test.py@1", Resources: []v1alpha1.ManifestResource{}},
 			{ID: "task-eligible-2", Spec: "test.py@2"},
 			{ID: "task-with-resources", Spec: "test.py@3", Resources: []v1alpha1.ManifestResource{{Type: "docker"}}},
+			{ID: "task-sandbox", Spec: "test.py@4", Image: "ghcr.io/example/image:v1", Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}}},
+			{ID: "task-mixed-resources", Spec: "test.py@5", Image: "ghcr.io/example/image:v1", Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}, {Type: "docker"}}},
 		},
 	}
 
@@ -3362,8 +3364,8 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 
 	// Case 1: spec.Tasks empty -> all tasks considered
 	tasks1 := r.initializeTasks(v1alpha1.RunSpec{}, manifest)
-	if len(tasks1) != 3 {
-		t.Fatalf("Expected 3 tasks, got %d", len(tasks1))
+	if len(tasks1) != 5 {
+		t.Fatalf("Expected 5 tasks, got %d", len(tasks1))
 	}
 	if tasks1[0].Phase != v1alpha1.TaskPhasePending {
 		t.Errorf("Expected task-eligible-1 to be Pending, got %s", tasks1[0].Phase)
@@ -3374,13 +3376,22 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 	if tasks1[2].Phase != v1alpha1.TaskPhaseFailed || tasks1[2].Message != "resources not supported yet" {
 		t.Errorf("Expected task-with-resources to be Failed with 'resources not supported yet', got %s (%s)", tasks1[2].Phase, tasks1[2].Message)
 	}
+	if tasks1[3].Phase != v1alpha1.TaskPhaseSkipped || tasks1[3].Message != "per-sample sandboxes are not supported by this controller yet" {
+		t.Errorf("Expected task-sandbox to be Skipped with 'per-sample sandboxes are not supported by this controller yet', got %s (%s)", tasks1[3].Phase, tasks1[3].Message)
+	}
+	if tasks1[3].SampleRange != nil || tasks1[3].SamplesPlanned != 0 {
+		t.Errorf("Expected task-sandbox to have no sample window, got SampleRange=%+v, SamplesPlanned=%d", tasks1[3].SampleRange, tasks1[3].SamplesPlanned)
+	}
+	if tasks1[4].Phase != v1alpha1.TaskPhaseFailed || tasks1[4].Message != "resources not supported yet" {
+		t.Errorf("Expected task-mixed-resources to be Failed with 'resources not supported yet', got %s (%s)", tasks1[4].Phase, tasks1[4].Message)
+	}
 
 	// Case 2: spec.Tasks allow-list
 	tasks2 := r.initializeTasks(v1alpha1.RunSpec{
-		Tasks: []string{"task-eligible-1", "nonexistent-task", "task-with-resources"},
+		Tasks: []string{"task-eligible-1", "nonexistent-task", "task-with-resources", "task-sandbox", "task-mixed-resources"},
 	}, manifest)
-	if len(tasks2) != 3 {
-		t.Fatalf("Expected 3 tasks, got %d", len(tasks2))
+	if len(tasks2) != 5 {
+		t.Fatalf("Expected 5 tasks, got %d", len(tasks2))
 	}
 	if tasks2[0].ID != "task-eligible-1" || tasks2[0].Phase != v1alpha1.TaskPhasePending {
 		t.Errorf("Expected task-eligible-1 to be Pending, got %+v", tasks2[0])
@@ -3390,6 +3401,15 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 	}
 	if tasks2[2].ID != "task-with-resources" || tasks2[2].Phase != v1alpha1.TaskPhaseFailed || tasks2[2].Message != "resources not supported yet" {
 		t.Errorf("Expected task-with-resources to be Failed, got %+v", tasks2[2])
+	}
+	if tasks2[3].ID != "task-sandbox" || tasks2[3].Phase != v1alpha1.TaskPhaseSkipped || tasks2[3].Message != "per-sample sandboxes are not supported by this controller yet" {
+		t.Errorf("Expected task-sandbox to be Skipped, got %+v", tasks2[3])
+	}
+	if tasks2[3].SampleRange != nil || tasks2[3].SamplesPlanned != 0 {
+		t.Errorf("Expected task-sandbox to have no sample window, got SampleRange=%+v, SamplesPlanned=%d", tasks2[3].SampleRange, tasks2[3].SamplesPlanned)
+	}
+	if tasks2[4].ID != "task-mixed-resources" || tasks2[4].Phase != v1alpha1.TaskPhaseFailed || tasks2[4].Message != "resources not supported yet" {
+		t.Errorf("Expected task-mixed-resources to be Failed, got %+v", tasks2[4])
 	}
 }
 
@@ -3633,6 +3653,308 @@ func TestReconcileDiscoveryToRunningWhenModelSet(t *testing.T) {
 	}
 	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhasePending {
 		t.Errorf("Expected task 0 to be Pending, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+}
+
+func TestReconcileDiscovery_SandboxTaskEligibleCountAndSkippedStatus(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-sandbox-discovery",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model:       "mockllm/model",
+			SampleRange: &v1alpha1.SampleRange{Start: 1, End: 10},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	token := "discovery-token-12345"
+	digest := discovery.AuthTokenDigest(token)
+	sandboxName := discovery.SandboxNameForRun("test-run-sandbox-discovery")
+	sandboxObj := discovery.BuildSandbox(run, "eval-runner-sandbox", digest)
+
+	secretName := discovery.AuthSecretNameForRun("test-run-sandbox-discovery")
+	authSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: "eval-runner",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token": []byte(token),
+		},
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	manifestJSON := `{
+		"tasks": [
+			{"id": "plain-task", "workdir": "evals", "spec": "docs.py@plain"},
+			{"id": "sandbox-task", "workdir": "evals", "spec": "docs.py@sandbox", "image": "ghcr.io/example/image:v1", "resources": [{"type": "sandbox"}]},
+			{"id": "docker-task", "workdir": "evals", "spec": "docs.py@docker", "resources": [{"type": "docker"}]}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		ListStdout: manifestJSON,
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sandboxObj, pod, authSecret).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-sandbox-discovery"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue: true to transition to Running")
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get updated run: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseRunning {
+		t.Fatalf("Expected phase %s, got %s", v1alpha1.RunPhaseRunning, updatedRun.Status.Phase)
+	}
+	if updatedRun.Status.Discovery == nil {
+		t.Fatalf("Expected Status.Discovery to be set")
+	}
+
+	// Assert the controller-produced Status.Discovery.EligibleTaskCount
+	if updatedRun.Status.Discovery.EligibleTaskCount != 1 {
+		t.Errorf("Expected controller-produced Status.Discovery.EligibleTaskCount = 1, got %d", updatedRun.Status.Discovery.EligibleTaskCount)
+	}
+	if updatedRun.Status.Discovery.TaskCount != 3 {
+		t.Errorf("Expected Status.Discovery.TaskCount = 3, got %d", updatedRun.Status.Discovery.TaskCount)
+	}
+
+	taskMap := make(map[string]v1alpha1.TaskStatus)
+	for _, taskStatus := range updatedRun.Status.Tasks {
+		taskMap[taskStatus.ID] = taskStatus
+	}
+
+	plainTaskStatus, exists := taskMap["plain-task"]
+	if !exists {
+		t.Fatalf("Missing plain-task in Status.Tasks")
+	}
+	if plainTaskStatus.Phase != v1alpha1.TaskPhasePending {
+		t.Errorf("Expected plain-task phase Pending, got %s", plainTaskStatus.Phase)
+	}
+	if plainTaskStatus.SampleRange == nil {
+		t.Errorf("Expected plain-task to have a sample window, got nil")
+	}
+
+	sandboxTaskStatus, exists := taskMap["sandbox-task"]
+	if !exists {
+		t.Fatalf("Missing sandbox-task in Status.Tasks")
+	}
+	if sandboxTaskStatus.Phase != v1alpha1.TaskPhaseSkipped {
+		t.Errorf("Expected sandbox-task phase Skipped, got %s", sandboxTaskStatus.Phase)
+	}
+	expectedSandboxMessage := "per-sample sandboxes are not supported by this controller yet"
+	if sandboxTaskStatus.Message != expectedSandboxMessage {
+		t.Errorf("Expected sandbox-task message %q, got %q", expectedSandboxMessage, sandboxTaskStatus.Message)
+	}
+	if sandboxTaskStatus.SampleRange != nil || sandboxTaskStatus.SamplesPlanned != 0 {
+		t.Errorf("Expected sandbox-task to have no sample window, got SampleRange=%+v, SamplesPlanned=%d",
+			sandboxTaskStatus.SampleRange, sandboxTaskStatus.SamplesPlanned)
+	}
+
+	dockerTaskStatus, exists := taskMap["docker-task"]
+	if !exists {
+		t.Fatalf("Missing docker-task in Status.Tasks")
+	}
+	if dockerTaskStatus.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected docker-task phase Failed, got %s", dockerTaskStatus.Phase)
+	}
+	expectedDockerMessage := "resources not supported yet"
+	if dockerTaskStatus.Message != expectedDockerMessage {
+		t.Errorf("Expected docker-task message %q, got %q", expectedDockerMessage, dockerTaskStatus.Message)
+	}
+}
+
+func TestReconcile_AllSandboxManifestCompletesRun(t *testing.T) {
+	scheme := setupScheme(t)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-all-sandbox",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseDiscovering,
+		},
+	}
+
+	token := "discovery-token-12345"
+	digest := discovery.AuthTokenDigest(token)
+	sandboxName := discovery.SandboxNameForRun("test-run-all-sandbox")
+	sandboxObj := discovery.BuildSandbox(run, "eval-runner-sandbox", digest)
+
+	secretName := discovery.AuthSecretNameForRun("test-run-all-sandbox")
+	authSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: "eval-runner",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token": []byte(token),
+		},
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.5",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	manifestJSON := `{
+		"tasks": [
+			{"id": "sandbox-1", "workdir": "evals", "spec": "bench.py@task1", "image": "ghcr.io/example/image:v1", "resources": [{"type": "sandbox"}]},
+			{"id": "sandbox-2", "workdir": "evals", "spec": "bench.py@task2", "image": "ghcr.io/example/image:v1", "resources": [{"type": "sandbox"}]}
+		]
+	}`
+
+	executor := &sandboxclient.FakeClient{
+		ListStdout: manifestJSON,
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, sandboxObj, pod, authSecret).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-all-sandbox"}}
+
+	// Turn 1: Discovery completes and initializes tasks into Running phase
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 Reconcile error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue: true from discovery transition")
+	}
+
+	var runningRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &runningRun); err != nil {
+		t.Fatalf("Failed to get run after Turn 1: %v", err)
+	}
+
+	if runningRun.Status.Phase != v1alpha1.RunPhaseRunning {
+		t.Fatalf("Expected phase %s after Turn 1, got %s", v1alpha1.RunPhaseRunning, runningRun.Status.Phase)
+	}
+	if runningRun.Status.Discovery == nil {
+		t.Fatalf("Expected Status.Discovery to be present")
+	}
+	// Assert controller-produced EligibleTaskCount is 0
+	if runningRun.Status.Discovery.EligibleTaskCount != 0 {
+		t.Errorf("Expected controller-produced Status.Discovery.EligibleTaskCount = 0, got %d", runningRun.Status.Discovery.EligibleTaskCount)
+	}
+	if runningRun.Status.Discovery.TaskCount != 2 {
+		t.Errorf("Expected Status.Discovery.TaskCount = 2, got %d", runningRun.Status.Discovery.TaskCount)
+	}
+	for _, taskStatus := range runningRun.Status.Tasks {
+		if taskStatus.Phase != v1alpha1.TaskPhaseSkipped {
+			t.Errorf("Expected task %s to be Skipped, got %s", taskStatus.ID, taskStatus.Phase)
+		}
+	}
+
+	// Turn 2: Reconcile running: all tasks are terminal (Skipped), Run completes
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 Reconcile error: %v", err)
+	}
+
+	var completedRun v1alpha1.Run
+	if err := client.Get(t.Context(), req.NamespacedName, &completedRun); err != nil {
+		t.Fatalf("Failed to get run after Turn 2: %v", err)
+	}
+
+	if completedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("Expected Run phase Completed when all tasks are skipped, got %s", completedRun.Status.Phase)
+	}
+	expectedMessage := "all 2 tasks skipped"
+	if completedRun.Status.Message != expectedMessage {
+		t.Errorf("Expected Run message %q, got %q", expectedMessage, completedRun.Status.Message)
+	}
+	if completedRun.Status.Summary == nil {
+		t.Fatalf("Expected Run Status.Summary to be non-nil")
+	}
+	if completedRun.Status.Summary.Tasks != "0/2" {
+		t.Errorf("Expected Summary.Tasks '0/2', got %q", completedRun.Status.Summary.Tasks)
+	}
+	if completedRun.Status.Summary.TasksCompleted != 0 {
+		t.Errorf("Expected Summary.TasksCompleted 0, got %d", completedRun.Status.Summary.TasksCompleted)
+	}
+	if completedRun.Status.Summary.TasksFailed != 0 {
+		t.Errorf("Expected Summary.TasksFailed 0, got %d", completedRun.Status.Summary.TasksFailed)
+	}
+	if completedRun.Status.Summary.TasksTotal != 2 {
+		t.Errorf("Expected Summary.TasksTotal 2, got %d", completedRun.Status.Summary.TasksTotal)
 	}
 }
 

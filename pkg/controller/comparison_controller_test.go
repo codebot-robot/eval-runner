@@ -4481,6 +4481,124 @@ func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 		}
 	})
 
+	t.Run("one sandbox task plus one plain task yields one Skipped and one normal status with verdict and check-run state unaffected", func(t *testing.T) {
+		plainTaskID := "docs/task-plain"
+		sandboxTaskID := "evals/task-sandbox"
+		comparisonName := "cmp-sandbox-skipped"
+
+		candidateScores := make([]stats.SampleScore, 20)
+		baselineScores := make([]stats.SampleScore, 20)
+		for i := 0; i < 20; i++ {
+			candidateScores[i] = stats.SampleScore{ID: fmt.Sprintf("sample-%03d", i), Score: 0.8}
+			baselineScores[i] = stats.SampleScore{ID: fmt.Sprintf("sample-%03d", i), Score: 0.8}
+		}
+
+		fakeGCS.Objects["test-bucket/runs/cand-commit/"+plainTaskID+"/log.json"] = fakes.FakeObject{
+			Data: makeSyntheticInspectLog(plainTaskID, candidateScores),
+		}
+		fakeGCS.Objects["test-bucket/runs/base-commit/"+plainTaskID+"/log.json"] = fakes.FakeObject{
+			Data: makeSyntheticInspectLog(plainTaskID, baselineScores),
+		}
+
+		candidateRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "candidate-run-sandbox", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "cand-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      plainTaskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/cand-commit/" + plainTaskID + "/log.json",
+					},
+					{
+						ID:      sandboxTaskID,
+						Phase:   v1alpha1.TaskPhaseSkipped,
+						Message: "per-sample sandboxes are not supported by this controller yet",
+					},
+				},
+			},
+		}
+
+		baselineRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "baseline-run-sandbox", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "base-commit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      plainTaskID,
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						LogPath: "gs://test-bucket/runs/base-commit/" + plainTaskID + "/log.json",
+					},
+					{
+						ID:      sandboxTaskID,
+						Phase:   v1alpha1.TaskPhaseSkipped,
+						Message: "per-sample sandboxes are not supported by this controller yet",
+					},
+				},
+			},
+		}
+
+		comparisonObj := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: comparisonName, Namespace: "eval-runner"},
+			Spec: v1alpha1.ComparisonSpec{
+				Baseline:  v1alpha1.ComparisonRunRef{Run: "baseline-run-sandbox"},
+				Candidate: v1alpha1.ComparisonRunRef{Run: "candidate-run-sandbox"},
+			},
+		}
+
+		clientObj := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(candidateRun, baselineRun, comparisonObj).
+			WithStatusSubresource(candidateRun, baselineRun, comparisonObj).
+			Build()
+
+		comparisonReconciler := &ComparisonReconciler{
+			Client:       clientObj,
+			Scheme:       scheme,
+			ArtifactSink: sink,
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: comparisonName}}
+		_, err := comparisonReconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedComparison v1alpha1.Comparison
+		if err := clientObj.Get(t.Context(), req.NamespacedName, &updatedComparison); err != nil {
+			t.Fatalf("Failed to get updated comparison: %v", err)
+		}
+
+		// Verdict is unaffected (UNCHANGED from plainTask, not capped to INCONCLUSIVE)
+		if updatedComparison.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
+			t.Errorf("Expected verdict %s, got %s", v1alpha1.ComparisonVerdictUnchanged, updatedComparison.Status.Verdict)
+		}
+		if len(updatedComparison.Status.Tasks) != 1 || updatedComparison.Status.Tasks[0].ID != plainTaskID {
+			t.Fatalf("Expected only plainTask in comparison tasks table, got %+v", updatedComparison.Status.Tasks)
+		}
+
+		// Check-run conclusion is unaffected (success for UNCHANGED)
+		checkRunState := github.CheckRunStateForComparison(&updatedComparison, baselineRun, candidateRun, "", "")
+		if checkRunState.Conclusion != "success" {
+			t.Errorf("Expected check-run conclusion 'success', got %q", checkRunState.Conclusion)
+		}
+
+		// PR comment lists the skipped sandbox task under one 'not run' line
+		markdownText := github.RenderComparisonMarkdown(&updatedComparison, baselineRun, candidateRun, "")
+		expectedNotRunLine := "tasks not executed: " + sandboxTaskID
+		if !strings.Contains(markdownText, expectedNotRunLine) {
+			t.Errorf("Expected PR comment markdown to contain %q, got:\n%s", expectedNotRunLine, markdownText)
+		}
+	})
+
 	t.Run("no spec.tasks with candidate completed a and b and baseline failed b excludes b and surfaces in message and artifact", func(t *testing.T) {
 		taskA := "docs/task_a"
 		taskB := "docs/task_b"
