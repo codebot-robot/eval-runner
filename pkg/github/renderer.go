@@ -65,6 +65,7 @@ var FormatIDList = stats.FormatIDList
 var idListPrefixes = []string{
 	"tasks not executed by both runs: ",
 	"tasks not executed: ",
+	"not run: ",
 	"failed in both runs: ",
 	"skipped (not planned): ",
 	"skipped (unmatched): ",

@@ -2010,6 +2010,18 @@ func (r *RunReconciler) deleteAllSandboxesForRun(ctx context.Context, runNamespa
 	return nil
 }
 
+func isPerSampleSandboxTask(task v1alpha1.ManifestTask) bool {
+	if len(task.Resources) == 0 {
+		return false
+	}
+	for _, resource := range task.Resources {
+		if resource.Type != v1alpha1.ResourceTypeSandbox {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha1.Manifest) []v1alpha1.TaskStatus {
 	var statuses []v1alpha1.TaskStatus
 	manifestMap := make(map[string]v1alpha1.ManifestTask)
@@ -2040,6 +2052,16 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				continue
 			}
 
+			if isPerSampleSandboxTask(task) {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:      taskID,
+					Cohort:  cohort,
+					Phase:   v1alpha1.TaskPhaseSkipped,
+					Message: "per-sample sandboxes are not supported by this controller yet",
+				})
+				continue
+			}
+
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             taskID,
@@ -2066,6 +2088,16 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 			if cohort == "" {
 				cohort = v1alpha1.DefaultCohort
 			}
+			if isPerSampleSandboxTask(task) {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:      task.ID,
+					Cohort:  cohort,
+					Phase:   v1alpha1.TaskPhaseSkipped,
+					Message: "per-sample sandboxes are not supported by this controller yet",
+				})
+				continue
+			}
+
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             task.ID,
@@ -2121,8 +2153,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	for _, t := range run.Status.Tasks {
 		if t.Phase == v1alpha1.TaskPhaseCompleted {
 			completedCount++
-		} else if t.Phase == v1alpha1.TaskPhaseFailed {
-			// failed
+		} else if t.Phase == v1alpha1.TaskPhaseFailed || t.Phase == v1alpha1.TaskPhaseSkipped {
+			// terminal
 		} else {
 			allFinished = false
 			break
@@ -2240,7 +2272,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 	// Clean up lingering sandboxes for tasks already in a terminal phase (e.g. from a crash before sandbox deletion)
 	for _, t := range run.Status.Tasks {
-		if t.Phase == v1alpha1.TaskPhaseCompleted || t.Phase == v1alpha1.TaskPhaseFailed {
+		if t.Phase == v1alpha1.TaskPhaseCompleted || t.Phase == v1alpha1.TaskPhaseFailed || t.Phase == v1alpha1.TaskPhaseSkipped {
 			if sb, ok := sandboxesByTask[t.ID]; ok {
 				sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
 				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
@@ -3811,6 +3843,8 @@ func FormatRatesSummary(tasks []v1alpha1.TaskStatus, maxLen int) string {
 			}
 		} else if t.Phase == v1alpha1.TaskPhaseFailed {
 			parts = append(parts, fmt.Sprintf("%s=failed", t.ID))
+		} else if t.Phase == v1alpha1.TaskPhaseSkipped {
+			parts = append(parts, fmt.Sprintf("%s=skipped", t.ID))
 		} else if t.Phase == v1alpha1.TaskPhaseRunning {
 			parts = append(parts, fmt.Sprintf("%s=running", t.ID))
 		} else if t.Phase == v1alpha1.TaskPhasePending {

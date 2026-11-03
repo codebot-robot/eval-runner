@@ -2225,6 +2225,8 @@ func taskPhaseChipClass(phase v1alpha1.TaskPhase) string {
 		return "neutral"
 	case v1alpha1.TaskPhaseFailed:
 		return "bad"
+	case v1alpha1.TaskPhaseSkipped:
+		return "neutral"
 	default:
 		return "neutral"
 	}

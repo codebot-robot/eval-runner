@@ -1654,17 +1654,27 @@ func determineRunningTaskIDs(comp *v1alpha1.Comparison, baseRun, candRun *v1alph
 }
 
 func getRunPlannedTaskIDs(run *v1alpha1.Run) map[string]bool {
+	skippedTasks := make(map[string]bool)
+	for _, t := range run.Status.Tasks {
+		if t.Phase == v1alpha1.TaskPhaseSkipped {
+			skippedTasks[t.ID] = true
+		}
+	}
 	if len(run.Spec.Tasks) > 0 {
 		m := make(map[string]bool, len(run.Spec.Tasks))
 		for _, id := range run.Spec.Tasks {
-			m[id] = true
+			if !skippedTasks[id] {
+				m[id] = true
+			}
 		}
 		return m
 	}
 	if len(run.Status.Tasks) > 0 {
 		m := make(map[string]bool, len(run.Status.Tasks))
 		for _, t := range run.Status.Tasks {
-			m[t.ID] = true
+			if !skippedTasks[t.ID] {
+				m[t.ID] = true
+			}
 		}
 		return m
 	}
@@ -3767,17 +3777,24 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	var failedBoth []string
 	var unattempted []string
 	var notBothExecuted []string
+	var notRun []string
 	if len(unexecuted) > 0 {
 		for _, id := range unexecuted {
 			if containsTask(candidateFailed, id) {
 				continue
 			}
-			candTask := findTaskStatus(candidateRun.Status.Tasks, id)
-			baseTask := findTaskStatus(baselineRun.Status.Tasks, id)
-			candRan := candTask != nil && candTask.Phase == v1alpha1.TaskPhaseCompleted
-			baseRan := baseTask != nil && baseTask.Phase == v1alpha1.TaskPhaseCompleted
-			candFailedBoth := candTask != nil && candTask.Phase == v1alpha1.TaskPhaseFailed
-			baseFailedBoth := baseTask != nil && baseTask.Phase == v1alpha1.TaskPhaseFailed
+			candidateTask := findTaskStatus(candidateRun.Status.Tasks, id)
+			baselineTask := findTaskStatus(baselineRun.Status.Tasks, id)
+			candidateSkipped := candidateTask != nil && candidateTask.Phase == v1alpha1.TaskPhaseSkipped
+			baselineSkipped := baselineTask != nil && baselineTask.Phase == v1alpha1.TaskPhaseSkipped
+			if candidateSkipped || baselineSkipped {
+				notRun = append(notRun, id)
+				continue
+			}
+			candRan := candidateTask != nil && candidateTask.Phase == v1alpha1.TaskPhaseCompleted
+			baseRan := baselineTask != nil && baselineTask.Phase == v1alpha1.TaskPhaseCompleted
+			candFailedBoth := candidateTask != nil && candidateTask.Phase == v1alpha1.TaskPhaseFailed
+			baseFailedBoth := baselineTask != nil && baselineTask.Phase == v1alpha1.TaskPhaseFailed
 			if !candRan && !baseRan {
 				if candFailedBoth && baseFailedBoth {
 					failedBoth = append(failedBoth, id)
@@ -3791,6 +3808,10 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		sort.Strings(failedBoth)
 		sort.Strings(unattempted)
 		sort.Strings(notBothExecuted)
+		sort.Strings(notRun)
+		if len(notRun) > 0 {
+			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("not run: %s", github.FormatIDList(notRun, github.MaxIDList)))
+		}
 		if len(failedBoth) > 0 {
 			unexecutedNotes = append(unexecutedNotes, fmt.Sprintf("failed in both runs: %s", github.FormatIDList(failedBoth, github.MaxIDList)))
 		}
