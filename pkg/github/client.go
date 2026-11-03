@@ -46,6 +46,7 @@ type CheckRunRef struct {
 	ID         int64  `json:"id"`
 	Name       string `json:"name"`
 	HeadSHA    string `json:"head_sha"`
+	ExternalID string `json:"external_id,omitempty"`
 	Status     string `json:"status,omitempty"`
 	Conclusion string `json:"conclusion,omitempty"`
 	AppID      int64  `json:"app_id,omitempty"`
@@ -631,6 +632,7 @@ type checkRunCreatePayload struct {
 	Name       string           `json:"name"`
 	HeadSHA    string           `json:"head_sha"`
 	DetailsURL string           `json:"details_url,omitempty"`
+	ExternalID string           `json:"external_id,omitempty"`
 	Status     string           `json:"status"`
 	Conclusion string           `json:"conclusion,omitempty"`
 	Output     *checkRunOutput  `json:"output,omitempty"`
@@ -640,6 +642,7 @@ type checkRunCreatePayload struct {
 type checkRunUpdatePayload struct {
 	Name       string           `json:"name"`
 	DetailsURL string           `json:"details_url,omitempty"`
+	ExternalID string           `json:"external_id,omitempty"`
 	Status     string           `json:"status"`
 	Conclusion string           `json:"conclusion,omitempty"`
 	Output     *checkRunOutput  `json:"output,omitempty"`
@@ -656,6 +659,7 @@ func (c *HTTPClient) CreateCheckRun(ctx context.Context, owner, repo string, hea
 		Name:       state.Name,
 		HeadSHA:    headSHA,
 		DetailsURL: state.DetailsURL,
+		ExternalID: state.ExternalID,
 		Status:     state.Status,
 		Conclusion: state.Conclusion,
 		Output: &checkRunOutput{
@@ -679,6 +683,7 @@ func (c *HTTPClient) UpdateCheckRun(ctx context.Context, owner, repo string, che
 	payload := checkRunUpdatePayload{
 		Name:       state.Name,
 		DetailsURL: state.DetailsURL,
+		ExternalID: state.ExternalID,
 		Status:     state.Status,
 		Conclusion: state.Conclusion,
 		Output: &checkRunOutput{
@@ -702,6 +707,7 @@ type checkRunItemResponse struct {
 	ID         int64                `json:"id"`
 	Name       string               `json:"name"`
 	HeadSHA    string               `json:"head_sha"`
+	ExternalID string               `json:"external_id"`
 	Status     string               `json:"status"`
 	Conclusion string               `json:"conclusion"`
 	App        *checkRunAppResponse `json:"app"`
@@ -728,6 +734,7 @@ func (c *HTTPClient) ListCheckRunsForRef(ctx context.Context, owner, repo, ref, 
 			ID:         item.ID,
 			Name:       item.Name,
 			HeadSHA:    item.HeadSHA,
+			ExternalID: item.ExternalID,
 			Status:     item.Status,
 			Conclusion: item.Conclusion,
 		}

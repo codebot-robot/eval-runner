@@ -73,6 +73,8 @@ func HashContent(markdown string, state CheckRunState, extraHash ...string) stri
 	h.Write([]byte(state.Text))
 	h.Write([]byte{0})
 	h.Write([]byte(state.DetailsURL))
+	h.Write([]byte{0})
+	h.Write([]byte(state.ExternalID))
 	for _, img := range state.Images {
 		h.Write([]byte{0})
 		h.Write([]byte(img.Alt))

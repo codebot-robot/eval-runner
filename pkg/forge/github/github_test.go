@@ -817,3 +817,179 @@ func TestGitHubForge_Reporter_SetStatus_ListBeforeCreate_UpdatesExisting(t *test
 		t.Errorf("lastStatus = %q, want completed", lastStatus)
 	}
 }
+
+func TestGitHubForge_Reporter_SetStatus_ExternalID(t *testing.T) {
+	var mu sync.Mutex
+	type checkRunData struct {
+		name       string
+		headSHA    string
+		externalID string
+		status     string
+	}
+	checkRuns := make(map[int64]*checkRunData)
+	nextCheckRunID := int64(100)
+	var lastCreatedExternalID string
+	var lastUpdatedExternalID string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.URL.Path == "/user" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"login":"eval-runner[bot]"}`)
+			return
+		}
+
+		// GET /repos/{owner}/{repo}/commits/{ref}/check-runs
+		if strings.HasPrefix(r.URL.Path, "/repos/gke-labs/eval-runner/commits/c0ffee1234/check-runs") && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			checkName := r.URL.Query().Get("check_name")
+			var items []map[string]any
+			for id, run := range checkRuns {
+				if checkName != "" && run.name != checkName {
+					continue
+				}
+				items = append(items, map[string]any{
+					"id":          id,
+					"name":        run.name,
+					"head_sha":    run.headSHA,
+					"external_id": run.externalID,
+					"status":      run.status,
+					"app": map[string]any{
+						"id":   1,
+						"slug": "eval-runner",
+					},
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": len(items),
+				"check_runs":  items,
+			})
+			return
+		}
+
+		// POST /repos/{owner}/{repo}/check-runs
+		if r.URL.Path == "/repos/gke-labs/eval-runner/check-runs" && r.Method == http.MethodPost {
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			nextCheckRunID++
+			newID := nextCheckRunID
+			externalID, _ := payload["external_id"].(string)
+			lastCreatedExternalID = externalID
+			name, _ := payload["name"].(string)
+			headSHA, _ := payload["head_sha"].(string)
+			statusValue, _ := payload["status"].(string)
+			checkRuns[newID] = &checkRunData{
+				name:       name,
+				headSHA:    headSHA,
+				externalID: externalID,
+				status:     statusValue,
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": newID})
+			return
+		}
+
+		// PATCH /repos/{owner}/{repo}/check-runs/{id}
+		if strings.HasPrefix(r.URL.Path, "/repos/gke-labs/eval-runner/check-runs/") && r.Method == http.MethodPatch {
+			parts := strings.Split(r.URL.Path, "/")
+			var targetID int64
+			fmt.Sscanf(parts[len(parts)-1], "%d", &targetID)
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if run, ok := checkRuns[targetID]; ok {
+				if externalID, ok := payload["external_id"].(string); ok {
+					run.externalID = externalID
+					lastUpdatedExternalID = externalID
+				}
+				if statusValue, ok := payload["status"].(string); ok {
+					run.status = statusValue
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": targetID})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	authForge := New(WithBaseURL(server.URL), WithToken("valid-token"))
+	ctx := t.Context()
+	ref := forge.RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	// 1. Create sets external_id
+	expectedExternalID := "comparison-uid-100/c0ffee1234"
+	createdID, err := authForge.SetStatus(ctx, ref, "c0ffee1234", forge.Status{
+		State:      "in_progress",
+		Context:    "eval-runner / evals",
+		ExternalID: expectedExternalID,
+	})
+	if err != nil {
+		t.Fatalf("first SetStatus failed: %v", err)
+	}
+	if lastCreatedExternalID != expectedExternalID {
+		t.Errorf("lastCreatedExternalID = %q, want %q", lastCreatedExternalID, expectedExternalID)
+	}
+
+	// 2. Add a newer slug-only candidate with empty external_id and the same name
+	mu.Lock()
+	newerSlugOnlyID := createdID + 50
+	checkRuns[newerSlugOnlyID] = &checkRunData{
+		name:       "eval-runner / evals",
+		headSHA:    "c0ffee1234",
+		externalID: "",
+		status:     "in_progress",
+	}
+	mu.Unlock()
+
+	// 3. Second SetStatus with CheckRunID: 0 should prefer the exact external_id match (createdID, older)
+	// over the newer slug-only candidate (newerSlugOnlyID).
+	// Under newest-wins logic, this would fail by adopting newerSlugOnlyID.
+	updatedID, err := authForge.SetStatus(ctx, ref, "c0ffee1234", forge.Status{
+		State:      "completed",
+		Conclusion: "success",
+		Context:    "eval-runner / evals",
+		ExternalID: expectedExternalID,
+	})
+	if err != nil {
+		t.Fatalf("second SetStatus failed: %v", err)
+	}
+	if updatedID != createdID {
+		t.Errorf("updatedID = %d, want createdID %d (newer slug-only was %d)", updatedID, createdID, newerSlugOnlyID)
+	}
+	if lastUpdatedExternalID != expectedExternalID {
+		t.Errorf("lastUpdatedExternalID = %q, want %q", lastUpdatedExternalID, expectedExternalID)
+	}
+	mu.Lock()
+	if checkRuns[newerSlugOnlyID].status != "in_progress" {
+		t.Errorf("newer slug-only check run should remain in_progress, got %q", checkRuns[newerSlugOnlyID].status)
+	}
+	mu.Unlock()
+
+	// 4. Test fallback to legacy slug match when no external_id matches
+	mu.Lock()
+	delete(checkRuns, createdID) // remove the check run matching expectedExternalID
+	mu.Unlock()
+
+	fallbackID, err := authForge.SetStatus(ctx, ref, "c0ffee1234", forge.Status{
+		State:      "completed",
+		Conclusion: "success",
+		Context:    "eval-runner / evals",
+		ExternalID: "new-comparison-uid-999/c0ffee1234",
+	})
+	if err != nil {
+		t.Fatalf("third SetStatus fallback failed: %v", err)
+	}
+	if fallbackID != newerSlugOnlyID {
+		t.Errorf("fallbackID = %d, want newerSlugOnlyID %d", fallbackID, newerSlugOnlyID)
+	}
+}
