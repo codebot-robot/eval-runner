@@ -1,0 +1,145 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-portal
+  namespace: eval-runner
+  labels:
+    app: model-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-portal
+  template:
+    metadata:
+      labels:
+        app: model-portal
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: model-portal
+        image: service-portal
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: TARGET_URL
+          value: "https://generativelanguage.googleapis.com"
+        - name: UPSTREAM_AUTH_HEADER
+          value: "x-goog-api-key"
+        - name: UPSTREAM_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: model-portal-secret
+              key: token
+              optional: true
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-portal
+  namespace: eval-runner
+  labels:
+    app: model-portal
+spec:
+  selector:
+    app: model-portal
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: model-portal-networkpolicy
+  namespace: eval-runner
+spec:
+  podSelector:
+    matchLabels:
+      app: model-portal
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: eval-runner-sandbox
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: eval-runner
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values:
+          - kube-dns
+          - node-local-dns
+    - ipBlock:
+        cidr: 169.254.20.10/32
+    - ipBlock:
+        cidr: 169.254.169.254/32
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 100.64.0.0/10
+        - 169.254.0.0/16
+    ports:
+    - protocol: TCP
+      port: 443

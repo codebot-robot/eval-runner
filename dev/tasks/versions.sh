@@ -19,6 +19,8 @@
 # - SANDBOXD_COMMIT: Pinned commit in https://github.com/codebot-robot/agent-sandbox
 # - SANDBOXD_TAG: Short SHA or tag corresponding to SANDBOXD_COMMIT.
 #   After bumping, rebuild and push the image via dev/tasks/sandboxd-image --push.
+# - SERVICE_PORTALS_COMMIT: Pinned commit in https://github.com/gke-labs/service-portals
 AGENT_SANDBOX_VERSION="v1.0.7"
 SANDBOXD_COMMIT="0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7"
 SANDBOXD_TAG="0d9e0d2"
+SERVICE_PORTALS_COMMIT="2c80583c64564b92a34e0008f67a93be0b848e18"

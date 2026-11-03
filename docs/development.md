@@ -86,6 +86,18 @@ docker buildx build --platform linux/amd64,linux/arm64 -f packages/sandboxd/Dock
 ```
 Note: Pushing the multi-arch image to the registry is a maintainer step whenever the fork commit changes. After pushing, update the pinned image digest in `pkg/discovery/sandbox.go`.
 
+#### Building the `service-portal` Image
+
+The `service-portal` image is built automatically by `ap deploy` from `images/service-portal/Dockerfile`. The upstream commit pin lives in `images/service-portal/Dockerfile` (`ARG COMMIT`) and `dev/tasks/versions.sh` (`SERVICE_PORTALS_COMMIT`). To bump the pin, update both places.
+
+### Configuring the Model Portal Secret (`model-portal-secret`)
+
+The `model-portal` deployment mounts upstream model API credentials from Secret `model-portal-secret` (key `token`) in the `eval-runner` namespace. This secret is untracked and created once per cluster by the operator (ADR-017):
+```bash
+kubectl create secret generic model-portal-secret -n eval-runner --from-literal=token="${GEMINI_API_KEY}"
+```
+The secret reference in `model-portal.yaml` is optional (`optional: true`); if the secret is not created, client request headers pass through to the upstream model API unchanged.
+
 ### CA Bootstrap and Rotation Procedure
 
 The controller maintains a self-signed CA that issues the controller's client certificate and per-sandbox server certificates:

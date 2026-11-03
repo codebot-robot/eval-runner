@@ -124,6 +124,8 @@ func (h *Harness) DeployEvalRunner() {
 	h.KindLoad("eval-runner-webhook:e2e")
 	h.DockerBuild("sample-runner:e2e", filepath.Join(gitRoot, "images/sample-runner/Dockerfile"), gitRoot)
 	h.KindLoad("sample-runner:e2e")
+	h.DockerBuild("service-portal:e2e", filepath.Join(gitRoot, "images/service-portal/Dockerfile"), gitRoot)
+	h.KindLoad("service-portal:e2e")
 
 	// Build and load sandboxd image from fork (clones out of tree if sibling is absent)
 	h.runCmd(filepath.Join(gitRoot, "dev/tasks/sandboxd-image"))
@@ -291,6 +293,21 @@ stringData:
 	h.KubectlApplyContent(modifiedWebhookDeploy)
 
 	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-webhook", "--timeout=60s")
+
+	// Apply model-portal Deployment, Service, and NetworkPolicy with image rewritten for kind local image
+	modelPortalContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/model-portal.yaml"))
+	if err != nil {
+		h.t.Fatalf("Failed to read model-portal.yaml: %v", err)
+	}
+	modifiedModelPortal := strings.Replace(
+		string(modelPortalContent),
+		"image: service-portal",
+		"image: service-portal:e2e\n        imagePullPolicy: Never",
+		1,
+	)
+	h.KubectlApplyContent(modifiedModelPortal)
+
+	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/model-portal", "--timeout=60s")
 }
 
 func (h *Harness) DeployGitServer(namespace string) {
