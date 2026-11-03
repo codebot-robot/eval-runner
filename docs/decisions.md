@@ -46,6 +46,12 @@ Future pull requests that introduce an architectural decision should append an e
 - **Decision**: Run the controller and user `Run` resources in `eval-runner`, while spawning all untrusted `Sandbox` resources and pods in `eval-runner-sandbox`.
 - **Rationale**: Strict isolation between the control plane and untrusted user workloads. Prevents untrusted sandbox code from discovering or interfering with controller pods or secrets, scopes controller informers and caches, and allows independent Pod Security Admission enforcement.
 
+### Amendment to ADR-004/ADR-011: Baseline Pod Security Admission for eval-runner-sandbox (#487)
+- **Date**: 2026-11-03
+- **Status**: Accepted
+- **Decision**: Set Pod Security Admission on `eval-runner-sandbox` to `baseline` (`enforce`, `warn`, and `audit`) while keeping `eval-runner` at `restricted`.
+- **Rationale**: Benchmark images (such as Terminal-Bench 2.0) run as root because their verifiers install packages. Forbidding root in `eval-runner-sandbox` blocks these workloads without providing meaningful security when the true isolation boundary is a runtime class (such as gVisor or microVMs) paired with a default-deny NetworkPolicy and no ServiceAccount token. `baseline` admission accommodates root benchmark containers while continuing to forbid privileged containers, host namespaces, hostPath volumes, and host ports.
+
 ### ADR-005: Pin `agent-sandbox` release (`v1.0.7`) as external prerequisite
 - **Date**: 2026-10-16
 - **Status**: Accepted
