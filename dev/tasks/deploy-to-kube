@@ -176,14 +176,14 @@ run_cmd_stdin() {
 wait_for_effective_settings() {
   local bucket="$1"
   local since_time="$2"
-  local timeout=60
-  local deadline=$(( $(date +%s) + timeout ))
+  local timeoutSeconds=60
+  local deadline=$(( $(date +%s) + timeoutSeconds ))
   local cmd=(kubectl -n eval-runner logs deployment/eval-runner-controller)
   if [[ -n "${since_time}" ]]; then
     cmd+=(--since-time="${since_time}")
   fi
 
-  echo "    waiting up to ${timeout}s for controller to log effective cluster settings..."
+  echo "    waiting up to ${timeoutSeconds}s for controller to log effective cluster settings..."
   while [[ $(date +%s) -lt ${deadline} ]]; do
     local logs=""
     if logs="$("${cmd[@]}" 2>/dev/null)"; then
@@ -210,7 +210,7 @@ wait_for_effective_settings() {
   if [[ -n "${bucket}" ]]; then
     desc=" reflecting artifactBucket=${bucket}"
   fi
-  echo "    WARNING: did not see 'effective cluster settings'${desc} within ${timeout}s;"
+  echo "    WARNING: did not see 'effective cluster settings'${desc} within ${timeoutSeconds}s;"
   echo "    the deploy succeeded. Check with: kubectl -n eval-runner logs deployment/eval-runner-controller | grep 'effective cluster settings'"
 }
 
