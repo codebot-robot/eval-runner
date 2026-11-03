@@ -99,6 +99,16 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 			return fmt.Errorf("task %q has invalid spec %q: must not start with '-'", id, task.Spec)
 		}
 
+		if len(task.Command) > 0 && strings.TrimSpace(task.Image) == "" {
+			return fmt.Errorf("task %q command requires image", id)
+		}
+
+		for _, resource := range task.Resources {
+			if resource.Type == v1alpha1.ResourceTypeSandbox && strings.TrimSpace(task.Image) == "" {
+				return fmt.Errorf("task %q sandbox resource requires image", id)
+			}
+		}
+
 		if task.Workdir != "" {
 			cleanWorkdir := filepath.Clean(task.Workdir)
 			if filepath.IsAbs(task.Workdir) || strings.HasPrefix(cleanWorkdir, "..") || cleanWorkdir == ".." || strings.Contains(task.Workdir, "..") {

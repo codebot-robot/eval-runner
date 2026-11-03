@@ -40,6 +40,14 @@ func TestParseManifest(t *testing.T) {
 				"workdir": "evals",
 				"spec": "escalation.py@escalation_policy",
 				"images": [ "support-agent-env:v12" ]
+			},
+			{
+				"id": "triage/per_sample_sandbox",
+				"workdir": "evals",
+				"spec": "custom.py@eval_fn",
+				"image": "ghcr.io/example/eval-env:v1",
+				"command": [ "harbor", "run" ],
+				"resources": [ { "type": "sandbox" } ]
 			}
 		]
 	}`)
@@ -52,14 +60,26 @@ func TestParseManifest(t *testing.T) {
 	if len(m.Images) != 1 || m.Images[0].Name != "support-agent-env:v12" {
 		t.Errorf("Unexpected images: %+v", m.Images)
 	}
-	if len(m.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks, got %d", len(m.Tasks))
+	if len(m.Tasks) != 3 {
+		t.Fatalf("Expected 3 tasks, got %d", len(m.Tasks))
 	}
 	if m.Tasks[0].ID != "triage/runbook_lookup" {
 		t.Errorf("Unexpected task 0 ID: %s", m.Tasks[0].ID)
 	}
 	if m.Tasks[1].ID != "triage/escalation_policy" {
 		t.Errorf("Unexpected task 1 ID: %s", m.Tasks[1].ID)
+	}
+	if m.Tasks[2].ID != "triage/per_sample_sandbox" {
+		t.Errorf("Unexpected task 2 ID: %s", m.Tasks[2].ID)
+	}
+	if m.Tasks[2].Image != "ghcr.io/example/eval-env:v1" {
+		t.Errorf("Unexpected task 2 image: %s", m.Tasks[2].Image)
+	}
+	if len(m.Tasks[2].Command) != 2 || m.Tasks[2].Command[0] != "harbor" || m.Tasks[2].Command[1] != "run" {
+		t.Errorf("Unexpected task 2 command: %v", m.Tasks[2].Command)
+	}
+	if len(m.Tasks[2].Resources) != 1 || m.Tasks[2].Resources[0].Type != v1alpha1.ResourceTypeSandbox {
+		t.Errorf("Unexpected task 2 resources: %v", m.Tasks[2].Resources)
 	}
 
 	// Invalid JSON test
@@ -305,6 +325,73 @@ func TestValidateManifest(t *testing.T) {
 				},
 			},
 			expectError: true,
+		},
+		{
+			name: "command without image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-cmd-no-img", Spec: "eval.py@task", Command: []string{"harbor", "run"}},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "command with whitespace image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-cmd-ws-img", Spec: "eval.py@task", Image: "   ", Command: []string{"harbor", "run"}},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "command with image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-cmd-img", Spec: "eval.py@task", Image: "ghcr.io/example/eval-env:v1", Command: []string{"harbor", "run"}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "sandbox resource without image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-sb-no-img",
+						Spec:      "eval.py@task",
+						Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "sandbox resource with image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-sb-img",
+						Spec:      "eval.py@task",
+						Image:     "ghcr.io/example/eval-env:v1",
+						Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "unknown resource without image is not rejected by manifest validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-docker",
+						Spec:      "eval.py@task",
+						Resources: []v1alpha1.ManifestResource{{Type: "docker"}},
+					},
+				},
+			},
+			expectError: false,
 		},
 	}
 
