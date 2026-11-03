@@ -18066,7 +18066,7 @@ type headMoveFixture struct {
 	cand1Run   *v1alpha1.Run
 	cand2Run   *v1alpha1.Run
 	comp       *v1alpha1.Comparison
-	client     client.Client
+	client     client.WithWatch
 	reconciler *ComparisonReconciler
 	server     *github.FakeGitHubServer
 	req        ctrl.Request
@@ -18202,6 +18202,7 @@ func newHeadMoveFixture(t *testing.T, withGitHub bool, interceptorFuncs ...inter
 
 	cl := builder.Build()
 	reconciler.Client = cl
+	reconciler.APIReader = cl
 
 	return &headMoveFixture{
 		taskID:     taskID,
@@ -18384,6 +18385,28 @@ func TestComparisonReconciler_HeadMove_PostsNewCheckRun(t *testing.T) {
 		t.Errorf("expected CheckRunIDs[%s] = %d, got %d", f.cand2SHA, cand2CheckRunID, curComp.Status.Reporting.CheckRunIDs[f.cand2SHA])
 	}
 
+	// Exactly one check run was created for the new head
+	cand2CheckRunCount := 0
+	for _, cr := range f.server.CheckRuns() {
+		if cr.HeadSHA == f.cand2SHA {
+			cand2CheckRunCount++
+		}
+	}
+	if cand2CheckRunCount != 1 {
+		t.Errorf("expected exactly 1 check run for new head %s, got %d", f.cand2SHA, cand2CheckRunCount)
+	}
+
+	// Exactly 2 total POST /check-runs were logged (1 for cand1, 1 for cand2; no duplicate)
+	totalPostCount := 0
+	for _, entry := range f.server.RequestLog() {
+		if strings.HasPrefix(entry, "POST /repos/gke-labs/eval-runner/check-runs") {
+			totalPostCount++
+		}
+	}
+	if totalPostCount != 2 {
+		t.Errorf("expected exactly 2 total POST /check-runs (1 for cand1, 1 for cand2), got %d:\n%v", totalPostCount, f.server.RequestLog())
+	}
+
 	// 3. Candidate 2 completes; re-score completes
 	f.cand2Run.Status.Phase = v1alpha1.RunPhaseCompleted
 	f.cand2Run.Status.Tasks[0].Phase = v1alpha1.TaskPhaseCompleted
@@ -18480,67 +18503,116 @@ func TestComparisonReconciler_HeadMove_StatusConflictDoesNotDuplicateCheckRun(t 
 	}
 }
 
-func TestComparisonReconciler_HeadMove_EagerCreateFailure_FallsBackToCreateOnMiss(t *testing.T) {
+func TestComparisonReconciler_CheckRun_UncachedRefreshPreventsDuplicateCreateOnStaleCache(t *testing.T) {
 	ctx := t.Context()
 	f := newHeadMoveFixture(t, true)
 
-	// 1. Initial reconcile: cand1 completes
+	// Cand1 starts running, not completed yet
+	f.cand1Run.Status.Phase = v1alpha1.RunPhaseRunning
+	f.cand1Run.Status.Tasks[0].Phase = v1alpha1.TaskPhaseRunning
+	f.cand1Run.Status.Summary = nil
+	if err := f.client.Status().Update(ctx, f.cand1Run); err != nil {
+		t.Fatalf("failed updating cand1 status: %v", err)
+	}
+
+	// 1. Initial reconcile: creates the initial check run on f.cand1SHA
 	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
-		t.Fatalf("first reconcile failed: %v", err)
+		t.Fatalf("initial reconcile failed: %v", err)
 	}
 
 	checkRuns := f.server.CheckRuns()
 	if len(checkRuns) != 1 {
-		t.Fatalf("expected 1 check run, got %d", len(checkRuns))
+		t.Fatalf("expected 1 check run after first reconcile, got %d", len(checkRuns))
 	}
-	cand1CheckRunID := checkRuns[0].ID
-	cand1Title := checkRuns[0].Title
-	cand1Conclusion := checkRuns[0].Conclusion
-
-	var curComp v1alpha1.Comparison
-	if err := f.client.Get(ctx, f.req.NamespacedName, &curComp); err != nil {
-		t.Fatalf("get comp failed: %v", err)
+	originalCheckRunID := checkRuns[0].ID
+	if checkRuns[0].Status != "in_progress" {
+		t.Fatalf("expected cand1 check run in_progress, got %s", checkRuns[0].Status)
 	}
 
-	// 2. Head moves to cand2, but eager create check-run call fails with HTTP 500
-	f.server.InjectPathError("POST", "/repos/gke-labs/eval-runner/check-runs", http.StatusInternalServerError, `{"message":"internal error"}`)
-
-	curComp.Spec.Candidate.Run = "cand2-run"
-	curComp.Spec.PullRequest.HeadSHA = f.cand2SHA
-	if err := f.client.Update(ctx, &curComp); err != nil {
-		t.Fatalf("update comp failed: %v", err)
+	var currentComparison v1alpha1.Comparison
+	if err := f.client.Get(ctx, f.req.NamespacedName, &currentComparison); err != nil {
+		t.Fatalf("get comparison failed: %v", err)
+	}
+	if currentComparison.Status.Reporting == nil || currentComparison.Status.Reporting.CheckRunIDs[f.cand1SHA] != originalCheckRunID {
+		t.Fatalf("expected CheckRunIDs[%s] = %d, got %v", f.cand1SHA, originalCheckRunID, currentComparison.Status.Reporting)
 	}
 
-	// Reconcile: eager create fails, but status reset clears CheckRunID for new head.
-	// When candidate completes and reportToGitHub runs, missing checkRunID creates a new check run on cand2SHA.
+	// 2. Wrap fixture's client with interceptor.NewClient so cached client and APIReader
+	// share the same underlying object store and the github-token Secret.
+	// The interceptor returns a stale Comparison (no check-run ID) for cached Get only.
+	staleCachedGetActive := true
+	cachedClient := interceptor.NewClient(f.client, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := cl.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if staleCachedGetActive {
+				if comp, ok := obj.(*v1alpha1.Comparison); ok && key == f.req.NamespacedName {
+					if comp.Status.Reporting != nil {
+						delete(comp.Status.Reporting.CheckRunIDs, f.cand1SHA)
+						comp.Status.Reporting.CheckRunID = 0
+						comp.Status.Reporting.LastPostedHash = ""
+					}
+				}
+			}
+			return nil
+		},
+	})
+	f.reconciler.Client = cachedClient
+	f.reconciler.APIReader = f.client
+
+	// Inject a 404 on GET /repos/<owner>/<repo>/commits/<sha>/check-runs in the fake GitHub server
+	// so the list fallback cannot mask a regression.
+	f.server.InjectPathError(
+		http.MethodGet,
+		fmt.Sprintf("/repos/gke-labs/eval-runner/commits/%s/check-runs", f.cand1SHA),
+		http.StatusNotFound,
+		`{"message":"not found"}`,
+	)
+
+	// 3. Second reconcile: queued by Run events while cand1 finishes.
+	f.cand1Run.Status.Phase = v1alpha1.RunPhaseCompleted
+	f.cand1Run.Status.Tasks[0].Phase = v1alpha1.TaskPhaseCompleted
+	f.cand1Run.Status.Summary = &v1alpha1.RunSummary{TotalSamples: 1}
+	if err := f.client.Status().Update(ctx, f.cand1Run); err != nil {
+		t.Fatalf("failed updating cand1 status: %v", err)
+	}
+
 	if _, err := f.reconciler.Reconcile(ctx, f.req); err != nil {
-		t.Fatalf("head move reconcile failed: %v", err)
+		t.Fatalf("second reconcile failed: %v", err)
 	}
 
-	checkRuns = f.server.CheckRuns()
-	if len(checkRuns) != 2 {
-		t.Fatalf("expected 2 check runs (fallback created new check run on miss), got %d", len(checkRuns))
-	}
-	// Old SHA check run untouched
-	if checkRuns[0].ID != cand1CheckRunID || checkRuns[0].HeadSHA != f.cand1SHA || checkRuns[0].Status != "completed" || checkRuns[0].Title != cand1Title || checkRuns[0].Conclusion != cand1Conclusion {
-		t.Errorf("cand1 check run was modified: %+v", checkRuns[0])
-	}
-	// New SHA check run created on cand2SHA and completed
-	if checkRuns[1].ID == cand1CheckRunID {
-		t.Errorf("new check run should have a distinct ID from old check run %d", cand1CheckRunID)
-	}
-	if checkRuns[1].HeadSHA != f.cand2SHA {
-		t.Errorf("expected cand2 head SHA %s, got %s", f.cand2SHA, checkRuns[1].HeadSHA)
-	}
-	if checkRuns[1].Status != "completed" {
-		t.Errorf("expected cand2 check run status completed, got %s", checkRuns[1].Status)
+	// Assert the fake's request log contains PATCH /check-runs/<id> and no second POST /check-runs.
+	patchPrefix := fmt.Sprintf("PATCH /repos/gke-labs/eval-runner/check-runs/%d", originalCheckRunID)
+	hasPatchForOriginalID := false
+	postCheckRunCount := 0
+	for _, entry := range f.server.RequestLog() {
+		if strings.HasPrefix(entry, "POST /repos/gke-labs/eval-runner/check-runs") {
+			postCheckRunCount++
+		}
+		if strings.HasPrefix(entry, patchPrefix) {
+			hasPatchForOriginalID = true
+		}
 	}
 
-	if err := f.client.Get(ctx, f.req.NamespacedName, &curComp); err != nil {
-		t.Fatalf("get comp failed: %v", err)
+	if !hasPatchForOriginalID {
+		t.Errorf("expected fake request log to contain %q, but got:\n%v", patchPrefix, f.server.RequestLog())
 	}
-	if curComp.Status.Reporting.CheckRunIDs[f.cand2SHA] != checkRuns[1].ID {
-		t.Errorf("expected CheckRunIDs[%s] = %d, got %v", f.cand2SHA, checkRuns[1].ID, curComp.Status.Reporting.CheckRunIDs)
+	if postCheckRunCount != 1 {
+		t.Errorf("expected exactly 1 POST /check-runs (no second POST created), got %d:\n%v", postCheckRunCount, f.server.RequestLog())
+	}
+
+	// Assert that persisted Status.Reporting.CheckRunIDs[<sha>] equals the original ID.
+	staleCachedGetActive = false
+	var persistedComparison v1alpha1.Comparison
+	if err := f.client.Get(ctx, f.req.NamespacedName, &persistedComparison); err != nil {
+		t.Fatalf("failed to get persisted comparison: %v", err)
+	}
+	if persistedComparison.Status.Reporting == nil {
+		t.Fatalf("expected non-nil Status.Reporting")
+	}
+	if persistedComparison.Status.Reporting.CheckRunIDs[f.cand1SHA] != originalCheckRunID {
+		t.Errorf("expected persisted CheckRunIDs[%s] = %d, got %v", f.cand1SHA, originalCheckRunID, persistedComparison.Status.Reporting.CheckRunIDs)
 	}
 }
 

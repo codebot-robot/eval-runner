@@ -626,7 +626,7 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 			} else {
 				state.Title = fmt.Sprintf("running · %d samples", completed)
 			}
-		} else if comp.Status.Reporting != nil && len(comp.Status.Reporting.CheckRunIDs) > 1 {
+		} else if isReRunningForNewHead(comp, candRun) {
 			sha := ""
 			if comp.Spec.PullRequest != nil {
 				sha = comp.Spec.PullRequest.HeadSHA
@@ -717,4 +717,23 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 	state.DetailsURL = CheckRunDetailsURL(comp, uiBaseURL, baseRun, candRun)
 
 	return state
+}
+
+func isReRunningForNewHead(comparison *v1alpha1.Comparison, candidateRun *v1alpha1.Run) bool {
+	if comparison == nil || comparison.Status.Reporting == nil || len(comparison.Status.Reporting.CheckRunIDs) == 0 {
+		return false
+	}
+	headSHA := ""
+	if comparison.Spec.PullRequest != nil {
+		headSHA = comparison.Spec.PullRequest.HeadSHA
+	}
+	if headSHA == "" && candidateRun != nil {
+		headSHA = candidateRun.Spec.Repo.Commit
+	}
+	for recordedSHA, checkRunID := range comparison.Status.Reporting.CheckRunIDs {
+		if recordedSHA != headSHA && checkRunID != 0 {
+			return true
+		}
+	}
+	return false
 }
