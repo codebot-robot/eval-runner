@@ -88,7 +88,9 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 | `tasks[].id` | Stable identifier, used everywhere in the UI, PR comment, storage paths and cohorts. |
 | `tasks[].workdir` | Directory to run the task from. |
 | `tasks[].spec` | Framework-specific task reference. For Inspect: `file.py@task_fn`. |
-| `tasks[].resources[]` | Declarative resource needs (see §3.2). Empty list means zero privilege. |
+| `tasks[].image` | Container image the task runs in. Empty means the shared sample-runner image. |
+| `tasks[].command` | Argv run inside the sandbox. Empty means the default `inspect eval` invocation. |
+| `tasks[].resources[]` | Declarative resource needs (see §3.2). Resource type `sandbox` means run this task in its own sandbox from `image`, harness inside, no cluster credentials. Empty list means zero privilege. |
 | `tasks[].images[]` | Which built images the task needs available (e.g. pre-loaded into a kind cluster). |
 
 **[open]** Fields not shown in the original concept mockup: manifest `version`, `tags` (§8), and per-task `dataset-size` (for planned "N of M possible samples" progress display up front) remain explicitly open. Task cohorts (`tasks[].cohort`, default `"default"`) are decided and implemented in ADR-030. Sample pairing does not require sample IDs or dataset sizes to be declared in the manifest because pairing is performed dynamically by Inspect sample id (`sample.id`) from Inspect evaluation logs (#131, ADR-018), and sample windows are specified via `spec.sampleRange` (ADR-025). Explicit dataset size remains open for calculating total dataset size up front before execution.
