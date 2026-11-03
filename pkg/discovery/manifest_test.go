@@ -69,6 +69,41 @@ func TestParseManifest(t *testing.T) {
 	}
 }
 
+func TestParseManifest_ImageCommandSandbox(t *testing.T) {
+	manifestJSON := []byte(`{
+		"tasks": [
+			{
+				"id": "triage/sandbox_eval",
+				"workdir": "evals",
+				"spec": "sandbox.py@eval",
+				"image": "my-sandbox-image:v1",
+				"command": ["inspect", "eval", "sandbox.py@eval"],
+				"resources": [
+					{ "type": "sandbox" }
+				]
+			}
+		]
+	}`)
+
+	manifest, err := ParseManifest(manifestJSON)
+	if err != nil {
+		t.Fatalf("ParseManifest failed: %v", err)
+	}
+	if len(manifest.Tasks) != 1 {
+		t.Fatalf("Expected 1 task, got %d", len(manifest.Tasks))
+	}
+	task := manifest.Tasks[0]
+	if task.Image != "my-sandbox-image:v1" {
+		t.Errorf("task.Image = %q, want 'my-sandbox-image:v1'", task.Image)
+	}
+	if len(task.Command) != 3 || task.Command[0] != "inspect" || task.Command[1] != "eval" || task.Command[2] != "sandbox.py@eval" {
+		t.Errorf("task.Command = %v, want ['inspect', 'eval', 'sandbox.py@eval']", task.Command)
+	}
+	if len(task.Resources) != 1 || task.Resources[0].Type != v1alpha1.ResourceTypeSandbox {
+		t.Errorf("task.Resources = %v, want [{Type: 'sandbox'}]", task.Resources)
+	}
+}
+
 func TestValidateManifest(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -305,6 +340,47 @@ func TestValidateManifest(t *testing.T) {
 				},
 			},
 			expectError: true,
+		},
+		{
+			name: "command without image fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:      "task-command-no-image",
+						Spec:    "test.py@eval",
+						Command: []string{"inspect", "eval"},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "sandbox resource without image fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-sandbox-no-image",
+						Spec:      "test.py@eval",
+						Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "command and sandbox resource with image passes validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-valid-sandbox",
+						Spec:      "test.py@eval",
+						Image:     "eval-image:v1",
+						Command:   []string{"inspect", "eval"},
+						Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					},
+				},
+			},
+			expectError: false,
 		},
 	}
 

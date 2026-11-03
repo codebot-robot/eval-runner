@@ -67,6 +67,8 @@ func ParseManifest(data []byte) (*v1alpha1.Manifest, error) {
 // - Each task must have a non-empty, unique ID
 // - Each task must have a non-empty Spec that does not start with '-'
 // - Each task's Workdir (if set) must be relative and not contain '..'
+// - Each task specifying command requires a non-blank image
+// - Each task specifying sandbox resource requires a non-blank image
 func ValidateManifest(m *v1alpha1.Manifest) error {
 	if m == nil {
 		return fmt.Errorf("manifest cannot be nil")
@@ -97,6 +99,16 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 		}
 		if strings.HasPrefix(spec, "-") {
 			return fmt.Errorf("task %q has invalid spec %q: must not start with '-'", id, task.Spec)
+		}
+
+		if len(task.Command) > 0 && strings.TrimSpace(task.Image) == "" {
+			return fmt.Errorf("task %q specifies command without image: command requires a non-blank image", id)
+		}
+
+		for _, resource := range task.Resources {
+			if resource.Type == v1alpha1.ResourceTypeSandbox && strings.TrimSpace(task.Image) == "" {
+				return fmt.Errorf("task %q specifies sandbox resource without image: sandbox resource requires a non-blank image", id)
+			}
 		}
 
 		if task.Workdir != "" {
