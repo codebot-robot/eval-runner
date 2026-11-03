@@ -147,6 +147,7 @@ type Status struct {
 	Description string               `json:"description"`
 	Text        string               `json:"text,omitempty"`
 	TargetURL   string               `json:"target_url"`
+	ExternalID  string               `json:"external_id,omitempty"`
 	CheckRunID  int64                `json:"check_run_id,omitempty"`
 	Images      []CheckRunImage      `json:"images,omitempty"`
 	Annotations []CheckRunAnnotation `json:"annotations,omitempty"`

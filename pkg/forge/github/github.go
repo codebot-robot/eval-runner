@@ -614,6 +614,7 @@ func (f *Forge) SetStatus(ctx context.Context, ref forge.RepoRef, sha string, st
 		Summary:     status.Description,
 		Text:        status.Text,
 		DetailsURL:  status.TargetURL,
+		ExternalID:  status.ExternalID,
 		Images:      status.Images,
 		Annotations: status.Annotations,
 		Actions:     status.Actions,
@@ -642,7 +643,7 @@ func (f *Forge) SetStatus(ctx context.Context, ref forge.RepoRef, sha string, st
 	}
 
 	if status.CheckRunID == 0 {
-		existingCheckRuns, err := f.client.ListCheckRunsForRef(ctx, ref.Owner, ref.Name, sha, checkState.Name)
+		existingCheckRuns, err := f.client.ListCheckRunsForRef(ctx, ref.Owner, ref.Name, sha, "")
 		if err != nil {
 			if checkError := mapCheckRunError(err); checkError != nil {
 				return 0, checkError
@@ -650,17 +651,28 @@ func (f *Forge) SetStatus(ctx context.Context, ref forge.RepoRef, sha string, st
 		}
 		currentUser, err := f.client.CurrentUser(ctx)
 		if err == nil {
-			var newestCheckRunID int64
-			for _, run := range existingCheckRuns {
-				if run.Name == checkState.Name && run.HeadSHA == sha && gh.IsCheckRunFromApp(run, currentUser) {
-					if run.ID > newestCheckRunID {
-						newestCheckRunID = run.ID
+			var matchedCheckRunID int64
+			if checkState.ExternalID != "" {
+				for _, run := range existingCheckRuns {
+					if run.ExternalID == checkState.ExternalID && gh.IsCheckRunFromApp(run, currentUser) {
+						if run.ID > matchedCheckRunID {
+							matchedCheckRunID = run.ID
+						}
 					}
 				}
 			}
-			if newestCheckRunID != 0 {
-				if err := f.client.UpdateCheckRun(ctx, ref.Owner, ref.Name, newestCheckRunID, checkState); err == nil {
-					return newestCheckRunID, nil
+			if matchedCheckRunID == 0 {
+				for _, run := range existingCheckRuns {
+					if run.ExternalID == "" && run.Name == checkState.Name && run.HeadSHA == sha && gh.IsCheckRunFromApp(run, currentUser) {
+						if run.ID > matchedCheckRunID {
+							matchedCheckRunID = run.ID
+						}
+					}
+				}
+			}
+			if matchedCheckRunID != 0 {
+				if err := f.client.UpdateCheckRun(ctx, ref.Owner, ref.Name, matchedCheckRunID, checkState); err == nil {
+					return matchedCheckRunID, nil
 				} else if checkError := mapCheckRunError(err); checkError != nil {
 					return 0, checkError
 				}

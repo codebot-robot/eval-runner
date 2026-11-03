@@ -4280,6 +4280,8 @@ func TestFakeGitHubServer_CheckRunsSortedByID(t *testing.T) {
 func TestListCheckRunsForRef(t *testing.T) {
 	server := NewFakeGitHubServer()
 	defer server.Close()
+	const configuredAppID = int64(12345)
+	server.SetAppID(configuredAppID)
 
 	client := server.Client("token")
 	ctx := t.Context()
@@ -4321,7 +4323,7 @@ func TestListCheckRunsForRef(t *testing.T) {
 	if runs[0].Name != CheckRunName || runs[0].HeadSHA != "commit1" {
 		t.Errorf("unexpected check run: %+v", runs[0])
 	}
-	if runs[0].AppSlug != "eval-runner" || runs[0].AppID != 1 {
+	if runs[0].AppSlug != "eval-runner" || runs[0].AppID != configuredAppID {
 		t.Errorf("unexpected app on check run: AppSlug=%q, AppID=%d", runs[0].AppSlug, runs[0].AppID)
 	}
 
@@ -4385,5 +4387,110 @@ func TestIsCheckRunFromApp(t *testing.T) {
 	// 4. Empty user returns false so foreign check runs are never adopted
 	if IsCheckRunFromApp(evalRunnerCR, "") || IsCheckRunFromApp(foreignCR, "") {
 		t.Errorf("expected empty user not to adopt any check run")
+	}
+}
+
+func TestCheckRun_ExternalID_CreateAndUpdateAndFakeFilter(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("test-token")
+	ctx := t.Context()
+
+	initialExternalID := "comparison-uid-123/head-sha-abc"
+	checkRunID, err := client.CreateCheckRun(ctx, "gke-labs", "eval-runner", "head-sha-abc", CheckRunState{
+		Name:       CheckRunName,
+		Status:     "in_progress",
+		ExternalID: initialExternalID,
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRun failed: %v", err)
+	}
+
+	// 1. Fake records external_id on create
+	recordedCheckRun := server.GetCheckRun(checkRunID)
+	if recordedCheckRun == nil {
+		t.Fatalf("check run %d not found on fake server", checkRunID)
+	}
+	if recordedCheckRun.ExternalID != initialExternalID {
+		t.Errorf("recorded ExternalID = %q, want %q", recordedCheckRun.ExternalID, initialExternalID)
+	}
+
+	// 2. Fake filters by external_id
+	matchingCheckRuns := server.CheckRunsByExternalID(initialExternalID)
+	if len(matchingCheckRuns) != 1 || matchingCheckRuns[0].ID != checkRunID {
+		t.Errorf("CheckRunsByExternalID(%q) = %+v, want 1 check run with ID %d", initialExternalID, matchingCheckRuns, checkRunID)
+	}
+	emptyCheckRuns := server.CheckRunsByExternalID("non-existent-external-id")
+	if len(emptyCheckRuns) != 0 {
+		t.Errorf("CheckRunsByExternalID for non-existent ID returned %d runs, want 0", len(emptyCheckRuns))
+	}
+
+	// 3. Fake records external_id on update
+	updatedExternalID := "comparison-uid-123/head-sha-def"
+	err = client.UpdateCheckRun(ctx, "gke-labs", "eval-runner", checkRunID, CheckRunState{
+		Name:       CheckRunName,
+		Status:     "completed",
+		Conclusion: "success",
+		ExternalID: updatedExternalID,
+	})
+	if err != nil {
+		t.Fatalf("UpdateCheckRun failed: %v", err)
+	}
+	if recordedCheckRun.ExternalID != updatedExternalID {
+		t.Errorf("after update, recorded ExternalID = %q, want %q", recordedCheckRun.ExternalID, updatedExternalID)
+	}
+
+	// 4. ListCheckRunsForRef returns external_id
+	listedCheckRuns, err := client.ListCheckRunsForRef(ctx, "gke-labs", "eval-runner", "head-sha-abc", CheckRunName)
+	if err != nil {
+		t.Fatalf("ListCheckRunsForRef failed: %v", err)
+	}
+	if len(listedCheckRuns) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(listedCheckRuns))
+	}
+	if listedCheckRuns[0].ExternalID != updatedExternalID {
+		t.Errorf("listed CheckRun ExternalID = %q, want %q", listedCheckRuns[0].ExternalID, updatedExternalID)
+	}
+}
+
+func TestCheckRunStateForComparison_ExternalID(t *testing.T) {
+	comp := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-comparison",
+			UID:  "comparison-uid-789",
+		},
+		Spec: v1alpha1.ComparisonSpec{
+			PullRequest: &v1alpha1.PullRequestSpec{
+				Repository: "gke-labs/eval-runner",
+				HeadSHA:    "sha-head-999",
+			},
+		},
+	}
+
+	state := CheckRunStateForComparison(comp, nil, nil, "", "")
+	expectedExternalID := "comparison-uid-789/sha-head-999"
+	if state.ExternalID != expectedExternalID {
+		t.Errorf("state.ExternalID = %q, want %q", state.ExternalID, expectedExternalID)
+	}
+
+	// Candidate Run fallback for head SHA
+	compWithoutPRHead := &v1alpha1.Comparison{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-comparison-cand",
+			UID:  "comparison-uid-456",
+		},
+	}
+	candRun := &v1alpha1.Run{
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				Commit: "sha-cand-commit-111",
+			},
+		},
+	}
+	stateCandidate := CheckRunStateForComparison(compWithoutPRHead, nil, candRun, "", "")
+	expectedCandidateExternalID := "comparison-uid-456/sha-cand-commit-111"
+	if stateCandidate.ExternalID != expectedCandidateExternalID {
+		t.Errorf("stateCandidate.ExternalID = %q, want %q", stateCandidate.ExternalID, expectedCandidateExternalID)
 	}
 }

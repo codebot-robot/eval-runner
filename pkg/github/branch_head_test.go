@@ -434,3 +434,164 @@ func TestReportBranchHead_ListBeforeCreate_UpdatesExisting(t *testing.T) {
 		t.Errorf("check run was not updated: %+v", checkRuns[0])
 	}
 }
+
+func TestCheckRunStateForBranchHead_ExternalID(t *testing.T) {
+	ref := forge.RepoRef{
+		Host:  "github.com",
+		Owner: "gke-labs",
+		Name:  "eval-runner",
+	}
+	pool := &pooling.CommitPool{
+		CommitSHA: "abcdef123456",
+	}
+	state := CheckRunStateForBranchHead(pool, nil, "https://dotevals.com", ref, "main", v1alpha1.RunPhaseCompleted, false, 0)
+	expectedExternalID := "eval-runner/main/abcdef123456"
+	if state.ExternalID != expectedExternalID {
+		t.Errorf("state.ExternalID = %q, want %q", state.ExternalID, expectedExternalID)
+	}
+}
+
+func TestReportBranchHead_CreateSetsExternalID(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("test-token")
+	rep := NewReporter(client, ReporterOptions{UIBaseURL: "https://dotevals.com"})
+	ref := forge.RepoRef{
+		Host:  "github.com",
+		Owner: "gke-labs",
+		Name:  "eval-runner",
+	}
+	state := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "in_progress",
+		Title:      "running",
+		Summary:    "evaluating",
+		DetailsURL: BranchHeadDetailsURL("https://dotevals.com", ref, "main"),
+	}
+
+	createdID, _, err := rep.ReportBranchHead(t.Context(), ref, "c0ffee1", state, 0)
+	if err != nil {
+		t.Fatalf("ReportBranchHead failed: %v", err)
+	}
+
+	checkRun := server.GetCheckRun(createdID)
+	if checkRun == nil {
+		t.Fatalf("check run %d not found on fake server", createdID)
+	}
+	expectedExternalID := "eval-runner/main/c0ffee1"
+	if checkRun.ExternalID != expectedExternalID {
+		t.Errorf("checkRun.ExternalID = %q, want %q", checkRun.ExternalID, expectedExternalID)
+	}
+}
+
+func TestReportBranchHead_PrefersExternalIDMatchOverOlderSlugMatch(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("test-token")
+	ctx := t.Context()
+	ref := forge.RepoRef{
+		Host:  "github.com",
+		Owner: "gke-labs",
+		Name:  "eval-runner",
+	}
+
+	// 1. Create an older legacy check run with empty external_id
+	legacyCheckRunID, err := client.CreateCheckRun(ctx, ref.Owner, ref.Name, "c0ffee1", CheckRunState{
+		Name:       CheckRunName,
+		Status:     "in_progress",
+		Title:      "legacy check run",
+		ExternalID: "",
+	})
+	if err != nil {
+		t.Fatalf("creating legacy check run failed: %v", err)
+	}
+
+	// 2. Create a newer check run matching external_id
+	expectedExternalID := "eval-runner/main/c0ffee1"
+	exactCheckRunID, err := client.CreateCheckRun(ctx, ref.Owner, ref.Name, "c0ffee1", CheckRunState{
+		Name:       "eval-runner / renamed-evals",
+		Status:     "in_progress",
+		Title:      "exact external_id check run",
+		ExternalID: expectedExternalID,
+	})
+	if err != nil {
+		t.Fatalf("creating exact external_id check run failed: %v", err)
+	}
+
+	// 3. ReportBranchHead with checkRunID == 0 should prefer the exact external_id match
+	rep := NewReporter(client, ReporterOptions{UIBaseURL: "https://dotevals.com"})
+	state := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "completed",
+		Conclusion: "success",
+		Title:      "completed",
+		Summary:    "evaluating",
+		ExternalID: expectedExternalID,
+	}
+
+	adoptedID, _, err := rep.ReportBranchHead(ctx, ref, "c0ffee1", state, 0)
+	if err != nil {
+		t.Fatalf("ReportBranchHead failed: %v", err)
+	}
+	if adoptedID != exactCheckRunID {
+		t.Errorf("adoptedID = %d, want exactCheckRunID %d (legacy was %d)", adoptedID, exactCheckRunID, legacyCheckRunID)
+	}
+
+	updatedCheckRun := server.GetCheckRun(exactCheckRunID)
+	if updatedCheckRun.Status != "completed" || updatedCheckRun.Conclusion != "success" {
+		t.Errorf("expected exact check run to be updated: %+v", updatedCheckRun)
+	}
+	legacyCheckRun := server.GetCheckRun(legacyCheckRunID)
+	if legacyCheckRun.Status != "in_progress" {
+		t.Errorf("legacy check run should remain untouched: %+v", legacyCheckRun)
+	}
+}
+
+func TestReportBranchHead_FallbackToSlugMatchForPreUpgradeCheckRun(t *testing.T) {
+	server := NewFakeGitHubServer()
+	defer server.Close()
+
+	client := server.Client("test-token")
+	ctx := t.Context()
+	ref := forge.RepoRef{
+		Host:  "github.com",
+		Owner: "gke-labs",
+		Name:  "eval-runner",
+	}
+
+	// Create only a legacy check run without external_id
+	legacyCheckRunID, err := client.CreateCheckRun(ctx, ref.Owner, ref.Name, "c0ffee1", CheckRunState{
+		Name:       CheckRunName,
+		Status:     "in_progress",
+		Title:      "legacy check run pre-upgrade",
+		ExternalID: "",
+	})
+	if err != nil {
+		t.Fatalf("creating legacy check run failed: %v", err)
+	}
+
+	rep := NewReporter(client, ReporterOptions{UIBaseURL: "https://dotevals.com"})
+	state := CheckRunState{
+		Name:       CheckRunName,
+		Status:     "completed",
+		Conclusion: "success",
+		Title:      "completed",
+		Summary:    "evaluating",
+		ExternalID: "eval-runner/main/c0ffee1",
+	}
+
+	adoptedID, _, err := rep.ReportBranchHead(ctx, ref, "c0ffee1", state, 0)
+	if err != nil {
+		t.Fatalf("ReportBranchHead fallback failed: %v", err)
+	}
+	if adoptedID != legacyCheckRunID {
+		t.Errorf("adoptedID = %d, want legacyCheckRunID %d", adoptedID, legacyCheckRunID)
+	}
+
+	updatedCheckRun := server.GetCheckRun(legacyCheckRunID)
+	if updatedCheckRun.ExternalID != "eval-runner/main/c0ffee1" {
+		t.Errorf("expected legacy check run to acquire external_id on update, got %q", updatedCheckRun.ExternalID)
+	}
+}

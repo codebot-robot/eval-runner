@@ -38,6 +38,7 @@ type FakeCheckRun struct {
 	Summary     string
 	Text        string
 	DetailsURL  string
+	ExternalID  string
 	Images      []CheckRunImage
 	Annotations []CheckRunAnnotation
 	Actions     []CheckRunAction
@@ -58,6 +59,7 @@ type FakeGitHubServer struct {
 	nextCommentID  int64
 	nextCheckRunID int64
 	currentUser    string
+	appID          int64
 	appSlug        string
 
 	// Injected errors: if non-empty, the next request(s) return this status and message
@@ -115,6 +117,13 @@ func (f *FakeGitHubServer) SetAppSlug(slug string) {
 	f.appSlug = slug
 }
 
+// SetAppID sets the app ID returned by GET /app and attached to check runs.
+func (f *FakeGitHubServer) SetAppID(appID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appID = appID
+}
+
 // SetUserPermission sets collaborator permission for a user in owner/repo.
 func (f *FakeGitHubServer) SetUserPermission(owner, repo, user, permission string) {
 	f.mu.Lock()
@@ -141,6 +150,9 @@ func (f *FakeGitHubServer) Client(token string) *HTTPClient {
 
 // AppClient returns an HTTPClient configured with AppAuth pointing to this fake server.
 func (f *FakeGitHubServer) AppClient(appID, instID string, privKey []byte) (*HTTPClient, error) {
+	if parsedAppID, err := strconv.ParseInt(appID, 10, 64); err == nil {
+		f.SetAppID(parsedAppID)
+	}
 	appAuth, err := NewAppTokenProvider(AppConfig{
 		AppID:          appID,
 		InstallationID: instID,
@@ -239,6 +251,22 @@ func (f *FakeGitHubServer) CheckRuns() []*FakeCheckRun {
 	return res
 }
 
+// CheckRunsByExternalID returns all stored check runs matching externalID sorted by ID ascending.
+func (f *FakeGitHubServer) CheckRunsByExternalID(externalID string) []*FakeCheckRun {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var res []*FakeCheckRun
+	for _, checkRun := range f.checkRuns {
+		if checkRun.ExternalID == externalID {
+			res = append(res, checkRun)
+		}
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].ID < res[j].ID
+	})
+	return res
+}
+
 // GetCheckRun returns the stored check run with the given ID, or nil if not found.
 func (f *FakeGitHubServer) GetCheckRun(id int64) *FakeCheckRun {
 	f.mu.Lock()
@@ -308,9 +336,10 @@ func (f *FakeGitHubServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// 0b. App info: /app
 	if path == "/app" && r.Method == http.MethodGet {
 		f.mu.Lock()
+		appID := f.appID
 		slug := f.appSlug
 		f.mu.Unlock()
-		writeJSONResponse(w, http.StatusOK, map[string]any{"id": 1, "slug": slug})
+		writeJSONResponse(w, http.StatusOK, map[string]any{"id": appID, "slug": slug})
 		return
 	}
 
@@ -561,9 +590,7 @@ func (f *FakeGitHubServer) handleCreateCheckRun(w http.ResponseWriter, r *http.R
 
 	f.nextCheckRunID++
 	appSlug := f.appSlug
-	if appSlug == "" {
-		appSlug = "eval-runner"
-	}
+	appID := f.appID
 	cr := &FakeCheckRun{
 		ID:         f.nextCheckRunID,
 		Name:       payload.Name,
@@ -571,8 +598,9 @@ func (f *FakeGitHubServer) handleCreateCheckRun(w http.ResponseWriter, r *http.R
 		Status:     payload.Status,
 		Conclusion: payload.Conclusion,
 		DetailsURL: payload.DetailsURL,
+		ExternalID: payload.ExternalID,
 		Actions:    payload.Actions,
-		AppID:      1,
+		AppID:      appID,
 		AppSlug:    appSlug,
 	}
 	if payload.Output != nil {
@@ -598,6 +626,7 @@ func (f *FakeGitHubServer) handleListCheckRunsForRef(w http.ResponseWriter, r *h
 	}
 	ref := parts[4]
 	checkName := r.URL.Query().Get("check_name")
+	externalID := r.URL.Query().Get("external_id")
 
 	var matching []*FakeCheckRun
 	for _, run := range f.checkRuns {
@@ -605,6 +634,9 @@ func (f *FakeGitHubServer) handleListCheckRunsForRef(w http.ResponseWriter, r *h
 			continue
 		}
 		if checkName != "" && run.Name != checkName {
+			continue
+		}
+		if externalID != "" && run.ExternalID != externalID {
 			continue
 		}
 		matching = append(matching, run)
@@ -620,6 +652,7 @@ func (f *FakeGitHubServer) handleListCheckRunsForRef(w http.ResponseWriter, r *h
 			ID:         run.ID,
 			Name:       run.Name,
 			HeadSHA:    run.HeadSHA,
+			ExternalID: run.ExternalID,
 			Status:     run.Status,
 			Conclusion: run.Conclusion,
 			App: &checkRunAppResponse{
@@ -670,6 +703,9 @@ func (f *FakeGitHubServer) handleUpdateCheckRun(w http.ResponseWriter, r *http.R
 	}
 	if payload.DetailsURL != "" {
 		cr.DetailsURL = payload.DetailsURL
+	}
+	if payload.ExternalID != "" {
+		cr.ExternalID = payload.ExternalID
 	}
 	if payload.Output != nil {
 		cr.Title = payload.Output.Title

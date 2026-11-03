@@ -116,6 +116,7 @@ type CheckRunState struct {
 	Summary     string // detailed summary text
 	Text        string // technical details text (e.g. collapsed error details)
 	DetailsURL  string // URL of the details page
+	ExternalID  string // deterministic identifier for check run idempotency
 	Images      []CheckRunImage
 	Annotations []CheckRunAnnotation
 	Actions     []CheckRunAction
@@ -532,6 +533,17 @@ func CheckRunStateForComparison(comp *v1alpha1.Comparison, baseRun, candRun *v1a
 	state.Images = BuildCheckRunImages(comp, baseRun, candRun, uiBaseURL)
 	state.Text = RenderCheckRunText(comp, baseRun, candRun, uiBaseURL)
 	state.DetailsURL = CheckRunDetailsURL(comp, uiBaseURL, baseRun, candRun)
+
+	headSHA := ""
+	if comp.Spec.PullRequest != nil {
+		headSHA = comp.Spec.PullRequest.HeadSHA
+	}
+	if headSHA == "" && candRun != nil {
+		headSHA = candRun.Spec.Repo.Commit
+	}
+	if comp.UID != "" && headSHA != "" {
+		state.ExternalID = fmt.Sprintf("%s/%s", comp.UID, headSHA)
+	}
 
 	policy := configkeys.InconclusivePolicyNeutral
 	if inconclusivePolicy != "" {

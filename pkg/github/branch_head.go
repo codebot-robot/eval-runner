@@ -273,6 +273,9 @@ func CheckRunStateForBranchHead(
 		Name:       CheckRunName,
 		DetailsURL: BranchHeadDetailsURL(uiBaseURL, repoRef, branch),
 	}
+	if pool != nil && pool.CommitSHA != "" && repoRef.Name != "" && branch != "" {
+		state.ExternalID = fmt.Sprintf("%s/%s/%s", repoRef.Name, branch, pool.CommitSHA)
+	}
 
 	// In-progress / queued lifecycle states
 	if phase != v1alpha1.RunPhaseCompleted && phase != v1alpha1.RunPhaseFailed {
@@ -384,6 +387,8 @@ func HashCheckRunState(state CheckRunState) string {
 	h.Write([]byte(state.Text))
 	h.Write([]byte{0})
 	h.Write([]byte(state.DetailsURL))
+	h.Write([]byte{0})
+	h.Write([]byte(state.ExternalID))
 	for _, img := range state.Images {
 		h.Write([]byte{0})
 		h.Write([]byte(img.ImageURL))
@@ -414,6 +419,14 @@ func (r *Reporter) ReportBranchHead(
 	if r.Client == nil {
 		return 0, "", nil
 	}
+	if state.ExternalID == "" && repoRef.Name != "" && commitSHA != "" {
+		if idx := strings.Index(state.DetailsURL, "/series/"); idx != -1 {
+			branch := state.DetailsURL[idx+len("/series/"):]
+			if branch != "" {
+				state.ExternalID = fmt.Sprintf("%s/%s/%s", repoRef.Name, branch, commitSHA)
+			}
+		}
+	}
 	hash := HashCheckRunState(state)
 
 	if checkRunID != 0 {
@@ -428,7 +441,7 @@ func (r *Reporter) ReportBranchHead(
 	}
 
 	if checkRunID == 0 {
-		existingCheckRuns, err := r.Client.ListCheckRunsForRef(ctx, repoRef.Owner, repoRef.Name, commitSHA, state.Name)
+		existingCheckRuns, err := r.Client.ListCheckRunsForRef(ctx, repoRef.Owner, repoRef.Name, commitSHA, "")
 		if err != nil {
 			var pe *PermanentError
 			if !errors.As(err, &pe) || pe.StatusCode != http.StatusNotFound {
@@ -437,22 +450,33 @@ func (r *Reporter) ReportBranchHead(
 		}
 		currentUser, err := r.Client.CurrentUser(ctx)
 		if err == nil {
-			var newestCheckRunID int64
-			for _, checkRun := range existingCheckRuns {
-				if checkRun.Name == state.Name && checkRun.HeadSHA == commitSHA && IsCheckRunFromApp(checkRun, currentUser) {
-					if checkRun.ID > newestCheckRunID {
-						newestCheckRunID = checkRun.ID
+			var matchedCheckRunID int64
+			if state.ExternalID != "" {
+				for _, checkRun := range existingCheckRuns {
+					if checkRun.ExternalID == state.ExternalID && IsCheckRunFromApp(checkRun, currentUser) {
+						if checkRun.ID > matchedCheckRunID {
+							matchedCheckRunID = checkRun.ID
+						}
 					}
 				}
 			}
-			if newestCheckRunID != 0 {
-				err := r.Client.UpdateCheckRun(ctx, repoRef.Owner, repoRef.Name, newestCheckRunID, state)
+			if matchedCheckRunID == 0 {
+				for _, checkRun := range existingCheckRuns {
+					if checkRun.ExternalID == "" && checkRun.Name == state.Name && checkRun.HeadSHA == commitSHA && IsCheckRunFromApp(checkRun, currentUser) {
+						if checkRun.ID > matchedCheckRunID {
+							matchedCheckRunID = checkRun.ID
+						}
+					}
+				}
+			}
+			if matchedCheckRunID != 0 {
+				err := r.Client.UpdateCheckRun(ctx, repoRef.Owner, repoRef.Name, matchedCheckRunID, state)
 				if err == nil {
-					return newestCheckRunID, hash, nil
+					return matchedCheckRunID, hash, nil
 				}
 				var pe *PermanentError
 				if !errors.As(err, &pe) || pe.StatusCode != http.StatusNotFound {
-					return 0, "", fmt.Errorf("updating check run %d: %w", newestCheckRunID, err)
+					return 0, "", fmt.Errorf("updating check run %d: %w", matchedCheckRunID, err)
 				}
 			}
 		}
