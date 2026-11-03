@@ -69,6 +69,49 @@ func TestParseManifest(t *testing.T) {
 	}
 }
 
+func TestParseManifest_PerSampleSandboxTask(t *testing.T) {
+	manifestJSON := []byte(`{
+		"tasks": [
+			{
+				"id": "terminal-bench",
+				"workdir": "evals",
+				"spec": "bench.py@eval_task",
+				"image": "ghcr.io/example/terminal-bench:v1",
+				"command": ["pytest", "-v", "test_sample.py"],
+				"resources": [ { "type": "sandbox" } ]
+			}
+		]
+	}`)
+
+	m, err := ParseManifest(manifestJSON)
+	if err != nil {
+		t.Fatalf("ParseManifest failed unexpectedly: %v", err)
+	}
+
+	if len(m.Tasks) != 1 {
+		t.Fatalf("Expected 1 task, got %d", len(m.Tasks))
+	}
+	task := m.Tasks[0]
+	if task.ID != "terminal-bench" {
+		t.Errorf("Unexpected task ID: %s", task.ID)
+	}
+	if task.Image != "ghcr.io/example/terminal-bench:v1" {
+		t.Errorf("Unexpected image: %s", task.Image)
+	}
+	expectedCommand := []string{"pytest", "-v", "test_sample.py"}
+	if len(task.Command) != len(expectedCommand) {
+		t.Fatalf("Expected command length %d, got %d", len(expectedCommand), len(task.Command))
+	}
+	for i, arg := range expectedCommand {
+		if task.Command[i] != arg {
+			t.Errorf("Command[%d] = %q, want %q", i, task.Command[i], arg)
+		}
+	}
+	if len(task.Resources) != 1 || task.Resources[0].Type != v1alpha1.ResourceTypeSandbox {
+		t.Errorf("Unexpected resources: %+v", task.Resources)
+	}
+}
+
 func TestValidateManifest(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -305,6 +348,102 @@ func TestValidateManifest(t *testing.T) {
 				},
 			},
 			expectError: true,
+		},
+		{
+			name: "command without image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-cmd-no-img", Spec: "eval.py@task", Command: []string{"pytest"}},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "command with whitespace image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-cmd-ws-img", Spec: "eval.py@task", Command: []string{"pytest"}, Image: "   "},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "command with valid image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{ID: "task-cmd-img", Spec: "eval.py@task", Command: []string{"pytest"}, Image: "ghcr.io/example/img:v1"},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "sandbox resource without image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-sb-no-img",
+						Spec:      "eval.py@task",
+						Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "sandbox resource with whitespace image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-sb-ws-img",
+						Spec:      "eval.py@task",
+						Image:     "   ",
+						Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "sandbox resource with valid image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-sb-img",
+						Spec:      "eval.py@task",
+						Image:     "ghcr.io/example/img:v1",
+						Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "command and sandbox resource with valid image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-cmd-sb-img",
+						Spec:      "eval.py@task",
+						Image:     "ghcr.io/example/img:v1",
+						Command:   []string{"pytest", "-v"},
+						Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "unknown resource without image does not fail manifest validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-unknown-res",
+						Spec:      "eval.py@task",
+						Resources: []v1alpha1.ManifestResource{{Type: "docker"}},
+					},
+				},
+			},
+			expectError: false,
 		},
 	}
 

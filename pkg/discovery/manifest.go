@@ -67,6 +67,8 @@ func ParseManifest(data []byte) (*v1alpha1.Manifest, error) {
 // - Each task must have a non-empty, unique ID
 // - Each task must have a non-empty Spec that does not start with '-'
 // - Each task's Workdir (if set) must be relative and not contain '..'
+// - Each task's Command requires a non-blank Image
+// - Each task with a sandbox resource requires a non-blank Image
 func ValidateManifest(m *v1alpha1.Manifest) error {
 	if m == nil {
 		return fmt.Errorf("manifest cannot be nil")
@@ -103,6 +105,16 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 			cleanWorkdir := filepath.Clean(task.Workdir)
 			if filepath.IsAbs(task.Workdir) || strings.HasPrefix(cleanWorkdir, "..") || cleanWorkdir == ".." || strings.Contains(task.Workdir, "..") {
 				return fmt.Errorf("task %q has invalid workdir %q: must be relative and not contain '..'", id, task.Workdir)
+			}
+		}
+
+		if len(task.Command) > 0 && strings.TrimSpace(task.Image) == "" {
+			return fmt.Errorf("task %q has command without image: command requires a non-blank image", id)
+		}
+
+		for _, resource := range task.Resources {
+			if resource.Type == v1alpha1.ResourceTypeSandbox && strings.TrimSpace(task.Image) == "" {
+				return fmt.Errorf("task %q has sandbox resource without image: sandbox resource requires an image", id)
 			}
 		}
 
