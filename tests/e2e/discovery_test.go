@@ -398,6 +398,10 @@ spec:
 		runWebhookSmoke(t, harness)
 	})
 
+	t.Run("ModelPortalSmoke", func(t *testing.T) {
+		runModelPortalSmoke(t, harness)
+	})
+
 	t.Run("GitRemoteSmoke", func(t *testing.T) {
 		runGitRemoteSmoke(t, harness, "eval-runner-sandbox")
 	})
