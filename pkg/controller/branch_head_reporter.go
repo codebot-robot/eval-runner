@@ -257,6 +257,9 @@ func (r *RunReconciler) reportBranchHeadInProgress(ctx context.Context, run *v1a
 	}
 
 	state := github.CheckRunStateForBranchHead(nil, nil, r.uiBaseURL(), repoRef, branch, run.Status.Phase, false, 0)
+	if state.ExternalID == "" && repoRef.Name != "" && branch != "" && commitSHA != "" {
+		state.ExternalID = fmt.Sprintf("%s/%s/%s", repoRef.Name, branch, commitSHA)
+	}
 	rep := github.NewReporter(ghClient, github.ReporterOptions{UIBaseURL: r.uiBaseURL()})
 	checkRunID, hash, err := rep.ReportBranchHead(ctx, repoRef, commitSHA, state, 0)
 	if err != nil {
@@ -416,6 +419,9 @@ func (r *RunReconciler) reportBranchHeadTerminal(ctx context.Context, run *v1alp
 		topUpsEnabled,
 		nextTopUpIn,
 	)
+	if state.ExternalID == "" && repoRef.Name != "" && branch != "" && headCommitSHA != "" {
+		state.ExternalID = fmt.Sprintf("%s/%s/%s", repoRef.Name, branch, headCommitSHA)
+	}
 
 	// Ensure we inspect the freshest status of seedRun
 	var freshSeed v1alpha1.Run
