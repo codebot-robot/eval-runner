@@ -256,7 +256,7 @@ func (r *RunReconciler) reportBranchHeadInProgress(ctx context.Context, run *v1a
 		return nil
 	}
 
-	state := github.CheckRunStateForBranchHead(nil, nil, r.uiBaseURL(), repoRef, branch, run.Status.Phase, false, 0)
+	state := github.CheckRunStateForBranchHead(&pooling.CommitPool{CommitSHA: commitSHA}, nil, r.uiBaseURL(), repoRef, branch, run.Status.Phase, false, 0)
 	rep := github.NewReporter(ghClient, github.ReporterOptions{UIBaseURL: r.uiBaseURL()})
 	checkRunID, hash, err := rep.ReportBranchHead(ctx, repoRef, commitSHA, state, 0)
 	if err != nil {
