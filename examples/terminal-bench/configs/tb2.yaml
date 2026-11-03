@@ -1,0 +1,25 @@
+# Adapted from kubernetes-sigs/agent-sandbox examples/harbor-terminal-bench (Apache-2.0)
+#
+# Terminal-Bench 2.0, 89 tasks, Terminus 2 with a model, 5 attempts per task.
+# Set the model and, optionally, the image mirror:
+#
+#   harbor run -c examples/terminal-bench/configs/tb2.yaml \
+#     -m anthropic/claude-sonnet-4-5 --ek image_mirror=us-central1-docker.pkg.dev/<project>/terminal-bench-mirror
+jobs_dir: jobs/terminal-bench
+n_attempts: 5
+n_concurrent_trials: 50
+environment:
+  import_path: k8s_agent_sandbox_harbor:AgentSandboxEnvironment
+  delete: true
+  kwargs:
+    namespace: eval-runner-sandbox
+    ready_timeout_s: "600"
+    warm_replicas: "0"          # 1 keeps one pod per task image ready between attempts
+    memory_limit_multiplier: "2"
+    # Optional image mirror in Artifact Registry:
+    # image_mirror: us-central1-docker.pkg.dev/<project>/terminal-bench-mirror
+agents:
+  - name: terminus-2
+datasets:
+  - name: terminal-bench
+    version: "2.0"
