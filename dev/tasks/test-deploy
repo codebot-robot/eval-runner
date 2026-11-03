@@ -131,11 +131,13 @@ VALID_DRY_RUN="deploy-eval-runner
       docker-build-eval-runner
       docker-build-git-server
       docker-build-sample-runner
+      docker-build-service-portal
   deploy-k8s
     kubectl-apply-00-namespaces.yaml
     kubectl-apply-evalrunner.gke-labs.dev_comparisons.yaml
     kubectl-apply-evalrunner.gke-labs.dev_runs.yaml
     kubectl-apply-httproute.yaml
+    kubectl-apply-model-portal.yaml
     kubectl-apply-rbac.yaml
     kubectl-apply-runner-deployment.yaml
     kubectl-apply-sandbox-networkpolicy.yaml
@@ -248,12 +250,29 @@ if [[ -z "${AGENT_SANDBOX_VERSION:-}" ]]; then
   exit 1
 fi
 
-HARNESS_VERSION="$(grep 'AgentSandboxVersion =' "${REPO_ROOT}/tests/e2e/harness.go" | sed -E 's/.*"([^"]+)".*/\1/')"
+HARNESS_VERSION="$(grep -E 'AgentSandboxVersion[[:space:]]+=' "${REPO_ROOT}/tests/e2e/harness.go" | sed -E 's/.*"([^"]+)".*/\1/')"
 if [[ "${AGENT_SANDBOX_VERSION}" != "${HARNESS_VERSION}" ]]; then
   echo "FAIL: AGENT_SANDBOX_VERSION (${AGENT_SANDBOX_VERSION}) does not match harness.go (${HARNESS_VERSION})" >&2
   exit 1
 fi
 echo "PASS: AGENT_SANDBOX_VERSION (${AGENT_SANDBOX_VERSION}) matches tests/e2e/harness.go."
+
+if [[ -z "${SERVICE_PORTALS_COMMIT:-}" ]]; then
+  echo "FAIL: SERVICE_PORTALS_COMMIT is not defined in dev/tasks/versions.sh" >&2
+  exit 1
+fi
+
+if [[ -z "${SERVICE_PORTALS_TAG:-}" ]]; then
+  echo "FAIL: SERVICE_PORTALS_TAG is not defined in dev/tasks/versions.sh" >&2
+  exit 1
+fi
+
+HARNESS_PORTAL_COMMIT="$(grep -E 'ServicePortalsCommit[[:space:]]+=' "${REPO_ROOT}/tests/e2e/harness.go" | sed -E 's/.*"([^"]+)".*/\1/')"
+if [[ "${SERVICE_PORTALS_COMMIT}" != "${HARNESS_PORTAL_COMMIT}" ]]; then
+  echo "FAIL: SERVICE_PORTALS_COMMIT (${SERVICE_PORTALS_COMMIT}) does not match harness.go (${HARNESS_PORTAL_COMMIT})" >&2
+  exit 1
+fi
+echo "PASS: SERVICE_PORTALS_COMMIT (${SERVICE_PORTALS_COMMIT}) matches tests/e2e/harness.go."
 
 echo "=== 7. Testing dev/tasks/sandboxd-image platform default ==="
 MOCK_BIN="${TMP_DIR}/bin"
