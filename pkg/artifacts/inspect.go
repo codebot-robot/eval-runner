@@ -556,6 +556,24 @@ func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 		return nil, fmt.Errorf("empty log data")
 	}
 
+	var results ResultsFile
+	if err := json.Unmarshal(data, &results); err == nil && results.SchemaVersion == 1 && len(results.Samples) > 0 {
+		var sampleScores []stats.SampleScore
+		for _, s := range results.Samples {
+			score := 0.0
+			if s.Score != nil {
+				score = *s.Score
+			} else if s.Passed != nil && *s.Passed {
+				score = 1.0
+			}
+			sampleScores = append(sampleScores, stats.SampleScore{
+				ID:    s.ID,
+				Score: score,
+			})
+		}
+		return sampleScores, nil
+	}
+
 	var log InspectLog
 	if err := json.Unmarshal(data, &log); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal inspect log: %w", err)
