@@ -165,6 +165,7 @@ func TaskSandboxNameForRun(runName, taskID string) string {
 type TaskSandboxConfig struct {
 	Namespace         string
 	SampleRunnerImage string
+	Image             string
 	ModelSecret       string
 	AuthTokenDigest   string
 	ServerCertSecret  string
@@ -181,7 +182,10 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 	if sandboxNamespace == "" {
 		sandboxNamespace = DefaultSandboxNamespace
 	}
-	image := cfg.SampleRunnerImage
+	image := cfg.Image
+	if image == "" {
+		image = cfg.SampleRunnerImage
+	}
 	if image == "" {
 		image = DefaultSampleRunnerImage
 	}
@@ -376,6 +380,11 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 									{
 										Name:      "workspace",
 										MountPath: "/workspace",
+									},
+									{
+										Name:      "workspace",
+										MountPath: "/out",
+										SubPath:   "out",
 									},
 									{
 										Name:      "sandbox-tls",

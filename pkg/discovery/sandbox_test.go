@@ -463,3 +463,52 @@ func TestBuildTaskSandbox_NoGCSCredentialsOrVolumes(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildTaskSandbox_ImageSelection(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+	}
+	digest := AuthTokenDigest("dummy-token")
+
+	// Case 1: Task image specified
+	sandboxCustom := BuildTaskSandbox(run, "task-custom", TaskSandboxConfig{
+		Namespace:         "eval-runner-sandbox",
+		SampleRunnerImage: "sample-runner:default",
+		Image:             "my-task-image:v1",
+		AuthTokenDigest:   digest,
+	})
+	if img := sandboxCustom.Spec.PodTemplate.Spec.Containers[0].Image; img != "my-task-image:v1" {
+		t.Errorf("Expected task image 'my-task-image:v1', got %q", img)
+	}
+	if len(sandboxCustom.Spec.PodTemplate.Spec.InitContainers) != 1 {
+		t.Fatalf("Expected 1 init container, got %d", len(sandboxCustom.Spec.PodTemplate.Spec.InitContainers))
+	}
+	if initContainerName := sandboxCustom.Spec.PodTemplate.Spec.InitContainers[0].Name; initContainerName != SandboxdInitContainerName {
+		t.Errorf("Expected init container name %q, got %q", SandboxdInitContainerName, initContainerName)
+	}
+
+	// Case 2: Task image empty, uses SampleRunnerImage
+	sandboxDefaultSample := BuildTaskSandbox(run, "task-default", TaskSandboxConfig{
+		Namespace:         "eval-runner-sandbox",
+		SampleRunnerImage: "sample-runner:custom",
+		AuthTokenDigest:   digest,
+	})
+	if img := sandboxDefaultSample.Spec.PodTemplate.Spec.Containers[0].Image; img != "sample-runner:custom" {
+		t.Errorf("Expected sample runner image 'sample-runner:custom', got %q", img)
+	}
+	if initContainerName := sandboxDefaultSample.Spec.PodTemplate.Spec.InitContainers[0].Name; initContainerName != SandboxdInitContainerName {
+		t.Errorf("Expected init container name %q, got %q", SandboxdInitContainerName, initContainerName)
+	}
+
+	// Case 3: Both empty, falls back to DefaultSampleRunnerImage
+	sandboxBuiltinDefault := BuildTaskSandbox(run, "task-fallback", TaskSandboxConfig{
+		Namespace:       "eval-runner-sandbox",
+		AuthTokenDigest: digest,
+	})
+	if img := sandboxBuiltinDefault.Spec.PodTemplate.Spec.Containers[0].Image; img != DefaultSampleRunnerImage {
+		t.Errorf("Expected fallback image %q, got %q", DefaultSampleRunnerImage, img)
+	}
+}
