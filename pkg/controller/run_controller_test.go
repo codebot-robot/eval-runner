@@ -3355,15 +3355,17 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 			{ID: "task-eligible-1", Spec: "test.py@1", Resources: []v1alpha1.ManifestResource{}},
 			{ID: "task-eligible-2", Spec: "test.py@2"},
 			{ID: "task-with-resources", Spec: "test.py@3", Resources: []v1alpha1.ManifestResource{{Type: "docker"}}},
+			{ID: "task-sandbox", Spec: "test.py@4", Image: "sandbox-image:v1", Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}}},
+			{ID: "task-mixed", Spec: "test.py@5", Image: "sandbox-image:v1", Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}, {Type: "docker"}}},
 		},
 	}
 
-	r := &RunReconciler{}
+	reconciler := &RunReconciler{}
 
 	// Case 1: spec.Tasks empty -> all tasks considered
-	tasks1 := r.initializeTasks(v1alpha1.RunSpec{}, manifest)
-	if len(tasks1) != 3 {
-		t.Fatalf("Expected 3 tasks, got %d", len(tasks1))
+	tasks1 := reconciler.initializeTasks(v1alpha1.RunSpec{}, manifest)
+	if len(tasks1) != 5 {
+		t.Fatalf("Expected 5 tasks, got %d", len(tasks1))
 	}
 	if tasks1[0].Phase != v1alpha1.TaskPhasePending {
 		t.Errorf("Expected task-eligible-1 to be Pending, got %s", tasks1[0].Phase)
@@ -3374,13 +3376,22 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 	if tasks1[2].Phase != v1alpha1.TaskPhaseFailed || tasks1[2].Message != "resources not supported yet" {
 		t.Errorf("Expected task-with-resources to be Failed with 'resources not supported yet', got %s (%s)", tasks1[2].Phase, tasks1[2].Message)
 	}
+	if tasks1[3].Phase != v1alpha1.TaskPhaseSkipped || tasks1[3].Message != "per-sample sandboxes are not supported by this controller yet" {
+		t.Errorf("Expected task-sandbox to be Skipped with 'per-sample sandboxes are not supported by this controller yet', got %s (%s)", tasks1[3].Phase, tasks1[3].Message)
+	}
+	if tasks1[3].SampleRange != nil || tasks1[3].SamplesPlanned != 0 {
+		t.Errorf("Expected task-sandbox to have no sample window, got sampleRange=%v planned=%d", tasks1[3].SampleRange, tasks1[3].SamplesPlanned)
+	}
+	if tasks1[4].Phase != v1alpha1.TaskPhaseFailed || tasks1[4].Message != "resources not supported yet" {
+		t.Errorf("Expected task-mixed to be Failed with 'resources not supported yet', got %s (%s)", tasks1[4].Phase, tasks1[4].Message)
+	}
 
 	// Case 2: spec.Tasks allow-list
-	tasks2 := r.initializeTasks(v1alpha1.RunSpec{
-		Tasks: []string{"task-eligible-1", "nonexistent-task", "task-with-resources"},
+	tasks2 := reconciler.initializeTasks(v1alpha1.RunSpec{
+		Tasks: []string{"task-eligible-1", "nonexistent-task", "task-with-resources", "task-sandbox", "task-mixed"},
 	}, manifest)
-	if len(tasks2) != 3 {
-		t.Fatalf("Expected 3 tasks, got %d", len(tasks2))
+	if len(tasks2) != 5 {
+		t.Fatalf("Expected 5 tasks, got %d", len(tasks2))
 	}
 	if tasks2[0].ID != "task-eligible-1" || tasks2[0].Phase != v1alpha1.TaskPhasePending {
 		t.Errorf("Expected task-eligible-1 to be Pending, got %+v", tasks2[0])
@@ -3390,6 +3401,97 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 	}
 	if tasks2[2].ID != "task-with-resources" || tasks2[2].Phase != v1alpha1.TaskPhaseFailed || tasks2[2].Message != "resources not supported yet" {
 		t.Errorf("Expected task-with-resources to be Failed, got %+v", tasks2[2])
+	}
+	if tasks2[3].ID != "task-sandbox" || tasks2[3].Phase != v1alpha1.TaskPhaseSkipped || tasks2[3].Message != "per-sample sandboxes are not supported by this controller yet" {
+		t.Errorf("Expected task-sandbox to be Skipped, got %+v", tasks2[3])
+	}
+	if tasks2[3].SampleRange != nil || tasks2[3].SamplesPlanned != 0 {
+		t.Errorf("Expected task-sandbox to have no sample window, got sampleRange=%v planned=%d", tasks2[3].SampleRange, tasks2[3].SamplesPlanned)
+	}
+	if tasks2[4].ID != "task-mixed" || tasks2[4].Phase != v1alpha1.TaskPhaseFailed || tasks2[4].Message != "resources not supported yet" {
+		t.Errorf("Expected task-mixed to be Failed, got %+v", tasks2[4])
+	}
+}
+
+func TestRunController_AllSandboxManifestCompletes(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: "task-sandbox-1", Spec: "test.py@1", Image: "sandbox-image:v1", Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}}},
+			{ID: "task-sandbox-2", Spec: "test.py@2", Image: "sandbox-image:v1", Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}}},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-all-sandbox",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-all-sandbox"}}
+
+	// Turn 1: initialize tasks as Skipped
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+
+	// Turn 2: terminal phase check marks Run as Completed with "all 2 tasks skipped"
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("second reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("get run error: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("Expected Run phase Completed, got %s", updatedRun.Status.Phase)
+	}
+	expectedMessage := "all 2 tasks skipped"
+	if updatedRun.Status.Message != expectedMessage {
+		t.Errorf("Expected Run message %q, got %q", expectedMessage, updatedRun.Status.Message)
+	}
+	if len(updatedRun.Status.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks, got %d", len(updatedRun.Status.Tasks))
+	}
+	for _, task := range updatedRun.Status.Tasks {
+		if task.Phase != v1alpha1.TaskPhaseSkipped {
+			t.Errorf("Expected task %s phase Skipped, got %s", task.ID, task.Phase)
+		}
+		if task.Message != "per-sample sandboxes are not supported by this controller yet" {
+			t.Errorf("Expected task %s message %q, got %q", task.ID, "per-sample sandboxes are not supported by this controller yet", task.Message)
+		}
+		if task.SampleRange != nil {
+			t.Errorf("Expected task %s sampleRange nil, got %+v", task.ID, task.SampleRange)
+		}
+		if task.SamplesPlanned != 0 {
+			t.Errorf("Expected task %s samplesPlanned 0, got %d", task.ID, task.SamplesPlanned)
+		}
 	}
 }
 

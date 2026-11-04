@@ -43,7 +43,7 @@ const (
 )
 
 // TaskPhase defines the lifecycle phase of an individual eval task.
-// +kubebuilder:validation:Enum=Pending;Running;Completed;Failed
+// +kubebuilder:validation:Enum=Pending;Running;Completed;Failed;Skipped
 type TaskPhase string
 
 const (
@@ -58,6 +58,9 @@ const (
 
 	// TaskPhaseFailed means the task encountered an error or failed to run.
 	TaskPhaseFailed TaskPhase = "Failed"
+
+	// TaskPhaseSkipped means the task was skipped and not executed.
+	TaskPhaseSkipped TaskPhase = "Skipped"
 )
 
 // CostSource represents the provenance of model prices used to compute costUSD.
@@ -286,9 +289,14 @@ type RunSpec struct {
 
 // ManifestResource describes a resource needed by an eval task.
 type ManifestResource struct {
-	// Type is the resource type (e.g., docker, kind, kubernetes-namespace).
+	// Type is the resource type (e.g., docker, kind, kubernetes-namespace, sandbox).
 	Type string `json:"type"`
 }
+
+const (
+	// ResourceTypeSandbox indicates the task runs in its own sandbox from image, harness inside, no cluster credentials.
+	ResourceTypeSandbox = "sandbox"
+)
 
 // ManifestImage describes a container image needed by eval tasks.
 type ManifestImage struct {
@@ -312,6 +320,14 @@ type ManifestTask struct {
 	// Spec is the framework-specific task reference (e.g. file.py@task_fn).
 	// +kubebuilder:validation:Required
 	Spec string `json:"spec"`
+
+	// Image is the container image the task runs in. If empty, uses the shared sample-runner image.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Command is the argv run inside the sandbox. If empty, uses the default invocation.
+	// +optional
+	Command []string `json:"command,omitempty"`
 
 	// Resources specifies the declarative resource requirements for the task.
 	// +optional

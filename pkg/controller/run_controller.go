@@ -2010,6 +2010,20 @@ func (r *RunReconciler) deleteAllSandboxesForRun(ctx context.Context, runNamespa
 	return nil
 }
 
+// isSandboxOnlyTask returns true if all resources declared by the task are of type sandbox.
+// A task mixing sandbox with another resource type also stays Failed.
+func isSandboxOnlyTask(task v1alpha1.ManifestTask) bool {
+	if len(task.Resources) == 0 {
+		return false
+	}
+	for _, resource := range task.Resources {
+		if resource.Type != v1alpha1.ResourceTypeSandbox {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha1.Manifest) []v1alpha1.TaskStatus {
 	var statuses []v1alpha1.TaskStatus
 	manifestMap := make(map[string]v1alpha1.ManifestTask)
@@ -2040,6 +2054,16 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				continue
 			}
 
+			if isSandboxOnlyTask(task) {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:      taskID,
+					Cohort:  cohort,
+					Phase:   v1alpha1.TaskPhaseSkipped,
+					Message: "per-sample sandboxes are not supported by this controller yet",
+				})
+				continue
+			}
+
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             taskID,
@@ -2066,6 +2090,16 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 			if cohort == "" {
 				cohort = v1alpha1.DefaultCohort
 			}
+			if isSandboxOnlyTask(task) {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:      task.ID,
+					Cohort:  cohort,
+					Phase:   v1alpha1.TaskPhaseSkipped,
+					Message: "per-sample sandboxes are not supported by this controller yet",
+				})
+				continue
+			}
+
 			if len(task.Resources) > 0 {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             task.ID,
@@ -2118,13 +2152,19 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	// 2. Check if all tasks have reached a terminal phase
 	allFinished := len(run.Status.Tasks) > 0
 	completedCount := 0
+	skippedCount := 0
 	for _, t := range run.Status.Tasks {
-		if t.Phase == v1alpha1.TaskPhaseCompleted {
+		switch t.Phase {
+		case v1alpha1.TaskPhaseCompleted:
 			completedCount++
-		} else if t.Phase == v1alpha1.TaskPhaseFailed {
+		case v1alpha1.TaskPhaseSkipped:
+			skippedCount++
+		case v1alpha1.TaskPhaseFailed:
 			// failed
-		} else {
+		default:
 			allFinished = false
+		}
+		if !allFinished {
 			break
 		}
 	}
@@ -2137,6 +2177,21 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			logger.Info("Tasks finished with at least one completed; marking Run as Completed", "run", run.Name, "completed", completedCount)
 			err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 				status.Phase = v1alpha1.RunPhaseCompleted
+				if status.Artifacts == "" {
+					if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
+						status.Artifacts = prefix
+					}
+				}
+				status.Summary = ComputeRunSummary(status.Tasks)
+			})
+			return ctrl.Result{}, err
+		}
+		if skippedCount == len(run.Status.Tasks) {
+			msg := fmt.Sprintf("all %d tasks skipped", len(run.Status.Tasks))
+			logger.Info("All tasks skipped; marking Run as Completed", "run", run.Name, "message", msg)
+			err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				status.Phase = v1alpha1.RunPhaseCompleted
+				status.Message = msg
 				if status.Artifacts == "" {
 					if prefix := r.artifactSink().ArtifactPrefix(run.Spec.Repo.Commit); prefix != "" {
 						status.Artifacts = prefix
@@ -2240,7 +2295,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 	// Clean up lingering sandboxes for tasks already in a terminal phase (e.g. from a crash before sandbox deletion)
 	for _, t := range run.Status.Tasks {
-		if t.Phase == v1alpha1.TaskPhaseCompleted || t.Phase == v1alpha1.TaskPhaseFailed {
+		if t.Phase == v1alpha1.TaskPhaseCompleted || t.Phase == v1alpha1.TaskPhaseFailed || t.Phase == v1alpha1.TaskPhaseSkipped {
 			if sb, ok := sandboxesByTask[t.ID]; ok {
 				sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
 				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
@@ -3815,6 +3870,8 @@ func FormatRatesSummary(tasks []v1alpha1.TaskStatus, maxLen int) string {
 			parts = append(parts, fmt.Sprintf("%s=running", t.ID))
 		} else if t.Phase == v1alpha1.TaskPhasePending {
 			parts = append(parts, fmt.Sprintf("%s=pending", t.ID))
+		} else if t.Phase == v1alpha1.TaskPhaseSkipped {
+			parts = append(parts, fmt.Sprintf("%s=skipped", t.ID))
 		}
 	}
 	res := strings.Join(parts, ", ")
