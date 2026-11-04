@@ -395,6 +395,63 @@ spec:
 		}
 	})
 
+	t.Run("SupportAgentSandboxTaskCompleted", func(t *testing.T) {
+		supportAgentCommit := harness.GetGitServerCommit("eval-runner-sandbox", "support-agent.git")
+		runName := "support-agent-sandbox-run"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    commit: %s
+  model: mockllm/model
+  tasks:
+  - triage/sandbox_eval
+`, runName, supportAgentCommit)
+
+		harness.KubectlApplyContent(manifest)
+
+		// Wait for Run to complete
+		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		if run.Status.Discovery == nil {
+			t.Fatalf("Expected status.discovery to be populated")
+		}
+		if run.Status.Discovery.TaskCount != 4 {
+			t.Fatalf("Expected 4 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+		}
+
+		if len(run.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
+		}
+
+		task := run.Status.Tasks[0]
+		if task.ID != "triage/sandbox_eval" {
+			t.Errorf("Expected task ID triage/sandbox_eval, got %s", task.ID)
+		}
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task Completed, got %s (msg: %s)", task.Phase, task.Message)
+		}
+		if task.Samples != 1 {
+			t.Errorf("Expected 1 sample, got %d", task.Samples)
+		}
+		if task.Successes != 1 {
+			t.Errorf("Expected 1 success, got %d", task.Successes)
+		}
+		if task.SamplesDone != 1 {
+			t.Errorf("Expected samplesDone 1, got %d", task.SamplesDone)
+		}
+		if task.MeanScore == nil || *task.MeanScore != 1.0 {
+			t.Errorf("Expected meanScore 1.0, got %v", task.MeanScore)
+		}
+
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+	})
+
 	t.Run("WebhookSmoke", func(t *testing.T) {
 		runWebhookSmoke(t, harness)
 	})
