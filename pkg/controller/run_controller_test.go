@@ -4031,6 +4031,529 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Errorf("Expected exact failure message %q, got %q", expectedFailureMessage, task.Message)
 		}
 	})
+
+	t.Run("CommandTimeoutSeconds_Explicit", func(t *testing.T) {
+		timeoutSeconds := 600
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:             "task-explicit-timeout",
+					Spec:           "eval.py@timeout",
+					Image:          "custom-task-image:v1",
+					Command:        []string{"run-eval"},
+					Resources:      []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					TimeoutSeconds: &timeoutSeconds,
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-explicit-timeout",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		var capturedCommandDeadline time.Time
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				if deadline, ok := ctx.Deadline(); ok {
+					capturedCommandDeadline = deadline
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				if path == "/out/results.json" {
+					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
+				}
+				return nil, fmt.Errorf("file %q not found", path)
+			},
+		}
+
+		sink := artifacts.NewInMemorySink()
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+			ArtifactSink:     sink,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-explicit-timeout"}}
+
+		// Turn 1: create sandbox
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.60",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		launchTime := time.Now()
+		// Turn 2: execute task
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		if capturedCommandDeadline.IsZero() {
+			t.Fatalf("Expected command context to have a deadline")
+		}
+		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
+		if remainingSeconds < 580 || remainingSeconds > 610 {
+			t.Errorf("Expected command deadline to be about 600s after launch, got %f seconds", remainingSeconds)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task Completed, got %s (msg: %s)", task.Phase, task.Message)
+		}
+		if task.TimeoutSeconds != 600 {
+			t.Errorf("Expected task.TimeoutSeconds == 600, got %d", task.TimeoutSeconds)
+		}
+	})
+
+	t.Run("CommandTimeoutSeconds_DefaultUnset", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-default-timeout",
+					Spec:      "eval.py@default",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-default-timeout",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		var capturedCommandDeadline time.Time
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				if deadline, ok := ctx.Deadline(); ok {
+					capturedCommandDeadline = deadline
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				if path == "/out/results.json" {
+					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
+				}
+				return nil, fmt.Errorf("file %q not found", path)
+			},
+		}
+
+		sink := artifacts.NewInMemorySink()
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:               cl,
+			Scheme:               scheme,
+			SandboxNamespace:     "eval-runner-sandbox",
+			SandboxClient:        fakeClient,
+			ArtifactSink:         sink,
+			ExecutionStepTimeout: 2 * time.Minute,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-default-timeout"}}
+
+		// Turn 1: create sandbox
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.61",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		launchTime := time.Now()
+		// Turn 2: execute task
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		if capturedCommandDeadline.IsZero() {
+			t.Fatalf("Expected command context to have a deadline")
+		}
+		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
+		if remainingSeconds < 110 || remainingSeconds > 130 {
+			t.Errorf("Expected command deadline to be about execution step timeout (120s) after launch, got %f seconds", remainingSeconds)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task Completed, got %s", task.Phase)
+		}
+		if task.TimeoutSeconds != 120 {
+			t.Errorf("Expected task.TimeoutSeconds == 120, got %d", task.TimeoutSeconds)
+		}
+	})
+
+	t.Run("CommandTimeoutSeconds_ExecutionDeadlineWins", func(t *testing.T) {
+		timeoutSeconds := 600
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:             "task-capped-timeout",
+					Spec:           "eval.py@timeout",
+					Image:          "custom-task-image:v1",
+					Command:        []string{"run-eval"},
+					Resources:      []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					TimeoutSeconds: &timeoutSeconds,
+				},
+			},
+		}
+
+		launchTime := time.Now().Truncate(time.Second)
+		deadlineTime := metav1.NewTime(launchTime.Add(300 * time.Second))
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-capped-timeout",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase:             v1alpha1.RunPhaseRunning,
+				ExecutionDeadline: &deadlineTime,
+			},
+		}
+
+		var capturedCommandDeadline time.Time
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				if deadline, ok := ctx.Deadline(); ok {
+					capturedCommandDeadline = deadline
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				if path == "/out/results.json" {
+					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
+				}
+				return nil, fmt.Errorf("file %q not found", path)
+			},
+		}
+
+		sink := artifacts.NewInMemorySink()
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+			ArtifactSink:     sink,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-capped-timeout"}}
+
+		// Turn 1: create sandbox
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.62",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		launchTime = time.Now()
+		// Turn 2: execute task
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		if capturedCommandDeadline.IsZero() {
+			t.Fatalf("Expected command context to have a deadline")
+		}
+		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
+		if remainingSeconds < 280 || remainingSeconds > 310 {
+			t.Errorf("Expected command deadline to be bounded by execution deadline (about 300s), got %f seconds", remainingSeconds)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task Completed, got %s", task.Phase)
+		}
+		if task.TimeoutSeconds != 300 {
+			t.Errorf("Expected task.TimeoutSeconds == 300, got %d", task.TimeoutSeconds)
+		}
+	})
+
+	t.Run("CommandTimeoutSeconds_OutOfRangeFailsTask", func(t *testing.T) {
+		timeoutZero := 0
+		timeoutExcessive := 9000
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:             "task-zero-timeout",
+					Spec:           "eval.py@zero",
+					Image:          "custom-task-image:v1",
+					Command:        []string{"run-eval"},
+					Resources:      []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					TimeoutSeconds: &timeoutZero,
+				},
+				{
+					ID:             "task-excessive-timeout",
+					Spec:           "eval.py@excessive",
+					Image:          "custom-task-image:v1",
+					Command:        []string{"run-eval"},
+					Resources:      []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					TimeoutSeconds: &timeoutExcessive,
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-out-of-range-timeout",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-out-of-range-timeout"}}
+
+		// Turn 1: initialize tasks and reconcile
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		if len(updatedRun.Status.Tasks) != 2 {
+			t.Fatalf("Expected 2 tasks, got %d", len(updatedRun.Status.Tasks))
+		}
+
+		taskZero := updatedRun.Status.Tasks[0]
+		if taskZero.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected taskZero Phase to be Failed, got %s", taskZero.Phase)
+		}
+		expectedZeroMessage := "invalid timeoutSeconds 0: must be between 1 and 7200"
+		if taskZero.Message != expectedZeroMessage {
+			t.Errorf("Expected taskZero message %q, got %q", expectedZeroMessage, taskZero.Message)
+		}
+
+		taskExcessive := updatedRun.Status.Tasks[1]
+		if taskExcessive.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected taskExcessive Phase to be Failed, got %s", taskExcessive.Phase)
+		}
+		expectedExcessiveMessage := "invalid timeoutSeconds 9000: must be between 1 and 7200"
+		if taskExcessive.Message != expectedExcessiveMessage {
+			t.Errorf("Expected taskExcessive message %q, got %q", expectedExcessiveMessage, taskExcessive.Message)
+		}
+	})
+
+	t.Run("CommandTimeout_FailureMessageShape", func(t *testing.T) {
+		timeoutSeconds := 5
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:             "task-timed-out",
+					Spec:           "eval.py@timeout",
+					Image:          "custom-task-image:v1",
+					Command:        []string{"run-eval"},
+					Resources:      []v1alpha1.ManifestResource{{Type: "sandbox"}},
+					TimeoutSeconds: &timeoutSeconds,
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-timed-out-command",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				// Simulate context timeout
+				return nil, context.DeadlineExceeded
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-timed-out-command"}}
+
+		// Turn 1: create sandbox
+		_, _ = reconciler.Reconcile(t.Context(), req)
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.63",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		// Turn 2: execute task
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		expectedTimeoutMessage := "step task command failed: sandbox did not report completion"
+		if task.Message != expectedTimeoutMessage {
+			t.Errorf("Expected task message %q, got %q", expectedTimeoutMessage, task.Message)
+		}
+	})
 }
 
 func TestRunControllerWritesTaskCohort(t *testing.T) {

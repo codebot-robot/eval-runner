@@ -603,6 +603,23 @@ func (r *RunReconciler) executionStepTimeout() time.Duration {
 	return DefaultExecutionStepTimeout
 }
 
+func (r *RunReconciler) effectiveTaskCommandTimeoutSeconds(task v1alpha1.ManifestTask, executionDeadline *metav1.Time) int {
+	stepTimeout := r.executionStepTimeout()
+	if task.TimeoutSeconds != nil {
+		stepTimeout = time.Duration(*task.TimeoutSeconds) * time.Second
+	}
+	if executionDeadline != nil {
+		remaining := executionDeadline.Sub(r.now())
+		if remaining < stepTimeout {
+			if remaining <= 0 {
+				return 0
+			}
+			return int(remaining.Round(time.Second).Seconds())
+		}
+	}
+	return int(stepTimeout.Round(time.Second).Seconds())
+}
+
 func (r *RunReconciler) watchdogInterval() time.Duration {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
@@ -2066,6 +2083,18 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				continue
 			}
 
+			if task.TimeoutSeconds != nil && (*task.TimeoutSeconds < v1alpha1.MinTaskTimeoutSeconds || *task.TimeoutSeconds > v1alpha1.MaxTaskTimeoutSeconds) {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:             taskID,
+					Cohort:         cohort,
+					Phase:          v1alpha1.TaskPhaseFailed,
+					Message:        fmt.Sprintf("invalid timeoutSeconds %d: must be between %d and %d", *task.TimeoutSeconds, v1alpha1.MinTaskTimeoutSeconds, v1alpha1.MaxTaskTimeoutSeconds),
+					SampleRange:    effRange,
+					SamplesPlanned: planned,
+				})
+				continue
+			}
+
 			statuses = append(statuses, v1alpha1.TaskStatus{
 				ID:             taskID,
 				Cohort:         cohort,
@@ -2086,6 +2115,18 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 					Cohort:         cohort,
 					Phase:          v1alpha1.TaskPhaseFailed,
 					Message:        "resources not supported yet",
+					SampleRange:    effRange,
+					SamplesPlanned: planned,
+				})
+				continue
+			}
+
+			if task.TimeoutSeconds != nil && (*task.TimeoutSeconds < v1alpha1.MinTaskTimeoutSeconds || *task.TimeoutSeconds > v1alpha1.MaxTaskTimeoutSeconds) {
+				statuses = append(statuses, v1alpha1.TaskStatus{
+					ID:             task.ID,
+					Cohort:         cohort,
+					Phase:          v1alpha1.TaskPhaseFailed,
+					Message:        fmt.Sprintf("invalid timeoutSeconds %d: must be between %d and %d", *task.TimeoutSeconds, v1alpha1.MinTaskTimeoutSeconds, v1alpha1.MaxTaskTimeoutSeconds),
 					SampleRange:    effRange,
 					SamplesPlanned: planned,
 				})
@@ -2392,6 +2433,14 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 								if s == tid {
 									status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
 									status.Tasks[i].StartedAt = &now
+									if manifest != nil {
+										for _, manifestTask := range manifest.Tasks {
+											if manifestTask.ID == tid && isSandboxOnlyTask(manifestTask) {
+												status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
+												break
+											}
+										}
+									}
 									break
 								}
 							}
@@ -2412,6 +2461,14 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 							if s == tid {
 								run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
 								run.Status.Tasks[i].StartedAt = &now
+								if manifest != nil {
+									for _, manifestTask := range manifest.Tasks {
+										if manifestTask.ID == tid && isSandboxOnlyTask(manifestTask) {
+											run.Status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
+											break
+										}
+									}
+								}
 								break
 							}
 						}
@@ -2801,6 +2858,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				} else if status.Tasks[i].SampleRange == nil {
 					status.Tasks[i].SampleRange = EffectiveSampleRange(run.Spec)
 				}
+				if res.timeoutSeconds > 0 {
+					status.Tasks[i].TimeoutSeconds = res.timeoutSeconds
+				}
 			}
 		}
 		status.Summary = ComputeRunSummary(status.Tasks)
@@ -2855,6 +2915,7 @@ type taskExecutionResult struct {
 	message         string
 	logPath         string
 	sampleRange     *v1alpha1.SampleRange
+	timeoutSeconds  int
 }
 
 func (r *RunReconciler) handleStepExecutionFailure(
@@ -3328,6 +3389,17 @@ func (r *RunReconciler) executeSandboxTask(
 ) taskExecutionResult {
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 
+	if targetTask.TimeoutSeconds != nil && (*targetTask.TimeoutSeconds < v1alpha1.MinTaskTimeoutSeconds || *targetTask.TimeoutSeconds > v1alpha1.MaxTaskTimeoutSeconds) {
+		message := fmt.Sprintf("invalid timeoutSeconds %d: must be between %d and %d", *targetTask.TimeoutSeconds, v1alpha1.MinTaskTimeoutSeconds, v1alpha1.MaxTaskTimeoutSeconds)
+		logger.Error(errors.New(message), "Task invalid timeoutSeconds", "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     message,
+			sampleRange: effRange,
+		}
+	}
+
 	// Ensure /workspace/out exists
 	mkdirContext, mkdirCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	if _, mkdirErr := executeSandboxWithTimeout(mkdirContext, sbClient, sandboxclient.ProcessConfig{
@@ -3342,13 +3414,21 @@ func (r *RunReconciler) executeSandboxTask(
 	if run.Spec.Repo.URL == "" {
 		cwd = "/workspace"
 	}
-	commandContext, commandCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	taskCommandTimeout := r.executionStepTimeout()
+	if targetTask.TimeoutSeconds != nil {
+		taskCommandTimeout = time.Duration(*targetTask.TimeoutSeconds) * time.Second
+	}
+	effectiveTimeoutSeconds := r.effectiveTaskCommandTimeoutSeconds(targetTask, run.Status.ExecutionDeadline)
+	logger.Info("Starting task step 1: task command", "command", targetTask.Command, "cwd", cwd, "timeoutSeconds", effectiveTimeoutSeconds)
+
+	commandContext, commandCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, taskCommandTimeout)
 	commandResult, commandErr := executeSandboxWithTimeout(commandContext, sbClient, sandboxclient.ProcessConfig{
 		Command: targetTask.Command,
 		Cwd:     cwd,
 	})
 	commandCancel()
 	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
+		failedResult.timeoutSeconds = effectiveTimeoutSeconds
 		return failedResult
 	}
 
@@ -3357,6 +3437,7 @@ func (r *RunReconciler) executeSandboxTask(
 	resultsBytes, readErr := readFileWithTimeout(readContext, sbClient, "/out/results.json")
 	readCancel()
 	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "results file", readContext, readErr, taskID, effRange); failed {
+		failedResult.timeoutSeconds = effectiveTimeoutSeconds
 		return failedResult
 	}
 
@@ -3366,20 +3447,22 @@ func (r *RunReconciler) executeSandboxTask(
 		message := fmt.Sprintf("failed to parse results file: %v", parseErr)
 		logger.Error(parseErr, "Task step parse results failed", "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     message,
-			sampleRange: effRange,
+			taskID:         taskID,
+			phase:          v1alpha1.TaskPhaseFailed,
+			message:        message,
+			sampleRange:    effRange,
+			timeoutSeconds: effectiveTimeoutSeconds,
 		}
 	}
 	if aggregates.Samples == 0 {
 		message := "no scored samples"
 		logger.Error(errors.New(message), "Task completed without scored samples", "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     message,
-			sampleRange: effRange,
+			taskID:         taskID,
+			phase:          v1alpha1.TaskPhaseFailed,
+			message:        message,
+			sampleRange:    effRange,
+			timeoutSeconds: effectiveTimeoutSeconds,
 		}
 	}
 
@@ -3423,16 +3506,18 @@ func (r *RunReconciler) executeSandboxTask(
 		message := fmt.Sprintf("failed to store artifact: %v", storeErr)
 		logger.Error(storeErr, "Failed to store artifact in sink", "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     message,
-			sampleRange: effRange,
+			taskID:         taskID,
+			phase:          v1alpha1.TaskPhaseFailed,
+			message:        message,
+			sampleRange:    effRange,
+			timeoutSeconds: effectiveTimeoutSeconds,
 		}
 	}
 
 	return taskExecutionResult{
 		taskID:          taskID,
 		phase:           v1alpha1.TaskPhaseCompleted,
+		timeoutSeconds:  effectiveTimeoutSeconds,
 		samples:         aggregates.Samples,
 		successes:       aggregates.Successes,
 		meanScore:       aggregates.MeanScore,
