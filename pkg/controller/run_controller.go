@@ -2859,6 +2859,7 @@ type taskExecutionResult struct {
 
 func (r *RunReconciler) handleStepExecutionFailure(
 	ctx context.Context,
+	runName string,
 	stepName string,
 	stepContext context.Context,
 	stepResult *sandboxclient.ExecuteResult,
@@ -2869,7 +2870,7 @@ func (r *RunReconciler) handleStepExecutionFailure(
 	if stepError == nil && stepResult != nil && stepResult.ExitCode == 0 {
 		return taskExecutionResult{}, false
 	}
-	logger := log.FromContext(ctx).WithValues("task", taskID)
+	logger := log.FromContext(ctx).WithValues("task", taskID, "run", runName)
 	if isStepTimeout(stepContext, stepError) {
 		message := fmt.Sprintf("step %s failed: sandbox did not report completion", stepName)
 		logger.Error(errors.New(message), fmt.Sprintf("Task step %s timed out", stepName), "task", taskID)
@@ -2927,6 +2928,7 @@ func (r *RunReconciler) handleStepExecutionFailure(
 
 func (r *RunReconciler) handleStepReadFailure(
 	ctx context.Context,
+	runName string,
 	stepName string,
 	readContext context.Context,
 	readError error,
@@ -2936,7 +2938,7 @@ func (r *RunReconciler) handleStepReadFailure(
 	if readError == nil {
 		return taskExecutionResult{}, false
 	}
-	logger := log.FromContext(ctx).WithValues("task", taskID)
+	logger := log.FromContext(ctx).WithValues("task", taskID, "run", runName)
 	if isStepTimeout(readContext, readError) {
 		message := fmt.Sprintf("step read %s failed: sandbox did not report completion", stepName)
 		logger.Error(errors.New(message), fmt.Sprintf("Task step read %s timed out", stepName), "task", taskID)
@@ -3063,7 +3065,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
 	})
 	cloneCancel()
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, "git clone", cloneCtx, cloneRes, cloneErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git clone", cloneCtx, cloneRes, cloneErr, taskID, effRange); failed {
 		return failedResult
 	}
 
@@ -3075,7 +3077,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		Cwd:     "repo",
 	})
 	checkoutCancel()
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, "git checkout", checkoutCtx, checkoutRes, checkoutErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git checkout", checkoutCtx, checkoutRes, checkoutErr, taskID, effRange); failed {
 		return failedResult
 	}
 
@@ -3108,7 +3110,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	close(stopPoller)
 	pollerWg.Wait()
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, "inspect eval", inspectCtx, inspectRes, inspectErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "inspect eval", inspectCtx, inspectRes, inspectErr, taskID, effRange); failed {
 		return failedResult
 	}
 
@@ -3163,7 +3165,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	readCtx, readCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	logBytes, readErr := readFileWithTimeout(readCtx, sbClient, filepath.Join("/out", logFilename))
 	readCancel()
-	if failedResult, failed := r.handleStepReadFailure(ctx, "inspect log", readCtx, readErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "inspect log", readCtx, readErr, taskID, effRange); failed {
 		return failedResult
 	}
 
@@ -3346,7 +3348,7 @@ func (r *RunReconciler) executeSandboxTask(
 		Cwd:     cwd,
 	})
 	commandCancel()
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
 		return failedResult
 	}
 
@@ -3354,29 +3356,29 @@ func (r *RunReconciler) executeSandboxTask(
 	readContext, readCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	resultsBytes, readErr := readFileWithTimeout(readContext, sbClient, "/out/results.json")
 	readCancel()
-	if failedResult, failed := r.handleStepReadFailure(ctx, "results file", readContext, readErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "results file", readContext, readErr, taskID, effRange); failed {
 		return failedResult
 	}
 
 	// Step 3: Parse and validate results
 	aggregates, sampleSummaries, parseErr := artifacts.ParseSandboxResults(resultsBytes)
 	if parseErr != nil {
-		msg := fmt.Sprintf("failed to parse results file: %v", parseErr)
+		message := fmt.Sprintf("failed to parse results file: %v", parseErr)
 		logger.Error(parseErr, "Task step parse results failed", "task", taskID)
 		return taskExecutionResult{
 			taskID:      taskID,
 			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
+			message:     message,
 			sampleRange: effRange,
 		}
 	}
 	if aggregates.Samples == 0 {
-		msg := "no scored samples"
-		logger.Error(errors.New(msg), "Task completed without scored samples", "task", taskID)
+		message := "no scored samples"
+		logger.Error(errors.New(message), "Task completed without scored samples", "task", taskID)
 		return taskExecutionResult{
 			taskID:      taskID,
 			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
+			message:     message,
 			sampleRange: effRange,
 		}
 	}
@@ -3418,12 +3420,12 @@ func (r *RunReconciler) executeSandboxTask(
 	logPath, storeErr := artifacts.StoreArtifactWithTimeout(sinkContext, r.artifactSink(), meta, "results.json", resultsBytes)
 	sinkCancel()
 	if storeErr != nil {
-		msg := fmt.Sprintf("failed to store artifact: %v", storeErr)
+		message := fmt.Sprintf("failed to store artifact: %v", storeErr)
 		logger.Error(storeErr, "Failed to store artifact in sink", "task", taskID)
 		return taskExecutionResult{
 			taskID:      taskID,
 			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
+			message:     message,
 			sampleRange: effRange,
 		}
 	}

@@ -22,19 +22,19 @@ import (
 func TestParseSandboxResults_ValidExample(t *testing.T) {
 	data := []byte(`{"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true, "score": 1.0, "message": ""}]}`)
 
-	agg, summaries, err := ParseSandboxResults(data)
+	aggregate, summaries, err := ParseSandboxResults(data)
 	if err != nil {
 		t.Fatalf("ParseSandboxResults failed: %v", err)
 	}
 
-	if agg.Samples != 1 {
-		t.Errorf("Expected 1 sample, got %d", agg.Samples)
+	if aggregate.Samples != 1 {
+		t.Errorf("Expected 1 sample, got %d", aggregate.Samples)
 	}
-	if agg.Successes != 1 {
-		t.Errorf("Expected 1 success, got %d", agg.Successes)
+	if aggregate.Successes != 1 {
+		t.Errorf("Expected 1 success, got %d", aggregate.Successes)
 	}
-	if agg.MeanScore == nil || *agg.MeanScore != 1.0 {
-		t.Errorf("Expected meanScore 1.0, got %v", agg.MeanScore)
+	if aggregate.MeanScore == nil || *aggregate.MeanScore != 1.0 {
+		t.Errorf("Expected meanScore 1.0, got %v", aggregate.MeanScore)
 	}
 	if len(summaries) != 1 {
 		t.Fatalf("Expected 1 summary, got %d", len(summaries))
@@ -60,20 +60,20 @@ func TestParseSandboxResults_MultipleSamplesWithDefaults(t *testing.T) {
 		]
 	}`)
 
-	agg, summaries, err := ParseSandboxResults(data)
+	aggregate, summaries, err := ParseSandboxResults(data)
 	if err != nil {
 		t.Fatalf("ParseSandboxResults failed: %v", err)
 	}
 
-	if agg.Samples != 3 {
-		t.Errorf("Expected 3 samples, got %d", agg.Samples)
+	if aggregate.Samples != 3 {
+		t.Errorf("Expected 3 samples, got %d", aggregate.Samples)
 	}
-	if agg.Successes != 1 {
-		t.Errorf("Expected 1 success, got %d", agg.Successes)
+	if aggregate.Successes != 1 {
+		t.Errorf("Expected 1 success, got %d", aggregate.Successes)
 	}
 	// Scores are 1.0, 0.0, 0.5 -> sum 1.5 -> mean 0.5
-	if agg.MeanScore == nil || *agg.MeanScore != 0.5 {
-		t.Errorf("Expected meanScore 0.5, got %v", agg.MeanScore)
+	if aggregate.MeanScore == nil || *aggregate.MeanScore != 0.5 {
+		t.Errorf("Expected meanScore 0.5, got %v", aggregate.MeanScore)
 	}
 
 	expectedStatuses := []string{"pass", "fail", "fail"}

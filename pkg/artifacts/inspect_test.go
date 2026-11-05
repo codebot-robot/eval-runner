@@ -329,6 +329,33 @@ func TestParseInspectSampleScores(t *testing.T) {
 			t.Errorf("Expected score 1 to be ID '120000000#2' and score 0.5, got %+v", scores[1])
 		}
 	})
+
+	t.Run("ResultsJSON", func(t *testing.T) {
+		raw := `{
+			"schemaVersion": 1,
+			"samples": [
+				{"id": "sample-pass", "passed": true},
+				{"id": "sample-fail", "passed": false},
+				{"id": "sample-score", "passed": false, "score": 0.75}
+			]
+		}`
+		sampleScores, err := ParseInspectSampleScores([]byte(raw))
+		if err != nil {
+			t.Fatalf("ParseInspectSampleScores failed: %v", err)
+		}
+		if len(sampleScores) != 3 {
+			t.Fatalf("Expected 3 scores, got %d", len(sampleScores))
+		}
+		if sampleScores[0].ID != "sample-pass" || sampleScores[0].Score != 1.0 {
+			t.Errorf("Expected sample 0 to have ID 'sample-pass' and score 1.0, got %+v", sampleScores[0])
+		}
+		if sampleScores[1].ID != "sample-fail" || sampleScores[1].Score != 0.0 {
+			t.Errorf("Expected sample 1 to have ID 'sample-fail' and score 0.0, got %+v", sampleScores[1])
+		}
+		if sampleScores[2].ID != "sample-score" || sampleScores[2].Score != 0.75 {
+			t.Errorf("Expected sample 2 to have ID 'sample-score' and score 0.75, got %+v", sampleScores[2])
+		}
+	})
 }
 
 func TestExtractInspectTokens(t *testing.T) {
