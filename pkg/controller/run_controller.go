@@ -3653,13 +3653,8 @@ func taskPodFailureMessage(pod *corev1.Pod) string {
 	if pod == nil {
 		return "task pod failed"
 	}
-	for _, containerStatus := range pod.Status.InitContainerStatuses {
-		if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
-			if message := strings.TrimSpace(containerStatus.State.Terminated.Message); message != "" {
-				return message
-			}
-			return fmt.Sprintf("container %s failed with exit code %d", containerStatus.Name, containerStatus.State.Terminated.ExitCode)
-		}
+	if initFailureMessage := taskPodInitFailureMessage(pod); initFailureMessage != "" {
+		return initFailureMessage
 	}
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
