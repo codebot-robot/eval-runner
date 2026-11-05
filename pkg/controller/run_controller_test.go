@@ -4276,8 +4276,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		launchTime := time.Now().Truncate(time.Second)
-		deadlineTime := metav1.NewTime(launchTime.Add(300 * time.Second))
+		fixedNow := time.Now().Truncate(time.Second)
+		deadlineTime := metav1.NewTime(fixedNow.Add(300 * time.Second))
 		run := &v1alpha1.Run{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-run-capped-timeout",
@@ -4325,6 +4325,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			SandboxNamespace: "eval-runner-sandbox",
 			SandboxClient:    fakeClient,
 			ArtifactSink:     sink,
+			Now:              func() time.Time { return fixedNow },
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -4353,7 +4354,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		launchTime = time.Now()
+		launchTime := time.Now()
 		// Turn 2: execute task
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {

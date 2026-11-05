@@ -2041,6 +2041,16 @@ func isSandboxOnlyTask(task v1alpha1.ManifestTask) bool {
 	return true
 }
 
+// validateTaskTimeoutSeconds validates that the task's timeoutSeconds is within the allowed range [1, 7200].
+func validateTaskTimeoutSeconds(task v1alpha1.ManifestTask) error {
+	if task.TimeoutSeconds != nil {
+		if *task.TimeoutSeconds < v1alpha1.MinTaskTimeoutSeconds || *task.TimeoutSeconds > v1alpha1.MaxTaskTimeoutSeconds {
+			return fmt.Errorf("invalid timeoutSeconds %d: must be between %d and %d", *task.TimeoutSeconds, v1alpha1.MinTaskTimeoutSeconds, v1alpha1.MaxTaskTimeoutSeconds)
+		}
+	}
+	return nil
+}
+
 func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha1.Manifest) []v1alpha1.TaskStatus {
 	var statuses []v1alpha1.TaskStatus
 	manifestMap := make(map[string]v1alpha1.ManifestTask)
@@ -2083,16 +2093,18 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				continue
 			}
 
-			if task.TimeoutSeconds != nil && (*task.TimeoutSeconds < v1alpha1.MinTaskTimeoutSeconds || *task.TimeoutSeconds > v1alpha1.MaxTaskTimeoutSeconds) {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:             taskID,
-					Cohort:         cohort,
-					Phase:          v1alpha1.TaskPhaseFailed,
-					Message:        fmt.Sprintf("invalid timeoutSeconds %d: must be between %d and %d", *task.TimeoutSeconds, v1alpha1.MinTaskTimeoutSeconds, v1alpha1.MaxTaskTimeoutSeconds),
-					SampleRange:    effRange,
-					SamplesPlanned: planned,
-				})
-				continue
+			if isSandboxOnlyTask(task) {
+				if err := validateTaskTimeoutSeconds(task); err != nil {
+					statuses = append(statuses, v1alpha1.TaskStatus{
+						ID:             taskID,
+						Cohort:         cohort,
+						Phase:          v1alpha1.TaskPhaseFailed,
+						Message:        err.Error(),
+						SampleRange:    effRange,
+						SamplesPlanned: planned,
+					})
+					continue
+				}
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
@@ -2121,16 +2133,18 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				continue
 			}
 
-			if task.TimeoutSeconds != nil && (*task.TimeoutSeconds < v1alpha1.MinTaskTimeoutSeconds || *task.TimeoutSeconds > v1alpha1.MaxTaskTimeoutSeconds) {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:             task.ID,
-					Cohort:         cohort,
-					Phase:          v1alpha1.TaskPhaseFailed,
-					Message:        fmt.Sprintf("invalid timeoutSeconds %d: must be between %d and %d", *task.TimeoutSeconds, v1alpha1.MinTaskTimeoutSeconds, v1alpha1.MaxTaskTimeoutSeconds),
-					SampleRange:    effRange,
-					SamplesPlanned: planned,
-				})
-				continue
+			if isSandboxOnlyTask(task) {
+				if err := validateTaskTimeoutSeconds(task); err != nil {
+					statuses = append(statuses, v1alpha1.TaskStatus{
+						ID:             task.ID,
+						Cohort:         cohort,
+						Phase:          v1alpha1.TaskPhaseFailed,
+						Message:        err.Error(),
+						SampleRange:    effRange,
+						SamplesPlanned: planned,
+					})
+					continue
+				}
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
@@ -3389,13 +3403,12 @@ func (r *RunReconciler) executeSandboxTask(
 ) taskExecutionResult {
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 
-	if targetTask.TimeoutSeconds != nil && (*targetTask.TimeoutSeconds < v1alpha1.MinTaskTimeoutSeconds || *targetTask.TimeoutSeconds > v1alpha1.MaxTaskTimeoutSeconds) {
-		message := fmt.Sprintf("invalid timeoutSeconds %d: must be between %d and %d", *targetTask.TimeoutSeconds, v1alpha1.MinTaskTimeoutSeconds, v1alpha1.MaxTaskTimeoutSeconds)
-		logger.Error(errors.New(message), "Task invalid timeoutSeconds", "task", taskID)
+	if err := validateTaskTimeoutSeconds(targetTask); err != nil {
+		logger.Error(err, "Task invalid timeoutSeconds", "task", taskID)
 		return taskExecutionResult{
 			taskID:      taskID,
 			phase:       v1alpha1.TaskPhaseFailed,
-			message:     message,
+			message:     err.Error(),
 			sampleRange: effRange,
 		}
 	}
