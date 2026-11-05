@@ -104,6 +104,49 @@ func TestParseManifest_ImageCommandSandbox(t *testing.T) {
 	}
 }
 
+func TestParseManifest_TimeoutSeconds(t *testing.T) {
+	manifestJSON := []byte(`{
+		"tasks": [
+			{
+				"id": "triage/timeout_explicit",
+				"spec": "eval.py@timeout",
+				"image": "my-sandbox-image:v1",
+				"command": ["run-eval"],
+				"resources": [{ "type": "sandbox" }],
+				"timeoutSeconds": 600
+			},
+			{
+				"id": "triage/timeout_default",
+				"spec": "eval.py@default",
+				"image": "my-sandbox-image:v1",
+				"command": ["run-eval"],
+				"resources": [{ "type": "sandbox" }]
+			}
+		]
+	}`)
+
+	manifest, err := ParseManifest(manifestJSON)
+	if err != nil {
+		t.Fatalf("ParseManifest failed: %v", err)
+	}
+	if len(manifest.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks, got %d", len(manifest.Tasks))
+	}
+
+	explicitTask := manifest.Tasks[0]
+	if explicitTask.TimeoutSeconds == nil {
+		t.Fatalf("Expected explicitTask.TimeoutSeconds to be non-nil")
+	}
+	if *explicitTask.TimeoutSeconds != 600 {
+		t.Errorf("explicitTask.TimeoutSeconds = %d, want 600", *explicitTask.TimeoutSeconds)
+	}
+
+	defaultTask := manifest.Tasks[1]
+	if defaultTask.TimeoutSeconds != nil {
+		t.Errorf("defaultTask.TimeoutSeconds = %v, want nil (default unset)", *defaultTask.TimeoutSeconds)
+	}
+}
+
 func TestValidateManifest(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -184,6 +184,10 @@ type TaskStatus struct {
 	// +kubebuilder:validation:MaxLength=64
 	// +optional
 	Cohort string `json:"cohort,omitempty"`
+
+	// TimeoutSeconds records the effective execution timeout applied to the task command in seconds.
+	// +optional
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 }
 
 // TaskLatency records latency percentiles (in seconds) aggregated across evaluated samples.
@@ -347,11 +351,24 @@ type ManifestTask struct {
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([-_a-zA-Z0-9.]*[a-zA-Z0-9])?$`
 	// +optional
 	Cohort string `json:"cohort,omitempty"`
+
+	// TimeoutSeconds is the maximum duration in seconds the task command may run in the sandbox.
+	// When unset, the controller's default execution step timeout is used.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=7200
+	// +optional
+	TimeoutSeconds *int `json:"timeoutSeconds,omitempty"`
 }
 
 const (
 	// DefaultCohort is the fallback cohort assigned to tasks that do not declare one.
 	DefaultCohort = "default"
+
+	// MinTaskTimeoutSeconds is the minimum allowed timeout in seconds for a task command.
+	MinTaskTimeoutSeconds = 1
+
+	// MaxTaskTimeoutSeconds is the maximum allowed timeout in seconds for a task command (2 hours).
+	MaxTaskTimeoutSeconds = 7200
 )
 
 // Manifest is the parsed output of .evals/list.
