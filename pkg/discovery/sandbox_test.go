@@ -483,8 +483,8 @@ func TestBuildTaskSandbox_ImageSelection(t *testing.T) {
 		Image:             "my-task-image:v1",
 		AuthTokenDigest:   digest,
 	})
-	if img := sandboxCustom.Spec.PodTemplate.Spec.Containers[0].Image; img != "my-task-image:v1" {
-		t.Errorf("Expected task image 'my-task-image:v1', got %q", img)
+	if image := sandboxCustom.Spec.PodTemplate.Spec.Containers[0].Image; image != "my-task-image:v1" {
+		t.Errorf("Expected task image 'my-task-image:v1', got %q", image)
 	}
 	if len(sandboxCustom.Spec.PodTemplate.Spec.InitContainers) != 1 {
 		t.Fatalf("Expected 1 init container, got %d", len(sandboxCustom.Spec.PodTemplate.Spec.InitContainers))
@@ -499,8 +499,8 @@ func TestBuildTaskSandbox_ImageSelection(t *testing.T) {
 		SampleRunnerImage: "sample-runner:custom",
 		AuthTokenDigest:   digest,
 	})
-	if img := sandboxDefaultSample.Spec.PodTemplate.Spec.Containers[0].Image; img != "sample-runner:custom" {
-		t.Errorf("Expected sample runner image 'sample-runner:custom', got %q", img)
+	if image := sandboxDefaultSample.Spec.PodTemplate.Spec.Containers[0].Image; image != "sample-runner:custom" {
+		t.Errorf("Expected sample runner image 'sample-runner:custom', got %q", image)
 	}
 	if initContainerName := sandboxDefaultSample.Spec.PodTemplate.Spec.InitContainers[0].Name; initContainerName != SandboxdInitContainerName {
 		t.Errorf("Expected init container name %q, got %q", SandboxdInitContainerName, initContainerName)
@@ -511,8 +511,8 @@ func TestBuildTaskSandbox_ImageSelection(t *testing.T) {
 		Namespace:       "eval-runner-sandbox",
 		AuthTokenDigest: digest,
 	})
-	if img := sandboxBuiltinDefault.Spec.PodTemplate.Spec.Containers[0].Image; img != DefaultSampleRunnerImage {
-		t.Errorf("Expected fallback image %q, got %q", DefaultSampleRunnerImage, img)
+	if image := sandboxBuiltinDefault.Spec.PodTemplate.Spec.Containers[0].Image; image != DefaultSampleRunnerImage {
+		t.Errorf("Expected fallback image %q, got %q", DefaultSampleRunnerImage, image)
 	}
 }
 
