@@ -2347,24 +2347,28 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				}
 
 				taskImage := ""
+				isSandboxTask := false
 				if manifest != nil {
 					for _, manifestTask := range manifest.Tasks {
 						if manifestTask.ID == taskID {
 							taskImage = manifestTask.Image
+							isSandboxTask = isSandboxOnlyTask(manifestTask)
 							break
 						}
 					}
 				}
 
 				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
-					Namespace:         r.sandboxNamespace(),
-					SampleRunnerImage: r.sampleRunnerImage(),
-					Image:             taskImage,
-					ModelSecret:       effectiveModelSecret,
-					AuthTokenDigest:   discovery.AuthTokenDigest(token),
-					ServerCertSecret:  pki.ServerSecretName(sbName),
-					CAConfigMap:       pki.DefaultCAConfigMapName,
-					SandboxdImage:     r.sandboxdImage(),
+					Namespace:          r.sandboxNamespace(),
+					SampleRunnerImage:  r.sampleRunnerImage(),
+					Image:              taskImage,
+					ModelSecret:        effectiveModelSecret,
+					AuthTokenDigest:    discovery.AuthTokenDigest(token),
+					ServerCertSecret:   pki.ServerSecretName(sbName),
+					CAConfigMap:        pki.DefaultCAConfigMapName,
+					SandboxdImage:      r.sandboxdImage(),
+					CloneRepo:          isSandboxTask && run.Spec.Repo.URL != "",
+					StepTimeoutSeconds: int(r.executionStepTimeout().Seconds()),
 				})
 				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
 					logger.Error(err, "Failed to create task sandbox", "task", taskID)
@@ -2585,11 +2589,15 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 
 		if pod.Status.Phase == corev1.PodFailed {
-			terminalFailures[t.ID] = "task pod failed"
+			terminalFailures[t.ID] = taskPodFailureMessage(&pod)
 			continue
 		}
 		if pod.Status.Phase == corev1.PodSucceeded {
 			terminalFailures[t.ID] = "task pod succeeded unexpectedly before execution"
+			continue
+		}
+		if failureMessage := taskPodInitFailureMessage(&pod); failureMessage != "" {
+			terminalFailures[t.ID] = failureMessage
 			continue
 		}
 
@@ -3327,11 +3335,15 @@ func (r *RunReconciler) executeSandboxTask(
 	}
 	mkdirCancel()
 
-	// Step 1: Execute task command in sandbox with working directory /workspace
+	// Step 1: Execute task command in sandbox with working directory repo
+	cwd := "repo"
+	if run.Spec.Repo.URL == "" {
+		cwd = "/workspace"
+	}
 	commandContext, commandCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	commandResult, commandErr := executeSandboxWithTimeout(commandContext, sbClient, sandboxclient.ProcessConfig{
 		Command: targetTask.Command,
-		Cwd:     "/workspace",
+		Cwd:     cwd,
 	})
 	commandCancel()
 	if failedResult, failed := r.handleStepExecutionFailure(ctx, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
@@ -3635,6 +3647,44 @@ func isPodReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+func taskPodFailureMessage(pod *corev1.Pod) string {
+	if pod == nil {
+		return "task pod failed"
+	}
+	for _, containerStatus := range pod.Status.InitContainerStatuses {
+		if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
+			if message := strings.TrimSpace(containerStatus.State.Terminated.Message); message != "" {
+				return message
+			}
+			return fmt.Sprintf("container %s failed with exit code %d", containerStatus.Name, containerStatus.State.Terminated.ExitCode)
+		}
+	}
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
+			if message := strings.TrimSpace(containerStatus.State.Terminated.Message); message != "" {
+				return message
+			}
+			return fmt.Sprintf("container %s failed with exit code %d", containerStatus.Name, containerStatus.State.Terminated.ExitCode)
+		}
+	}
+	return "task pod failed"
+}
+
+func taskPodInitFailureMessage(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, containerStatus := range pod.Status.InitContainerStatuses {
+		if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
+			if message := strings.TrimSpace(containerStatus.State.Terminated.Message); message != "" {
+				return message
+			}
+			return fmt.Sprintf("container %s failed with exit code %d", containerStatus.Name, containerStatus.State.Terminated.ExitCode)
+		}
+	}
+	return ""
 }
 
 func formatPodDeadlineMessage(pod *corev1.Pod) string {

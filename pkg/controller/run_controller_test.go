@@ -3516,8 +3516,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		if len(executedCommand) != 2 || executedCommand[0] != "run-eval" || executedCommand[1] != "--all" {
 			t.Errorf("Expected executed command [run-eval --all], got %v", executedCommand)
 		}
-		if executedCwd != "/workspace" {
-			t.Errorf("Expected working directory '/workspace', got %q", executedCwd)
+		if executedCwd != "repo" {
+			t.Errorf("Expected working directory 'repo', got %q", executedCwd)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -3821,6 +3821,214 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		if !strings.Contains(task.Message, "failed to parse results file") || !strings.Contains(task.Message, "unsupported results schemaVersion 99") {
 			t.Errorf("Expected unsupported schemaVersion message, got %q", task.Message)
+		}
+	})
+
+	t.Run("FailedCheckoutFailsTask", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-failed-checkout",
+					Spec:      "eval.py@checkout",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-sandbox-failed-checkout",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "badcommit"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-sandbox-failed-checkout"}}
+
+		// Turn 1: create sandbox
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		if len(sbList.Items) != 1 {
+			t.Fatalf("Expected 1 sandbox created, got %d", len(sbList.Items))
+		}
+
+		// Create pod for sandbox with failed checkout init container
+		expectedFailureMessage := "step git checkout failed with exit code 1: error: pathspec 'badcommit' did not match any file(s) known to git"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodFailed,
+				InitContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: discovery.SandboxdInitContainerName,
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{
+								ExitCode: 0,
+							},
+						},
+					},
+					{
+						Name: discovery.RepoCheckoutInitContainerName,
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{
+								ExitCode: 1,
+								Message:  expectedFailureMessage,
+							},
+						},
+					},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		// Turn 2: reconcile discovers pod failure and marks task Failed
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		if len(updatedRun.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task status, got %d", len(updatedRun.Status.Tasks))
+		}
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		if !strings.Contains(task.Message, "step git checkout failed") {
+			t.Errorf("Expected task message to contain 'step git checkout failed', got %q", task.Message)
+		}
+		if task.Message != expectedFailureMessage {
+			t.Errorf("Expected exact failure message %q, got %q", expectedFailureMessage, task.Message)
+		}
+
+		// Verify task sandbox was cleaned up
+		var postSBList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &postSBList, client.InNamespace("eval-runner-sandbox"))
+		if len(postSBList.Items) != 0 {
+			t.Errorf("Expected sandbox to be deleted on failure, found %d", len(postSBList.Items))
+		}
+	})
+
+	t.Run("FailedCloneFailsTask", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-failed-clone",
+					Spec:      "eval.py@clone",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-sandbox-failed-clone",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://invalid-repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-sandbox-failed-clone"}}
+
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+
+		expectedFailureMessage := "step git clone failed with exit code 128: fatal: repository 'git://invalid-repo' not found"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodFailed,
+				InitContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: discovery.RepoCheckoutInitContainerName,
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{
+								ExitCode: 128,
+								Message:  expectedFailureMessage,
+							},
+						},
+					},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		if !strings.Contains(task.Message, "step git clone failed") {
+			t.Errorf("Expected task message to contain 'step git clone failed', got %q", task.Message)
+		}
+		if task.Message != expectedFailureMessage {
+			t.Errorf("Expected exact failure message %q, got %q", expectedFailureMessage, task.Message)
 		}
 	})
 }
