@@ -157,3 +157,162 @@ func TestParseSandboxResults_RejectsEmptyID(t *testing.T) {
 		t.Errorf("Expected empty id error, got: %v", err)
 	}
 }
+
+func TestClassifyArtifact(t *testing.T) {
+	testCases := []struct {
+		name         string
+		data         []byte
+		expectedKind ArtifactKind
+	}{
+		{
+			name:         "EmptyBytes",
+			data:         []byte(""),
+			expectedKind: ArtifactKindUnknown,
+		},
+		{
+			name:         "WhitespaceOnly",
+			data:         []byte("   \n\t  "),
+			expectedKind: ArtifactKindUnknown,
+		},
+		{
+			name:         "ResultsFileSchemaVersion1",
+			data:         []byte(`{"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true}]}`),
+			expectedKind: ArtifactKindResultsFile,
+		},
+		{
+			name:         "ResultsFileSchemaVersion2",
+			data:         []byte(`{"schemaVersion": 2, "samples": []}`),
+			expectedKind: ArtifactKindResultsFile,
+		},
+		{
+			name:         "InspectLogVersion2",
+			data:         []byte(`{"version": 2, "eval": {"task": "test"}, "samples": []}`),
+			expectedKind: ArtifactKindInspectLog,
+		},
+		{
+			name:         "GenericJSONWithoutSchemaVersion",
+			data:         []byte(`{"name": "eval", "samples": []}`),
+			expectedKind: ArtifactKindInspectLog,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			actualKind := ClassifyArtifact(testCase.data)
+			if actualKind != testCase.expectedKind {
+				t.Errorf("expected %q, got %q", testCase.expectedKind, actualKind)
+			}
+		})
+	}
+}
+
+func TestParseResultsSamples_Valid(t *testing.T) {
+	data := []byte(`{
+		"schemaVersion": 1,
+		"samples": [
+			{"id": "sample-1", "passed": true, "score": 1.0, "message": "all tests passed"},
+			{"id": "sample-2", "passed": false, "message": "assertion error"},
+			{"id": "sample-3", "passed": true},
+			{"id": "sample-4", "passed": false, "score": 0.5, "message": "partial credit"}
+		]
+	}`)
+
+	parsedSamples, err := ParseResultsSamples(data)
+	if err != nil {
+		t.Fatalf("ParseResultsSamples failed: %v", err)
+	}
+
+	if len(parsedSamples) != 4 {
+		t.Fatalf("expected 4 samples, got %d", len(parsedSamples))
+	}
+
+	// sample-1
+	if parsedSamples[0].ID != "sample-1" || parsedSamples[0].Status != "pass" || !parsedSamples[0].HasScore ||
+		parsedSamples[0].Score == nil || *parsedSamples[0].Score != 1.0 || parsedSamples[0].ScoreStr != "1.00" ||
+		parsedSamples[0].Explanation != "all tests passed" {
+		t.Errorf("sample-1 mismatch: %+v", parsedSamples[0])
+	}
+
+	// sample-2 (default score for failed sample is 0.0)
+	if parsedSamples[1].ID != "sample-2" || parsedSamples[1].Status != "fail" || !parsedSamples[1].HasScore ||
+		parsedSamples[1].Score == nil || *parsedSamples[1].Score != 0.0 || parsedSamples[1].ScoreStr != "0.00" ||
+		parsedSamples[1].Explanation != "assertion error" {
+		t.Errorf("sample-2 mismatch: %+v", parsedSamples[1])
+	}
+
+	// sample-3 (default score for passed sample is 1.0, empty message)
+	if parsedSamples[2].ID != "sample-3" || parsedSamples[2].Status != "pass" || !parsedSamples[2].HasScore ||
+		parsedSamples[2].Score == nil || *parsedSamples[2].Score != 1.0 || parsedSamples[2].ScoreStr != "1.00" ||
+		parsedSamples[2].Explanation != "" {
+		t.Errorf("sample-3 mismatch: %+v", parsedSamples[2])
+	}
+
+	// sample-4 (explicit score 0.5 with passed: false)
+	if parsedSamples[3].ID != "sample-4" || parsedSamples[3].Status != "fail" || !parsedSamples[3].HasScore ||
+		parsedSamples[3].Score == nil || *parsedSamples[3].Score != 0.5 || parsedSamples[3].ScoreStr != "0.50" ||
+		parsedSamples[3].Explanation != "partial credit" {
+		t.Errorf("sample-4 mismatch: %+v", parsedSamples[3])
+	}
+}
+
+func TestParseResultsSamples_EmptySamples(t *testing.T) {
+	data := []byte(`{"schemaVersion": 1, "samples": []}`)
+	parsedSamples, err := ParseResultsSamples(data)
+	if err != nil {
+		t.Fatalf("expected nil error for empty samples, got %v", err)
+	}
+	if len(parsedSamples) != 0 {
+		t.Errorf("expected 0 samples, got %d", len(parsedSamples))
+	}
+}
+
+func TestParseResultsSamples_ValidationErrors(t *testing.T) {
+	testCases := []struct {
+		name          string
+		data          []byte
+		expectedError string
+	}{
+		{
+			name:          "EmptyData",
+			data:          []byte("   "),
+			expectedError: "empty results data",
+		},
+		{
+			name:          "MalformedJSON",
+			data:          []byte("{invalid"),
+			expectedError: "failed to unmarshal results JSON",
+		},
+		{
+			name:          "WrongSchemaVersion",
+			data:          []byte(`{"schemaVersion": 2, "samples": [{"id": "sample-1", "passed": true}]}`),
+			expectedError: "unsupported results schemaVersion 2",
+		},
+		{
+			name:          "EmptyID",
+			data:          []byte(`{"schemaVersion": 1, "samples": [{"id": "", "passed": true}]}`),
+			expectedError: "empty id",
+		},
+		{
+			name:          "MissingPassed",
+			data:          []byte(`{"schemaVersion": 1, "samples": [{"id": "sample-1", "score": 1.0}]}`),
+			expectedError: "missing required 'passed' field",
+		},
+		{
+			name:          "OutOfRangeScore",
+			data:          []byte(`{"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true, "score": 1.5}]}`),
+			expectedError: "out of range [0, 1]",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := ParseResultsSamples(testCase.data)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", testCase.expectedError)
+			}
+			if !strings.Contains(err.Error(), testCase.expectedError) {
+				t.Errorf("expected error containing %q, got: %v", testCase.expectedError, err)
+			}
+		})
+	}
+}
