@@ -90,6 +90,7 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 | `tasks[].spec` | Framework-specific task reference. For Inspect: `file.py@task_fn`. |
 | `tasks[].image` | Container image the task runs in. Empty means the shared sample-runner image. |
 | `tasks[].command` | Argv run inside the sandbox. Empty means the default `inspect eval` invocation. |
+| `tasks[].timeoutSeconds` | Optional integer duration in seconds for the sandbox task `command`. When unset, defaults to the controller execution step timeout (2 minutes). Values must be in `[1, 7200]`. Capped by the Run's `ExecutionDeadline` (the shorter wins). Out-of-range values fail the task at discovery. |
 | `tasks[].resources[]` | Declarative resource needs (see §3.2). Resource type `sandbox` means run this task in its own sandbox from `image`, harness inside, no cluster credentials, reporting results via `/out/results.json`. Empty list means zero privilege. |
 | `tasks[].images[]` | Which built images the task needs available (e.g. pre-loaded into a kind cluster). |
 
@@ -97,7 +98,7 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 
 ### 2.2.1 Sandbox task results contract (`/out/results.json`)
 
-Tasks declaring resource type `sandbox` run their declared `command` inside their own container image (or the default runner image) with the evaluated repository checked out at the Run's commit. The command runs with the repository root as the working directory and writes sample evaluation results to `/out/results.json` (currently public repository URLs are supported for checkout; private repository credentials are not injected):
+Tasks declaring resource type `sandbox` run their declared `command` inside their own container image (or the default runner image) with the evaluated repository checked out at the Run's commit. The command runs with the repository root as the working directory and writes sample evaluation results to `/out/results.json` (currently public repository URLs are supported for checkout; private repository credentials are not injected). The command executes bounded by `timeoutSeconds` (default 2 minutes, maximum 7200 seconds / 2 hours), capped by the Run's `ExecutionDeadline` (the shorter duration wins). Clone, checkout, results read, and artifact store retain standard step timeouts. A timed-out task command fails the task with the standard step timeout message (`step task command failed: sandbox did not report completion`).
 
 ```json
 {"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true, "score": 1.0, "message": ""}]}
