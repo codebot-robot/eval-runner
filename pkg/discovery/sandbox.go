@@ -178,7 +178,6 @@ type TaskSandboxConfig struct {
 	ServerCertSecret   string
 	CAConfigMap        string
 	SandboxdImage      string
-	GitCheckoutImage   string
 	CloneRepo          bool
 	StepTimeoutSeconds int
 }
@@ -299,10 +298,6 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 	}
 
 	if cfg.CloneRepo && run.Spec.Repo.URL != "" {
-		gitCheckoutImage := cfg.GitCheckoutImage
-		if gitCheckoutImage == "" {
-			gitCheckoutImage = GitCheckoutImage
-		}
 		var checkoutEnv []corev1.EnvVar
 		checkoutEnv = append(checkoutEnv, corev1.EnvVar{
 			Name:  "REPO_URL",
@@ -328,26 +323,32 @@ else
     timeout_prefix=""
 fi
 
-if ! output=$($timeout_prefix git clone -- "$REPO_URL" /workspace/repo 2>&1); then
-    status=$?
+workspace_root="${WORKSPACE_ROOT:-/workspace}"
+repo_dir="$workspace_root/repo"
+termination_log="${TERMINATION_LOG:-/dev/termination-log}"
+
+output=$($timeout_prefix git clone -- "$REPO_URL" "$repo_dir" 2>&1)
+status=$?
+if [ "$status" -ne 0 ]; then
     if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
-        echo "step git clone failed: sandbox did not report completion" > /dev/termination-log 2>/dev/null || true
+        echo "step git clone failed: sandbox did not report completion" > "$termination_log" 2>/dev/null || true
     else
         tail_output=$(echo "$output" | tail -n 20)
-        echo "step git clone failed with exit code $status: $tail_output" > /dev/termination-log 2>/dev/null || true
+        echo "step git clone failed with exit code $status: $tail_output" > "$termination_log" 2>/dev/null || true
     fi
     echo "$output" >&2
     exit "$status"
 fi
 
 if [ -n "$REPO_COMMIT" ]; then
-    if ! output=$($timeout_prefix git -C /workspace/repo checkout "$REPO_COMMIT" 2>&1); then
-        status=$?
+    output=$($timeout_prefix git -C "$repo_dir" checkout "$REPO_COMMIT" 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ]; then
         if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
-            echo "step git checkout failed: sandbox did not report completion" > /dev/termination-log 2>/dev/null || true
+            echo "step git checkout failed: sandbox did not report completion" > "$termination_log" 2>/dev/null || true
         else
             tail_output=$(echo "$output" | tail -n 20)
-            echo "step git checkout failed with exit code $status: $tail_output" > /dev/termination-log 2>/dev/null || true
+            echo "step git checkout failed with exit code $status: $tail_output" > "$termination_log" 2>/dev/null || true
         fi
         echo "$output" >&2
         exit "$status"
@@ -357,7 +358,7 @@ fi
 
 		initContainers = append(initContainers, corev1.Container{
 			Name:    RepoCheckoutInitContainerName,
-			Image:   gitCheckoutImage,
+			Image:   GitCheckoutImage,
 			Command: []string{"/bin/sh", "-c", checkoutScript},
 			Env:     checkoutEnv,
 			SecurityContext: &corev1.SecurityContext{
