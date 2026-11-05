@@ -108,3 +108,99 @@ func ParseSandboxResults(data []byte) (*TaskAggregates, []TaskSampleSummary, err
 
 	return aggregate, summaries, nil
 }
+
+// ArtifactKind classifies the format of a stored task evaluation artifact.
+type ArtifactKind string
+
+const (
+	// ArtifactKindInspectLog identifies an Inspect JSON evaluation log.
+	ArtifactKindInspectLog ArtifactKind = "inspect"
+	// ArtifactKindResultsFile identifies a sandbox task results.json file.
+	ArtifactKindResultsFile ArtifactKind = "results"
+	// ArtifactKindUnknown identifies an unrecognized or empty artifact format.
+	ArtifactKindUnknown ArtifactKind = "unknown"
+)
+
+// ClassifyArtifact inspects raw artifact data to determine whether it is a sandbox task
+// results.json artifact or an Inspect evaluation log.
+//
+// Sandbox tasks write /out/results.json conforming to ResultsFile, which declares a
+// top-level numeric schemaVersion field (currently schemaVersion: 1). Inspect evaluation
+// logs declare a top-level numeric version field instead (e.g. version: 2) and do not
+// contain a schemaVersion field.
+func ClassifyArtifact(data []byte) ArtifactKind {
+	trimmed := strings.TrimSpace(string(data))
+	if len(trimmed) == 0 {
+		return ArtifactKindUnknown
+	}
+
+	var header struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &header); err == nil && header.SchemaVersion > 0 {
+		return ArtifactKindResultsFile
+	}
+
+	return ArtifactKindInspectLog
+}
+
+// ParseResultsSamples parses raw JSON bytes from a sandbox task results.json file,
+// validates the schema, and returns ParsedInspectSample records for UI display.
+func ParseResultsSamples(data []byte) ([]ParsedInspectSample, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, fmt.Errorf("empty results data")
+	}
+
+	var resultsFile ResultsFile
+	if err := json.Unmarshal(data, &resultsFile); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal results JSON: %w", err)
+	}
+
+	if resultsFile.SchemaVersion != 1 {
+		return nil, fmt.Errorf("unsupported results schemaVersion %d, expected 1", resultsFile.SchemaVersion)
+	}
+
+	if len(resultsFile.Samples) == 0 {
+		return nil, nil
+	}
+
+	parsedSamples := make([]ParsedInspectSample, len(resultsFile.Samples))
+	for index, sample := range resultsFile.Samples {
+		if strings.TrimSpace(sample.ID) == "" {
+			return nil, fmt.Errorf("sample at index %d has empty id", index)
+		}
+		if sample.Passed == nil {
+			return nil, fmt.Errorf("sample %q missing required 'passed' field", sample.ID)
+		}
+		if sample.Score != nil && (*sample.Score < 0.0 || *sample.Score > 1.0) {
+			return nil, fmt.Errorf("sample %q score %f out of range [0, 1]", sample.ID, *sample.Score)
+		}
+
+		status := "fail"
+		if *sample.Passed {
+			status = "pass"
+		}
+
+		var scoreValue float64
+		if sample.Score != nil {
+			scoreValue = *sample.Score
+		} else if *sample.Passed {
+			scoreValue = 1.0
+		} else {
+			scoreValue = 0.0
+		}
+
+		scoreString := fmt.Sprintf("%.2f", scoreValue)
+
+		parsedSamples[index] = ParsedInspectSample{
+			ID:          sample.ID,
+			Status:      status,
+			Score:       &scoreValue,
+			HasScore:    true,
+			ScoreStr:    scoreString,
+			Explanation: sample.Message,
+		}
+	}
+
+	return parsedSamples, nil
+}

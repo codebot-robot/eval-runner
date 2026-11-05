@@ -560,14 +560,21 @@ func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 		return nil, fmt.Errorf("empty log data")
 	}
 
-	if _, summaries, err := ParseSandboxResults(data); err == nil && len(summaries) > 0 {
+	if ClassifyArtifact(data) == ArtifactKindResultsFile {
+		_, summaries, err := ParseSandboxResults(data)
+		if err != nil {
+			return nil, err
+		}
+		if len(summaries) == 0 {
+			return nil, nil
+		}
 		sampleScores := make([]stats.SampleScore, len(summaries))
-		for i, summary := range summaries {
+		for index, summary := range summaries {
 			score := 0.0
 			if summary.Score != nil {
 				score = *summary.Score
 			}
-			sampleScores[i] = stats.SampleScore{
+			sampleScores[index] = stats.SampleScore{
 				ID:    summary.ID,
 				Score: score,
 			}

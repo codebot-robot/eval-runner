@@ -2291,6 +2291,29 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		t.Fatalf("failed to store artifact: %v", err)
 	}
 
+	sandboxTaskID := "sandbox/eval"
+	sandboxResults := []byte(`{
+		"schemaVersion": 1,
+		"samples": [
+			{"id": "sample-sb-1", "passed": true, "score": 1.0, "message": "all assertions succeeded"},
+			{"id": "sample-sb-2", "passed": false, "score": 0.0, "message": "assertion error: expected 42"}
+		]
+	}`)
+	sandboxMeta := artifacts.RunMetadata{
+		TaskID:      sandboxTaskID,
+		Commit:      commit,
+		Model:       "gemini-2.5-pro",
+		SampleCount: 2,
+		Successes:   1,
+		MeanScore:   &meanScore,
+		StartedAt:   &now,
+		FinishedAt:  &now,
+	}
+	sandboxLogURI, err := sink.StoreArtifact(t.Context(), sandboxMeta, "results.json", sandboxResults)
+	if err != nil {
+		t.Fatalf("failed to store sandbox artifact: %v", err)
+	}
+
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sample-run",
@@ -2310,6 +2333,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 					ID:      taskID,
 					Phase:   v1alpha1.TaskPhaseCompleted,
 					LogPath: logURI,
+				},
+				{
+					ID:      sandboxTaskID,
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: sandboxLogURI,
 				},
 				{
 					ID:    "task/no-log",
@@ -2374,6 +2402,54 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 
 		normalizedBody := strings.ReplaceAll(body, baseDir, "/tmp/eval-runner-sink")
 		assertGolden(t, "task_samples.golden.html", normalizedBody)
+	})
+
+	t.Run("SamplesList_ResultsFile_Success", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/sandbox%2Feval/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		for _, expected := range []string{
+			"sample-sb-1",
+			"sample-sb-2",
+			"1.00",
+			"0.00",
+			"chip-good",
+			"chip-bad",
+			"all assertions succeeded",
+			"assertion error: expected 42",
+		} {
+			if !strings.Contains(body, expected) {
+				t.Errorf("expected samples list to contain %q, got body:\n%s", expected, body)
+			}
+		}
+	})
+
+	t.Run("SampleTranscript_ResultsFile_Success", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/sandbox%2Feval/samples/sample-sb-1", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+
+		body := w.Body.String()
+		for _, expected := range []string{
+			"sample-sb-1",
+			"PASS",
+			"all assertions succeeded",
+			"No transcript events recorded for this sample.",
+		} {
+			if !strings.Contains(body, expected) {
+				t.Errorf("expected sample transcript to contain %q, got body:\n%s", expected, body)
+			}
+		}
 	})
 
 	t.Run("SampleTranscript_FailSample", func(t *testing.T) {

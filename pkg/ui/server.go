@@ -3524,7 +3524,14 @@ func (s *Server) loadInspectSamples(ctx context.Context, logPath string) ([]arti
 		return nil, inspectFailureUnavailable, err
 	}
 
-	samples, parseErr := artifacts.ParseInspectSamples(data)
+	var samples []artifacts.ParsedInspectSample
+	var parseErr error
+	switch artifacts.ClassifyArtifact(data) {
+	case artifacts.ArtifactKindResultsFile:
+		samples, parseErr = artifacts.ParseResultsSamples(data)
+	default:
+		samples, parseErr = artifacts.ParseInspectSamples(data)
+	}
 	if parseErr != nil {
 		if s.cache != nil {
 			s.cache.set(logPath, int64(len(data)), nil, parseErr)
