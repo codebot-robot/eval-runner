@@ -475,6 +475,10 @@ spec:
                       description: Successes is the number of samples with score ==
                         1 (for binary scorers).
                       type: integer
+                    timeoutSeconds:
+                      description: TimeoutSeconds records the effective execution
+                        timeout applied to the task command in seconds.
+                      type: integer
                     tokens:
                       description: Tokens is the token usage breakdown consumed for
                         this task, when present in Inspect logs.
