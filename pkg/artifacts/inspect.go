@@ -551,25 +551,26 @@ func formatArgValue(v any) string {
 // ParseInspectSampleScores extracts per-sample scores from Inspect JSON log bytes,
 // matching the primary scorer selection used in ParseInspectLog.
 // Each sample score preserves the sample ID as a string.
+//
+// It also accepts sandbox task results.json files so callers (such as comparison
+// controllers and check-run reporters) can extract sample scores uniformly across
+// Inspect and custom sandbox tasks without format-branching at every call site.
 func ParseInspectSampleScores(data []byte) ([]stats.SampleScore, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return nil, fmt.Errorf("empty log data")
 	}
 
-	var results ResultsFile
-	if err := json.Unmarshal(data, &results); err == nil && results.SchemaVersion == 1 && len(results.Samples) > 0 {
-		var sampleScores []stats.SampleScore
-		for _, s := range results.Samples {
+	if _, summaries, err := ParseSandboxResults(data); err == nil && len(summaries) > 0 {
+		sampleScores := make([]stats.SampleScore, len(summaries))
+		for i, summary := range summaries {
 			score := 0.0
-			if s.Score != nil {
-				score = *s.Score
-			} else if s.Passed != nil && *s.Passed {
-				score = 1.0
+			if summary.Score != nil {
+				score = *summary.Score
 			}
-			sampleScores = append(sampleScores, stats.SampleScore{
-				ID:    s.ID,
+			sampleScores[i] = stats.SampleScore{
+				ID:    summary.ID,
 				Score: score,
-			})
+			}
 		}
 		return sampleScores, nil
 	}
