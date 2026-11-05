@@ -2054,17 +2054,7 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				continue
 			}
 
-			if isSandboxOnlyTask(task) {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:      taskID,
-					Cohort:  cohort,
-					Phase:   v1alpha1.TaskPhaseSkipped,
-					Message: "per-sample sandboxes are not supported by this controller yet",
-				})
-				continue
-			}
-
-			if len(task.Resources) > 0 {
+			if len(task.Resources) > 0 && !isSandboxOnlyTask(task) {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             taskID,
 					Cohort:         cohort,
@@ -2090,17 +2080,7 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 			if cohort == "" {
 				cohort = v1alpha1.DefaultCohort
 			}
-			if isSandboxOnlyTask(task) {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:      task.ID,
-					Cohort:  cohort,
-					Phase:   v1alpha1.TaskPhaseSkipped,
-					Message: "per-sample sandboxes are not supported by this controller yet",
-				})
-				continue
-			}
-
-			if len(task.Resources) > 0 {
+			if len(task.Resources) > 0 && !isSandboxOnlyTask(task) {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             task.ID,
 					Cohort:         cohort,
@@ -2366,9 +2346,20 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					continue
 				}
 
+				taskImage := ""
+				if manifest != nil {
+					for _, manifestTask := range manifest.Tasks {
+						if manifestTask.ID == taskID {
+							taskImage = manifestTask.Image
+							break
+						}
+					}
+				}
+
 				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
 					Namespace:         r.sandboxNamespace(),
 					SampleRunnerImage: r.sampleRunnerImage(),
+					Image:             taskImage,
 					ModelSecret:       effectiveModelSecret,
 					AuthTokenDigest:   discovery.AuthTokenDigest(token),
 					ServerCertSecret:  pki.ServerSecretName(sbName),
@@ -2858,6 +2849,106 @@ type taskExecutionResult struct {
 	sampleRange     *v1alpha1.SampleRange
 }
 
+func (r *RunReconciler) handleStepExecutionFailure(
+	ctx context.Context,
+	stepName string,
+	stepContext context.Context,
+	stepResult *sandboxclient.ExecuteResult,
+	stepError error,
+	taskID string,
+	sampleRange *v1alpha1.SampleRange,
+) (taskExecutionResult, bool) {
+	if stepError == nil && stepResult != nil && stepResult.ExitCode == 0 {
+		return taskExecutionResult{}, false
+	}
+	logger := log.FromContext(ctx).WithValues("task", taskID)
+	if isStepTimeout(stepContext, stepError) {
+		message := fmt.Sprintf("step %s failed: sandbox did not report completion", stepName)
+		logger.Error(errors.New(message), fmt.Sprintf("Task step %s timed out", stepName), "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     message,
+			sampleRange: sampleRange,
+		}, true
+	}
+	if status.Code(stepError) == codes.Unauthenticated {
+		message := fmt.Sprintf("step %s failed: unauthenticated: %v", stepName, stepError)
+		logger.Error(stepError, fmt.Sprintf("Task step %s failed", stepName), "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     message,
+			sampleRange: sampleRange,
+		}, true
+	}
+	var stderr string
+	var exitCode int
+	if stepResult != nil {
+		stderr = stepResult.Stderr
+		exitCode = stepResult.ExitCode
+	}
+	tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
+	prefix := fmt.Sprintf("step %s failed", stepName)
+	var message string
+	if stepResult != nil && stepResult.ExitCode != 0 {
+		if tail != "" {
+			message = fmt.Sprintf("%s with exit code %d: %s", prefix, stepResult.ExitCode, tail)
+		} else {
+			message = fmt.Sprintf("%s with exit code %d", prefix, stepResult.ExitCode)
+		}
+	} else if tail != "" {
+		if stepError != nil {
+			message = fmt.Sprintf("%s: %v: %s", prefix, stepError, tail)
+		} else {
+			message = fmt.Sprintf("%s: %s", prefix, tail)
+		}
+	} else if stepError != nil {
+		message = fmt.Sprintf("%s: %v", prefix, stepError)
+	} else {
+		message = prefix
+	}
+	logger.Error(errors.New(message), fmt.Sprintf("Task step %s failed", stepName), "task", taskID, "exitCode", exitCode, "stderr", tail)
+	return taskExecutionResult{
+		taskID:      taskID,
+		phase:       v1alpha1.TaskPhaseFailed,
+		message:     message,
+		sampleRange: sampleRange,
+	}, true
+}
+
+func (r *RunReconciler) handleStepReadFailure(
+	ctx context.Context,
+	stepName string,
+	readContext context.Context,
+	readError error,
+	taskID string,
+	sampleRange *v1alpha1.SampleRange,
+) (taskExecutionResult, bool) {
+	if readError == nil {
+		return taskExecutionResult{}, false
+	}
+	logger := log.FromContext(ctx).WithValues("task", taskID)
+	if isStepTimeout(readContext, readError) {
+		message := fmt.Sprintf("step read %s failed: sandbox did not report completion", stepName)
+		logger.Error(errors.New(message), fmt.Sprintf("Task step read %s timed out", stepName), "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     message,
+			sampleRange: sampleRange,
+		}, true
+	}
+	message := fmt.Sprintf("failed to read %s: %v", stepName, readError)
+	logger.Error(readError, fmt.Sprintf("Task step read %s failed", stepName), "task", taskID)
+	return taskExecutionResult{
+		taskID:      taskID,
+		phase:       v1alpha1.TaskPhaseFailed,
+		message:     message,
+		sampleRange: sampleRange,
+	}, true
+}
+
 func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, taskID string, sb *sandboxv1beta1.Sandbox, pod *corev1.Pod) (res taskExecutionResult) {
 	startTime := r.now()
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
@@ -2944,6 +3035,10 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}()
 
+	if isSandboxOnlyTask(*targetTask) {
+		return r.executeSandboxTask(ctx, run, taskID, sbClient, *targetTask, effRange, startTime)
+	}
+
 	// Ensure /workspace/out exists
 	mkdirCtx, mkdirCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	if _, mkdirErr := executeSandboxWithTimeout(mkdirCtx, sbClient, sandboxclient.ProcessConfig{
@@ -2960,57 +3055,8 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
 	})
 	cloneCancel()
-	if cloneErr != nil || cloneRes == nil || cloneRes.ExitCode != 0 {
-		if isStepTimeout(cloneCtx, cloneErr) {
-			msg := "step git clone failed: sandbox did not report completion"
-			logger.Error(errors.New(msg), "Task step git clone timed out", "task", taskID)
-			return taskExecutionResult{
-				taskID:      taskID,
-				phase:       v1alpha1.TaskPhaseFailed,
-				message:     msg,
-				sampleRange: effRange,
-			}
-		}
-		if status.Code(cloneErr) == codes.Unauthenticated {
-			msg := fmt.Sprintf("step git clone failed: unauthenticated: %v", cloneErr)
-			logger.Error(cloneErr, "Task step git clone failed", "task", taskID)
-			return taskExecutionResult{
-				taskID:  taskID,
-				phase:   v1alpha1.TaskPhaseFailed,
-				message: msg,
-			}
-		}
-		var stderr string
-		var exitCode int
-		if cloneRes != nil {
-			stderr = cloneRes.Stderr
-			exitCode = cloneRes.ExitCode
-		}
-		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		var msg string
-		if cloneRes != nil && cloneRes.ExitCode != 0 {
-			if tail != "" {
-				msg = fmt.Sprintf("step git clone failed with exit code %d: %s", cloneRes.ExitCode, tail)
-			} else {
-				msg = fmt.Sprintf("step git clone failed with exit code %d", cloneRes.ExitCode)
-			}
-		} else if tail != "" {
-			if cloneErr != nil {
-				msg = fmt.Sprintf("step git clone failed: %v: %s", cloneErr, tail)
-			} else {
-				msg = fmt.Sprintf("step git clone failed: %s", tail)
-			}
-		} else if cloneErr != nil {
-			msg = fmt.Sprintf("step git clone failed: %v", cloneErr)
-		} else {
-			msg = "step git clone failed"
-		}
-		logger.Error(errors.New(msg), "Task step git clone failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
-		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: msg,
-		}
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, "git clone", cloneCtx, cloneRes, cloneErr, taskID, effRange); failed {
+		return failedResult
 	}
 
 	// Step 2: Checkout commit
@@ -3021,58 +3067,8 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		Cwd:     "repo",
 	})
 	checkoutCancel()
-	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
-		if isStepTimeout(checkoutCtx, checkoutErr) {
-			msg := "step git checkout failed: sandbox did not report completion"
-			logger.Error(errors.New(msg), "Task step git checkout timed out", "task", taskID)
-			return taskExecutionResult{
-				taskID:      taskID,
-				phase:       v1alpha1.TaskPhaseFailed,
-				message:     msg,
-				sampleRange: effRange,
-			}
-		}
-		if status.Code(checkoutErr) == codes.Unauthenticated {
-			msg := fmt.Sprintf("step git checkout failed: unauthenticated: %v", checkoutErr)
-			logger.Error(checkoutErr, "Task step git checkout failed", "task", taskID)
-			return taskExecutionResult{
-				taskID:  taskID,
-				phase:   v1alpha1.TaskPhaseFailed,
-				message: msg,
-			}
-		}
-		var stderr string
-		var exitCode int
-		if checkoutRes != nil {
-			stderr = checkoutRes.Stderr
-			exitCode = checkoutRes.ExitCode
-		}
-		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		var msg string
-		if checkoutRes != nil && checkoutRes.ExitCode != 0 {
-			if tail != "" {
-				msg = fmt.Sprintf("step git checkout failed with exit code %d: %s", checkoutRes.ExitCode, tail)
-			} else {
-				msg = fmt.Sprintf("step git checkout failed with exit code %d", checkoutRes.ExitCode)
-			}
-		} else if tail != "" {
-			if checkoutErr != nil {
-				msg = fmt.Sprintf("step git checkout failed: %v: %s", checkoutErr, tail)
-			} else {
-				msg = fmt.Sprintf("step git checkout failed: %s", tail)
-			}
-		} else if checkoutErr != nil {
-			msg = fmt.Sprintf("step git checkout failed: %v", checkoutErr)
-		} else {
-			msg = "step git checkout failed"
-		}
-		logger.Error(errors.New(msg), "Task step git checkout failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
-		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
-			sampleRange: effRange,
-		}
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, "git checkout", checkoutCtx, checkoutRes, checkoutErr, taskID, effRange); failed {
+		return failedResult
 	}
 
 	// Step 3: inspect eval
@@ -3104,59 +3100,8 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	close(stopPoller)
 	pollerWg.Wait()
-	if inspectErr != nil || inspectRes == nil || inspectRes.ExitCode != 0 {
-		if isStepTimeout(inspectCtx, inspectErr) {
-			msg := "step inspect eval failed: sandbox did not report completion"
-			logger.Error(errors.New(msg), "Task step inspect eval timed out", "task", taskID)
-			return taskExecutionResult{
-				taskID:      taskID,
-				phase:       v1alpha1.TaskPhaseFailed,
-				message:     msg,
-				sampleRange: effRange,
-			}
-		}
-		if status.Code(inspectErr) == codes.Unauthenticated {
-			msg := fmt.Sprintf("step inspect eval failed: unauthenticated: %v", inspectErr)
-			logger.Error(inspectErr, "Task step inspect eval failed", "task", taskID)
-			return taskExecutionResult{
-				taskID:      taskID,
-				phase:       v1alpha1.TaskPhaseFailed,
-				message:     msg,
-				sampleRange: effRange,
-			}
-		}
-		var stderr string
-		var exitCode int
-		if inspectRes != nil {
-			stderr = inspectRes.Stderr
-			exitCode = inspectRes.ExitCode
-		}
-		tail := extractStderrTail(stderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
-		var msg string
-		if inspectRes != nil && inspectRes.ExitCode != 0 {
-			if tail != "" {
-				msg = fmt.Sprintf("step inspect eval failed with exit code %d: %s", inspectRes.ExitCode, tail)
-			} else {
-				msg = fmt.Sprintf("step inspect eval failed with exit code %d", inspectRes.ExitCode)
-			}
-		} else if tail != "" {
-			if inspectErr != nil {
-				msg = fmt.Sprintf("step inspect eval failed: %v: %s", inspectErr, tail)
-			} else {
-				msg = fmt.Sprintf("step inspect eval failed: %s", tail)
-			}
-		} else if inspectErr != nil {
-			msg = fmt.Sprintf("step inspect eval failed: %v", inspectErr)
-		} else {
-			msg = "step inspect eval failed"
-		}
-		logger.Error(errors.New(msg), "Task step inspect eval failed", "task", taskID, "exitCode", exitCode, "stderr", tail)
-		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
-			sampleRange: effRange,
-		}
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, "inspect eval", inspectCtx, inspectRes, inspectErr, taskID, effRange); failed {
+		return failedResult
 	}
 
 	// Step 4: List /out for json log
@@ -3210,25 +3155,8 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	readCtx, readCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	logBytes, readErr := readFileWithTimeout(readCtx, sbClient, filepath.Join("/out", logFilename))
 	readCancel()
-	if readErr != nil {
-		if isStepTimeout(readCtx, readErr) {
-			msg := "step read inspect log failed: sandbox did not report completion"
-			logger.Error(errors.New(msg), "Task step read inspect log timed out", "task", taskID)
-			return taskExecutionResult{
-				taskID:      taskID,
-				phase:       v1alpha1.TaskPhaseFailed,
-				message:     msg,
-				sampleRange: effRange,
-			}
-		}
-		msg := fmt.Sprintf("failed to read inspect log: %v", readErr)
-		logger.Error(readErr, "Task step read inspect log failed", "task", taskID)
-		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
-			sampleRange: effRange,
-		}
+	if failedResult, failed := r.handleStepReadFailure(ctx, "inspect log", readCtx, readErr, taskID, effRange); failed {
+		return failedResult
 	}
 
 	// Step 5: Parse Inspect log
@@ -3373,6 +3301,132 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		costSource:      costSource,
 		possibleSamples: datasetSamples,
 		samplesDone:     agg.Samples,
+		samplesPlanned:  planned,
+		logPath:         logPath,
+		sampleRange:     effRange,
+	}
+}
+
+func (r *RunReconciler) executeSandboxTask(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	taskID string,
+	sbClient sandboxclient.Client,
+	targetTask v1alpha1.ManifestTask,
+	effRange *v1alpha1.SampleRange,
+	startTime time.Time,
+) taskExecutionResult {
+	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
+
+	// Ensure /workspace/out exists
+	mkdirContext, mkdirCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	if _, mkdirErr := executeSandboxWithTimeout(mkdirContext, sbClient, sandboxclient.ProcessConfig{
+		Command: []string{"mkdir", "-p", "/workspace/out"},
+	}); mkdirErr != nil {
+		logger.V(1).Info("mkdir /workspace/out returned error", "error", mkdirErr)
+	}
+	mkdirCancel()
+
+	// Step 1: Execute task command in sandbox with working directory /workspace
+	commandContext, commandCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	commandResult, commandErr := executeSandboxWithTimeout(commandContext, sbClient, sandboxclient.ProcessConfig{
+		Command: targetTask.Command,
+		Cwd:     "/workspace",
+	})
+	commandCancel()
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
+		return failedResult
+	}
+
+	// Step 2: Read /out/results.json via sandboxd ReadFile
+	readContext, readCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	resultsBytes, readErr := readFileWithTimeout(readContext, sbClient, "/out/results.json")
+	readCancel()
+	if failedResult, failed := r.handleStepReadFailure(ctx, "results file", readContext, readErr, taskID, effRange); failed {
+		return failedResult
+	}
+
+	// Step 3: Parse and validate results
+	aggregates, sampleSummaries, parseErr := artifacts.ParseSandboxResults(resultsBytes)
+	if parseErr != nil {
+		msg := fmt.Sprintf("failed to parse results file: %v", parseErr)
+		logger.Error(parseErr, "Task step parse results failed", "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
+		}
+	}
+	if aggregates.Samples == 0 {
+		msg := "no scored samples"
+		logger.Error(errors.New(msg), "Task completed without scored samples", "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
+		}
+	}
+
+	// Step 4: Compute statistics
+	successRate, successRateCI, successRateSD := computeTaskAggregateStats(aggregates)
+	finishTime := r.now()
+	planned := computeSamplesPlanned(effRange, run.Spec.Limit, aggregates.Samples)
+
+	// Step 5: Store artifact
+	var artifactSampleRange *artifacts.SampleRange
+	if effRange != nil {
+		artifactSampleRange = &artifacts.SampleRange{
+			Start: effRange.Start,
+			End:   effRange.End,
+		}
+	}
+	meta := artifacts.RunMetadata{
+		RunName:           run.Name,
+		RunNamespace:      run.Namespace,
+		ControllerVersion: r.controllerVersion(),
+		TaskID:            taskID,
+		Model:             run.Spec.Model,
+		Commit:            run.Spec.Repo.Commit,
+		Scorer:            "sandbox",
+		SampleCount:       aggregates.Samples,
+		Samples:           sampleSummaries,
+		Successes:         aggregates.Successes,
+		MeanScore:         aggregates.MeanScore,
+		SuccessRate:       successRate,
+		SuccessRateCI:     successRateCI,
+		SuccessRateSD:     successRateSD,
+		StartedAt:         &startTime,
+		FinishedAt:        &finishTime,
+		SampleRange:       artifactSampleRange,
+		PossibleSamples:   aggregates.Samples,
+	}
+	sinkContext, sinkCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
+	logPath, storeErr := artifacts.StoreArtifactWithTimeout(sinkContext, r.artifactSink(), meta, "results.json", resultsBytes)
+	sinkCancel()
+	if storeErr != nil {
+		msg := fmt.Sprintf("failed to store artifact: %v", storeErr)
+		logger.Error(storeErr, "Failed to store artifact in sink", "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     msg,
+			sampleRange: effRange,
+		}
+	}
+
+	return taskExecutionResult{
+		taskID:          taskID,
+		phase:           v1alpha1.TaskPhaseCompleted,
+		samples:         aggregates.Samples,
+		successes:       aggregates.Successes,
+		meanScore:       aggregates.MeanScore,
+		successRate:     successRate,
+		successRateCI:   successRateCI,
+		successRateSD:   successRateSD,
+		possibleSamples: aggregates.Samples,
+		samplesDone:     aggregates.Samples,
 		samplesPlanned:  planned,
 		logPath:         logPath,
 		sampleRange:     effRange,

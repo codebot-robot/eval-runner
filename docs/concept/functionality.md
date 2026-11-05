@@ -90,10 +90,25 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 | `tasks[].spec` | Framework-specific task reference. For Inspect: `file.py@task_fn`. |
 | `tasks[].image` | Container image the task runs in. Empty means the shared sample-runner image. |
 | `tasks[].command` | Argv run inside the sandbox. Empty means the default `inspect eval` invocation. |
-| `tasks[].resources[]` | Declarative resource needs (see §3.2). Resource type `sandbox` means run this task in its own sandbox from `image`, harness inside, no cluster credentials. Empty list means zero privilege. |
+| `tasks[].resources[]` | Declarative resource needs (see §3.2). Resource type `sandbox` means run this task in its own sandbox from `image`, harness inside, no cluster credentials, reporting results via `/out/results.json`. Empty list means zero privilege. |
 | `tasks[].images[]` | Which built images the task needs available (e.g. pre-loaded into a kind cluster). |
 
 **[open]** Fields not shown in the original concept mockup: manifest `version`, `tags` (§8), and per-task `dataset-size` (for planned "N of M possible samples" progress display up front) remain explicitly open. Task cohorts (`tasks[].cohort`, default `"default"`) are decided and implemented in ADR-030. Sample pairing does not require sample IDs or dataset sizes to be declared in the manifest because pairing is performed dynamically by Inspect sample id (`sample.id`) from Inspect evaluation logs (#131, ADR-018), and sample windows are specified via `spec.sampleRange` (ADR-025). Explicit dataset size remains open for calculating total dataset size up front before execution.
+
+### 2.2.1 Sandbox task results contract (`/out/results.json`)
+
+Tasks declaring resource type `sandbox` run their declared `command` inside their own container image (or the default runner image) with working directory `/workspace` and write sample evaluation results to `/out/results.json`:
+
+```json
+{"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true, "score": 1.0, "message": ""}]}
+```
+
+- `schemaVersion` (integer, required): currently `1`.
+- `samples` (array, required): list of sample results.
+  - `id` (string, required): sample identifier.
+  - `passed` (boolean, required): outcome flag.
+  - `score` (float in [0, 1], optional): normalized score. Defaults to 1.0 when `passed` is true, 0.0 otherwise.
+  - `message` (string, optional): failure detail or diagnosis.
 
 ### 2.3 Fallback when `.evals/list` is absent
 

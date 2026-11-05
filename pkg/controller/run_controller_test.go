@@ -3376,11 +3376,8 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 	if tasks1[2].Phase != v1alpha1.TaskPhaseFailed || tasks1[2].Message != "resources not supported yet" {
 		t.Errorf("Expected task-with-resources to be Failed with 'resources not supported yet', got %s (%s)", tasks1[2].Phase, tasks1[2].Message)
 	}
-	if tasks1[3].Phase != v1alpha1.TaskPhaseSkipped || tasks1[3].Message != "per-sample sandboxes are not supported by this controller yet" {
-		t.Errorf("Expected task-sandbox to be Skipped with 'per-sample sandboxes are not supported by this controller yet', got %s (%s)", tasks1[3].Phase, tasks1[3].Message)
-	}
-	if tasks1[3].SampleRange != nil || tasks1[3].SamplesPlanned != 0 {
-		t.Errorf("Expected task-sandbox to have no sample window, got sampleRange=%v planned=%d", tasks1[3].SampleRange, tasks1[3].SamplesPlanned)
+	if tasks1[3].Phase != v1alpha1.TaskPhasePending {
+		t.Errorf("Expected task-sandbox to be Pending, got %s", tasks1[3].Phase)
 	}
 	if tasks1[4].Phase != v1alpha1.TaskPhaseFailed || tasks1[4].Message != "resources not supported yet" {
 		t.Errorf("Expected task-mixed to be Failed with 'resources not supported yet', got %s (%s)", tasks1[4].Phase, tasks1[4].Message)
@@ -3402,97 +3399,430 @@ func TestTaskEligibilityAndFiltering(t *testing.T) {
 	if tasks2[2].ID != "task-with-resources" || tasks2[2].Phase != v1alpha1.TaskPhaseFailed || tasks2[2].Message != "resources not supported yet" {
 		t.Errorf("Expected task-with-resources to be Failed, got %+v", tasks2[2])
 	}
-	if tasks2[3].ID != "task-sandbox" || tasks2[3].Phase != v1alpha1.TaskPhaseSkipped || tasks2[3].Message != "per-sample sandboxes are not supported by this controller yet" {
-		t.Errorf("Expected task-sandbox to be Skipped, got %+v", tasks2[3])
-	}
-	if tasks2[3].SampleRange != nil || tasks2[3].SamplesPlanned != 0 {
-		t.Errorf("Expected task-sandbox to have no sample window, got sampleRange=%v planned=%d", tasks2[3].SampleRange, tasks2[3].SamplesPlanned)
+	if tasks2[3].ID != "task-sandbox" || tasks2[3].Phase != v1alpha1.TaskPhasePending {
+		t.Errorf("Expected task-sandbox to be Pending, got %+v", tasks2[3])
 	}
 	if tasks2[4].ID != "task-mixed" || tasks2[4].Phase != v1alpha1.TaskPhaseFailed || tasks2[4].Message != "resources not supported yet" {
 		t.Errorf("Expected task-mixed to be Failed, got %+v", tasks2[4])
 	}
 }
 
-func TestRunController_AllSandboxManifestCompletes(t *testing.T) {
+func TestRunController_SandboxTaskExecution(t *testing.T) {
 	scheme := setupScheme(t)
 
-	manifest := &v1alpha1.Manifest{
-		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-sandbox-1", Spec: "test.py@1", Image: "sandbox-image:v1", Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}}},
-			{ID: "task-sandbox-2", Spec: "test.py@2", Image: "sandbox-image:v1", Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}}},
-		},
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run-all-sandbox",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.RunSpec{
-			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
-			Model: "mockllm/model",
-		},
-		Status: v1alpha1.RunStatus{
-			Phase: v1alpha1.RunPhaseRunning,
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(run).
-		WithStatusSubresource(run).
-		Build()
-
-	reconciler := &RunReconciler{
-		Client:           cl,
-		Scheme:           scheme,
-		SandboxNamespace: "eval-runner-sandbox",
-	}
-	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-all-sandbox"}}
-
-	// Turn 1: initialize tasks as Skipped
-	_, err := reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("first reconcile error: %v", err)
-	}
-
-	// Turn 2: terminal phase check marks Run as Completed with "all 2 tasks skipped"
-	_, err = reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("second reconcile error: %v", err)
-	}
-
-	var updatedRun v1alpha1.Run
-	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
-		t.Fatalf("get run error: %v", err)
-	}
-
-	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
-		t.Errorf("Expected Run phase Completed, got %s", updatedRun.Status.Phase)
-	}
-	expectedMessage := "all 2 tasks skipped"
-	if updatedRun.Status.Message != expectedMessage {
-		t.Errorf("Expected Run message %q, got %q", expectedMessage, updatedRun.Status.Message)
-	}
-	if len(updatedRun.Status.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks, got %d", len(updatedRun.Status.Tasks))
-	}
-	for _, task := range updatedRun.Status.Tasks {
-		if task.Phase != v1alpha1.TaskPhaseSkipped {
-			t.Errorf("Expected task %s phase Skipped, got %s", task.ID, task.Phase)
+	t.Run("CompletedWithRightSampleCounts", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-sandbox-1",
+					Spec:      "eval.py@1",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval", "--all"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
 		}
-		if task.Message != "per-sample sandboxes are not supported by this controller yet" {
-			t.Errorf("Expected task %s message %q, got %q", task.ID, "per-sample sandboxes are not supported by this controller yet", task.Message)
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-sandbox-complete",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
 		}
-		if task.SampleRange != nil {
-			t.Errorf("Expected task %s sampleRange nil, got %+v", task.ID, task.SampleRange)
+
+		var executedCommand []string
+		var executedCwd string
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				executedCommand = cfg.Command
+				executedCwd = cfg.Cwd
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				if path == "/out/results.json" {
+					return []byte(`{"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true, "score": 1.0, "message": ""}]}`), nil
+				}
+				return nil, fmt.Errorf("file %q not found (HTTP 404)", path)
+			},
 		}
-		if task.SamplesPlanned != 0 {
-			t.Errorf("Expected task %s samplesPlanned 0, got %d", task.ID, task.SamplesPlanned)
+
+		sink := artifacts.NewInMemorySink()
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+			ArtifactSink:     sink,
 		}
-	}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-sandbox-complete"}}
+
+		// Turn 1: initialize task as Pending and create Sandbox
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		if len(sbList.Items) != 1 {
+			t.Fatalf("Expected 1 sandbox created, got %d", len(sbList.Items))
+		}
+		if sandboxImage := sbList.Items[0].Spec.PodTemplate.Spec.Containers[0].Image; sandboxImage != "custom-task-image:v1" {
+			t.Errorf("Expected sandbox container image 'custom-task-image:v1', got %q", sandboxImage)
+		}
+
+		// Create Pod for sandbox
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.50",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		if err := cl.Create(t.Context(), pod); err != nil {
+			t.Fatalf("failed to create pod: %v", err)
+		}
+
+		// Turn 2: execute task
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		if len(executedCommand) != 2 || executedCommand[0] != "run-eval" || executedCommand[1] != "--all" {
+			t.Errorf("Expected executed command [run-eval --all], got %v", executedCommand)
+		}
+		if executedCwd != "/workspace" {
+			t.Errorf("Expected working directory '/workspace', got %q", executedCwd)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("get run error: %v", err)
+		}
+
+		if len(updatedRun.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task status, got %d", len(updatedRun.Status.Tasks))
+		}
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task Completed, got %s (msg: %s)", task.Phase, task.Message)
+		}
+		if task.Samples != 1 {
+			t.Errorf("Expected 1 sample, got %d", task.Samples)
+		}
+		if task.Successes != 1 {
+			t.Errorf("Expected 1 success, got %d", task.Successes)
+		}
+		if task.SamplesDone != 1 {
+			t.Errorf("Expected samplesDone 1, got %d", task.SamplesDone)
+		}
+		if task.MeanScore == nil || *task.MeanScore != 1.0 {
+			t.Errorf("Expected meanScore 1.0, got %v", task.MeanScore)
+		}
+		if task.SuccessRate == nil || *task.SuccessRate != 1.0 {
+			t.Errorf("Expected successRate 1.0, got %v", task.SuccessRate)
+		}
+		if task.LogPath == "" {
+			t.Errorf("Expected non-empty logPath")
+		}
+
+		// Turn 3: marks Run as Completed
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
+		}
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("get run error: %v", err)
+		}
+		if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+			t.Errorf("Expected Run phase Completed, got %s", updatedRun.Status.Phase)
+		}
+	})
+
+	t.Run("NonZeroExitFails", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-fail",
+					Spec:      "eval.py@fail",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-failing-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-sandbox-fail",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 42, Stderr: "fatal: test suite crashed"}, nil
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-sandbox-fail"}}
+
+		// Turn 1: create sandbox
+		_, _ = reconciler.Reconcile(t.Context(), req)
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.51",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		// Turn 2: execute task
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		if !strings.Contains(task.Message, "exit code 42") || !strings.Contains(task.Message, "fatal: test suite crashed") {
+			t.Errorf("Expected failure message with exit code and stderr tail, got %q", task.Message)
+		}
+	})
+
+	t.Run("MissingResultsFileFails", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-missing-results",
+					Spec:      "eval.py@missing",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-missing-results",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				return nil, fmt.Errorf("file %q not found (HTTP 404)", path)
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-missing-results"}}
+
+		_, _ = reconciler.Reconcile(t.Context(), req)
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.52",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		if !strings.Contains(task.Message, "failed to read results file") || !strings.Contains(task.Message, "not found") {
+			t.Errorf("Expected failed to read results file message, got %q", task.Message)
+		}
+	})
+
+	t.Run("WrongSchemaVersionFails", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-wrong-schema",
+					Spec:      "eval.py@wrong",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-wrong-schema",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				return []byte(`{"schemaVersion": 99, "samples": [{"id": "s1", "passed": true}]}`), nil
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-wrong-schema"}}
+
+		_, _ = reconciler.Reconcile(t.Context(), req)
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.53",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_ = cl.Create(t.Context(), pod)
+
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		if !strings.Contains(task.Message, "failed to parse results file") || !strings.Contains(task.Message, "unsupported results schemaVersion 99") {
+			t.Errorf("Expected unsupported schemaVersion message, got %q", task.Message)
+		}
+	})
 }
 
 func TestRunControllerWritesTaskCohort(t *testing.T) {
