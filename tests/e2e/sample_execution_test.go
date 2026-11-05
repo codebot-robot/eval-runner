@@ -1294,7 +1294,7 @@ spec:
 		startWaitProgress := time.Now()
 		var observedProgress bool
 		for time.Since(startWaitProgress) < 120*time.Second {
-			out, err := exec.Command("kubectl", "get", "run", baseRunName, "-n", "eval-runner", "-o", "json").CombinedOutput()
+			out, err := exec.Command("kubectl", "get", "run", baseRunName, "-n", "eval-runner", "-o", "json").Output()
 			if err == nil {
 				var runObj v1alpha1.Run
 				if json.Unmarshal(out, &runObj) == nil {
