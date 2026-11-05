@@ -69,10 +69,10 @@ func (h *Harness) Setup() {
 	}
 
 	if _, err := exec.LookPath("kind"); err != nil {
-		h.t.Fatalf("kind not found on PATH: %v (run ./dev/tasks/test-e2e to install)", err)
+		h.t.Fatalf("kind not found on PATH: %v", err)
 	}
 	if _, err := exec.LookPath("kubectl"); err != nil {
-		h.t.Fatalf("kubectl not found on PATH: %v (run ./dev/tasks/test-e2e to install)", err)
+		h.t.Fatalf("kubectl not found on PATH: %v", err)
 	}
 
 	clusters := h.runCmd("kind", "get", "clusters")
