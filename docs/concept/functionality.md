@@ -97,7 +97,7 @@ manifest. This makes discovery reproducible, isolated and format-agnostic.
 
 ### 2.2.1 Sandbox task results contract (`/out/results.json`)
 
-Tasks declaring resource type `sandbox` run their declared `command` inside their own container image (or the default runner image) with working directory `/workspace` and write sample evaluation results to `/out/results.json`:
+Tasks declaring resource type `sandbox` run their declared `command` inside their own container image (or the default runner image) with the evaluated repository checked out at the Run's commit. The command runs with the repository root as the working directory and writes sample evaluation results to `/out/results.json` (currently public repository URLs are supported for checkout; private repository credentials are not injected):
 
 ```json
 {"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true, "score": 1.0, "message": ""}]}

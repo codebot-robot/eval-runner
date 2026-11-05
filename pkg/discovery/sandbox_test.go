@@ -15,6 +15,9 @@
 package discovery
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -510,5 +513,266 @@ func TestBuildTaskSandbox_ImageSelection(t *testing.T) {
 	})
 	if img := sandboxBuiltinDefault.Spec.PodTemplate.Spec.Containers[0].Image; img != DefaultSampleRunnerImage {
 		t.Errorf("Expected fallback image %q, got %q", DefaultSampleRunnerImage, img)
+	}
+}
+
+func TestBuildTaskSandbox_RepoCheckoutInitContainer(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abcdef123456",
+			},
+		},
+	}
+	digest := AuthTokenDigest("dummy-token")
+
+	// Case 1: CloneRepo is true, init container is present
+	sandboxWithCheckout := BuildTaskSandbox(run, "task-sandbox", TaskSandboxConfig{
+		Namespace:          "eval-runner-sandbox",
+		Image:              "custom-task-image:v1",
+		AuthTokenDigest:    digest,
+		CloneRepo:          true,
+		StepTimeoutSeconds: 60,
+	})
+
+	if len(sandboxWithCheckout.Spec.PodTemplate.Spec.InitContainers) != 2 {
+		t.Fatalf("Expected 2 init containers, got %d", len(sandboxWithCheckout.Spec.PodTemplate.Spec.InitContainers))
+	}
+
+	sandboxdInitContainer := sandboxWithCheckout.Spec.PodTemplate.Spec.InitContainers[0]
+	if sandboxdInitContainer.Name != SandboxdInitContainerName {
+		t.Errorf("Expected first init container name %q, got %q", SandboxdInitContainerName, sandboxdInitContainer.Name)
+	}
+	if sandboxdInitContainer.Image != SandboxdImage {
+		t.Errorf("Expected first init container image %q, got %q", SandboxdImage, sandboxdInitContainer.Image)
+	}
+	if len(sandboxdInitContainer.VolumeMounts) != 1 || sandboxdInitContainer.VolumeMounts[0].Name != "sandboxd-bin" {
+		t.Errorf("Expected sandboxd-bin volume mount on install-sandboxd, got %+v", sandboxdInitContainer.VolumeMounts)
+	}
+
+	checkoutInitContainer := sandboxWithCheckout.Spec.PodTemplate.Spec.InitContainers[1]
+	if checkoutInitContainer.Name != RepoCheckoutInitContainerName {
+		t.Errorf("Expected second init container name %q, got %q", RepoCheckoutInitContainerName, checkoutInitContainer.Name)
+	}
+	if checkoutInitContainer.Image != GitCheckoutImage {
+		t.Errorf("Expected second init container image %q, got %q", GitCheckoutImage, checkoutInitContainer.Image)
+	}
+
+	// Assert mount: workspace volume mounted at /workspace
+	foundWorkspaceMount := false
+	for _, volumeMount := range checkoutInitContainer.VolumeMounts {
+		if volumeMount.Name == "workspace" && volumeMount.MountPath == "/workspace" {
+			foundWorkspaceMount = true
+			break
+		}
+	}
+	if !foundWorkspaceMount {
+		t.Errorf("Expected workspace volume mounted at /workspace, got %+v", checkoutInitContainer.VolumeMounts)
+	}
+
+	// Assert security context is unchanged and matches install-sandboxd / pod security context
+	securityContext := checkoutInitContainer.SecurityContext
+	if securityContext == nil {
+		t.Fatalf("Expected security context on checkout init container")
+	}
+	if securityContext.AllowPrivilegeEscalation == nil || *securityContext.AllowPrivilegeEscalation {
+		t.Errorf("Expected allowPrivilegeEscalation false")
+	}
+	if securityContext.RunAsNonRoot == nil || !*securityContext.RunAsNonRoot {
+		t.Errorf("Expected runAsNonRoot true")
+	}
+	if securityContext.RunAsUser == nil || *securityContext.RunAsUser != 1000 {
+		t.Errorf("Expected runAsUser 1000")
+	}
+	if securityContext.RunAsGroup == nil || *securityContext.RunAsGroup != 1000 {
+		t.Errorf("Expected runAsGroup 1000")
+	}
+	if securityContext.SeccompProfile == nil || securityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Expected RuntimeDefault seccomp profile")
+	}
+	if securityContext.Capabilities == nil || len(securityContext.Capabilities.Drop) != 1 || securityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Expected drop ALL capabilities")
+	}
+
+	// Case 2: CloneRepo is false, checkout init container is not present
+	sandboxWithoutCheckout := BuildTaskSandbox(run, "task-inspect", TaskSandboxConfig{
+		Namespace:       "eval-runner-sandbox",
+		Image:           "custom-task-image:v1",
+		AuthTokenDigest: digest,
+		CloneRepo:       false,
+	})
+	if len(sandboxWithoutCheckout.Spec.PodTemplate.Spec.InitContainers) != 1 {
+		t.Fatalf("Expected 1 init container when CloneRepo is false, got %d", len(sandboxWithoutCheckout.Spec.PodTemplate.Spec.InitContainers))
+	}
+	if sandboxWithoutCheckout.Spec.PodTemplate.Spec.InitContainers[0].Name != SandboxdInitContainerName {
+		t.Errorf("Expected only install-sandboxd init container, got %q", sandboxWithoutCheckout.Spec.PodTemplate.Spec.InitContainers[0].Name)
+	}
+}
+
+func TestRepoCheckoutScript(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not found on PATH")
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://example.com/repo.git",
+				Commit: "test-commit",
+			},
+		},
+	}
+	sandbox := BuildTaskSandbox(run, "task-test", TaskSandboxConfig{
+		Namespace:       "eval-runner-sandbox",
+		AuthTokenDigest: AuthTokenDigest("dummy-token"),
+		CloneRepo:       true,
+	})
+	if len(sandbox.Spec.PodTemplate.Spec.InitContainers) != 2 {
+		t.Fatalf("Expected 2 init containers, got %d", len(sandbox.Spec.PodTemplate.Spec.InitContainers))
+	}
+	checkoutScript := sandbox.Spec.PodTemplate.Spec.InitContainers[1].Command[2]
+
+	temporaryDirectory := t.TempDir()
+	binDirectory := filepath.Join(temporaryDirectory, "bin")
+	if err := os.MkdirAll(binDirectory, 0755); err != nil {
+		t.Fatalf("failed to create bin directory: %v", err)
+	}
+
+	fakeGitPath := filepath.Join(binDirectory, "git")
+	fakeGitScript := `#!/bin/sh
+if [ "$1" = "clone" ]; then
+    url="$3"
+    target="$4"
+    if [ "$url" = "fail-clone" ]; then
+        echo "fatal: repository 'fail-clone' not found" >&2
+        exit 128
+    fi
+    if [ "$url" = "timeout-clone" ]; then
+        exit 124
+    fi
+    mkdir -p "$target"
+    exit 0
+fi
+if [ "$1" = "-C" ] && [ "$3" = "checkout" ]; then
+    commit="$4"
+    if [ "$commit" = "fail-checkout" ]; then
+        echo "error: pathspec 'fail-checkout' did not match any file(s) known to git" >&2
+        exit 1
+    fi
+    if [ "$commit" = "timeout-checkout" ]; then
+        exit 124
+    fi
+    exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(fakeGitPath, []byte(fakeGitScript), 0755); err != nil {
+		t.Fatalf("failed to write fake git: %v", err)
+	}
+
+	testCases := []struct {
+		name                 string
+		repositoryURL        string
+		repositoryCommit     string
+		expectedExitCode     int
+		expectedMessagePart  string
+		expectRepoDirCreated bool
+	}{
+		{
+			name:                 "SuccessPath",
+			repositoryURL:        "https://example.com/valid/repo.git",
+			repositoryCommit:     "v1.0.0",
+			expectedExitCode:     0,
+			expectRepoDirCreated: true,
+		},
+		{
+			name:                "PlainCloneFailure",
+			repositoryURL:       "fail-clone",
+			repositoryCommit:    "main",
+			expectedExitCode:    128,
+			expectedMessagePart: "step git clone failed with exit code 128",
+		},
+		{
+			name:                "CloneTimeout",
+			repositoryURL:       "timeout-clone",
+			repositoryCommit:    "main",
+			expectedExitCode:    124,
+			expectedMessagePart: "step git clone failed: sandbox did not report completion",
+		},
+		{
+			name:                "PlainCheckoutFailure",
+			repositoryURL:       "https://example.com/valid/repo.git",
+			repositoryCommit:    "fail-checkout",
+			expectedExitCode:    1,
+			expectedMessagePart: "step git checkout failed with exit code 1",
+		},
+		{
+			name:                "CheckoutTimeout",
+			repositoryURL:       "https://example.com/valid/repo.git",
+			repositoryCommit:    "timeout-checkout",
+			expectedExitCode:    124,
+			expectedMessagePart: "step git checkout failed: sandbox did not report completion",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			caseDirectory := t.TempDir()
+			workspaceDirectory := filepath.Join(caseDirectory, "workspace")
+			if err := os.MkdirAll(workspaceDirectory, 0755); err != nil {
+				t.Fatalf("failed to create workspace: %v", err)
+			}
+			terminationLogPath := filepath.Join(caseDirectory, "termination-log")
+
+			command := exec.Command("sh", "-c", checkoutScript)
+			command.Env = append(os.Environ(),
+				"PATH="+binDirectory+":"+os.Getenv("PATH"),
+				"WORKSPACE_ROOT="+workspaceDirectory,
+				"TERMINATION_LOG="+terminationLogPath,
+				"REPO_URL="+tc.repositoryURL,
+				"REPO_COMMIT="+tc.repositoryCommit,
+			)
+
+			output, err := command.CombinedOutput()
+			exitCode := 0
+			if err != nil {
+				if exitError, ok := err.(*exec.ExitError); ok {
+					exitCode = exitError.ExitCode()
+				} else {
+					t.Fatalf("unexpected execution error: %v", err)
+				}
+			}
+
+			if exitCode != tc.expectedExitCode {
+				t.Errorf("expected exit code %d, got %d (output: %s)", tc.expectedExitCode, exitCode, string(output))
+			}
+
+			if tc.expectedMessagePart != "" {
+				logBytes, readErr := os.ReadFile(terminationLogPath)
+				if readErr != nil {
+					t.Fatalf("failed to read termination log: %v", readErr)
+				}
+				logContent := string(logBytes)
+				if !strings.Contains(logContent, tc.expectedMessagePart) {
+					t.Errorf("expected termination log to contain %q, got %q", tc.expectedMessagePart, logContent)
+				}
+			}
+
+			if tc.expectRepoDirCreated {
+				repoDirectory := filepath.Join(workspaceDirectory, "repo")
+				if info, statErr := os.Stat(repoDirectory); statErr != nil || !info.IsDir() {
+					t.Errorf("expected repo directory to be created at %q, err: %v", repoDirectory, statErr)
+				}
+			}
+		})
 	}
 }

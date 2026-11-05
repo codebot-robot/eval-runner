@@ -17,6 +17,7 @@ package discovery
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -39,6 +40,9 @@ const (
 	// SandboxdImage is the pinned image containing the sandboxd binary.
 	SandboxdImage = "gcr.io/justinsb-knotai-dev/sandboxd:0d9e0d2@sha256:01efbe0c568ec76e73e0c1c9337a77f61f8b45e2b06efb39ec256c568d782609"
 
+	// GitCheckoutImage is the pinned image used to checkout repositories in sandbox tasks.
+	GitCheckoutImage = "alpine/git:v2.47.2"
+
 	// DiscoveryImage is the pinned image used for discovery sandboxes.
 	DiscoveryImage = "alpine/git:v2.47.2"
 
@@ -47,6 +51,9 @@ const (
 
 	// SandboxdInitContainerName is the init container name that injects sandboxd.
 	SandboxdInitContainerName = "install-sandboxd"
+
+	// RepoCheckoutInitContainerName is the init container name that checks out the repository.
+	RepoCheckoutInitContainerName = "checkout-repo"
 
 	// LabelRunName tracks the name of the Run that owns the sandbox.
 	LabelRunName = "evalrunner.gke-labs.dev/run-name"
@@ -163,14 +170,16 @@ func TaskSandboxNameForRun(runName, taskID string) string {
 
 // TaskSandboxConfig configures task sandbox creation.
 type TaskSandboxConfig struct {
-	Namespace         string
-	SampleRunnerImage string
-	Image             string
-	ModelSecret       string
-	AuthTokenDigest   string
-	ServerCertSecret  string
-	CAConfigMap       string
-	SandboxdImage     string
+	Namespace          string
+	SampleRunnerImage  string
+	Image              string
+	ModelSecret        string
+	AuthTokenDigest    string
+	ServerCertSecret   string
+	CAConfigMap        string
+	SandboxdImage      string
+	CloneRepo          bool
+	StepTimeoutSeconds int
 }
 
 // BuildTaskSandbox constructs the Sandbox CR for executing an eval task for a Run.
@@ -250,6 +259,137 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 		"--require-client-cert",
 	}
 
+	initContainers := []corev1.Container{
+		{
+			Name:  SandboxdInitContainerName,
+			Image: sandboxdImg,
+			Command: []string{
+				"/bin/sh",
+				"-c",
+				"cp /usr/local/bin/sandboxd /sandboxd-bin/sandboxd",
+			},
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+				RunAsNonRoot:             &runAsNonRoot,
+				RunAsUser:                &runAsUser,
+				RunAsGroup:               &runAsGroup,
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+				},
+				SeccompProfile: &seccompProfile,
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("100m"),
+					corev1.ResourceMemory: resource.MustParse("128Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "sandboxd-bin",
+					MountPath: "/sandboxd-bin",
+				},
+			},
+		},
+	}
+
+	if cfg.CloneRepo && run.Spec.Repo.URL != "" {
+		var checkoutEnv []corev1.EnvVar
+		checkoutEnv = append(checkoutEnv, corev1.EnvVar{
+			Name:  "REPO_URL",
+			Value: run.Spec.Repo.URL,
+		})
+		if run.Spec.Repo.Commit != "" {
+			checkoutEnv = append(checkoutEnv, corev1.EnvVar{
+				Name:  "REPO_COMMIT",
+				Value: run.Spec.Repo.Commit,
+			})
+		}
+		if cfg.StepTimeoutSeconds > 0 {
+			checkoutEnv = append(checkoutEnv, corev1.EnvVar{
+				Name:  "TIMEOUT_SECONDS",
+				Value: strconv.Itoa(cfg.StepTimeoutSeconds),
+			})
+		}
+
+		checkoutScript := `status=0
+if [ -n "$TIMEOUT_SECONDS" ] && [ "$TIMEOUT_SECONDS" -gt 0 ] 2>/dev/null; then
+    timeout_prefix="timeout $TIMEOUT_SECONDS"
+else
+    timeout_prefix=""
+fi
+
+workspace_root="${WORKSPACE_ROOT:-/workspace}"
+repo_dir="$workspace_root/repo"
+termination_log="${TERMINATION_LOG:-/dev/termination-log}"
+
+output=$($timeout_prefix git clone -- "$REPO_URL" "$repo_dir" 2>&1)
+status=$?
+if [ "$status" -ne 0 ]; then
+    if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
+        echo "step git clone failed: sandbox did not report completion" > "$termination_log" 2>/dev/null || true
+    else
+        tail_output=$(echo "$output" | tail -n 20)
+        echo "step git clone failed with exit code $status: $tail_output" > "$termination_log" 2>/dev/null || true
+    fi
+    echo "$output" >&2
+    exit "$status"
+fi
+
+if [ -n "$REPO_COMMIT" ]; then
+    output=$($timeout_prefix git -C "$repo_dir" checkout "$REPO_COMMIT" 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
+            echo "step git checkout failed: sandbox did not report completion" > "$termination_log" 2>/dev/null || true
+        else
+            tail_output=$(echo "$output" | tail -n 20)
+            echo "step git checkout failed with exit code $status: $tail_output" > "$termination_log" 2>/dev/null || true
+        fi
+        echo "$output" >&2
+        exit "$status"
+    fi
+fi
+`
+
+		initContainers = append(initContainers, corev1.Container{
+			Name:    RepoCheckoutInitContainerName,
+			Image:   GitCheckoutImage,
+			Command: []string{"/bin/sh", "-c", checkoutScript},
+			Env:     checkoutEnv,
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+				RunAsNonRoot:             &runAsNonRoot,
+				RunAsUser:                &runAsUser,
+				RunAsGroup:               &runAsGroup,
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+				},
+				SeccompProfile: &seccompProfile,
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("100m"),
+					corev1.ResourceMemory: resource.MustParse("128Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "workspace",
+					MountPath: "/workspace",
+				},
+			},
+		})
+	}
+
 	return &sandboxv1beta1.Sandbox{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: sandboxv1beta1.GroupVersion.String(),
@@ -277,44 +417,8 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 							FSGroup:        &runAsGroup,
 							SeccompProfile: &seccompProfile,
 						},
-						RestartPolicy: corev1.RestartPolicyNever,
-						InitContainers: []corev1.Container{
-							{
-								Name:  SandboxdInitContainerName,
-								Image: sandboxdImg,
-								Command: []string{
-									"/bin/sh",
-									"-c",
-									"cp /usr/local/bin/sandboxd /sandboxd-bin/sandboxd",
-								},
-								SecurityContext: &corev1.SecurityContext{
-									AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-									RunAsNonRoot:             &runAsNonRoot,
-									RunAsUser:                &runAsUser,
-									RunAsGroup:               &runAsGroup,
-									Capabilities: &corev1.Capabilities{
-										Drop: []corev1.Capability{"ALL"},
-									},
-									SeccompProfile: &seccompProfile,
-								},
-								Resources: corev1.ResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("100m"),
-										corev1.ResourceMemory: resource.MustParse("128Mi"),
-									},
-									Limits: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("500m"),
-										corev1.ResourceMemory: resource.MustParse("512Mi"),
-									},
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										Name:      "sandboxd-bin",
-										MountPath: "/sandboxd-bin",
-									},
-								},
-							},
-						},
+						RestartPolicy:  corev1.RestartPolicyNever,
+						InitContainers: initContainers,
 						Containers: []corev1.Container{
 							{
 								Name:    DiscoveryContainerName,
