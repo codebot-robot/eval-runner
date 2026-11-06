@@ -29,12 +29,25 @@ RUN git config --global user.email "test@example.com" && \
     touch /git/no-evals.git/git-daemon-export-ok && \
     rm -rf /work
 
+WORKDIR /tb-work
+COPY examples/terminal-bench/ ./
+COPY examples/terminal-bench/ examples/terminal-bench/
+RUN git config --global user.email "test@example.com" && \
+    git config --global user.name "Test" && \
+    git init -b main && \
+    git add . && \
+    git commit -m "initial commit" && \
+    git clone --bare /tb-work /git/terminal-bench.git && \
+    touch /git/terminal-bench.git/git-daemon-export-ok && \
+    rm -rf /tb-work
+
 WORKDIR /docs-work
 COPY evals/ evals/
 COPY .evals/ .evals/
 COPY README.md README.md
 COPY docs/ docs/
-RUN git config --global user.email "test@example.com" && \
+RUN sed -i '/readme_comprehension_blind/s/},/}/; /terminal-bench/d' .evals/list && \
+    git config --global user.email "test@example.com" && \
     git config --global user.name "Test" && \
     git init -b main && \
     git add . && \

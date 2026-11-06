@@ -460,6 +460,63 @@ spec:
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
 	})
 
+	t.Run("TerminalBenchSandboxTaskCompleted", func(t *testing.T) {
+		terminalBenchCommit := harness.GetGitServerCommit("eval-runner-sandbox", "terminal-bench.git")
+		runName := "terminal-bench-sandbox-run"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: git://git-server.eval-runner-sandbox.svc/terminal-bench.git
+    commit: %s
+  model: mockllm/model
+  tasks:
+  - terminal-bench/regex-log
+`, runName, terminalBenchCommit)
+
+		harness.KubectlApplyContent(manifest)
+
+		// Wait for Run to complete
+		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 300*time.Second)
+
+		if run.Status.Discovery == nil {
+			t.Fatalf("Expected status.discovery to be populated")
+		}
+		if run.Status.Discovery.TaskCount != 10 {
+			t.Fatalf("Expected 10 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+		}
+
+		if len(run.Status.Tasks) != 1 {
+			t.Fatalf("Expected 1 task in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
+		}
+
+		task := run.Status.Tasks[0]
+		if task.ID != "terminal-bench/regex-log" {
+			t.Errorf("Expected task ID terminal-bench/regex-log, got %s", task.ID)
+		}
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected task %s Completed, got %s (msg: %s)", task.ID, task.Phase, task.Message)
+		}
+		if task.Samples != 1 {
+			t.Errorf("Expected 1 sample for %s, got %d", task.ID, task.Samples)
+		}
+		if task.Successes != 1 {
+			t.Errorf("Expected 1 success for %s, got %d", task.ID, task.Successes)
+		}
+		if task.SamplesDone != 1 {
+			t.Errorf("Expected samplesDone 1 for %s, got %d", task.ID, task.SamplesDone)
+		}
+		if task.MeanScore == nil || *task.MeanScore != 1.0 {
+			t.Errorf("Expected meanScore 1.0 for %s, got %v", task.ID, task.MeanScore)
+		}
+
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+	})
+
 	t.Run("WebhookSmoke", func(t *testing.T) {
 		runWebhookSmoke(t, harness)
 	})
