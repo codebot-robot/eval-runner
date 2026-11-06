@@ -81,14 +81,14 @@ spec:
 		if run.Status.Discovery == nil {
 			t.Fatalf("Expected status.discovery to be populated")
 		}
-		if run.Status.Discovery.TaskCount != 4 {
-			t.Fatalf("Expected 4 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
+		if run.Status.Discovery.TaskCount != 5 {
+			t.Fatalf("Expected 5 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
 		}
 		if run.Status.Discovery.EligibleTaskCount != 3 {
 			t.Fatalf("Expected 3 eligible tasks, got %d", run.Status.Discovery.EligibleTaskCount)
 		}
-		if len(run.Status.Discovery.TaskIDs) != 4 {
-			t.Fatalf("Expected 4 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
+		if len(run.Status.Discovery.TaskIDs) != 5 {
+			t.Fatalf("Expected 5 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
 		}
 		if run.Status.Discovery.ManifestPath == "" || run.Status.Discovery.ManifestHash == "" {
 			t.Fatalf("Expected ManifestPath and ManifestHash populated, got: %+v", run.Status.Discovery)
@@ -102,6 +102,7 @@ spec:
 			"triage/escalation_policy": false,
 			"triage/summary_quality":   false,
 			"triage/sandbox_eval":      false,
+			"triage/sandbox_root_eval": false,
 		}
 		for _, id := range run.Status.Discovery.TaskIDs {
 			if _, ok := expectedTasks[id]; !ok {
@@ -133,8 +134,8 @@ spec:
 		if err := json.Unmarshal([]byte(manifestContent), &storedManifest); err != nil {
 			t.Fatalf("Failed to parse stored manifest JSON from kind node: %v", err)
 		}
-		if len(storedManifest.Tasks) != 4 {
-			t.Errorf("Expected 4 tasks in stored manifest, got %d", len(storedManifest.Tasks))
+		if len(storedManifest.Tasks) != 5 {
+			t.Errorf("Expected 5 tasks in stored manifest, got %d", len(storedManifest.Tasks))
 		}
 
 		// Assert sandbox was deleted from eval-runner-sandbox
@@ -411,6 +412,7 @@ spec:
   model: mockllm/model
   tasks:
   - triage/sandbox_eval
+  - triage/sandbox_root_eval
 `, runName, supportAgentCommit)
 
 		harness.KubectlApplyContent(manifest)
@@ -421,32 +423,38 @@ spec:
 		if run.Status.Discovery == nil {
 			t.Fatalf("Expected status.discovery to be populated")
 		}
-		if run.Status.Discovery.TaskCount != 4 {
-			t.Fatalf("Expected 4 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+		if run.Status.Discovery.TaskCount != 5 {
+			t.Fatalf("Expected 5 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
 		}
 
-		if len(run.Status.Tasks) != 1 {
-			t.Fatalf("Expected 1 task in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
+		if len(run.Status.Tasks) != 2 {
+			t.Fatalf("Expected 2 tasks in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
 		}
 
-		task := run.Status.Tasks[0]
-		if task.ID != "triage/sandbox_eval" {
-			t.Errorf("Expected task ID triage/sandbox_eval, got %s", task.ID)
+		tasksByID := make(map[string]v1alpha1.TaskStatus)
+		for _, task := range run.Status.Tasks {
+			tasksByID[task.ID] = task
 		}
-		if task.Phase != v1alpha1.TaskPhaseCompleted {
-			t.Errorf("Expected task Completed, got %s (msg: %s)", task.Phase, task.Message)
-		}
-		if task.Samples != 1 {
-			t.Errorf("Expected 1 sample, got %d", task.Samples)
-		}
-		if task.Successes != 1 {
-			t.Errorf("Expected 1 success, got %d", task.Successes)
-		}
-		if task.SamplesDone != 1 {
-			t.Errorf("Expected samplesDone 1, got %d", task.SamplesDone)
-		}
-		if task.MeanScore == nil || *task.MeanScore != 1.0 {
-			t.Errorf("Expected meanScore 1.0, got %v", task.MeanScore)
+		for _, expectedTaskID := range []string{"triage/sandbox_eval", "triage/sandbox_root_eval"} {
+			task, ok := tasksByID[expectedTaskID]
+			if !ok {
+				t.Fatalf("Expected task %s in status.tasks", expectedTaskID)
+			}
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("Expected task %s Completed, got %s (msg: %s)", expectedTaskID, task.Phase, task.Message)
+			}
+			if task.Samples != 1 {
+				t.Errorf("Expected 1 sample for %s, got %d", expectedTaskID, task.Samples)
+			}
+			if task.Successes != 1 {
+				t.Errorf("Expected 1 success for %s, got %d", expectedTaskID, task.Successes)
+			}
+			if task.SamplesDone != 1 {
+				t.Errorf("Expected samplesDone 1 for %s, got %d", expectedTaskID, task.SamplesDone)
+			}
+			if task.MeanScore == nil || *task.MeanScore != 1.0 {
+				t.Errorf("Expected meanScore 1.0 for %s, got %v", expectedTaskID, task.MeanScore)
+			}
 		}
 
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)

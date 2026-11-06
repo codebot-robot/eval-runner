@@ -180,6 +180,7 @@ type TaskSandboxConfig struct {
 	SandboxdImage      string
 	CloneRepo          bool
 	StepTimeoutSeconds int
+	SandboxTask        bool
 }
 
 // BuildTaskSandbox constructs the Sandbox CR for executing an eval task for a Run.
@@ -219,6 +220,31 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 	allowPrivilegeEscalation := false
 	seccompProfile := corev1.SeccompProfile{
 		Type: corev1.SeccompProfileTypeRuntimeDefault,
+	}
+
+	podSecurityContext := &corev1.PodSecurityContext{
+		FSGroup:        &runAsGroup,
+		SeccompProfile: &seccompProfile,
+	}
+	var taskSecurityContext *corev1.SecurityContext
+	if cfg.SandboxTask {
+		taskSecurityContext = &corev1.SecurityContext{
+			SeccompProfile: &seccompProfile,
+		}
+	} else {
+		podSecurityContext.RunAsNonRoot = &runAsNonRoot
+		podSecurityContext.RunAsUser = &runAsUser
+		podSecurityContext.RunAsGroup = &runAsGroup
+		taskSecurityContext = &corev1.SecurityContext{
+			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+			RunAsNonRoot:             &runAsNonRoot,
+			RunAsUser:                &runAsUser,
+			RunAsGroup:               &runAsGroup,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &seccompProfile,
+		}
 	}
 
 	labels := map[string]string{
@@ -410,15 +436,9 @@ fi
 					},
 					Spec: corev1.PodSpec{
 						AutomountServiceAccountToken: &automountToken,
-						SecurityContext: &corev1.PodSecurityContext{
-							RunAsNonRoot:   &runAsNonRoot,
-							RunAsUser:      &runAsUser,
-							RunAsGroup:     &runAsGroup,
-							FSGroup:        &runAsGroup,
-							SeccompProfile: &seccompProfile,
-						},
-						RestartPolicy:  corev1.RestartPolicyNever,
-						InitContainers: initContainers,
+						SecurityContext:              podSecurityContext,
+						RestartPolicy:                corev1.RestartPolicyNever,
+						InitContainers:               initContainers,
 						Containers: []corev1.Container{
 							{
 								Name:    DiscoveryContainerName,
@@ -455,16 +475,7 @@ fi
 									SuccessThreshold:    1,
 									FailureThreshold:    3,
 								},
-								SecurityContext: &corev1.SecurityContext{
-									AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-									RunAsNonRoot:             &runAsNonRoot,
-									RunAsUser:                &runAsUser,
-									RunAsGroup:               &runAsGroup,
-									Capabilities: &corev1.Capabilities{
-										Drop: []corev1.Capability{"ALL"},
-									},
-									SeccompProfile: &seccompProfile,
-								},
+								SecurityContext: taskSecurityContext,
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{
 										corev1.ResourceCPU:    resource.MustParse("100m"),

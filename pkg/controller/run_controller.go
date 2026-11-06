@@ -2424,6 +2424,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					SandboxdImage:      r.sandboxdImage(),
 					CloneRepo:          isSandboxTask && run.Spec.Repo.URL != "",
 					StepTimeoutSeconds: int(r.executionStepTimeout().Seconds()),
+					SandboxTask:        isSandboxTask,
 				})
 				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
 					logger.Error(err, "Failed to create task sandbox", "task", taskID)
