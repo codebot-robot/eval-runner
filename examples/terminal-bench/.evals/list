@@ -1,0 +1,74 @@
+#!/bin/sh
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -e
+
+script_directory="$(cd "$(dirname "$0")" && pwd)"
+tasks_json_file=""
+
+if [ -f "${script_directory}/../tasks.json" ]; then
+  tasks_json_file="${script_directory}/../tasks.json"
+elif [ -f "${script_directory}/tasks.json" ]; then
+  tasks_json_file="${script_directory}/tasks.json"
+elif [ -f "examples/terminal-bench/tasks.json" ]; then
+  tasks_json_file="examples/terminal-bench/tasks.json"
+elif [ -f "tasks.json" ]; then
+  tasks_json_file="tasks.json"
+fi
+
+if [ -z "${tasks_json_file}" ] || [ ! -f "${tasks_json_file}" ]; then
+  echo '{"tasks": []}'
+  exit 0
+fi
+
+awk '
+  BEGIN { count = 0 }
+  /"name"[[:space:]]*:/ {
+    split($0, a, "\"")
+    task_name = a[4]
+  }
+  /"agentTimeoutSeconds"[[:space:]]*:/ {
+    split($0, a, ":")
+    gsub(/[^0-9]/, "", a[2])
+    agent_timeout = a[2] + 0
+  }
+  /"verifierTimeoutSeconds"[[:space:]]*:/ {
+    split($0, a, ":")
+    gsub(/[^0-9]/, "", a[2])
+    verifier_timeout = a[2] + 0
+    timeout = agent_timeout + verifier_timeout
+    if (timeout <= 0) timeout = 1800
+    names[count] = task_name
+    timeouts[count] = timeout
+    count++
+  }
+  END {
+    print "{"
+    print "  \"tasks\": ["
+    for (i = 0; i < count; i++) {
+      comma = (i < count - 1) ? "," : ""
+      print "    {"
+      printf "      \"id\": \"terminal-bench/%s\",\n", names[i]
+      printf "      \"spec\": \"terminal-bench/%s\",\n", names[i]
+      printf "      \"image\": \"ghcr.io/laude-institute/terminal-bench/%s:2.0\",\n", names[i]
+      printf "      \"command\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"oracle\"],\n", names[i]
+      printf "      \"timeoutSeconds\": %d,\n", timeouts[i]
+      print  "      \"resources\": [{\"type\": \"sandbox\"}]"
+      print "    }" comma
+    }
+    print "  ]"
+    print "}"
+  }
+' "${tasks_json_file}"
