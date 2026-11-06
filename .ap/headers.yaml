@@ -17,4 +17,5 @@ copyrightHolder: Google LLC
 skip:
   - ".venv/"
   - "evals/.venv/"
+  - "examples/terminal-bench/tasks/"
 
