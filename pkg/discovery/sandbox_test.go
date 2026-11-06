@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -611,6 +612,174 @@ func TestBuildTaskSandbox_RepoCheckoutInitContainer(t *testing.T) {
 	}
 	if sandboxWithoutCheckout.Spec.PodTemplate.Spec.InitContainers[0].Name != SandboxdInitContainerName {
 		t.Errorf("Expected only install-sandboxd init container, got %q", sandboxWithoutCheckout.Spec.PodTemplate.Spec.InitContainers[0].Name)
+	}
+}
+
+func TestBuildTaskSandbox_SecurityContext_SandboxVsInspect(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abcdef123456",
+			},
+		},
+	}
+	digest := AuthTokenDigest("dummy-token")
+
+	// Case 1: Sandbox task (SandboxTask = true, CloneRepo = true)
+	sandboxTask := BuildTaskSandbox(run, "task-sandbox", TaskSandboxConfig{
+		Namespace:          "eval-runner-sandbox",
+		Image:              "alpine:3.21",
+		AuthTokenDigest:    digest,
+		CloneRepo:          true,
+		StepTimeoutSeconds: 60,
+		SandboxTask:        true,
+	})
+
+	// Pod security context on sandbox task:
+	// - FSGroup stays
+	// - RuntimeDefault seccomp profile stays
+	// - runAsUser, runAsGroup, runAsNonRoot are NOT set
+	podSecurityContext := sandboxTask.Spec.PodTemplate.Spec.SecurityContext
+	if podSecurityContext == nil {
+		t.Fatalf("Expected pod security context on sandbox task")
+	}
+	if podSecurityContext.RunAsUser != nil {
+		t.Errorf("Expected pod runAsUser nil on sandbox task, got %v", *podSecurityContext.RunAsUser)
+	}
+	if podSecurityContext.RunAsGroup != nil {
+		t.Errorf("Expected pod runAsGroup nil on sandbox task, got %v", *podSecurityContext.RunAsGroup)
+	}
+	if podSecurityContext.RunAsNonRoot != nil {
+		t.Errorf("Expected pod runAsNonRoot nil on sandbox task, got %v", *podSecurityContext.RunAsNonRoot)
+	}
+	if podSecurityContext.FSGroup == nil || *podSecurityContext.FSGroup != 1000 {
+		t.Errorf("Expected pod FSGroup 1000 on sandbox task, got %v", podSecurityContext.FSGroup)
+	}
+	if podSecurityContext.SeccompProfile == nil || podSecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Expected pod RuntimeDefault seccomp profile on sandbox task")
+	}
+
+	// Task container security context on sandbox task:
+	// - no runAsUser, runAsGroup, runAsNonRoot
+	// - no capability drop
+	// - no allowPrivilegeEscalation setting
+	// - keeps RuntimeDefault seccomp profile
+	taskContainer := sandboxTask.Spec.PodTemplate.Spec.Containers[0]
+	taskSecurityContext := taskContainer.SecurityContext
+	if taskSecurityContext == nil {
+		t.Fatalf("Expected task container security context on sandbox task")
+	}
+	if taskSecurityContext.RunAsUser != nil {
+		t.Errorf("Expected task container runAsUser nil on sandbox task, got %v", *taskSecurityContext.RunAsUser)
+	}
+	if taskSecurityContext.RunAsGroup != nil {
+		t.Errorf("Expected task container runAsGroup nil on sandbox task, got %v", *taskSecurityContext.RunAsGroup)
+	}
+	if taskSecurityContext.RunAsNonRoot != nil {
+		t.Errorf("Expected task container runAsNonRoot nil on sandbox task, got %v", *taskSecurityContext.RunAsNonRoot)
+	}
+	if taskSecurityContext.Capabilities != nil {
+		t.Errorf("Expected task container capabilities nil on sandbox task, got %+v", taskSecurityContext.Capabilities)
+	}
+	if taskSecurityContext.AllowPrivilegeEscalation != nil {
+		t.Errorf("Expected task container allowPrivilegeEscalation nil on sandbox task, got %v", *taskSecurityContext.AllowPrivilegeEscalation)
+	}
+	if taskSecurityContext.SeccompProfile == nil || taskSecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Expected task container RuntimeDefault seccomp profile on sandbox task")
+	}
+
+	// Both init containers keep their non-root security context
+	if len(sandboxTask.Spec.PodTemplate.Spec.InitContainers) != 2 {
+		t.Fatalf("Expected 2 init containers on sandbox task with CloneRepo, got %d", len(sandboxTask.Spec.PodTemplate.Spec.InitContainers))
+	}
+	for _, initContainer := range sandboxTask.Spec.PodTemplate.Spec.InitContainers {
+		initSecurityContext := initContainer.SecurityContext
+		if initSecurityContext == nil {
+			t.Fatalf("Expected security context on init container %s", initContainer.Name)
+		}
+		if initSecurityContext.RunAsNonRoot == nil || !*initSecurityContext.RunAsNonRoot {
+			t.Errorf("Expected runAsNonRoot true on init container %s", initContainer.Name)
+		}
+		if initSecurityContext.RunAsUser == nil || *initSecurityContext.RunAsUser != 1000 {
+			t.Errorf("Expected runAsUser 1000 on init container %s", initContainer.Name)
+		}
+		if initSecurityContext.RunAsGroup == nil || *initSecurityContext.RunAsGroup != 1000 {
+			t.Errorf("Expected runAsGroup 1000 on init container %s", initContainer.Name)
+		}
+		if initSecurityContext.AllowPrivilegeEscalation == nil || *initSecurityContext.AllowPrivilegeEscalation {
+			t.Errorf("Expected allowPrivilegeEscalation false on init container %s", initContainer.Name)
+		}
+		if initSecurityContext.Capabilities == nil || len(initSecurityContext.Capabilities.Drop) != 1 || initSecurityContext.Capabilities.Drop[0] != "ALL" {
+			t.Errorf("Expected drop ALL capabilities on init container %s", initContainer.Name)
+		}
+		if initSecurityContext.SeccompProfile == nil || initSecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+			t.Errorf("Expected RuntimeDefault seccomp profile on init container %s", initContainer.Name)
+		}
+	}
+
+	// Case 2: Inspect task (SandboxTask = false)
+	inspectTask := BuildTaskSandbox(run, "task-inspect", TaskSandboxConfig{
+		Namespace:       "eval-runner-sandbox",
+		Image:           "custom-task-image:v1",
+		AuthTokenDigest: digest,
+		CloneRepo:       false,
+		SandboxTask:     false,
+	})
+
+	// Pod security context on inspect task: unchanged
+	inspectPodSecurityContext := inspectTask.Spec.PodTemplate.Spec.SecurityContext
+	if inspectPodSecurityContext == nil {
+		t.Fatalf("Expected pod security context on inspect task")
+	}
+	if inspectPodSecurityContext.RunAsUser == nil || *inspectPodSecurityContext.RunAsUser != 1000 {
+		t.Errorf("Expected pod runAsUser 1000 on inspect task")
+	}
+	if inspectPodSecurityContext.RunAsGroup == nil || *inspectPodSecurityContext.RunAsGroup != 1000 {
+		t.Errorf("Expected pod runAsGroup 1000 on inspect task")
+	}
+	if inspectPodSecurityContext.RunAsNonRoot == nil || !*inspectPodSecurityContext.RunAsNonRoot {
+		t.Errorf("Expected pod runAsNonRoot true on inspect task")
+	}
+	if inspectPodSecurityContext.FSGroup == nil || *inspectPodSecurityContext.FSGroup != 1000 {
+		t.Errorf("Expected pod FSGroup 1000 on inspect task")
+	}
+	if inspectPodSecurityContext.SeccompProfile == nil || inspectPodSecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Expected pod RuntimeDefault seccomp profile on inspect task")
+	}
+
+	// Task container security context on inspect task: unchanged
+	inspectContainer := inspectTask.Spec.PodTemplate.Spec.Containers[0]
+	inspectSecurityContext := inspectContainer.SecurityContext
+	if inspectSecurityContext == nil {
+		t.Fatalf("Expected container security context on inspect task")
+	}
+	if inspectSecurityContext.RunAsUser == nil || *inspectSecurityContext.RunAsUser != 1000 {
+		t.Errorf("Expected runAsUser 1000 on inspect task container")
+	}
+	if inspectSecurityContext.RunAsGroup == nil || *inspectSecurityContext.RunAsGroup != 1000 {
+		t.Errorf("Expected runAsGroup 1000 on inspect task container")
+	}
+	if inspectSecurityContext.RunAsNonRoot == nil || !*inspectSecurityContext.RunAsNonRoot {
+		t.Errorf("Expected runAsNonRoot true on inspect task container")
+	}
+	if inspectSecurityContext.AllowPrivilegeEscalation == nil || *inspectSecurityContext.AllowPrivilegeEscalation {
+		t.Errorf("Expected allowPrivilegeEscalation false on inspect task container")
+	}
+	if inspectSecurityContext.Capabilities == nil || len(inspectSecurityContext.Capabilities.Drop) != 1 || inspectSecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Expected drop ALL capabilities on inspect task container")
+	}
+	if inspectSecurityContext.SeccompProfile == nil || inspectSecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Expected RuntimeDefault seccomp profile on inspect task container")
+	}
+
+	// install-sandboxd init container is byte-for-byte identical between sandbox and inspect tasks
+	if !reflect.DeepEqual(sandboxTask.Spec.PodTemplate.Spec.InitContainers[0], inspectTask.Spec.PodTemplate.Spec.InitContainers[0]) {
+		t.Errorf("Expected install-sandboxd init container to be byte-for-byte identical between sandbox and inspect tasks")
 	}
 }
 
