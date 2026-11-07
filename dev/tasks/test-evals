@@ -52,12 +52,17 @@ if not tasks:
 task_ids = set()
 for t in tasks:
     task_id = t.get('id')
-    workdir = t.get('workdir')
-    spec = t.get('spec')
-    if not task_id or not workdir or not spec:
+    if not task_id:
         print(f'ERROR: Incomplete task entry: {t}', file=sys.stderr)
         sys.exit(1)
     task_ids.add(task_id)
+    if t.get('command'):
+        continue
+    workdir = t.get('workdir')
+    spec = t.get('spec')
+    if not workdir or not spec:
+        print(f'ERROR: Incomplete task entry: {t}', file=sys.stderr)
+        sys.exit(1)
     spec_file = spec.split('@')[0]
     task_path = repo_root / workdir / spec_file
     if not task_path.is_file():

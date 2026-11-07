@@ -16,6 +16,7 @@ package discovery
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -466,4 +467,71 @@ func TestDiscoveryPathsAgreement(t *testing.T) {
 	if DiscoveryManifestWritePath != expectedWritePath {
 		t.Errorf("DiscoveryManifestWritePath %q does not match %q", DiscoveryManifestWritePath, expectedWritePath)
 	}
+}
+
+func assertTerminalBenchTask(t *testing.T, task *v1alpha1.ManifestTask, taskName string) {
+	t.Helper()
+	expectedID := "terminal-bench/" + taskName
+	if task.ID != expectedID {
+		t.Errorf("task ID = %q, want %q", task.ID, expectedID)
+	}
+	expectedImage := "ghcr.io/laude-institute/terminal-bench/" + taskName + ":2.0"
+	if task.Image != expectedImage {
+		t.Errorf("task %s Image = %q, want %q", task.ID, task.Image, expectedImage)
+	}
+	if task.TimeoutSeconds == nil || *task.TimeoutSeconds <= 0 {
+		t.Errorf("task %s expected positive timeoutSeconds, got %v", task.ID, task.TimeoutSeconds)
+	}
+	expectedCommand := []string{"bash", "examples/terminal-bench/run-task.sh", taskName, "oracle"}
+	if strings.Join(task.Command, " ") != strings.Join(expectedCommand, " ") {
+		t.Errorf("task %s Command = %v, want %v", task.ID, task.Command, expectedCommand)
+	}
+	if len(task.Resources) != 1 || task.Resources[0].Type != v1alpha1.ResourceTypeSandbox {
+		t.Errorf("task %s Resources = %v, want [{Type: 'sandbox'}]", task.ID, task.Resources)
+	}
+}
+
+func parseAndValidateScriptOutput(t *testing.T, scriptRelativePath string) *v1alpha1.Manifest {
+	t.Helper()
+	scriptPath, err := filepath.Abs(scriptRelativePath)
+	if err != nil {
+		t.Fatalf("failed to resolve script %s: %v", scriptRelativePath, err)
+	}
+	command := exec.Command("sh", scriptPath)
+	command.Dir = filepath.Dir(scriptPath)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("executing script %s failed: %v", scriptRelativePath, err)
+	}
+	manifest, err := ParseManifest(output)
+	if err != nil {
+		t.Fatalf("ParseManifest failed for %s: %v\noutput: %s", scriptRelativePath, err, string(output))
+	}
+	if err := ValidateManifest(manifest); err != nil {
+		t.Fatalf("ValidateManifest failed for %s: %v", scriptRelativePath, err)
+	}
+	return manifest
+}
+
+func TestTerminalBenchManifest(t *testing.T) {
+	manifest := parseAndValidateScriptOutput(t, "../../examples/terminal-bench/.evals/list")
+	if len(manifest.Tasks) != 10 {
+		t.Fatalf("expected 10 tasks in terminal-bench manifest, got %d", len(manifest.Tasks))
+	}
+	for _, task := range manifest.Tasks {
+		taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
+		assertTerminalBenchTask(t, &task, taskName)
+	}
+
+	rootManifest := parseAndValidateScriptOutput(t, "../../.evals/list")
+	for i := range rootManifest.Tasks {
+		if rootManifest.Tasks[i].ID == "terminal-bench/regex-log" {
+			assertTerminalBenchTask(t, &rootManifest.Tasks[i], "regex-log")
+			if len(rootManifest.Tasks[i].Paths) != 1 || rootManifest.Tasks[i].Paths[0] != "examples/terminal-bench/**" {
+				t.Errorf("root regex-log Paths = %v, want ['examples/terminal-bench/**']", rootManifest.Tasks[i].Paths)
+			}
+			return
+		}
+	}
+	t.Fatalf("terminal-bench/regex-log not found in root .evals/list")
 }

@@ -18,7 +18,8 @@ cat <<'EOF'
 {
   "tasks": [
     { "id": "docs/readme_comprehension",       "workdir": "evals", "spec": "docs_comprehension.py@readme_comprehension",       "paths": ["docs/**", "README.md", "evals/**"], "resources": [] },
-    { "id": "docs/readme_comprehension_blind", "workdir": "evals", "spec": "docs_comprehension.py@readme_comprehension_blind", "paths": ["docs/**", "README.md", "evals/**"], "resources": [] }
+    { "id": "docs/readme_comprehension_blind", "workdir": "evals", "spec": "docs_comprehension.py@readme_comprehension_blind", "paths": ["docs/**", "README.md", "evals/**"], "resources": [] },
+    { "id": "terminal-bench/regex-log", "spec": "terminal-bench/regex-log", "image": "ghcr.io/laude-institute/terminal-bench/regex-log:2.0", "command": ["bash", "examples/terminal-bench/run-task.sh", "regex-log", "oracle"], "timeoutSeconds": 1800, "paths": ["examples/terminal-bench/**"], "resources": [{"type": "sandbox"}] }
   ]
 }
 EOF
