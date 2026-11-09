@@ -188,6 +188,14 @@ type TaskStatus struct {
 	// TimeoutSeconds records the effective execution timeout applied to the task command in seconds.
 	// +optional
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+
+	// CPULimit records the effective CPU limit applied to the task sandbox container.
+	// +optional
+	CPULimit string `json:"cpuLimit,omitempty"`
+
+	// MemoryLimit records the effective memory limit applied to the task sandbox container.
+	// +optional
+	MemoryLimit string `json:"memoryLimit,omitempty"`
 }
 
 // TaskLatency records latency percentiles (in seconds) aggregated across evaluated samples.
@@ -295,6 +303,16 @@ type RunSpec struct {
 type ManifestResource struct {
 	// Type is the resource type (e.g., docker, kind, kubernetes-namespace, sandbox).
 	Type string `json:"type"`
+
+	// CPU specifies the maximum CPU limit for the task sandbox container (e.g. "1", "500m").
+	// Only valid when Type is "sandbox".
+	// +optional
+	CPU string `json:"cpu,omitempty"`
+
+	// Memory specifies the maximum memory limit for the task sandbox container (e.g. "2G", "512Mi").
+	// Only valid when Type is "sandbox".
+	// +optional
+	Memory string `json:"memory,omitempty"`
 }
 
 const (
@@ -369,6 +387,18 @@ const (
 
 	// MaxTaskTimeoutSeconds is the maximum allowed timeout in seconds for a task command (2 hours).
 	MaxTaskTimeoutSeconds = 7200
+
+	// DefaultTaskCPULimit is the fallback CPU limit applied to a sandbox task container when unset.
+	DefaultTaskCPULimit = "500m"
+
+	// DefaultTaskMemoryLimit is the fallback memory limit applied to a sandbox task container when unset.
+	DefaultTaskMemoryLimit = "512Mi"
+
+	// MaxTaskCPULimit is the maximum allowed CPU limit for a sandbox task (16 cores).
+	MaxTaskCPULimit = "16"
+
+	// MaxTaskMemoryLimit is the maximum allowed memory limit for a sandbox task (64Gi).
+	MaxTaskMemoryLimit = "64Gi"
 )
 
 // Manifest is the parsed output of .evals/list.
