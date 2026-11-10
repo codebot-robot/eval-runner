@@ -348,6 +348,10 @@ spec:
                       description: CostUSD is the estimated task evaluation cost in
                         USD from model prices.
                       type: number
+                    cpuLimit:
+                      description: CPULimit records the effective CPU limit applied
+                        to the task sandbox container.
+                      type: string
                     id:
                       description: ID is the unique identifier of the task (e.g. docs/readme_comprehension).
                       type: string
@@ -377,6 +381,10 @@ spec:
                       description: MeanScore is the mean of per-sample scores in [0,
                         1].
                       type: number
+                    memoryLimit:
+                      description: MemoryLimit records the effective memory limit
+                        applied to the task sandbox container.
+                      type: string
                     message:
                       description: Message contains failure detail or bounded error
                         information.
