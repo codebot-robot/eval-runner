@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestParseManifest(t *testing.T) {
@@ -489,6 +490,9 @@ func assertTerminalBenchTask(t *testing.T, task *v1alpha1.ManifestTask, taskName
 	if len(task.Resources) != 1 || task.Resources[0].Type != v1alpha1.ResourceTypeSandbox {
 		t.Errorf("task %s Resources = %v, want [{Type: 'sandbox'}]", task.ID, task.Resources)
 	}
+	if task.Resources[0].CPU == "" || task.Resources[0].Memory == "" {
+		t.Errorf("task %s Resources missing CPU or Memory: %v", task.ID, task.Resources[0])
+	}
 }
 
 func parseAndValidateScriptOutput(t *testing.T, scriptRelativePath string) *v1alpha1.Manifest {
@@ -522,9 +526,27 @@ func TestTerminalBenchManifest(t *testing.T) {
 	if len(manifest.Tasks) != 89 {
 		t.Fatalf("expected 89 tasks in terminal-bench manifest, got %d", len(manifest.Tasks))
 	}
+	var count4G, count8G int
 	for _, task := range manifest.Tasks {
 		taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
 		assertTerminalBenchTask(t, &task, taskName)
+		if taskName == "regex-log" {
+			if task.Resources[0].CPU != "1" || task.Resources[0].Memory != "2G" {
+				t.Errorf("regex-log expected cpu=1, memory=2G; got cpu=%s, memory=%s", task.Resources[0].CPU, task.Resources[0].Memory)
+			}
+		}
+		if task.Resources[0].Memory == "4G" {
+			count4G++
+		}
+		if task.Resources[0].Memory == "8G" {
+			count8G++
+		}
+	}
+	if count4G == 0 {
+		t.Errorf("expected at least one 4G task in terminal-bench manifest, got 0")
+	}
+	if count8G == 0 {
+		t.Errorf("expected at least one 8G task in terminal-bench manifest, got 0")
 	}
 
 	rootManifest := parseAndValidateScriptOutput(t, "../../.evals/list")
@@ -535,6 +557,11 @@ func TestTerminalBenchManifest(t *testing.T) {
 			foundTerminalBenchCount++
 			taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
 			assertTerminalBenchTask(t, task, taskName)
+			if taskName == "regex-log" {
+				if task.Resources[0].CPU != "1" || task.Resources[0].Memory != "2G" {
+					t.Errorf("root regex-log expected cpu=1, memory=2G; got cpu=%s, memory=%s", task.Resources[0].CPU, task.Resources[0].Memory)
+				}
+			}
 			if len(task.Paths) != 1 || task.Paths[0] != "examples/terminal-bench/**" {
 				t.Errorf("root %s Paths = %v, want ['examples/terminal-bench/**']", task.ID, task.Paths)
 			}
@@ -543,4 +570,247 @@ func TestTerminalBenchManifest(t *testing.T) {
 	if foundTerminalBenchCount == 0 {
 		t.Fatalf("no terminal-bench tasks found in root .evals/list")
 	}
+}
+
+func TestValidateTaskResources_RejectionPaths(t *testing.T) {
+	tests := []struct {
+		name          string
+		task          v1alpha1.ManifestTask
+		expectedTask  string
+		expectedField string
+		expectedValue string
+	}{
+		{
+			name: "bad quantity cpu",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-bad-cpu",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "not-a-number"}},
+			},
+			expectedTask:  "task-bad-cpu",
+			expectedField: "cpu",
+			expectedValue: "not-a-number",
+		},
+		{
+			name: "bad quantity memory",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-bad-mem",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Memory: "invalid-mem"}},
+			},
+			expectedTask:  "task-bad-mem",
+			expectedField: "memory",
+			expectedValue: "invalid-mem",
+		},
+		{
+			name: "non-sandbox resource with cpu",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-non-sb-cpu",
+				Spec:      "eval.py@task",
+				Resources: []v1alpha1.ManifestResource{{Type: "docker", CPU: "1"}},
+			},
+			expectedTask:  "task-non-sb-cpu",
+			expectedField: "cpu",
+			expectedValue: "1",
+		},
+		{
+			name: "non-sandbox resource with memory",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-non-sb-mem",
+				Spec:      "eval.py@task",
+				Resources: []v1alpha1.ManifestResource{{Type: "kind", Memory: "2G"}},
+			},
+			expectedTask:  "task-non-sb-mem",
+			expectedField: "memory",
+			expectedValue: "2G",
+		},
+		{
+			name: "zero cpu",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-zero-cpu",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "0"}},
+			},
+			expectedTask:  "task-zero-cpu",
+			expectedField: "cpu",
+			expectedValue: "0",
+		},
+		{
+			name: "negative cpu",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-neg-cpu",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "-1"}},
+			},
+			expectedTask:  "task-neg-cpu",
+			expectedField: "cpu",
+			expectedValue: "-1",
+		},
+		{
+			name: "zero memory",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-zero-mem",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Memory: "0"}},
+			},
+			expectedTask:  "task-zero-mem",
+			expectedField: "memory",
+			expectedValue: "0",
+		},
+		{
+			name: "negative memory",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-neg-mem",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Memory: "-512Mi"}},
+			},
+			expectedTask:  "task-neg-mem",
+			expectedField: "memory",
+			expectedValue: "-512Mi",
+		},
+		{
+			name: "cpu over cap 16",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-over-cpu",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "17"}},
+			},
+			expectedTask:  "task-over-cpu",
+			expectedField: "cpu",
+			expectedValue: "17",
+		},
+		{
+			name: "memory over cap 64Gi",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-over-mem",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Memory: "65Gi"}},
+			},
+			expectedTask:  "task-over-mem",
+			expectedField: "memory",
+			expectedValue: "65Gi",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateTaskResources(tc.task)
+			if err == nil {
+				t.Fatalf("expected validation error, got nil")
+			}
+			errMsg := err.Error()
+			if !strings.Contains(errMsg, tc.expectedTask) {
+				t.Errorf("error %q should name task id %q", errMsg, tc.expectedTask)
+			}
+			if !strings.Contains(errMsg, tc.expectedField) {
+				t.Errorf("error %q should name field %q", errMsg, tc.expectedField)
+			}
+			if !strings.Contains(errMsg, tc.expectedValue) {
+				t.Errorf("error %q should name value %q", errMsg, tc.expectedValue)
+			}
+		})
+	}
+}
+
+func TestValidateTaskResources_Valid(t *testing.T) {
+	tests := []struct {
+		name string
+		task v1alpha1.ManifestTask
+	}{
+		{
+			name: "typical sandbox task",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-1",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "1", Memory: "2G"}},
+			},
+		},
+		{
+			name: "at upper bounds (16 cpu, 64Gi memory)",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-cap",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "16", Memory: "64Gi"}},
+			},
+		},
+		{
+			name: "milli-cpu and mebibytes",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-milli",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "500m", Memory: "512Mi"}},
+			},
+		},
+		{
+			name: "absent cpu and memory (keeps defaults)",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-def",
+				Spec:      "eval.py@task",
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+			},
+		},
+		{
+			name: "no resources declared",
+			task: v1alpha1.ManifestTask{
+				ID:   "task-no-res",
+				Spec: "eval.py@task",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateTaskResources(tc.task); err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestTaskResourceLimits(t *testing.T) {
+	t.Run("explicit limits", func(t *testing.T) {
+		task := v1alpha1.ManifestTask{
+			ID:        "task-explicit",
+			Resources: []v1alpha1.ManifestResource{{Type: "sandbox", CPU: "2", Memory: "4G"}},
+		}
+		cpuLimit, memoryLimit, cpuQuantity, memoryQuantity := TaskResourceLimits(task)
+		if cpuLimit != "2" || memoryLimit != "4G" {
+			t.Errorf("got cpuLimit=%q, memoryLimit=%q; want 2, 4G", cpuLimit, memoryLimit)
+		}
+		if cpuQuantity.Cmp(resource.MustParse("2")) != 0 {
+			t.Errorf("got cpuQuantity=%v, want 2", cpuQuantity)
+		}
+		if memoryQuantity.Cmp(resource.MustParse("4G")) != 0 {
+			t.Errorf("got memoryQuantity=%v, want 4G", memoryQuantity)
+		}
+	})
+
+	t.Run("defaults when absent", func(t *testing.T) {
+		task := v1alpha1.ManifestTask{
+			ID:        "task-defaults",
+			Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+		}
+		cpuLimit, memoryLimit, cpuQuantity, memoryQuantity := TaskResourceLimits(task)
+		if cpuLimit != v1alpha1.DefaultTaskCPULimit || memoryLimit != v1alpha1.DefaultTaskMemoryLimit {
+			t.Errorf("got cpuLimit=%q, memoryLimit=%q; want %s, %s", cpuLimit, memoryLimit, v1alpha1.DefaultTaskCPULimit, v1alpha1.DefaultTaskMemoryLimit)
+		}
+		if cpuQuantity.Cmp(resource.MustParse("500m")) != 0 {
+			t.Errorf("got cpuQuantity=%v, want 500m", cpuQuantity)
+		}
+		if memoryQuantity.Cmp(resource.MustParse("512Mi")) != 0 {
+			t.Errorf("got memoryQuantity=%v, want 512Mi", memoryQuantity)
+		}
+	})
 }
