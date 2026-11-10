@@ -18,7 +18,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# Pin agent-client-protocol below 1.0.0 (1.0.0 removed acp.helpers required by inspect-ai 0.3.281); bump together with inspect-ai.
 RUN pip install --no-cache-dir \
+    agent-client-protocol==0.12.1 \
     inspect-ai==0.3.281 \
     google-genai==2.31.0 \
     openai==3.33.0 \
