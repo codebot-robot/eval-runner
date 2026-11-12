@@ -434,4 +434,305 @@ else
   exit 1
 fi
 
+echo "=== 10. Testing dev/tasks/setup-workload-identity-federation ==="
+
+# Mock kubectl for workload identity federation
+cat << 'EOF' > "${MOCK_BIN}/kubectl"
+#!/bin/sh
+if [ "$1" = "get" ] && [ "$2" = "--raw" ]; then
+  if [ "$3" = "/.well-known/openid-configuration" ]; then
+    echo '{"issuer":"https://kubernetes.default.svc.cluster.local","jwks_uri":"https://kubernetes.default.svc.cluster.local/openid/v1/jwks"}'
+    exit 0
+  fi
+  if [ "$3" = "/openid/v1/jwks" ]; then
+    echo '{"keys":[{"kty":"RSA","kid":"key-2026-alpha","n":"abc","e":"AQAB"}]}'
+    exit 0
+  fi
+fi
+if [ "$1" = "apply" ]; then
+  exit 0
+fi
+echo "Unexpected kubectl call: $*" >&2
+exit 1
+EOF
+chmod +x "${MOCK_BIN}/kubectl"
+
+# Mock gcloud for test 10A: initial creation where pool and provider are absent
+cat << 'EOF' > "${MOCK_BIN}/gcloud"
+#!/bin/sh
+if [ "$1" = "auth" ]; then echo "test-user@google.com"; exit 0; fi
+if [ "$1" = "projects" ] && [ "$2" = "describe" ]; then echo "123456789"; exit 0; fi
+if [ "$1" = "iam" ] && [ "$2" = "workload-identity-pools" ]; then
+  if [ "$3" = "describe" ]; then
+    # Pool does not exist initially; returns NOT_FOUND in stderr
+    echo "ERROR: (gcloud.iam.workload-identity-pools.describe) NOT_FOUND: WorkloadIdentityPool not found" >&2
+    exit 1
+  fi
+  if [ "$3" = "create" ]; then exit 0; fi
+  if [ "$3" = "providers" ]; then
+    if [ "$4" = "describe" ]; then
+      # Provider does not exist initially; returns NOT_FOUND in stderr
+      echo "ERROR: (gcloud.iam.workload-identity-pools.providers.describe) NOT_FOUND: WorkloadIdentityPoolProvider not found" >&2
+      exit 1
+    fi
+    if [ "$4" = "create-oidc" ] || [ "$4" = "update-oidc" ]; then exit 0; fi
+  fi
+fi
+if [ "$1" = "storage" ]; then exit 0; fi
+echo "Unexpected gcloud call: $*" >&2
+exit 1
+EOF
+chmod +x "${MOCK_BIN}/gcloud"
+
+# Test 10A: Dry-run creation against fake kubectl and gcloud
+FEDERATION_DRY_RUN="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/setup-workload-identity-federation" --dry-run --project p --bucket b --pool x 2>&1)"
+
+# Assert provider flags
+for expected in \
+  "gcloud iam workload-identity-pools create x --location=global --project=p" \
+  "create-oidc kubernetes" \
+  "--workload-identity-pool=x" \
+  "--location=global" \
+  "--project=p" \
+  "--issuer-uri=https://kubernetes.default.svc.cluster.local" \
+  "--jwk-json-path=" \
+  "--attribute-mapping=" \
+  "google.subject=assertion.sub" \
+  "attribute.namespace=assertion" \
+  "attribute.service_account_name=assertion" \
+  "--allowed-audiences=//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/x/providers/kubernetes,eval-runner.gke-labs.dev/gcp-workload-identity"; do
+  if ! echo "${FEDERATION_DRY_RUN}" | grep -F -q -- "${expected}"; then
+    echo "FAIL: setup-workload-identity-federation dry run missing provider flag '${expected}'. Got: ${FEDERATION_DRY_RUN}" >&2
+    exit 1
+  fi
+done
+echo "PASS: setup-workload-identity-federation dry run prints expected pool and provider creation flags."
+
+# Assert both bucket bindings
+CONTROLLER_BINDING="gcloud storage buckets add-iam-policy-binding gs://b --project=p --member=principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/x/subject/system:serviceaccount:eval-runner:eval-runner-controller --role=roles/storage.objectAdmin --format=none"
+UI_BINDING="gcloud storage buckets add-iam-policy-binding gs://b --project=p --member=principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/x/subject/system:serviceaccount:eval-runner:eval-runner-ui --role=roles/storage.objectViewer --format=none"
+
+if ! echo "${FEDERATION_DRY_RUN}" | grep -F -q -- "${CONTROLLER_BINDING}"; then
+  echo "FAIL: setup-workload-identity-federation dry run missing controller bucket binding. Got: ${FEDERATION_DRY_RUN}" >&2
+  exit 1
+fi
+if ! echo "${FEDERATION_DRY_RUN}" | grep -F -q -- "${UI_BINDING}"; then
+  echo "FAIL: setup-workload-identity-federation dry run missing UI bucket binding. Got: ${FEDERATION_DRY_RUN}" >&2
+  exit 1
+fi
+echo "PASS: setup-workload-identity-federation dry run prints both bucket IAM bindings."
+
+# Assert ConfigMap content
+for expected in \
+  "kubectl apply -f -" \
+  "\"name\": \"eval-runner-gcp-credentials\"" \
+  "\"namespace\": \"eval-runner\"" \
+  "\"GOOGLE_APPLICATION_CREDENTIALS\": \"/etc/eval-runner/gcp/credential-config.json\"" \
+  "\"credential-config.json\":" \
+  "external_account" \
+  "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/x/providers/kubernetes" \
+  "urn:ietf:params:oauth:token-type:jwt" \
+  "https://sts.googleapis.com/v1/token" \
+  "/var/run/secrets/eval-runner/gcp/token"; do
+  if ! echo "${FEDERATION_DRY_RUN}" | grep -F -q -- "${expected}"; then
+    echo "FAIL: setup-workload-identity-federation dry run missing ConfigMap entry '${expected}'. Got: ${FEDERATION_DRY_RUN}" >&2
+    exit 1
+  fi
+done
+echo "PASS: setup-workload-identity-federation dry run prints ConfigMap content."
+
+# Test 10B: Update path where provider exists with different key ID and without fixed audience
+cat << 'EOF' > "${MOCK_BIN}/gcloud"
+#!/bin/sh
+if [ "$1" = "auth" ]; then echo "test-user@google.com"; exit 0; fi
+if [ "$1" = "projects" ] && [ "$2" = "describe" ]; then echo "123456789"; exit 0; fi
+if [ "$1" = "iam" ] && [ "$2" = "workload-identity-pools" ]; then
+  if [ "$3" = "describe" ]; then
+    # Pool exists
+    echo '{"name":"projects/123456789/locations/global/workloadIdentityPools/x","state":"ACTIVE"}'
+    exit 0
+  fi
+  if [ "$3" = "providers" ]; then
+    if [ "$4" = "describe" ]; then
+      # Provider exists with older key ID and only default audience
+      cat << 'JSON'
+{
+  "name": "projects/123456789/locations/global/workloadIdentityPools/x/providers/kubernetes",
+  "attributeMapping": {
+    "google.subject": "assertion.sub",
+    "attribute.namespace": "assertion['kubernetes.io']['namespace']",
+    "attribute.service_account_name": "assertion['kubernetes.io']['serviceaccount']['name']"
+  },
+  "oidc": {
+    "issuerUri": "https://kubernetes.default.svc.cluster.local",
+    "allowedAudiences": [
+      "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/x/providers/kubernetes"
+    ],
+    "jwksJson": "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"old-key-2025\",\"n\":\"xyz\",\"e\":\"AQAB\"}]}"
+  }
+}
+JSON
+      exit 0
+    fi
+    if [ "$4" = "create-oidc" ] || [ "$4" = "update-oidc" ]; then exit 0; fi
+  fi
+fi
+if [ "$1" = "storage" ]; then exit 0; fi
+echo "Unexpected gcloud call: $*" >&2
+exit 1
+EOF
+chmod +x "${MOCK_BIN}/gcloud"
+
+FEDERATION_UPDATE_RUN="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/setup-workload-identity-federation" --dry-run --project p --bucket b --pool x 2>&1)"
+
+UPDATE_OIDC_COUNT="$(echo "${FEDERATION_UPDATE_RUN}" | grep -c "update-oidc" || true)"
+if [ "${UPDATE_OIDC_COUNT}" -ne 1 ]; then
+  echo "FAIL: Expected exactly one update-oidc call, got ${UPDATE_OIDC_COUNT}. Got: ${FEDERATION_UPDATE_RUN}" >&2
+  exit 1
+fi
+if echo "${FEDERATION_UPDATE_RUN}" | grep -F -q -- "create-oidc"; then
+  echo "FAIL: setup-workload-identity-federation should not call create-oidc on update path. Got: ${FEDERATION_UPDATE_RUN}" >&2
+  exit 1
+fi
+if ! echo "${FEDERATION_UPDATE_RUN}" | grep -F -q -- "--allowed-audiences=//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/x/providers/kubernetes,eval-runner.gke-labs.dev/gcp-workload-identity"; then
+  echo "FAIL: update-oidc missing updated allowed-audiences with both audiences. Got: ${FEDERATION_UPDATE_RUN}" >&2
+  exit 1
+fi
+if ! echo "${FEDERATION_UPDATE_RUN}" | grep -F -q -- "--jwk-json-path="; then
+  echo "FAIL: update-oidc missing --jwk-json-path. Got: ${FEDERATION_UPDATE_RUN}" >&2
+  exit 1
+fi
+if ! echo "${FEDERATION_UPDATE_RUN}" | grep -F -q -- "JWKS keys (old-key-2025 -> key-2026-alpha)"; then
+  echo "FAIL: setup-workload-identity-federation did not report old and new key IDs in change output. Got: ${FEDERATION_UPDATE_RUN}" >&2
+  exit 1
+fi
+echo "PASS: setup-workload-identity-federation update path issues exactly one update-oidc with new JWKS and both audiences."
+
+# Test 10C: No-op path where provider equals desired state with different whitespace and key ordering in jwksJson
+cat << 'EOF' > "${MOCK_BIN}/gcloud"
+#!/bin/sh
+if [ "$1" = "auth" ]; then echo "test-user@google.com"; exit 0; fi
+if [ "$1" = "projects" ] && [ "$2" = "describe" ]; then echo "123456789"; exit 0; fi
+if [ "$1" = "iam" ] && [ "$2" = "workload-identity-pools" ]; then
+  if [ "$3" = "describe" ]; then
+    echo '{"name":"projects/123456789/locations/global/workloadIdentityPools/x","state":"ACTIVE"}'
+    exit 0
+  fi
+  if [ "$3" = "providers" ]; then
+    if [ "$4" = "describe" ]; then
+      cat << 'JSON'
+{
+  "name": "projects/123456789/locations/global/workloadIdentityPools/x/providers/kubernetes",
+  "attributeMapping": {
+    "google.subject": "assertion.sub",
+    "attribute.namespace": "assertion['kubernetes.io']['namespace']",
+    "attribute.service_account_name": "assertion['kubernetes.io']['serviceaccount']['name']"
+  },
+  "oidc": {
+    "issuerUri": "https://kubernetes.default.svc.cluster.local",
+    "allowedAudiences": [
+      "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/x/providers/kubernetes",
+      "eval-runner.gke-labs.dev/gcp-workload-identity"
+    ],
+    "jwksJson": "{\n  \"keys\": [\n    {\n      \"e\": \"AQAB\",\n      \"kid\": \"key-2026-alpha\",\n      \"n\": \"abc\",\n      \"kty\": \"RSA\"\n    }\n  ]\n}"
+  }
+}
+JSON
+      exit 0
+    fi
+    if [ "$4" = "create-oidc" ] || [ "$4" = "update-oidc" ]; then
+      echo "Unexpected mutating provider call: $*" >&2
+      exit 1
+    fi
+  fi
+fi
+if [ "$1" = "storage" ]; then exit 0; fi
+echo "Unexpected gcloud call: $*" >&2
+exit 1
+EOF
+chmod +x "${MOCK_BIN}/gcloud"
+
+FEDERATION_NOOP_RUN="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/setup-workload-identity-federation" --dry-run --project p --bucket b --pool x 2>&1)"
+
+if ! echo "${FEDERATION_NOOP_RUN}" | grep -F -q -- "OIDC provider kubernetes is up to date"; then
+  echo "FAIL: Expected setup-workload-identity-federation to report provider up to date. Got: ${FEDERATION_NOOP_RUN}" >&2
+  exit 1
+fi
+if echo "${FEDERATION_NOOP_RUN}" | grep -E -q "update-oidc|create-oidc"; then
+  echo "FAIL: setup-workload-identity-federation should not call update-oidc or create-oidc when up to date. Got: ${FEDERATION_NOOP_RUN}" >&2
+  exit 1
+fi
+echo "PASS: setup-workload-identity-federation no-op path detects identical state with different JWKS formatting and skips update."
+
+# Test 10D: Non-https issuer error
+cat << 'EOF' > "${MOCK_BIN}/kubectl"
+#!/bin/sh
+if [ "$1" = "get" ] && [ "$2" = "--raw" ] && [ "$3" = "/.well-known/openid-configuration" ]; then
+  echo '{"issuer":"http://insecure.cluster.local"}'
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/kubectl"
+
+NON_HTTPS_ERROR="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/setup-workload-identity-federation" --dry-run --project p --bucket b --pool x 2>&1 || true)"
+if echo "${NON_HTTPS_ERROR}" | grep -q "error: cluster OIDC issuer must be an https:// URL"; then
+  echo "PASS: setup-workload-identity-federation rejects non-https issuer."
+else
+  echo "FAIL: setup-workload-identity-federation did not reject non-https issuer. Got: ${NON_HTTPS_ERROR}" >&2
+  exit 1
+fi
+
+# Test 10E: Missing --project error
+MISSING_PROJECT_ERROR="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/setup-workload-identity-federation" --dry-run --bucket b --pool x 2>&1 || true)"
+if echo "${MISSING_PROJECT_ERROR}" | grep -q -- "--project"; then
+  echo "PASS: setup-workload-identity-federation rejects missing --project."
+else
+  echo "FAIL: setup-workload-identity-federation did not reject missing --project. Got: ${MISSING_PROJECT_ERROR}" >&2
+  exit 1
+fi
+
+# Test 10F: Permission denied on pool describe exits non-zero
+cat << 'EOF' > "${MOCK_BIN}/kubectl"
+#!/bin/sh
+if [ "$1" = "get" ] && [ "$2" = "--raw" ]; then
+  if [ "$3" = "/.well-known/openid-configuration" ]; then
+    echo '{"issuer":"https://kubernetes.default.svc.cluster.local","jwks_uri":"https://kubernetes.default.svc.cluster.local/openid/v1/jwks"}'
+    exit 0
+  fi
+  if [ "$3" = "/openid/v1/jwks" ]; then
+    echo '{"keys":[{"kty":"RSA","kid":"key-2026-alpha","n":"abc","e":"AQAB"}]}'
+    exit 0
+  fi
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/kubectl"
+
+cat << 'EOF' > "${MOCK_BIN}/gcloud"
+#!/bin/sh
+if [ "$1" = "auth" ]; then echo "test-user@google.com"; exit 0; fi
+if [ "$1" = "projects" ] && [ "$2" = "describe" ]; then echo "123456789"; exit 0; fi
+if [ "$1" = "iam" ] && [ "$2" = "workload-identity-pools" ]; then
+  if [ "$3" = "describe" ]; then
+    echo "ERROR: PERMISSION_DENIED: User test-user is not authorized" >&2
+    exit 1
+  fi
+  if [ "$3" = "create" ]; then
+    echo "Unexpected create call on permission denied: $*" >&2
+    exit 1
+  fi
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/gcloud"
+
+PERMISSION_DENIED_ERROR="$(PATH="${MOCK_BIN}:${PATH}" "${REPO_ROOT}/dev/tasks/setup-workload-identity-federation" --dry-run --project p --bucket b --pool x 2>&1 || true)"
+if echo "${PERMISSION_DENIED_ERROR}" | grep -q "PERMISSION_DENIED"; then
+  echo "PASS: setup-workload-identity-federation halts on describe permission denied without attempting create."
+else
+  echo "FAIL: setup-workload-identity-federation did not halt on permission denied. Got: ${PERMISSION_DENIED_ERROR}" >&2
+  exit 1
+fi
+
 echo "=== All test-deploy checks passed successfully ==="
