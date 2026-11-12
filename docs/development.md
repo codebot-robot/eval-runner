@@ -197,7 +197,7 @@ Options:
 - `--restart`: Restarts deployments after deploy.
 - `--dry-run`: Prints commands without executing mutating actions.
 
-If `artifactBucket` is configured, the controller and UI interact with GCS using Application Default Credentials (ADC). On non-GKE clusters, ensure the node service account (or cloud IAM role provider) is granted `roles/storage.objectAdmin` on the bucket.
+If `artifactBucket` is configured, the controller and UI interact with GCS using Application Default Credentials (ADC). On non-GKE clusters, GCP Workload Identity Federation can be configured via `./dev/tasks/setup-workload-identity-federation` (see below), or ensure the node service account (or cloud IAM role provider) is granted `roles/storage.objectAdmin` on the bucket.
 
 ### Deploying to GKE in one step (`dev/tasks/deploy-to-gke`)
 
@@ -212,6 +212,18 @@ It:
 2. Creates the artifact bucket `<project>-eval-runner` if needed.
 3. Grants the controller and UI Kubernetes ServiceAccounts access to the bucket through Workload Identity Federation principals (`principal://iam.googleapis.com/...`) without needing Google Service Account keys or KSA annotations.
 4. Delegates the remainder to `./dev/tasks/deploy-to-kube` with `IMAGE_PREFIX=gcr.io/<project>` and `--set artifactBucket=... --set artifactDir=none`.
+
+### Workload Identity Federation on non-GKE clusters (`dev/tasks/setup-workload-identity-federation`)
+
+For clusters running outside GKE (such as kOps on GCE, AWS EKS, or on-premises clusters), pods cannot access the GKE metadata server to obtain Google Cloud credentials. `./dev/tasks/setup-workload-identity-federation` configures GCP Workload Identity Federation using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required), establishes bucket IAM bindings, and applies the `eval-runner-gcp-credentials` ConfigMap.
+
+The `eval-runner-controller` and `eval-runner-ui` Deployments in `k8s/` wire this contract in optionally:
+- **Audience**: Projected ServiceAccount token with audience `eval-runner.gke-labs.dev/gcp-workload-identity` and `expirationSeconds: 3600`.
+- **Token path**: Mounted read-only at `/var/run/secrets/eval-runner/gcp` with path `token` (`/var/run/secrets/eval-runner/gcp/token`).
+- **Config path**: ConfigMap volume `eval-runner-gcp-credentials` (`optional: true`) mounted read-only at `/etc/eval-runner/gcp` (`/etc/eval-runner/gcp/credential-config.json`).
+- **Environment variable**: `GOOGLE_APPLICATION_CREDENTIALS` populated from `configMapKeyRef` (`name: eval-runner-gcp-credentials`, `key: GOOGLE_APPLICATION_CREDENTIALS`, `optional: true`), pointing to `/etc/eval-runner/gcp/credential-config.json`.
+
+When `eval-runner-gcp-credentials` is absent (such as on GKE or kind), `GOOGLE_APPLICATION_CREDENTIALS` remains unset and Application Default Credentials fall back to standard behavior.
 
 Every step is idempotent; `--dry-run` prints the commands instead of running them. Use `--set KEY=VALUE` for extra ConfigMap entries, `--bucket`, `--image-prefix` and `--kubeconfig` to override defaults, and `--skip-bucket`, `--skip-sandboxd-build`, or `--skip-deploy` to run only part of it. Use `--restart` to restart deployments after deploying if running a controller older than #277 (the controller and UI reload at runtime since #277).
 
