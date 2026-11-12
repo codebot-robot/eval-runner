@@ -37,85 +37,36 @@ Only the Python standard library is used.
 """
 
 import argparse
-import json
-import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+
+# Ensure dev/tasks is on sys.path when invoked directly or via path
+TASKS_DIRECTORY = Path(__file__).resolve().parent
+if str(TASKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(TASKS_DIRECTORY))
+
+from task_helpers import (
+    CONTROLLER_SERVICE_ACCOUNT,
+    UI_SERVICE_ACCOUNT,
+    Runner,
+    Step,
+    gcloud_json,
+    permission_hint,
+    project_number,
+    whoami,
+)
 
 NAMESPACE = "eval-runner"
-CONTROLLER_KSA = "eval-runner-controller"
-UI_KSA = "eval-runner-ui"
+CONTROLLER_KSA = CONTROLLER_SERVICE_ACCOUNT
+UI_KSA = UI_SERVICE_ACCOUNT
 
 CLUSTER_PATH_RE = re.compile(
     r"^projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)/clusters/(?P<cluster>[^/]+)$"
 )
 # A zone looks like us-central1-b; the matching region is us-central1.
 ZONE_RE = re.compile(r"^(?P<region>[a-z]+-[a-z]+\d+)-[a-z]$")
-
-
-class Step:
-    """Prints a numbered heading for each step."""
-
-    count = 0
-
-    def __init__(self, title: str):
-        Step.count += 1
-        print(f"\n==> [{Step.count}] {title}", flush=True)
-
-
-class Runner:
-    """Runs external commands, honouring --dry-run and a dedicated KUBECONFIG."""
-
-    def __init__(self, dry_run: bool, kubeconfig: Path):
-        self.dry_run = dry_run
-        self.env = dict(os.environ)
-        self.env["KUBECONFIG"] = str(kubeconfig)
-        # The deploy task pins ap via go run; it needs the toolchain to be free to download.
-        self.env.setdefault("GOTOOLCHAIN", "auto")
-
-    def show(self, cmd: List[str], env_overrides: Optional[Dict[str, str]] = None) -> None:
-        prefix = "".join(f"{k}={shlex.quote(v)} " for k, v in (env_overrides or {}).items())
-        print(f"    $ {prefix}{shlex.join(cmd)}", flush=True)
-
-    def run(
-        self,
-        cmd: List[str],
-        *,
-        check: bool = True,
-        capture: bool = False,
-        quiet: bool = False,
-        mutating: bool = True,
-        env_overrides: Optional[Dict[str, str]] = None,
-        stdin: Optional[str] = None,
-    ) -> subprocess.CompletedProcess:
-        """Run cmd. In dry-run mode, mutating commands are printed but not run."""
-        if not quiet:
-            self.show(cmd, env_overrides)
-        if self.dry_run and mutating:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        env = dict(self.env)
-        env.update(env_overrides or {})
-        result = subprocess.run(
-            cmd,
-            env=env,
-            input=stdin,
-            text=True,
-            capture_output=capture,
-            check=False,
-        )
-        if check and result.returncode != 0:
-            if capture:
-                sys.stderr.write(result.stderr)
-            raise SystemExit(f"error: command failed with exit code {result.returncode}: {shlex.join(cmd)}")
-        return result
-
-    def output(self, cmd: List[str], *, quiet: bool = True) -> str:
-        """Run a read-only command and return stdout (also in dry-run mode)."""
-        return self.run(cmd, capture=True, quiet=quiet, mutating=False).stdout.strip()
 
 
 def parse_args() -> argparse.Namespace:
@@ -191,25 +142,6 @@ def repo_root() -> Path:
     return Path(out.stdout.strip())
 
 
-def gcloud_json(r: Runner, cmd: List[str]):
-    out = r.output(cmd + ["--format=json"])
-    return json.loads(out) if out else None
-
-
-def whoami(r: Runner, project: str) -> str:
-    """Return the active gcloud account, or exit with instructions."""
-    account = r.output(["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"])
-    if not account:
-        raise SystemExit(
-            "error: no active gcloud account. Run `gcloud auth login` (and `gcloud auth application-default login` "
-            "if you also plan to run the e2e tests), then re-run this script."
-        )
-    account = account.splitlines()[0].strip()
-    print(f"    authenticated as {account}")
-    print(f"    project        {project}")
-    return account
-
-
 def ensure_kubeconfig(r: Runner, args: argparse.Namespace) -> None:
     args.kubeconfig.parent.mkdir(parents=True, exist_ok=True)
     r.run(
@@ -239,21 +171,6 @@ def workload_identity_pool(r: Runner, args: argparse.Namespace) -> str:
             "or pass --skip-bucket to deploy without artifact storage."
         )
     return pool
-
-
-def project_number(r: Runner, project: str) -> str:
-    return r.output(["gcloud", "projects", "describe", project, "--format=value(projectNumber)"])
-
-
-def permission_hint(account: str, project: str, err: str) -> str:
-    return (
-        f"\n    Permission denied while changing bucket IAM as {account}.\n"
-        f"    If you can administer this project, you may want to run\n"
-        f"      gcloud projects add-iam-policy-binding {project} \\\n"
-        f"        --member=\"user:{account}\" --role=\"roles/storage.admin\"\n"
-        f"    then re-run this script. Otherwise ask a project owner to run the command above\n"
-        f"    or the failing command. gcloud said:\n      {err.strip().splitlines()[-1] if err.strip() else '(no detail)'}\n"
-    )
 
 
 def ensure_bucket(r: Runner, args: argparse.Namespace, account: str) -> None:
