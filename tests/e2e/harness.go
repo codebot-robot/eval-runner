@@ -36,6 +36,8 @@ import (
 
 const (
 	AgentSandboxVersion = "v1.0.7"
+
+	ServicePortalsCommit = "ae5f0aebfc7870bf8de8110e06b8f267c1b49dd6"
 )
 
 type Harness struct {

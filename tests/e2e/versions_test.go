@@ -59,3 +59,40 @@ func TestAgentSandboxVersionMatchesVersionsScript(t *testing.T) {
 			versionsPath, scriptVersion, AgentSandboxVersion)
 	}
 }
+
+func TestServicePortalsCommitMatchesVersionsScript(t *testing.T) {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatalf("failed to determine git root: %v", err)
+	}
+	gitRoot := strings.TrimSpace(string(out))
+
+	versionsPath := filepath.Join(gitRoot, "dev", "tasks", "versions.sh")
+	f, err := os.Open(versionsPath)
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", versionsPath, err)
+	}
+	defer f.Close()
+
+	var scriptCommit string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "SERVICE_PORTALS_COMMIT=") {
+			scriptCommit = strings.Trim(strings.TrimPrefix(line, "SERVICE_PORTALS_COMMIT="), `"'`)
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("failed reading %s: %v", versionsPath, err)
+	}
+
+	if scriptCommit == "" {
+		t.Fatalf("SERVICE_PORTALS_COMMIT not found in %s", versionsPath)
+	}
+
+	if scriptCommit != ServicePortalsCommit {
+		t.Errorf("SERVICE_PORTALS_COMMIT in %s (%s) does not match ServicePortalsCommit in harness.go (%s)",
+			versionsPath, scriptCommit, ServicePortalsCommit)
+	}
+}
