@@ -408,10 +408,12 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
       done
+      run_cmd kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
     fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       run_cmd kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
+    run_cmd kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
     run_cmd kubectl -n eval-runner logs deployment/eval-runner-controller --since-time="${STARTED_TIME}"
   else
     "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]}"
@@ -419,10 +421,12 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
       done
+      kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
     fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
+    kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
 
     SINCE_ARG=""
     if [[ "${CONFIGMAP_CHANGED}" == "true" ]]; then

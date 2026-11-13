@@ -20,6 +20,8 @@
 # - SANDBOXD_COMMIT: Pinned commit in https://github.com/codebot-robot/agent-sandbox
 # - SANDBOXD_TAG: Short SHA or tag corresponding to SANDBOXD_COMMIT.
 #   After bumping, rebuild and push the image via dev/tasks/sandboxd-image --push.
+# - service-portals: Pinned via the SERVICE_PORTALS_COMMIT default ARG in
+#   images/portal-node-proxy/Dockerfile and images/portal-nri-plugin/Dockerfile.
 AGENT_SANDBOX_VERSION="v1.0.7"
 GATEWAY_API_VERSION="v1.2.0"
 SANDBOXD_COMMIT="0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7"

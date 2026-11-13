@@ -631,6 +631,40 @@ The default sample runner sandbox image (`images/sample-runner`) includes Inspec
 
 For evaluations requiring other model providers or custom environments, a repository can declare custom images in `.evals/list` using the manifest's top-level `images[]` declarations and `tasks[].images[]` references (see concept §2.2 in `docs/concept/functionality.md`).
 
+### Service Portal NRI Node Agent (Model Gateway Interception)
+
+The `portal-node-agent` DaemonSet (`k8s/portal-node-agent.yaml`) runs in namespace `service-portal-system` using Node Resource Interface (NRI) per-node interception mode from `gke-labs/service-portals`. It consists of two containers:
+- `proxy` (`portal-node-proxy`): an all-in-one portal proxy that dynamically terminates and mints TLS certificates using a node-local Root CA and swaps authentication headers upstream based on `PortalRule` definitions.
+- `nri-plugin` (`portal-nri-plugin`): an NRI plugin connecting to containerd (`/var/run/nri/nri.sock`) that synchronously configures host network redirection for intercepted pods and injects the node CA certificate into containers.
+
+#### Node Prerequisite
+
+The node agent requires containerd with NRI enabled (the default starting in containerd 2.0 or newer).
+
+#### Configuring Rules (`portal-rules` Secret)
+
+Model credentials and egress rules are configured via the `portal-rules` Secret in the `service-portal-system` namespace. The DaemonSet mounts this Secret optionally into the proxy container at `/etc/portals` alongside an optional `portal-passthrough-rules` ConfigMap.
+
+To configure a `PortalRule` for the Gemini API (`generativelanguage.googleapis.com`):
+
+```bash
+kubectl -n service-portal-system create secret generic portal-rules \
+  --from-literal=gemini.yaml="apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: gemini
+spec:
+  host: generativelanguage.googleapis.com
+  authHeader: x-goog-api-key
+  authToken: ${GEMINI_API_KEY}"
+```
+
+Rule changes take effect when the proxy receives a SIGHUP signal, or by restarting the DaemonSet:
+
+```bash
+kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
+```
+
 ## Results in GCS
 
 By default, the controller runs with an in-memory no-op artifact sink. When `artifactBucket` is configured (via the `eval-runner-config` ConfigMap or the `--artifact-bucket` flag), the controller persists raw Inspect evaluation JSON logs alongside a per-task aggregate `summary.json` directly to Google Cloud Storage under `runs/<commit>/<task-id>/`.
