@@ -273,7 +273,7 @@ kubectl -n eval-runner rollout restart deployment/eval-runner-controller
 
 **Why**: If an external project or fork (such as `agent-sandbox`) is cloned under the repo tree (e.g. under `.build/`), `ap deploy` will discover and attempt to apply all of its manifests (such as `controller.yaml` and CRD definitions) to the target cluster. In the case of `agent-sandbox`, this can roll the cluster's `agent-sandbox-controller` Deployment to an unresolvable image reference and fail CRD reconciliation, breaking sandbox management across the cluster.
 
-Both `./dev/tasks/deploy` and `./dev/tasks/test-deploy` enforce this by asserting that `ap deploy --dry-run` lists only the manifests from this repository's `k8s/` directory and rejecting any foreign manifest paths or directories.
+`./dev/tasks/deploy` enforces this by asserting that `ap deploy --dry-run` lists only the manifests from this repository's `k8s/` directory and rejecting any foreign manifest paths or directories.
 
 #### Operator Recovery Note
 
