@@ -16,9 +16,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -55,11 +57,13 @@ type ToolCall struct {
 	Command string `json:"command"`
 }
 
-// ToolResult represents the output and exit code resulting from a tool execution.
+// ToolResult represents the output, exit code, and duration resulting from a tool execution.
 type ToolResult struct {
-	ID       string `json:"id,omitempty"`
-	Output   string `json:"output"`
-	ExitCode int    `json:"exitCode"`
+	ID                   string `json:"id,omitempty"`
+	Command              string `json:"command,omitempty"`
+	Output               string `json:"output"`
+	ExitCode             int    `json:"exitCode"`
+	DurationMilliseconds int64  `json:"durationMilliseconds,omitempty"`
 }
 
 // Message represents one turn in a conversation.
@@ -93,20 +97,21 @@ type ExecuteResult struct {
 
 // Options configures the execution parameters for the agent loop.
 type Options struct {
-	Instruction    string        `json:"instruction,omitempty"`
-	MaxSteps       int           `json:"maxSteps,omitempty"`
-	MaxOutputBytes int           `json:"maxOutputBytes,omitempty"`
-	CommandTimeout time.Duration `json:"commandTimeout,omitempty"`
+	Instruction       string        `json:"instruction,omitempty"`
+	SystemInstruction string        `json:"systemInstruction,omitempty"`
+	MaxSteps          int           `json:"maxSteps,omitempty"`
+	MaxOutputBytes    int           `json:"maxOutputBytes,omitempty"`
+	CommandTimeout    time.Duration `json:"commandTimeout,omitempty"`
 }
 
 // Step records the assistant text, tool calls, tool results, durations, and token usage for one turn.
 type Step struct {
-	Text         string          `json:"text,omitempty"`
-	ToolCalls    []ToolCall      `json:"toolCalls,omitempty"`
-	ToolResults  []ToolResult    `json:"toolResults,omitempty"`
-	Durations    []time.Duration `json:"durations,omitempty"`
-	InputTokens  int             `json:"inputTokens,omitempty"`
-	OutputTokens int             `json:"outputTokens,omitempty"`
+	Text                 string       `json:"text,omitempty"`
+	ToolCalls            []ToolCall   `json:"toolCalls,omitempty"`
+	ToolResults          []ToolResult `json:"toolResults,omitempty"`
+	DurationMilliseconds int64        `json:"durationMilliseconds,omitempty"`
+	InputTokens          int          `json:"inputTokens,omitempty"`
+	OutputTokens         int          `json:"outputTokens,omitempty"`
 }
 
 // Result summarizes the complete agent loop execution.
@@ -149,17 +154,23 @@ func Run(ctx context.Context, model Model, executor Executor, options Options) (
 			return result, contextErr
 		}
 
-		response, generateErr := model.Generate(ctx, Request{Messages: messages})
-		if generateErr != nil {
-			if contextErr := ctx.Err(); contextErr != nil {
-				result.StopReason = StopReasonContextDone
-				return result, contextErr
-			}
-			result.StopReason = StopReasonModelError
-			return result, generateErr
+		modelStartTime := time.Now()
+		response, generateErr := model.Generate(ctx, Request{
+			SystemInstruction: options.SystemInstruction,
+			Messages:          messages,
+		})
+		modelDuration := time.Since(modelStartTime)
+
+		if contextErr := ctx.Err(); contextErr != nil {
+			result.StopReason = StopReasonContextDone
+			return result, contextErr
 		}
-		if response == nil {
-			response = &Response{}
+		if generateErr != nil || response == nil {
+			result.StopReason = StopReasonModelError
+			if generateErr == nil {
+				generateErr = errors.New("model returned nil response without error")
+			}
+			return result, generateErr
 		}
 
 		result.InputTokens += response.InputTokens
@@ -167,40 +178,50 @@ func Run(ctx context.Context, model Model, executor Executor, options Options) (
 
 		if len(response.ToolCalls) == 0 {
 			result.Steps = append(result.Steps, Step{
-				Text: response.Text, InputTokens: response.InputTokens, OutputTokens: response.OutputTokens,
+				Text:                 response.Text,
+				DurationMilliseconds: modelDuration.Milliseconds(),
+				InputTokens:          response.InputTokens,
+				OutputTokens:         response.OutputTokens,
 			})
 			result.StopReason = StopReasonCompleted
 			return result, nil
 		}
 
 		var toolResults []ToolResult
-		var durations []time.Duration
+		appendPartialStep := func() {
+			result.Steps = append(result.Steps, Step{
+				Text:                 response.Text,
+				ToolCalls:            response.ToolCalls,
+				ToolResults:          toolResults,
+				DurationMilliseconds: modelDuration.Milliseconds(),
+				InputTokens:          response.InputTokens,
+				OutputTokens:         response.OutputTokens,
+			})
+		}
 
 		for _, toolCall := range response.ToolCalls {
 			if contextErr := ctx.Err(); contextErr != nil {
+				appendPartialStep()
 				result.StopReason = StopReasonContextDone
 				return result, contextErr
 			}
 
-			startTime := time.Now()
+			commandStartTime := time.Now()
 			commandContext, cancelCommand := context.WithTimeout(ctx, commandTimeout)
 			executeResult, executeErr := executor.Execute(commandContext, toolCall.Command)
 			cancelCommand()
-			durations = append(durations, time.Since(startTime))
+			commandDuration := time.Since(commandStartTime)
 
 			if contextErr := ctx.Err(); contextErr != nil {
+				appendPartialStep()
 				result.StopReason = StopReasonContextDone
 				return result, contextErr
 			}
 
-			toolResults = append(toolResults, formatToolResult(toolCall.ID, executeResult, executeErr, maxOutputBytes))
+			toolResults = append(toolResults, formatToolResult(toolCall, executeResult, executeErr, commandDuration, maxOutputBytes))
 		}
 
-		result.Steps = append(result.Steps, Step{
-			Text: response.Text, ToolCalls: response.ToolCalls, ToolResults: toolResults,
-			Durations: durations, InputTokens: response.InputTokens, OutputTokens: response.OutputTokens,
-		})
-
+		appendPartialStep()
 		messages = append(messages,
 			Message{Role: RoleAssistant, Text: response.Text, ToolCalls: response.ToolCalls},
 			Message{Role: RoleTool, ToolResults: toolResults},
@@ -213,7 +234,7 @@ func Run(ctx context.Context, model Model, executor Executor, options Options) (
 	}
 }
 
-func formatToolResult(toolCallID string, executeResult ExecuteResult, executeErr error, maxOutputBytes int) ToolResult {
+func formatToolResult(toolCall ToolCall, executeResult ExecuteResult, executeErr error, duration time.Duration, maxOutputBytes int) ToolResult {
 	output := executeResult.Stdout
 	if executeResult.Stderr != "" {
 		if output != "" && !strings.HasSuffix(output, "\n") {
@@ -233,15 +254,27 @@ func formatToolResult(toolCallID string, executeResult ExecuteResult, executeErr
 		output += executeErr.Error()
 	}
 
-	return ToolResult{ID: toolCallID, Output: truncateOutput(output, maxOutputBytes), ExitCode: exitCode}
+	return ToolResult{
+		ID:                   toolCall.ID,
+		Command:              toolCall.Command,
+		Output:               truncateOutput(output, maxOutputBytes),
+		ExitCode:             exitCode,
+		DurationMilliseconds: duration.Milliseconds(),
+	}
 }
 
 func truncateOutput(output string, maxOutputBytes int) string {
 	if maxOutputBytes <= 0 || len(output) <= maxOutputBytes {
 		return output
 	}
-	halfBytes := maxOutputBytes / 2
-	head := output[:halfBytes]
-	tail := output[len(output)-(maxOutputBytes-halfBytes):]
-	return fmt.Sprintf("%s[... %d bytes omitted ...]%s", head, len(output)-maxOutputBytes, tail)
+	headBytes := maxOutputBytes / 2
+	for headBytes > 0 && !utf8.RuneStart(output[headBytes]) {
+		headBytes--
+	}
+	tailStart := len(output) - (maxOutputBytes - (maxOutputBytes / 2))
+	for tailStart < len(output) && !utf8.RuneStart(output[tailStart]) {
+		tailStart++
+	}
+	omittedBytes := tailStart - headBytes
+	return fmt.Sprintf("%s[... %d bytes omitted ...]%s", output[:headBytes], omittedBytes, output[tailStart:])
 }
