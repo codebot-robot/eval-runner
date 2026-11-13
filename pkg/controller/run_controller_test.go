@@ -40,6 +40,7 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -4553,6 +4554,286 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		expectedTimeoutMessage := "step task command failed: sandbox did not report completion"
 		if task.Message != expectedTimeoutMessage {
 			t.Errorf("Expected task message %q, got %q", expectedTimeoutMessage, task.Message)
+		}
+	})
+
+	t.Run("TaskResourceLimits_ManifestLimitsAppliedToSandboxAndStatus", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-custom-limits",
+					Spec:      "eval.py@custom",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}}},
+				},
+				{
+					ID:        "task-default-limits",
+					Spec:      "eval.py@default",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-resource-limits",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				if path == "/out/results.json" {
+					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
+				}
+				return nil, fmt.Errorf("file %q not found", path)
+			},
+		}
+
+		sink := artifacts.NewInMemorySink()
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient:    fakeClient,
+			ArtifactSink:     sink,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-resource-limits"}}
+
+		// Turn 1: Sandboxes created and tasks marked Running
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sandboxList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox"))
+		if len(sandboxList.Items) != 2 {
+			t.Fatalf("Expected 2 sandboxes, got %d", len(sandboxList.Items))
+		}
+
+		expectedCustomCPULimit := resource.MustParse("2")
+		expectedCustomMemoryLimit := resource.MustParse("4Gi")
+		expectedDefaultCPULimit := resource.MustParse("500m")
+		expectedDefaultMemoryLimit := resource.MustParse("512Mi")
+
+		for _, sandbox := range sandboxList.Items {
+			taskID := sandbox.Annotations[discovery.AnnotationTaskID]
+			container := sandbox.Spec.PodTemplate.Spec.Containers[0]
+			switch taskID {
+			case "task-custom-limits":
+				if container.Resources.Limits.Cpu().Cmp(expectedCustomCPULimit) != 0 {
+					t.Errorf("task-custom-limits sandbox CPU limit want %v, got %v", expectedCustomCPULimit, container.Resources.Limits.Cpu())
+				}
+				if container.Resources.Limits.Memory().Cmp(expectedCustomMemoryLimit) != 0 {
+					t.Errorf("task-custom-limits sandbox Memory limit want %v, got %v", expectedCustomMemoryLimit, container.Resources.Limits.Memory())
+				}
+			case "task-default-limits":
+				if container.Resources.Limits.Cpu().Cmp(expectedDefaultCPULimit) != 0 {
+					t.Errorf("task-default-limits sandbox CPU limit want %v, got %v", expectedDefaultCPULimit, container.Resources.Limits.Cpu())
+				}
+				if container.Resources.Limits.Memory().Cmp(expectedDefaultMemoryLimit) != 0 {
+					t.Errorf("task-default-limits sandbox Memory limit want %v, got %v", expectedDefaultMemoryLimit, container.Resources.Limits.Memory())
+				}
+			default:
+				t.Errorf("Unexpected sandbox task ID: %s", taskID)
+			}
+		}
+
+		var midRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &midRun)
+		for _, task := range midRun.Status.Tasks {
+			if task.Resources == nil || task.Resources.Limits == nil {
+				t.Fatalf("midRun task %s missing Resources.Limits", task.ID)
+			}
+			cpuLimit := task.Resources.Limits[corev1.ResourceCPU]
+			memoryLimit := task.Resources.Limits[corev1.ResourceMemory]
+			switch task.ID {
+			case "task-custom-limits":
+				if cpuLimit.String() != "2" || memoryLimit.String() != "4Gi" {
+					t.Errorf("midRun task-custom-limits status want cpuLimit=2, memoryLimit=4Gi; got %q, %q", cpuLimit.String(), memoryLimit.String())
+				}
+			case "task-default-limits":
+				if cpuLimit.String() != "500m" || memoryLimit.String() != "512Mi" {
+					t.Errorf("midRun task-default-limits status want cpuLimit=500m, memoryLimit=512Mi; got %q, %q", cpuLimit.String(), memoryLimit.String())
+				}
+			}
+		}
+
+		// Create mock ready pods for both sandboxes
+		for i, sandbox := range sandboxList.Items {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandbox.Name,
+					Namespace: "eval-runner-sandbox",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					PodIP: fmt.Sprintf("10.244.0.7%d", i),
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			}
+			_ = cl.Create(t.Context(), pod)
+		}
+
+		// Turn 2: Tasks execute and complete
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		for _, task := range updatedRun.Status.Tasks {
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("task %s expected Completed, got %s (msg: %s)", task.ID, task.Phase, task.Message)
+			}
+			if task.Resources == nil || task.Resources.Limits == nil {
+				t.Fatalf("completed task %s missing Resources.Limits", task.ID)
+			}
+			cpuLimit := task.Resources.Limits[corev1.ResourceCPU]
+			memoryLimit := task.Resources.Limits[corev1.ResourceMemory]
+			switch task.ID {
+			case "task-custom-limits":
+				if cpuLimit.String() != "2" || memoryLimit.String() != "4Gi" {
+					t.Errorf("completed task-custom-limits status want cpuLimit=2, memoryLimit=4Gi; got %q, %q", cpuLimit.String(), memoryLimit.String())
+				}
+			case "task-default-limits":
+				if cpuLimit.String() != "500m" || memoryLimit.String() != "512Mi" {
+					t.Errorf("completed task-default-limits status want cpuLimit=500m, memoryLimit=512Mi; got %q, %q", cpuLimit.String(), memoryLimit.String())
+				}
+			}
+		}
+	})
+
+	t.Run("TaskResourceLimits_InvalidResourcesFailsTask", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:        "task-over-cpu",
+					Spec:      "eval.py@overcpu",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("32")}}},
+				},
+				{
+					ID:        "task-over-mem",
+					Spec:      "eval.py@overmem",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Gi")}}},
+				},
+				{
+					ID:        "task-zero-cpu",
+					Spec:      "eval.py@zerocpu",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0")}}},
+				},
+				{
+					ID:        "task-valid",
+					Spec:      "eval.py@valid",
+					Image:     "custom-task-image:v1",
+					Command:   []string{"run-eval"},
+					Resources: []v1alpha1.ManifestResource{{Type: "sandbox", Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("2G")}}},
+				},
+			},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-run-invalid-resources",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+				Model: "mockllm/model",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			SandboxNamespace: "eval-runner-sandbox",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-invalid-resources"}}
+
+		_, _ = reconciler.Reconcile(t.Context(), req)
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		if len(updatedRun.Status.Tasks) != 4 {
+			t.Fatalf("Expected 4 tasks, got %d", len(updatedRun.Status.Tasks))
+		}
+
+		if updatedRun.Status.Phase != v1alpha1.RunPhaseRunning {
+			t.Errorf("Expected Run phase to remain %s while valid tasks continue, got %s", v1alpha1.RunPhaseRunning, updatedRun.Status.Phase)
+		}
+
+		var foundValid bool
+		for _, task := range updatedRun.Status.Tasks {
+			if task.ID == "task-valid" {
+				foundValid = true
+				if task.Phase == v1alpha1.TaskPhaseFailed {
+					t.Errorf("task-valid should not have Failed, got phase %s", task.Phase)
+				}
+				continue
+			}
+
+			if task.Phase != v1alpha1.TaskPhaseFailed {
+				t.Errorf("task %s Phase expected Failed, got %s", task.ID, task.Phase)
+			}
+			switch task.ID {
+			case "task-over-cpu":
+				if !strings.Contains(task.Message, "task-over-cpu") || !strings.Contains(task.Message, "cpu") || !strings.Contains(task.Message, "32") {
+					t.Errorf("task-over-cpu message %q should name task, field and value", task.Message)
+				}
+			case "task-over-mem":
+				if !strings.Contains(task.Message, "task-over-mem") || !strings.Contains(task.Message, "memory") || !strings.Contains(task.Message, "128Gi") {
+					t.Errorf("task-over-mem message %q should name task, field and value", task.Message)
+				}
+			case "task-zero-cpu":
+				if !strings.Contains(task.Message, "task-zero-cpu") || !strings.Contains(task.Message, "cpu") || !strings.Contains(task.Message, "0") {
+					t.Errorf("task-zero-cpu message %q should name task, field and value", task.Message)
+				}
+			}
+		}
+		if !foundValid {
+			t.Errorf("Expected task-valid to be present in updatedRun.Status.Tasks")
 		}
 	})
 }
