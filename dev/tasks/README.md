@@ -31,7 +31,7 @@ For Kubernetes clusters running outside GKE (such as kOps on GCE, AWS EKS, or on
 
 1. **Read Cluster OIDC Issuer and JWKS**: Retrieves the OIDC issuer from `kubectl get --raw /.well-known/openid-configuration` (validating it is an `https://` URL) and signing keys from `kubectl get --raw /openid/v1/jwks`.
 2. **Workload Identity Pool**: Ensures the global workload identity pool exists in the target GCP project (`gcloud iam workload-identity-pools create`).
-3. **OIDC Provider**: Creates or updates the OIDC provider (`create-oidc` / `update-oidc`) with the uploaded JWKS, attribute mapping (`google.subject`, `attribute.namespace`, `attribute.service_account_name`), and allowed audiences (the provider's default audience plus the fixed audience `eval-runner.gke-labs.dev/gcp-workload-identity`). On update, it only invokes `update-oidc` when configuration or keys differ.
+3. **OIDC Provider**: Creates or updates the OIDC provider (`create-oidc` / `update-oidc`) with the uploaded JWKS, attribute mapping (`google.subject`, `attribute.namespace`, `attribute.service_account_name`), and allowed audiences (the provider's default audience plus the fixed audience `eval-runner.gke-labs.dev/gcp-workload-identity`).
 4. **Bucket IAM Bindings**: Grants direct principal bucket IAM permissions (no Google service accounts or impersonation):
    - `roles/storage.objectAdmin` to `system:serviceaccount:<namespace>:eval-runner-controller`
    - `roles/storage.objectViewer` to `system:serviceaccount:<namespace>:eval-runner-ui`
