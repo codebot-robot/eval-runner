@@ -24,60 +24,61 @@ import (
 )
 
 type scriptedModel struct {
-	turns []*Response
-	errs  []error
-	calls int
+	turns  []*Response
+	errors []error
+	calls  int
 }
 
-func (m *scriptedModel) Generate(context.Context, Request) (*Response, error) {
-	if m.calls >= len(m.turns) {
+func (model *scriptedModel) Generate(context.Context, Request) (*Response, error) {
+	if model.calls >= len(model.turns) {
 		return nil, errors.New("unexpected Generate call")
 	}
-	i := m.calls
-	m.calls++
-	if i < len(m.errs) {
-		return m.turns[i], m.errs[i]
+	index := model.calls
+	model.calls++
+	var err error
+	if index < len(model.errors) {
+		err = model.errors[index]
 	}
-	return m.turns[i], nil
+	return model.turns[index], err
 }
 
 type scriptedExecutor struct {
 	results []ExecuteResult
-	errs    []error
+	errors  []error
 	onCall  func(int)
 	calls   int
 }
 
-func (e *scriptedExecutor) Execute(context.Context, string) (ExecuteResult, error) {
-	if e.onCall != nil {
-		e.onCall(e.calls)
+func (executor *scriptedExecutor) Execute(context.Context, string) (ExecuteResult, error) {
+	if executor.onCall != nil {
+		executor.onCall(executor.calls)
 	}
-	i := e.calls
-	e.calls++
-	var res ExecuteResult
+	index := executor.calls
+	executor.calls++
+	var result ExecuteResult
 	var err error
-	if i < len(e.results) {
-		res = e.results[i]
+	if index < len(executor.results) {
+		result = executor.results[index]
 	}
-	if i < len(e.errs) {
-		err = e.errs[i]
+	if index < len(executor.errors) {
+		err = executor.errors[index]
 	}
-	return res, err
+	return result, err
 }
 
 func TestRun(t *testing.T) {
 	cases := []struct {
-		name        string
-		options     Options
-		turns       []*Response
-		turnErrs    []error
-		execResults []ExecuteResult
-		execErrs    []error
-		setup       func(context.Context) (context.Context, func(int))
-		wantReason  StopReason
-		wantErr     bool
-		wantTokens  [2]int
-		wantSteps   []Step
+		name           string
+		options        Options
+		turns          []*Response
+		turnErrors     []error
+		executeResults []ExecuteResult
+		executeErrors  []error
+		setup          func(context.Context) (context.Context, func(int))
+		wantReason     StopReason
+		wantErr        bool
+		wantTokens     [2]int
+		wantSteps      []Step
 	}{
 		{
 			name: "completes after two steps",
@@ -85,20 +86,20 @@ func TestRun(t *testing.T) {
 				{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}, InputTokens: 10, OutputTokens: 2},
 				{Text: "done", InputTokens: 12, OutputTokens: 3},
 			},
-			execResults: []ExecuteResult{{Stdout: "1\n"}},
-			wantReason:  StopReasonCompleted,
-			wantTokens:  [2]int{22, 5},
+			executeResults: []ExecuteResult{{Stdout: "1\n"}},
+			wantReason:     StopReasonCompleted,
+			wantTokens:     [2]int{22, 5},
 			wantSteps: []Step{
 				{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}, ToolResults: []ToolResult{{ID: "c1", Command: "echo 1", Output: "1\n"}}, InputTokens: 10, OutputTokens: 2},
 				{Text: "done", InputTokens: 12, OutputTokens: 3},
 			},
 		},
 		{
-			name:        "failing command and command timeout are fed back",
-			turns:       []*Response{{ToolCalls: []ToolCall{{ID: "c1", Command: "cat missing"}, {ID: "c2", Command: "sleep 10"}}}, {Text: "recovered"}},
-			execResults: []ExecuteResult{{ExitCode: 1, Stderr: "no such file\n"}, {}},
-			execErrs:    []error{nil, context.DeadlineExceeded},
-			wantReason:  StopReasonCompleted,
+			name:           "failing command and command timeout are fed back",
+			turns:          []*Response{{ToolCalls: []ToolCall{{ID: "c1", Command: "cat missing"}, {ID: "c2", Command: "sleep 10"}}}, {Text: "recovered"}},
+			executeResults: []ExecuteResult{{ExitCode: 1, Stderr: "no such file\n"}, {}},
+			executeErrors:  []error{nil, context.DeadlineExceeded},
+			wantReason:     StopReasonCompleted,
 			wantSteps: []Step{
 				{
 					ToolCalls: []ToolCall{{ID: "c1", Command: "cat missing"}, {ID: "c2", Command: "sleep 10"}},
@@ -111,24 +112,24 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:        "max steps",
-			options:     Options{MaxSteps: 2},
-			turns:       []*Response{{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}}, {ToolCalls: []ToolCall{{ID: "c2", Command: "echo 2"}}}},
-			execResults: []ExecuteResult{{Stdout: "1\n"}, {Stdout: "2\n"}},
-			wantReason:  StopReasonMaxSteps,
+			name:           "max steps",
+			options:        Options{MaxSteps: 2},
+			turns:          []*Response{{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}}, {ToolCalls: []ToolCall{{ID: "c2", Command: "echo 2"}}}},
+			executeResults: []ExecuteResult{{Stdout: "1\n"}, {Stdout: "2\n"}},
+			wantReason:     StopReasonMaxSteps,
 			wantSteps: []Step{
 				{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}, ToolResults: []ToolResult{{ID: "c1", Command: "echo 1", Output: "1\n"}}},
 				{ToolCalls: []ToolCall{{ID: "c2", Command: "echo 2"}}, ToolResults: []ToolResult{{ID: "c2", Command: "echo 2", Output: "2\n"}}},
 			},
 		},
 		{
-			name:        "model error returns the partial result",
-			turns:       []*Response{{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}, InputTokens: 5, OutputTokens: 1}, nil},
-			turnErrs:    []error{nil, errors.New("upstream model failure")},
-			execResults: []ExecuteResult{{Stdout: "1\n"}},
-			wantReason:  StopReasonModelError,
-			wantErr:     true,
-			wantTokens:  [2]int{5, 1},
+			name:           "model error returns the partial result",
+			turns:          []*Response{{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}, InputTokens: 5, OutputTokens: 1}, nil},
+			turnErrors:     []error{nil, errors.New("upstream model failure")},
+			executeResults: []ExecuteResult{{Stdout: "1\n"}},
+			wantReason:     StopReasonModelError,
+			wantErr:        true,
+			wantTokens:     [2]int{5, 1},
 			wantSteps: []Step{
 				{ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}}, ToolResults: []ToolResult{{ID: "c1", Command: "echo 1", Output: "1\n"}}, InputTokens: 5, OutputTokens: 1},
 			},
@@ -136,19 +137,19 @@ func TestRun(t *testing.T) {
 		{
 			name: "context cancelled mid-step keeps the partial step",
 			setup: func(ctx context.Context) (context.Context, func(int)) {
-				cCtx, cancel := context.WithCancel(ctx)
-				return cCtx, func(call int) {
+				cancelledContext, cancel := context.WithCancel(ctx)
+				return cancelledContext, func(call int) {
 					if call == 1 {
 						cancel()
 					}
 				}
 			},
-			turns:       []*Response{{Text: "step", ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}, {ID: "c2", Command: "echo 2"}}, InputTokens: 7, OutputTokens: 3}},
-			execResults: []ExecuteResult{{Stdout: "1\n"}, {}},
-			execErrs:    []error{nil, context.Canceled},
-			wantReason:  StopReasonContextDone,
-			wantErr:     true,
-			wantTokens:  [2]int{7, 3},
+			turns:          []*Response{{Text: "step", ToolCalls: []ToolCall{{ID: "c1", Command: "echo 1"}, {ID: "c2", Command: "echo 2"}}, InputTokens: 7, OutputTokens: 3}},
+			executeResults: []ExecuteResult{{Stdout: "1\n"}, {}},
+			executeErrors:  []error{nil, context.Canceled},
+			wantReason:     StopReasonContextDone,
+			wantErr:        true,
+			wantTokens:     [2]int{7, 3},
 			wantSteps: []Step{
 				{
 					Text:        "step",
@@ -160,19 +161,19 @@ func TestRun(t *testing.T) {
 		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
 			ctx := t.Context()
 			var onCall func(int)
-			if tc.setup != nil {
-				ctx, onCall = tc.setup(ctx)
+			if testCase.setup != nil {
+				ctx, onCall = testCase.setup(ctx)
 			}
-			result, err := Run(ctx, &scriptedModel{turns: tc.turns, errs: tc.turnErrs}, &scriptedExecutor{results: tc.execResults, errs: tc.execErrs, onCall: onCall}, tc.options)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Run() error = %v, wantErr %v", err, tc.wantErr)
+			result, err := Run(ctx, &scriptedModel{turns: testCase.turns, errors: testCase.turnErrors}, &scriptedExecutor{results: testCase.executeResults, errors: testCase.executeErrors, onCall: onCall}, testCase.options)
+			if (err != nil) != testCase.wantErr {
+				t.Fatalf("Run() error = %v, wantErr %v", err, testCase.wantErr)
 			}
-			if result.StopReason != tc.wantReason || [2]int{result.InputTokens, result.OutputTokens} != tc.wantTokens {
-				t.Errorf("got reason %q, tokens %v; want %q, %v", result.StopReason, [2]int{result.InputTokens, result.OutputTokens}, tc.wantReason, tc.wantTokens)
+			if result.StopReason != testCase.wantReason || [2]int{result.InputTokens, result.OutputTokens} != testCase.wantTokens {
+				t.Errorf("got reason %q, tokens %v; want %q, %v", result.StopReason, [2]int{result.InputTokens, result.OutputTokens}, testCase.wantReason, testCase.wantTokens)
 			}
 			for i := range result.Steps {
 				result.Steps[i].ModelDurationMilliseconds = 0
@@ -180,8 +181,8 @@ func TestRun(t *testing.T) {
 					result.Steps[i].ToolResults[j].DurationMilliseconds = 0
 				}
 			}
-			if !reflect.DeepEqual(result.Steps, tc.wantSteps) {
-				t.Errorf("steps mismatch:\ngot  %+v\nwant %+v", result.Steps, tc.wantSteps)
+			if !reflect.DeepEqual(result.Steps, testCase.wantSteps) {
+				t.Errorf("steps mismatch:\ngot  %+v\nwant %+v", result.Steps, testCase.wantSteps)
 			}
 		})
 	}
@@ -199,11 +200,10 @@ func TestTruncateOutput(t *testing.T) {
 		{"MultiByteHead", "ééééééééééé", 7, "é[... 16 bytes omitted ...]éé"},
 		{"MultiByteTail", "ab" + strings.Repeat("é", 10), 9, "abé[... 14 bytes omitted ...]éé"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := truncateOutput(tc.input, tc.maxBytes)
-			if got != tc.want || !utf8.ValidString(got) {
-				t.Fatalf("truncateOutput(%q, %d) = %q, want %q", tc.input, tc.maxBytes, got, tc.want)
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := truncateOutput(testCase.input, testCase.maxBytes); got != testCase.want || !utf8.ValidString(got) {
+				t.Fatalf("truncateOutput(%q, %d) = %q, want %q", testCase.input, testCase.maxBytes, got, testCase.want)
 			}
 		})
 	}
