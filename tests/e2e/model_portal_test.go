@@ -17,12 +17,19 @@ package e2e
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -52,8 +59,8 @@ func TestModelPortalManifestConfiguration(t *testing.T) {
 	}
 
 	yamlReader := yaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
-	var deployment *appsv1.Deployment
-	var service *corev1.Service
+	deployments := make(map[string]*appsv1.Deployment)
+	services := make(map[string]*corev1.Service)
 
 	for {
 		doc, err := yamlReader.Read()
@@ -75,21 +82,24 @@ func TestModelPortalManifestConfiguration(t *testing.T) {
 			if err := sigsyaml.Unmarshal(doc, &parsedDeployment); err != nil {
 				t.Fatalf("failed to unmarshal Deployment: %v", err)
 			}
-			deployment = &parsedDeployment
+			deployments[parsedDeployment.Name] = &parsedDeployment
 		case "Service":
 			var parsedService corev1.Service
 			if err := sigsyaml.Unmarshal(doc, &parsedService); err != nil {
 				t.Fatalf("failed to unmarshal Service: %v", err)
 			}
-			service = &parsedService
+			services[parsedService.Name] = &parsedService
 		}
 	}
 
+	deployment := deployments["model-portal"]
+	service := services["model-portal"]
+
 	if deployment == nil {
-		t.Fatalf("expected Deployment in %s, got none", manifestPath)
+		t.Fatalf("expected Deployment 'model-portal' in %s, got none", manifestPath)
 	}
 	if service == nil {
-		t.Fatalf("expected Service in %s, got none", manifestPath)
+		t.Fatalf("expected Service 'model-portal' in %s, got none", manifestPath)
 	}
 
 	// 1. Verify Service definition
@@ -212,6 +222,131 @@ func TestModelPortalManifestConfiguration(t *testing.T) {
 	if container.ReadinessProbe == nil || container.ReadinessProbe.TCPSocket == nil || container.ReadinessProbe.TCPSocket.Port.IntVal != 8080 {
 		t.Errorf("expected tcpSocket readiness probe on port 8080, got %v", container.ReadinessProbe)
 	}
+
+	// 5. Verify gemini-portal Deployment and Service definition
+	geminiDeployment := deployments["gemini-portal"]
+	geminiService := services["gemini-portal"]
+	if geminiDeployment == nil {
+		t.Fatalf("expected Deployment 'gemini-portal' in %s, got none", manifestPath)
+	}
+	if geminiService == nil {
+		t.Fatalf("expected Service 'gemini-portal' in %s, got none", manifestPath)
+	}
+	if geminiService.Namespace != "eval-runner" || geminiService.Spec.Selector["app"] != "gemini-portal" {
+		t.Errorf("expected Service gemini-portal selector app=gemini-portal in eval-runner, got %v in %s", geminiService.Spec.Selector, geminiService.Namespace)
+	}
+	if len(geminiDeployment.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected 1 container in gemini-portal, got %d", len(geminiDeployment.Spec.Template.Spec.Containers))
+	}
+	geminiContainer := geminiDeployment.Spec.Template.Spec.Containers[0]
+	if geminiContainer.Image != "service-portal" {
+		t.Errorf("expected gemini-portal container image 'service-portal', got %q", geminiContainer.Image)
+	}
+	var geminiAuthHeader string
+	for _, env := range geminiContainer.Env {
+		if env.Name == "UPSTREAM_AUTH_HEADER" {
+			geminiAuthHeader = env.Value
+		}
+	}
+	if geminiAuthHeader != "x-goog-api-key" {
+		t.Errorf("expected gemini-portal UPSTREAM_AUTH_HEADER='x-goog-api-key', got %q", geminiAuthHeader)
+	}
+}
+
+// TestModelPortalHeaderInjection tests against the real service-portal binary and asserts
+// that upstream requests receive the appropriate authentication header:
+// - Authorization: Bearer <token> for OpenAI-compatible client requests.
+// - x-goog-api-key: <token> for native Gemini API client requests.
+func TestModelPortalHeaderInjection(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	installCommand := exec.Command("go", "install", "github.com/gke-labs/service-portals/cmd/service-portal@"+ServicePortalsCommit)
+	installCommand.Env = append(os.Environ(), "GOBIN="+temporaryDirectory)
+	if output, err := installCommand.CombinedOutput(); err != nil {
+		t.Fatalf("failed to install service-portal: %v\nOutput: %s", err, string(output))
+	}
+	portalBinaryPath := filepath.Join(temporaryDirectory, "service-portal")
+
+	runHeaderTest := func(t *testing.T, upstreamAuthHeader, upstreamAuthToken, clientHeaderName, clientHeaderValue, expectedUpstreamHeader, expectedUpstreamValue string) {
+		capturedHeaderChan := make(chan string, 1)
+		upstreamEchoServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			capturedHeaderChan <- request.Header.Get(expectedUpstreamHeader)
+			writer.WriteHeader(http.StatusOK)
+		}))
+		defer upstreamEchoServer.Close()
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to listen on port: %v", err)
+		}
+		portalPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+		_ = listener.Close()
+
+		contextWithCancel, cancel := context.WithCancel(context.Background())
+		portalCommand := exec.CommandContext(contextWithCancel, portalBinaryPath)
+		portalCommand.Env = append(os.Environ(),
+			"PORT="+portalPort,
+			"TARGET_URL="+upstreamEchoServer.URL,
+			"UPSTREAM_AUTH_HEADER="+upstreamAuthHeader,
+			"UPSTREAM_AUTH_TOKEN="+upstreamAuthToken,
+		)
+		if err := portalCommand.Start(); err != nil {
+			cancel()
+			t.Fatalf("failed to start service-portal: %v", err)
+		}
+		defer func() {
+			cancel()
+			if portalCommand.Process != nil {
+				_ = portalCommand.Process.Kill()
+				_ = portalCommand.Wait()
+			}
+		}()
+
+		ready := false
+		for attempt := 0; attempt < 30; attempt++ {
+			connection, dialErr := net.DialTimeout("tcp", "127.0.0.1:"+portalPort, 100*time.Millisecond)
+			if dialErr == nil {
+				_ = connection.Close()
+				ready = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !ready {
+			t.Fatalf("portal failed to become ready on port %s", portalPort)
+		}
+
+		request, err := http.NewRequest("POST", "http://127.0.0.1:"+portalPort+"/test", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatalf("failed to construct request: %v", err)
+		}
+		request.Header.Set(clientHeaderName, clientHeaderValue)
+
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", response.StatusCode)
+		}
+
+		select {
+		case capturedHeader := <-capturedHeaderChan:
+			if capturedHeader != expectedUpstreamValue {
+				t.Errorf("expected upstream header %s: %q, got %q", expectedUpstreamHeader, expectedUpstreamValue, capturedHeader)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for upstream request")
+		}
+	}
+
+	t.Run("OpenAICompatible", func(t *testing.T) {
+		runHeaderTest(t, "Authorization", "secret-openai-token", "Authorization", "Bearer placeholder-openai-key", "Authorization", "Bearer secret-openai-token")
+	})
+
+	t.Run("NativeGemini", func(t *testing.T) {
+		runHeaderTest(t, "x-goog-api-key", "secret-gemini-token", "x-goog-api-key", "placeholder-gemini-key", "x-goog-api-key", "secret-gemini-token")
+	})
 }
 
 // TestServicePortalDockerfile verifies that images/service-portal/Dockerfile cross-compiles
