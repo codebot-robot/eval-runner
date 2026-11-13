@@ -36,7 +36,6 @@ import (
 
 const (
 	AgentSandboxVersion = "v1.0.7"
-	AgentSandboxURL     = "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/" + AgentSandboxVersion + "/sandbox.yaml"
 )
 
 type Harness struct {
@@ -101,85 +100,23 @@ func (h *Harness) Setup() {
 
 	contextName := "kind-" + h.clusterName
 	h.runCmd("kubectl", "config", "use-context", contextName)
-
-	h.InstallAgentSandbox()
-}
-
-func (h *Harness) InstallAgentSandbox() {
-	h.t.Logf("Installing agent-sandbox %s", AgentSandboxVersion)
-	h.KubectlApplyFileWithRetry(AgentSandboxURL, 60*time.Second)
-	h.runCmd("kubectl", "wait", "--namespace", "agent-sandbox-system", "--for=condition=available", "deployment/agent-sandbox-controller", "--timeout=120s")
 }
 
 func (h *Harness) DeployEvalRunner() {
-	h.t.Log("Building and deploying eval-runner controller from k8s manifests")
+	h.t.Log("Installing eval-runner through dev/tasks/deploy-to-kube")
 	gitRoot := h.GetGitRoot()
 
-	// Build and load controller image
-	h.DockerBuild("eval-runner:e2e", filepath.Join(gitRoot, "images/eval-runner/Dockerfile"), gitRoot)
-	h.KindLoad("eval-runner:e2e")
-	h.DockerBuild("eval-runner-ui:e2e", filepath.Join(gitRoot, "images/eval-runner-ui/Dockerfile"), gitRoot)
-	h.KindLoad("eval-runner-ui:e2e")
-	h.DockerBuild("eval-runner-webhook:e2e", filepath.Join(gitRoot, "images/eval-runner-webhook/Dockerfile"), gitRoot)
-	h.KindLoad("eval-runner-webhook:e2e")
-	h.DockerBuild("sample-runner:e2e", filepath.Join(gitRoot, "images/sample-runner/Dockerfile"), gitRoot)
-	h.KindLoad("sample-runner:e2e")
-
-	// Build and load sandboxd image from fork (clones out of tree if sibling is absent)
-	h.runCmd(filepath.Join(gitRoot, "dev/tasks/sandboxd-image"))
-	agentSandboxDir := os.Getenv("AGENT_SANDBOX_DIR")
-	if agentSandboxDir == "" {
-		sibling := filepath.Join(gitRoot, "../agent-sandbox")
-		if _, err := os.Stat(sibling); err == nil {
-			agentSandboxDir = sibling
-		} else {
-			cacheDir := os.Getenv("XDG_CACHE_HOME")
-			if cacheDir == "" {
-				home, err := os.UserHomeDir()
-				if err != nil || home == "" {
-					home = os.TempDir()
-				}
-				cacheDir = filepath.Join(home, ".cache")
-			}
-			agentSandboxDir = filepath.Join(cacheDir, "eval-runner", "agent-sandbox")
-		}
-	}
-	h.DockerBuild("sandboxd:e2e", filepath.Join(agentSandboxDir, "packages/sandboxd/Dockerfile"), agentSandboxDir)
-	h.KindLoad("sandboxd:e2e")
-
-	// Apply namespaces
-	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/00-namespaces.yaml"))
-
-	// Apply Run and Comparison CRDs and wait for them to be established
-	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/evalrunner.gke-labs.dev_runs.yaml"))
-	h.runCmd("kubectl", "wait", "--for=condition=established", "--timeout=60s", "crd/runs.evalrunner.gke-labs.dev")
-
-	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/evalrunner.gke-labs.dev_comparisons.yaml"))
-	h.runCmd("kubectl", "wait", "--for=condition=established", "--timeout=60s", "crd/comparisons.evalrunner.gke-labs.dev")
-
-	// Apply RBAC
-	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/rbac.yaml"))
-
-	// Apply NetworkPolicy
-	h.KubectlApplyFile(filepath.Join(gitRoot, "k8s/sandbox-networkpolicy.yaml"))
-
-	// Apply eval-runner-config ConfigMap with artifactDir for local sink support
-	cmManifest := `
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: eval-runner-config
-  namespace: eval-runner
-data:
-  artifactDir: /tmp/artifacts
-  defaultModel: mockllm/model
-  defaultBatchSize: "8"
-  defaultMaxSamplesPerTask: "64"
-  commandUsers: "reviewer"
-  webhookRepositories: "gke-labs/eval-runner"
-  pollProgressInterval: 2s
-`
-	h.KubectlApplyContent(cmManifest)
+	deployScript := filepath.Join(gitRoot, "dev/tasks/deploy-to-kube")
+	h.runCmd(deployScript,
+		"--set", "artifactDir=/tmp/artifacts",
+		"--set", "defaultModel=mockllm/model",
+		"--set", "defaultBatchSize=8",
+		"--set", "defaultMaxSamplesPerTask=64",
+		"--set", "commandUsers=reviewer",
+		"--set", "webhookRepositories=gke-labs/eval-runner",
+		"--set", "pollProgressInterval=2s",
+		"--set", "allowedCloneHosts=github.com,git-server.eval-runner-sandbox.svc",
+	)
 
 	// Apply Secret for eval-runner-webhook HMAC signature verification
 	secManifest := `
@@ -193,27 +130,6 @@ stringData:
   secret: e2e-webhook-secret
 `
 	h.KubectlApplyContent(secManifest)
-
-	// Apply Deployment with image rewritten for kind local image
-	deployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/runner-deployment.yaml"))
-	if err != nil {
-		h.t.Fatalf("Failed to read runner-deployment.yaml: %v", err)
-	}
-	modifiedDeploy := strings.Replace(
-		string(deployContent),
-		"image: eval-runner",
-		"image: eval-runner:e2e\n        imagePullPolicy: Never",
-		1,
-	)
-	modifiedDeploy = strings.Replace(
-		modifiedDeploy,
-		"args:",
-		"args:\n        - --sandboxd-image=sandboxd:e2e",
-		1,
-	)
-	h.KubectlApplyContent(modifiedDeploy)
-
-	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-controller", "--timeout=90s")
 
 	// Assert controller startup logs report stamped 40-hex VCS revision rather than 'devel'
 	controllerLogs := h.runCmd("kubectl", "logs", "--namespace", "eval-runner", "deployment/eval-runner-controller")
@@ -255,42 +171,6 @@ stringData:
 			h.t.Fatalf("0.0.0.0/0 internet rule missing expected TCP port %d", p)
 		}
 	}
-
-	// Apply UI Deployment with image rewritten for kind local image
-	uiDeployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/ui-deployment.yaml"))
-	if err != nil {
-		h.t.Fatalf("Failed to read ui-deployment.yaml: %v", err)
-	}
-	modifiedUIDeploy := strings.Replace(
-		string(uiDeployContent),
-		"image: eval-runner-ui",
-		"image: eval-runner-ui:e2e\n        imagePullPolicy: Never",
-		1,
-	)
-	h.KubectlApplyContent(modifiedUIDeploy)
-
-	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-ui", "--timeout=60s")
-
-	// Apply Webhook Deployment with image rewritten for kind local image
-	webhookDeployContent, err := os.ReadFile(filepath.Join(gitRoot, "k8s/webhook-deployment.yaml"))
-	if err != nil {
-		h.t.Fatalf("Failed to read webhook-deployment.yaml: %v", err)
-	}
-	modifiedWebhookDeploy := strings.Replace(
-		string(webhookDeployContent),
-		"image: eval-runner-webhook",
-		"image: eval-runner-webhook:e2e\n        imagePullPolicy: Never",
-		1,
-	)
-	modifiedWebhookDeploy = strings.Replace(
-		modifiedWebhookDeploy,
-		"- --listen-addr=:8080",
-		"- --listen-addr=:8080\n        - --allowed-clone-hosts=github.com,git-server.eval-runner-sandbox.svc",
-		1,
-	)
-	h.KubectlApplyContent(modifiedWebhookDeploy)
-
-	h.runCmd("kubectl", "wait", "--namespace", "eval-runner", "--for=condition=available", "deployment/eval-runner-webhook", "--timeout=60s")
 }
 
 func (h *Harness) DeployGitServer(namespace string) {
@@ -464,17 +344,8 @@ spec:
 
 func (h *Harness) ConfigureGCSSink(bucket string) {
 	h.t.Logf("Configuring controller with GCS sink pointing to bucket %s on fake-gcs-server", bucket)
-	cmManifest := fmt.Sprintf(`
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: eval-runner-config
-  namespace: eval-runner
-data:
-  artifactBucket: %s
-  pollProgressInterval: 2s
-`, bucket)
-	h.KubectlApplyContent(cmManifest)
+	patch := fmt.Sprintf(`{"data":{"artifactBucket":%q,"artifactDir":null}}`, bucket)
+	h.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", patch)
 
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST=fake-gcs-server.eval-runner.svc:4443")
 	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
@@ -485,17 +356,8 @@ data:
 
 func (h *Harness) ConfigureLocalDirSink() {
 	h.t.Log("Restoring controller to LocalDir artifact sink")
-	cmManifest := `
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: eval-runner-config
-  namespace: eval-runner
-data:
-  artifactDir: /tmp/artifacts
-  pollProgressInterval: 2s
-`
-	h.KubectlApplyContent(cmManifest)
+	patch := `{"data":{"artifactDir":"/tmp/artifacts","artifactBucket":null}}`
+	h.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", patch)
 
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST-")
 	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
@@ -1006,34 +868,6 @@ func (h *Harness) KubectlApplyContent(content string) {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		h.t.Fatalf("kubectl apply failed: %v\nStderr: %s", err, stderr.String())
-	}
-}
-
-func (h *Harness) KubectlApplyFile(path string) {
-	h.t.Logf("Applying kubectl file: %s", path)
-	h.runCmd("kubectl", "apply", "-f", path)
-}
-
-func (h *Harness) KubectlApplyFileWithRetry(path string, timeout time.Duration) {
-	h.t.Logf("Applying kubectl file (with retry): %s", path)
-	start := time.Now()
-	var lastErr error
-	var lastStderr string
-	for {
-		cmd := exec.Command("kubectl", "apply", "-f", path)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err == nil {
-			return
-		} else {
-			lastErr = err
-			lastStderr = stderr.String()
-		}
-
-		if time.Since(start) > timeout {
-			h.t.Fatalf("Timeout waiting for kubectl apply %s to succeed: %v\nStderr: %s", path, lastErr, lastStderr)
-		}
-		time.Sleep(2 * time.Second)
 	}
 }
 
