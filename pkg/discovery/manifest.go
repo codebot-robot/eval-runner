@@ -23,10 +23,20 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/affinity"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 var (
 	validCohortRegex = regexp.MustCompile(`^[a-zA-Z0-9]([-_a-zA-Z0-9.]*[a-zA-Z0-9])?$`)
+
+	maxTaskResourceLimits = map[corev1.ResourceName]struct {
+		capQuantity resource.Quantity
+		capString   string
+	}{
+		corev1.ResourceCPU:    {capQuantity: resource.MustParse(v1alpha1.MaxTaskCPULimit), capString: v1alpha1.MaxTaskCPULimit},
+		corev1.ResourceMemory: {capQuantity: resource.MustParse(v1alpha1.MaxTaskMemoryLimit), capString: v1alpha1.MaxTaskMemoryLimit},
+	}
 )
 
 const (
@@ -146,4 +156,65 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 	}
 
 	return nil
+}
+
+// ValidateTaskResources validates declarative resource requirements for a task:
+// - cpu and memory limits are only valid on resources of type sandbox.
+// - cpu and memory limits must be positive (> 0).
+// - cpu limit must not exceed MaxTaskCPULimit (16).
+// - memory limit must not exceed MaxTaskMemoryLimit (64Gi).
+func ValidateTaskResources(task v1alpha1.ManifestTask) error {
+	taskID := task.ID
+	for _, manifestResource := range task.Resources {
+		if manifestResource.Type != v1alpha1.ResourceTypeSandbox {
+			if len(manifestResource.Limits) > 0 {
+				return fmt.Errorf("task %q has invalid limits %v: limits are only valid on sandbox resources", taskID, manifestResource.Limits)
+			}
+			continue
+		}
+
+		for resourceName, quantity := range manifestResource.Limits {
+			limitCap, supported := maxTaskResourceLimits[resourceName]
+			if !supported {
+				return fmt.Errorf("task %q has invalid resource limit %q with value %q: unsupported resource key", taskID, string(resourceName), quantity.String())
+			}
+
+			if quantity.Sign() <= 0 {
+				return fmt.Errorf("task %q has invalid %s %q: must be positive", taskID, string(resourceName), quantity.String())
+			}
+			if quantity.Cmp(limitCap.capQuantity) > 0 {
+				return fmt.Errorf("task %q has invalid %s %q: exceeds maximum allowed %s", taskID, string(resourceName), quantity.String(), limitCap.capString)
+			}
+		}
+	}
+	return nil
+}
+
+// TaskResourceLimits returns the effective CPU and memory resource.Quantity limits and *v1alpha1.TaskResources for a task.
+// For sandbox tasks, if limits are specified in resources, those values are used; otherwise, the defaults (500m / 512Mi) are returned.
+func TaskResourceLimits(task v1alpha1.ManifestTask) (resource.Quantity, resource.Quantity, *v1alpha1.TaskResources) {
+	cpuLimit := resource.MustParse(v1alpha1.DefaultTaskCPULimit)
+	memoryLimit := resource.MustParse(v1alpha1.DefaultTaskMemoryLimit)
+
+	for _, manifestResource := range task.Resources {
+		if manifestResource.Type == v1alpha1.ResourceTypeSandbox {
+			if manifestResource.Limits != nil {
+				if quantity, ok := manifestResource.Limits[corev1.ResourceCPU]; ok && !quantity.IsZero() {
+					cpuLimit = quantity
+				}
+				if quantity, ok := manifestResource.Limits[corev1.ResourceMemory]; ok && !quantity.IsZero() {
+					memoryLimit = quantity
+				}
+			}
+			break
+		}
+	}
+
+	taskResources := &v1alpha1.TaskResources{
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    cpuLimit,
+			corev1.ResourceMemory: memoryLimit,
+		},
+	}
+	return cpuLimit, memoryLimit, taskResources
 }

@@ -24,6 +24,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -943,5 +944,94 @@ exit 0
 				}
 			}
 		})
+	}
+}
+
+func TestBuildTaskSandbox_ResourceLimits_Explicit(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-res",
+			Namespace: "eval-runner",
+		},
+	}
+	token := "auth-token-12345"
+	digest := AuthTokenDigest(token)
+
+	cpuLimit := resource.MustParse("2")
+	memoryLimit := resource.MustParse("4Gi")
+
+	sb := BuildTaskSandbox(run, "custom-task", TaskSandboxConfig{
+		Namespace:       "eval-runner-sandbox",
+		AuthTokenDigest: digest,
+		CPULimit:        cpuLimit,
+		MemoryLimit:     memoryLimit,
+	})
+
+	podSpec := sb.Spec.PodTemplate.Spec
+	if len(podSpec.Containers) == 0 {
+		t.Fatalf("Expected at least 1 container in pod spec")
+	}
+
+	taskContainer := podSpec.Containers[0]
+	// Assert limits match explicit values
+	if taskContainer.Resources.Limits.Cpu().Cmp(cpuLimit) != 0 {
+		t.Errorf("Expected task container CPU limit %v, got %v", cpuLimit, taskContainer.Resources.Limits.Cpu())
+	}
+	if taskContainer.Resources.Limits.Memory().Cmp(memoryLimit) != 0 {
+		t.Errorf("Expected task container Memory limit %v, got %v", memoryLimit, taskContainer.Resources.Limits.Memory())
+	}
+
+	// Assert requests remain the 100m / 128Mi default
+	expectedCPURequest := resource.MustParse("100m")
+	expectedMemoryRequest := resource.MustParse("128Mi")
+	if taskContainer.Resources.Requests.Cpu().Cmp(expectedCPURequest) != 0 {
+		t.Errorf("Expected task container CPU request %v, got %v", expectedCPURequest, taskContainer.Resources.Requests.Cpu())
+	}
+	if taskContainer.Resources.Requests.Memory().Cmp(expectedMemoryRequest) != 0 {
+		t.Errorf("Expected task container Memory request %v, got %v", expectedMemoryRequest, taskContainer.Resources.Requests.Memory())
+	}
+
+	// Assert init containers keep their default limits (500m / 512Mi)
+	defaultCPULimit := resource.MustParse("500m")
+	defaultMemoryLimit := resource.MustParse("512Mi")
+	for _, initContainer := range podSpec.InitContainers {
+		if initContainer.Resources.Limits.Cpu().Cmp(defaultCPULimit) != 0 {
+			t.Errorf("Init container %s CPU limit should be %v, got %v", initContainer.Name, defaultCPULimit, initContainer.Resources.Limits.Cpu())
+		}
+		if initContainer.Resources.Limits.Memory().Cmp(defaultMemoryLimit) != 0 {
+			t.Errorf("Init container %s Memory limit should be %v, got %v", initContainer.Name, defaultMemoryLimit, initContainer.Resources.Limits.Memory())
+		}
+	}
+}
+
+func TestBuildTaskSandbox_ResourceLimits_DefaultsWhenAbsent(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-def-res",
+			Namespace: "eval-runner",
+		},
+	}
+	token := "auth-token-12345"
+	digest := AuthTokenDigest(token)
+
+	sandbox := BuildTaskSandbox(run, "default-task", TaskSandboxConfig{
+		Namespace:       "eval-runner-sandbox",
+		AuthTokenDigest: digest,
+	})
+
+	podSpec := sandbox.Spec.PodTemplate.Spec
+	if len(podSpec.Containers) == 0 {
+		t.Fatalf("Expected at least 1 container in pod spec")
+	}
+
+	taskContainer := podSpec.Containers[0]
+	defaultCPULimit := resource.MustParse("500m")
+	defaultMemoryLimit := resource.MustParse("512Mi")
+
+	if taskContainer.Resources.Limits.Cpu().Cmp(defaultCPULimit) != 0 {
+		t.Errorf("Expected default task container CPU limit %v, got %v", defaultCPULimit, taskContainer.Resources.Limits.Cpu())
+	}
+	if taskContainer.Resources.Limits.Memory().Cmp(defaultMemoryLimit) != 0 {
+		t.Errorf("Expected default task container Memory limit %v, got %v", defaultMemoryLimit, taskContainer.Resources.Limits.Memory())
 	}
 }
