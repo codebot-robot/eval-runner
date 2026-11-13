@@ -28,6 +28,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/forge"
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestRunDiscovery(t *testing.T) {
@@ -480,6 +481,33 @@ spec:
 
 		harness.KubectlApplyContent(manifest)
 
+		// Assert that the regex-log sandbox pod's task container has limits cpu: 1, memory: 2G
+		sandboxName := discovery.TaskSandboxNameForRun(runName, "terminal-bench/regex-log")
+		var observedCPULimit, observedMemoryLimit string
+		podObservedDeadline := time.Now().Add(180 * time.Second)
+		for time.Now().Before(podObservedDeadline) {
+			out, err := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "-o", "json").CombinedOutput()
+			if err == nil {
+				var pod corev1.Pod
+				if json.Unmarshal(out, &pod) == nil && len(pod.Spec.Containers) > 0 {
+					for _, c := range pod.Spec.Containers {
+						if c.Name == discovery.TaskContainerName {
+							observedCPULimit = c.Resources.Limits.Cpu().String()
+							observedMemoryLimit = c.Resources.Limits.Memory().String()
+							break
+						}
+					}
+					if observedCPULimit != "" && observedMemoryLimit != "" {
+						break
+					}
+				}
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if observedCPULimit != "1" || observedMemoryLimit != "2G" {
+			t.Errorf("Expected regex-log sandbox pod task container limits cpu: 1, memory: 2G; got cpu: %s, memory: %s", observedCPULimit, observedMemoryLimit)
+		}
+
 		// Wait for Run to complete
 		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 600*time.Second)
 
@@ -512,6 +540,17 @@ spec:
 		}
 		if task.MeanScore == nil || *task.MeanScore != 1.0 {
 			t.Errorf("Expected meanScore 1.0 for %s, got %v", task.ID, task.MeanScore)
+		}
+		if task.Resources == nil || task.Resources.Limits == nil {
+			t.Fatalf("Expected task.Resources.Limits for %s to be populated", task.ID)
+		}
+		cpuLimit := task.Resources.Limits[corev1.ResourceCPU]
+		if cpuLimit.String() != "1" {
+			t.Errorf("Expected task.Resources.Limits[cpu] 1 for %s, got %s", task.ID, cpuLimit.String())
+		}
+		memoryLimit := task.Resources.Limits[corev1.ResourceMemory]
+		if memoryLimit.String() != "2G" {
+			t.Errorf("Expected task.Resources.Limits[memory] 2G for %s, got %s", task.ID, memoryLimit.String())
 		}
 
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
