@@ -688,11 +688,100 @@ func (h *Harness) WaitForRunPhase(namespace, runName, expectedPhase string, time
 		}
 
 		if time.Since(start) > timeout {
+			h.logTimeoutDiagnostics(namespace, runName)
 			h.t.Fatalf("Timeout waiting for Run %s/%s to reach %s; last phase: %s, message: %s, lastErr: %v",
 				namespace, runName, expectedPhase, lastRun.Status.Phase, lastRun.Status.Message, lastErr)
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+func (h *Harness) logTimeoutDiagnostics(namespace, runName string) {
+	h.t.Logf("=== TIMEOUT DIAGNOSTICS FOR RUN %s/%s ===", namespace, runName)
+
+	// 1. Run as YAML
+	if out, err := exec.Command("kubectl", "get", "run", runName, "-n", namespace, "-o", "yaml").CombinedOutput(); err == nil {
+		h.t.Logf("Run %s/%s YAML:\n%s", namespace, runName, string(out))
+	} else {
+		h.t.Logf("Failed to get Run %s/%s YAML: %v (output: %s)", namespace, runName, err, string(out))
+	}
+
+	// 2. kubectl get pods -n eval-runner-sandbox -o wide
+	if out, err := exec.Command("kubectl", "get", "pods", "-n", "eval-runner-sandbox", "-o", "wide").CombinedOutput(); err == nil {
+		h.t.Logf("Pods in eval-runner-sandbox (wide):\n%s", string(out))
+	} else {
+		h.t.Logf("Failed to list pods in eval-runner-sandbox: %v (output: %s)", err, string(out))
+	}
+
+	// 3 & 4. For each sandbox pod of the Run: container statuses and last ~100 lines of logs
+	out, err := exec.Command("kubectl", "get", "pods", "-n", "eval-runner-sandbox", "-o", "json").CombinedOutput()
+	if err != nil {
+		h.t.Logf("Failed to get pods in eval-runner-sandbox: %v (output: %s)", err, string(out))
+	} else {
+		var podList corev1.PodList
+		if err := json.Unmarshal(out, &podList); err != nil {
+			h.t.Logf("Failed to unmarshal pods in eval-runner-sandbox: %v", err)
+		} else {
+			for _, pod := range podList.Items {
+				if pod.Labels["evalrunner.gke-labs.dev/run-name"] != runName {
+					continue
+				}
+				h.t.Logf("--- Sandbox Pod: %s (Phase: %s) ---", pod.Name, pod.Status.Phase)
+				logContainerStatus := func(containerType string, statuses []corev1.ContainerStatus) {
+					for _, cs := range statuses {
+						var stateStr, lastStateStr, reason string
+						var exitCode int32
+						var oomKilled bool
+
+						if cs.State.Waiting != nil {
+							stateStr = fmt.Sprintf("Waiting(reason=%s, message=%s)", cs.State.Waiting.Reason, cs.State.Waiting.Message)
+							reason = cs.State.Waiting.Reason
+						} else if cs.State.Running != nil {
+							stateStr = fmt.Sprintf("Running(startedAt=%s)", cs.State.Running.StartedAt)
+						} else if cs.State.Terminated != nil {
+							stateStr = fmt.Sprintf("Terminated(exitCode=%d, reason=%s, message=%s)", cs.State.Terminated.ExitCode, cs.State.Terminated.Reason, cs.State.Terminated.Message)
+							reason = cs.State.Terminated.Reason
+							exitCode = cs.State.Terminated.ExitCode
+							oomKilled = (cs.State.Terminated.Reason == "OOMKilled" || cs.State.Terminated.ExitCode == 137)
+						}
+
+						if cs.LastTerminationState.Waiting != nil {
+							lastStateStr = fmt.Sprintf("Waiting(reason=%s, message=%s)", cs.LastTerminationState.Waiting.Reason, cs.LastTerminationState.Waiting.Message)
+						} else if cs.LastTerminationState.Running != nil {
+							lastStateStr = fmt.Sprintf("Running(startedAt=%s)", cs.LastTerminationState.Running.StartedAt)
+						} else if cs.LastTerminationState.Terminated != nil {
+							lastStateStr = fmt.Sprintf("Terminated(exitCode=%d, reason=%s, message=%s)", cs.LastTerminationState.Terminated.ExitCode, cs.LastTerminationState.Terminated.Reason, cs.LastTerminationState.Terminated.Message)
+							if !oomKilled {
+								oomKilled = (cs.LastTerminationState.Terminated.Reason == "OOMKilled" || cs.LastTerminationState.Terminated.ExitCode == 137)
+							}
+						}
+
+						h.t.Logf("Pod %s container [%s] %s: state=%s, lastState=%s, reason=%s, exitCode=%d, OOMKilled=%v",
+							pod.Name, containerType, cs.Name, stateStr, lastStateStr, reason, exitCode, oomKilled)
+
+						// 4. Last ~100 lines of each container's logs
+						if logOut, err := exec.Command("kubectl", "logs", pod.Name, "-n", "eval-runner-sandbox", "-c", cs.Name, "--tail=100").CombinedOutput(); err == nil {
+							h.t.Logf("Logs for %s/%s (container %s, tail 100):\n%s", pod.Name, cs.Name, cs.Name, string(logOut))
+						} else {
+							h.t.Logf("Failed to get logs for %s container %s: %v", pod.Name, cs.Name, err)
+						}
+					}
+				}
+
+				logContainerStatus("init", pod.Status.InitContainerStatuses)
+				logContainerStatus("main", pod.Status.ContainerStatuses)
+			}
+		}
+	}
+
+	// 5. Last ~100 lines of the controller log
+	if ctrlLogs, err := exec.Command("kubectl", "logs", "-n", namespace, "-l", "app=eval-runner-controller", "--tail=100").CombinedOutput(); err == nil {
+		h.t.Logf("Controller logs (tail 100):\n%s", string(ctrlLogs))
+	} else {
+		h.t.Logf("Failed to get controller logs: %v (output: %s)", err, string(ctrlLogs))
+	}
+
+	h.t.Logf("=== END TIMEOUT DIAGNOSTICS ===")
 }
 
 func (h *Harness) WaitForRunDeleted(namespace, runName string, timeout time.Duration) {

@@ -143,11 +143,7 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
       printf "      \"image\": \"%s\",\n", images[i]
       printf "      \"command\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"oracle\", \"%s\"],\n", names[i], workdirs[i]
       printf "      \"timeoutSeconds\": %d,\n", timeouts[i]
-      print  "      \"resources\": [{\"type\": \"sandbox\"}],"
-      print  "      \"metadata\": {"
-      printf "        \"cpus\": %d,\n", cpus_list[i]
-      printf "        \"memory\": \"%s\"\n", memory_list[i]
-      print  "      }"
+      printf "      \"resources\": [{\"type\": \"sandbox\", \"limits\": {\"cpu\": \"%d\", \"memory\": \"%s\"}}]\n", cpus_list[i], memory_list[i]
       print "    }" comma
     }
     print "  ]"

@@ -13,7 +13,7 @@ The task manifest in `examples/terminal-bench/.evals/list` is generated dynamica
 - `agent.timeout_sec` and `verifier.timeout_sec` from `task.toml` (`timeoutSeconds` is their sum, capped at the controller maximum of 7200 seconds)
 - The working directory from the last `WORKDIR` directive in `environment/Dockerfile` (defaulting to `/app`)
 
-The emitted `metadata.cpus`/`metadata.memory` is informational today because `ManifestTask` has no such field and `ParseManifest` drops unknown keys; the per-task-resources slice must add the field before anything consumes it.
+The declared `cpus` and `memory` from `task.toml` are emitted in the `sandbox` resource entry (`resources: [{"type": "sandbox", "limits": {"cpu": "<cpus>", "memory": "<memory>"}}]`) and applied as container limits on the sandbox task pod.
 
 ## Pinned Commit and How to Bump It
 
