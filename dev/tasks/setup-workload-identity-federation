@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Set up GCP Workload Identity Federation for eval-runner on a Kubernetes cluster.
+
+For non-GKE clusters (such as kOps on GCE or generic Kubernetes clusters) where
+pods cannot access GCP metadata credentials, this task configures Workload Identity
+Federation:
+  1. Reads the cluster OIDC issuer and JWKS signing keys via kubectl.
+  2. Ensures the GCP Workload Identity Pool exists.
+  3. Creates or updates the OIDC provider with the uploaded JWKS and allowed audiences.
+  4. Grants artifact storage bucket access directly to the controller and UI
+     Kubernetes ServiceAccounts (no Google service accounts or impersonation).
+  5. Applies a credential configuration ConfigMap (eval-runner-gcp-credentials)
+     for external account authentication with GCP STS.
+
+Every step is idempotent: re-running this script refreshes the uploaded JWKS
+after cluster ServiceAccount signing-key rotations.
+
+Only the Python standard library is used.
+"""
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# Ensure dev/tasks is on sys.path when invoked directly or via path
+TASKS_DIRECTORY = Path(__file__).resolve().parent
+if str(TASKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(TASKS_DIRECTORY))
+
+from task_helpers import (
+    CONTROLLER_SERVICE_ACCOUNT,
+    UI_SERVICE_ACCOUNT,
+    Runner,
+    Step,
+    permission_hint,
+    project_number,
+    whoami,
+)
+
+# Fixed audience allowing deployment manifests to project tokens without project or pool details.
+FIXED_AUDIENCE = "eval-runner.gke-labs.dev/gcp-workload-identity"
+
+# Contract paths for the projected token and external account credential configuration.
+CREDENTIAL_SOURCE_FILE = "/var/run/secrets/eval-runner/gcp/token"
+GOOGLE_APPLICATION_CREDENTIALS_PATH = "/etc/eval-runner/gcp/credential-config.json"
+
+ATTRIBUTE_MAPPING = (
+    "google.subject=assertion.sub,"
+    "attribute.namespace=assertion['kubernetes.io']['namespace'],"
+    "attribute.service_account_name=assertion['kubernetes.io']['serviceaccount']['name']"
+)
+
+
+def parse_attribute_mapping(mapping_string: str) -> Dict[str, str]:
+    """Parse comma-separated KEY=VALUE pairs into an attribute mapping dictionary."""
+    mapping: Dict[str, str] = {}
+    for item in mapping_string.split(","):
+        if "=" in item:
+            key, value = item.split("=", 1)
+            mapping[key] = value
+    return mapping
+
+
+DESIRED_ATTRIBUTE_MAPPING = parse_attribute_mapping(ATTRIBUTE_MAPPING)
+
+DEFAULT_NAMESPACE = "eval-runner"
+DEFAULT_PROVIDER = "kubernetes"
+CONFIGMAP_NAME = "eval-runner-gcp-credentials"
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--project", required=True, help="GCP project ID")
+    parser.add_argument("--bucket", required=True, help="artifact storage bucket name")
+    parser.add_argument("--pool", required=True, help="Workload Identity Pool ID")
+    parser.add_argument(
+        "--provider",
+        default=DEFAULT_PROVIDER,
+        help=f"OIDC provider ID within the pool (default: {DEFAULT_PROVIDER})",
+    )
+    parser.add_argument("--kubeconfig", help="path to dedicated kubeconfig file (optional)")
+    parser.add_argument(
+        "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help=f"Kubernetes namespace for eval-runner (default: {DEFAULT_NAMESPACE})",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="print commands without executing them")
+
+    arguments = parser.parse_args()
+    if not arguments.project.strip():
+        parser.error("--project is required")
+
+    arguments.bucket = arguments.bucket.removeprefix("gs://").rstrip("/")
+    if arguments.kubeconfig:
+        arguments.kubeconfig = Path(arguments.kubeconfig).expanduser()
+    return arguments
+
+
+def extract_key_ids_from_jwks(jwks_data: Optional[Dict[str, Any]]) -> Set[str]:
+    """Extract the set of key IDs ('kid') from a JWKS dictionary."""
+    if not jwks_data or not isinstance(jwks_data, dict):
+        return set()
+    return {
+        key.get("kid")
+        for key in jwks_data.get("keys", [])
+        if isinstance(key, dict) and key.get("kid")
+    }
+
+
+def parse_jwks(raw_jwks: Any) -> Optional[Dict[str, Any]]:
+    """Parse JWKS if provided as a JSON string, or return as dict if already parsed."""
+    if isinstance(raw_jwks, str):
+        try:
+            return json.loads(raw_jwks)
+        except json.JSONDecodeError as error:
+            sys.stderr.write(f"warning: failed to parse existing provider JWKS as JSON: {error}\n")
+            return None
+    elif isinstance(raw_jwks, dict):
+        return raw_jwks
+    return None
+
+
+def normalize_jwks(jwks: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Normalize JWKS structure so comparison is invariant to key order and whitespace."""
+    if not jwks or not isinstance(jwks, dict):
+        return None
+    keys = jwks.get("keys")
+    if isinstance(keys, list):
+        sorted_keys = sorted(
+            keys,
+            key=lambda key: (
+                key.get("kid", "") if isinstance(key, dict) else "",
+                json.dumps(key, sort_keys=True),
+            ),
+        )
+        return {**jwks, "keys": sorted_keys}
+    return jwks
+
+
+def read_cluster_oidc(runner: Runner) -> Tuple[str, str, Dict[str, Any], List[str]]:
+    """Read and validate the cluster OIDC issuer URL and JWKS keys."""
+    openid_configuration_raw = runner.output(
+        ["kubectl", "get", "--raw", "/.well-known/openid-configuration"]
+    )
+    try:
+        openid_configuration = json.loads(openid_configuration_raw)
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"error: failed to parse cluster openid-configuration as JSON: {error}"
+        )
+
+    issuer_uri = openid_configuration.get("issuer")
+    if not issuer_uri or not isinstance(issuer_uri, str) or not issuer_uri.startswith("https://"):
+        raise SystemExit(
+            f"error: cluster OIDC issuer must be an https:// URL, got {issuer_uri!r}"
+        )
+
+    jwks_raw = runner.output(["kubectl", "get", "--raw", "/openid/v1/jwks"])
+    try:
+        jwks_data = json.loads(jwks_raw)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"error: failed to parse cluster JWKS as JSON: {error}")
+
+    cluster_key_ids = sorted(extract_key_ids_from_jwks(jwks_data))
+    print(f"    issuer:    {issuer_uri}")
+    print(f"    key IDs:   {', '.join(cluster_key_ids) if cluster_key_ids else '(none)'}")
+    return issuer_uri, jwks_raw, jwks_data, cluster_key_ids
+
+
+def ensure_workload_identity_pool(runner: Runner, arguments: argparse.Namespace) -> None:
+    """Describe the Workload Identity Pool, creating it if absent."""
+    pool_describe_result = runner.run(
+        [
+            "gcloud", "iam", "workload-identity-pools", "describe", arguments.pool,
+            "--location=global", f"--project={arguments.project}", "--format=json",
+        ],
+        check=False,
+        capture=True,
+        mutating=False,
+    )
+    if pool_describe_result.returncode == 0:
+        print(f"    workload identity pool {arguments.pool} exists")
+    elif "NOT_FOUND" in pool_describe_result.stderr:
+        runner.run(
+            [
+                "gcloud", "iam", "workload-identity-pools", "create", arguments.pool,
+                "--location=global", f"--project={arguments.project}",
+            ],
+            mutating=True,
+        )
+        if not arguments.dry_run:
+            print(f"    created workload identity pool {arguments.pool}")
+    else:
+        sys.stderr.write(pool_describe_result.stderr)
+        raise SystemExit(
+            f"error: failed to describe workload identity pool {arguments.pool}"
+        )
+
+
+def ensure_oidc_provider(
+    runner: Runner,
+    arguments: argparse.Namespace,
+    numeric_project_number: str,
+    issuer_uri: str,
+    jwks_raw: str,
+    jwks_data: Dict[str, Any],
+    cluster_key_ids: List[str],
+) -> str:
+    """Create or update the OIDC provider, returning the provider's default audience."""
+    default_audience = (
+        f"//iam.googleapis.com/projects/{numeric_project_number}/locations/global/"
+        f"workloadIdentityPools/{arguments.pool}/providers/{arguments.provider}"
+    )
+    allowed_audiences_string = f"{default_audience},{FIXED_AUDIENCE}"
+
+    provider_describe_result = runner.run(
+        [
+            "gcloud", "iam", "workload-identity-pools", "providers", "describe", arguments.provider,
+            f"--workload-identity-pool={arguments.pool}", "--location=global",
+            f"--project={arguments.project}", "--format=json",
+        ],
+        check=False,
+        capture=True,
+        mutating=False,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as temporary_file:
+        temporary_file.write(jwks_raw)
+        temporary_jwks_path = temporary_file.name
+
+    try:
+        if provider_describe_result.returncode != 0:
+            if "NOT_FOUND" in provider_describe_result.stderr:
+                runner.run(
+                    [
+                        "gcloud", "iam", "workload-identity-pools", "providers", "create-oidc",
+                        arguments.provider,
+                        f"--workload-identity-pool={arguments.pool}",
+                        "--location=global",
+                        f"--project={arguments.project}",
+                        f"--issuer-uri={issuer_uri}",
+                        f"--jwk-json-path={temporary_jwks_path}",
+                        f"--attribute-mapping={ATTRIBUTE_MAPPING}",
+                        f"--allowed-audiences={allowed_audiences_string}",
+                    ],
+                    mutating=True,
+                )
+                if not arguments.dry_run:
+                    print(f"    created OIDC provider {arguments.provider}")
+            else:
+                sys.stderr.write(provider_describe_result.stderr)
+                raise SystemExit(
+                    f"error: failed to describe OIDC provider {arguments.provider}"
+                )
+        else:
+            try:
+                existing_provider_data = json.loads(provider_describe_result.stdout)
+            except json.JSONDecodeError as error:
+                sys.stderr.write(provider_describe_result.stdout)
+                raise SystemExit(
+                    f"error: failed to parse provider describe output as JSON: {error}"
+                )
+
+            existing_oidc = existing_provider_data.get("oidc", {})
+            differences: List[str] = []
+
+            existing_issuer = existing_oidc.get("issuerUri")
+            if existing_issuer != issuer_uri:
+                differences.append(f"issuer ({existing_issuer!r} -> {issuer_uri!r})")
+
+            existing_audiences = set(existing_oidc.get("allowedAudiences") or [])
+            desired_audiences = {default_audience, FIXED_AUDIENCE}
+            if existing_audiences != desired_audiences:
+                differences.append(
+                    f"allowed audiences ({sorted(existing_audiences)} -> {sorted(desired_audiences)})"
+                )
+
+            existing_mapping = existing_provider_data.get("attributeMapping") or {}
+            if existing_mapping != DESIRED_ATTRIBUTE_MAPPING:
+                differences.append(
+                    f"attribute mapping ({existing_mapping} -> {DESIRED_ATTRIBUTE_MAPPING})"
+                )
+
+            existing_jwks = parse_jwks(existing_oidc.get("jwksJson"))
+            existing_key_ids = extract_key_ids_from_jwks(existing_jwks)
+            current_key_ids_set = set(cluster_key_ids)
+            if normalize_jwks(existing_jwks) != normalize_jwks(jwks_data):
+                if existing_key_ids != current_key_ids_set:
+                    differences.append(
+                        f"JWKS keys ({', '.join(sorted(existing_key_ids)) or '(none)'} -> "
+                        f"{', '.join(cluster_key_ids) or '(none)'})"
+                    )
+                else:
+                    differences.append(
+                        f"JWKS keys ({', '.join(cluster_key_ids) or '(none)'} updated)"
+                    )
+
+            if differences:
+                print(f"    provider configuration changed: {'; '.join(differences)}")
+                runner.run(
+                    [
+                        "gcloud", "iam", "workload-identity-pools", "providers", "update-oidc",
+                        arguments.provider,
+                        f"--workload-identity-pool={arguments.pool}",
+                        "--location=global",
+                        f"--project={arguments.project}",
+                        f"--issuer-uri={issuer_uri}",
+                        f"--jwk-json-path={temporary_jwks_path}",
+                        f"--attribute-mapping={ATTRIBUTE_MAPPING}",
+                        f"--allowed-audiences={allowed_audiences_string}",
+                    ],
+                    mutating=True,
+                )
+            else:
+                print(f"    OIDC provider {arguments.provider} is up to date")
+    finally:
+        try:
+            os.unlink(temporary_jwks_path)
+        except OSError:
+            pass
+
+    return default_audience
+
+
+def ensure_bucket_access(
+    runner: Runner,
+    arguments: argparse.Namespace,
+    numeric_project_number: str,
+    account: str,
+) -> Tuple[str, str]:
+    """Grant direct principal bucket IAM bindings to controller and UI KSAs."""
+    bucket_uri = f"gs://{arguments.bucket}"
+    principal_prefix = (
+        f"principal://iam.googleapis.com/projects/{numeric_project_number}/locations/global/"
+        f"workloadIdentityPools/{arguments.pool}/subject"
+    )
+    controller_principal = (
+        f"{principal_prefix}/system:serviceaccount:{arguments.namespace}:{CONTROLLER_SERVICE_ACCOUNT}"
+    )
+    ui_principal = (
+        f"{principal_prefix}/system:serviceaccount:{arguments.namespace}:{UI_SERVICE_ACCOUNT}"
+    )
+    grants = [
+        (controller_principal, "roles/storage.objectAdmin"),
+        (ui_principal, "roles/storage.objectViewer"),
+    ]
+    for member, role in grants:
+        result = runner.run(
+            [
+                "gcloud", "storage", "buckets", "add-iam-policy-binding", bucket_uri,
+                f"--project={arguments.project}", f"--member={member}", f"--role={role}", "--format=none",
+            ],
+            check=False,
+            capture=True,
+            mutating=True,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(result.stderr)
+            if "denied" in result.stderr.lower() or "403" in result.stderr:
+                sys.stderr.write(permission_hint(account, arguments.project, result.stderr))
+            raise SystemExit(f"error: could not grant bucket access to {member}")
+        print(f"    {role} -> {member}")
+    return controller_principal, ui_principal
+
+
+def ensure_credential_configmap(
+    runner: Runner,
+    arguments: argparse.Namespace,
+    default_audience: str,
+) -> None:
+    """Apply the external account credential configuration ConfigMap."""
+    credential_config = {
+        "type": "external_account",
+        "audience": default_audience,
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": "https://sts.googleapis.com/v1/token",
+        "credential_source": {
+            "file": CREDENTIAL_SOURCE_FILE,
+        },
+    }
+    config_map_manifest = json.dumps(
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": CONFIGMAP_NAME,
+                "namespace": arguments.namespace,
+            },
+            "data": {
+                "GOOGLE_APPLICATION_CREDENTIALS": GOOGLE_APPLICATION_CREDENTIALS_PATH,
+                "credential-config.json": json.dumps(credential_config, indent=2),
+            },
+        },
+        indent=2,
+    )
+    runner.run(
+        ["kubectl", "apply", "-f", "-"],
+        stdin=config_map_manifest,
+        mutating=True,
+    )
+    print(f"    ConfigMap {arguments.namespace}/{CONFIGMAP_NAME} applied")
+
+
+def print_summary(
+    arguments: argparse.Namespace,
+    issuer_uri: str,
+    cluster_key_ids: List[str],
+    controller_principal: str,
+    ui_principal: str,
+) -> None:
+    """Print a summary of the configured Workload Identity Federation resources."""
+    print(f"    Pool:            {arguments.pool}")
+    print(f"    Provider:        {arguments.provider}")
+    print(f"    Issuer:          {issuer_uri}")
+    print(f"    Key IDs:         {', '.join(cluster_key_ids) if cluster_key_ids else '(none)'}")
+    print("    Bucket bindings:")
+    print(f"      roles/storage.objectAdmin  -> {controller_principal}")
+    print(f"      roles/storage.objectViewer -> {ui_principal}")
+    print(f"    ConfigMap:       {arguments.namespace}/{CONFIGMAP_NAME}")
+    print()
+    print("Next step: set artifactBucket in eval-runner-config, e.g.:")
+    print(
+        f"    kubectl -n {arguments.namespace} patch configmap eval-runner-config "
+        f"--type=merge -p '{{\"data\":{{\"artifactBucket\":\"{arguments.bucket}\"}}}}'"
+    )
+
+
+def main() -> None:
+    arguments = parse_arguments()
+    runner = Runner(dry_run=arguments.dry_run, kubeconfig=arguments.kubeconfig)
+    if arguments.dry_run:
+        print("dry run: mutating commands are printed, not executed")
+
+    Step("Who am I")
+    account = whoami(runner, arguments.project)
+    numeric_project_number = project_number(runner, arguments.project)
+
+    # 1. Read the issuer and JWKS from the cluster
+    Step("Read cluster OIDC issuer and JWKS")
+    issuer_uri, jwks_raw, jwks_data, cluster_key_ids = read_cluster_oidc(runner)
+
+    # 2. Pool: describe; create if absent
+    Step(f"Workload Identity Pool {arguments.pool}")
+    ensure_workload_identity_pool(runner, arguments)
+
+    # 3. OIDC provider: create or update
+    Step(f"OIDC provider {arguments.provider}")
+    default_audience = ensure_oidc_provider(
+        runner,
+        arguments,
+        numeric_project_number,
+        issuer_uri,
+        jwks_raw,
+        jwks_data,
+        cluster_key_ids,
+    )
+
+    # 4. Bucket access as direct principal bindings
+    Step(f"Bucket IAM bindings on gs://{arguments.bucket}")
+    controller_principal, ui_principal = ensure_bucket_access(
+        runner, arguments, numeric_project_number, account
+    )
+
+    # 5. Credential configuration ConfigMap
+    Step(f"Credential configuration ConfigMap {arguments.namespace}/{CONFIGMAP_NAME}")
+    ensure_credential_configmap(runner, arguments, default_audience)
+
+    # 6. Summary
+    Step("Workload Identity Federation summary")
+    print_summary(
+        arguments, issuer_uri, cluster_key_ids, controller_principal, ui_principal
+    )
+
+
+if __name__ == "__main__":
+    main()
