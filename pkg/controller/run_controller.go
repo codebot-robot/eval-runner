@@ -45,6 +45,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -2105,6 +2106,22 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 					})
 					continue
 				}
+				if err := discovery.ValidateTaskResources(task); err != nil {
+					statuses = append(statuses, v1alpha1.TaskStatus{
+						ID:             taskID,
+						Cohort:         cohort,
+						Phase:          v1alpha1.TaskPhaseFailed,
+						Message:        err.Error(),
+						SampleRange:    effRange,
+						SamplesPlanned: planned,
+					})
+					continue
+				}
+			}
+
+			var taskResources *v1alpha1.TaskResources
+			if isSandboxOnlyTask(task) {
+				_, _, taskResources = discovery.TaskResourceLimits(task)
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
@@ -2113,6 +2130,7 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				Phase:          v1alpha1.TaskPhasePending,
 				SampleRange:    effRange,
 				SamplesPlanned: planned,
+				Resources:      taskResources,
 			})
 		}
 	} else if manifest != nil {
@@ -2145,6 +2163,22 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 					})
 					continue
 				}
+				if err := discovery.ValidateTaskResources(task); err != nil {
+					statuses = append(statuses, v1alpha1.TaskStatus{
+						ID:             task.ID,
+						Cohort:         cohort,
+						Phase:          v1alpha1.TaskPhaseFailed,
+						Message:        err.Error(),
+						SampleRange:    effRange,
+						SamplesPlanned: planned,
+					})
+					continue
+				}
+			}
+
+			var taskResources *v1alpha1.TaskResources
+			if isSandboxOnlyTask(task) {
+				_, _, taskResources = discovery.TaskResourceLimits(task)
 			}
 
 			statuses = append(statuses, v1alpha1.TaskStatus{
@@ -2153,6 +2187,7 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				Phase:          v1alpha1.TaskPhasePending,
 				SampleRange:    effRange,
 				SamplesPlanned: planned,
+				Resources:      taskResources,
 			})
 		}
 	}
@@ -2403,11 +2438,15 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 				taskImage := ""
 				isSandboxTask := false
+				var taskCPULimit, taskMemoryLimit resource.Quantity
 				if manifest != nil {
 					for _, manifestTask := range manifest.Tasks {
 						if manifestTask.ID == taskID {
 							taskImage = manifestTask.Image
 							isSandboxTask = isSandboxOnlyTask(manifestTask)
+							if isSandboxTask {
+								taskCPULimit, taskMemoryLimit, _ = discovery.TaskResourceLimits(manifestTask)
+							}
 							break
 						}
 					}
@@ -2425,6 +2464,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					CloneRepo:          isSandboxTask && run.Spec.Repo.URL != "",
 					StepTimeoutSeconds: int(r.executionStepTimeout().Seconds()),
 					SandboxTask:        isSandboxTask,
+					CPULimit:           taskCPULimit,
+					MemoryLimit:        taskMemoryLimit,
 				})
 				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
 					logger.Error(err, "Failed to create task sandbox", "task", taskID)
@@ -2452,6 +2493,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 										for _, manifestTask := range manifest.Tasks {
 											if manifestTask.ID == tid && isSandboxOnlyTask(manifestTask) {
 												status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
+												_, _, taskResources := discovery.TaskResourceLimits(manifestTask)
+												status.Tasks[i].Resources = taskResources
 												break
 											}
 										}
@@ -2480,6 +2523,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 									for _, manifestTask := range manifest.Tasks {
 										if manifestTask.ID == tid && isSandboxOnlyTask(manifestTask) {
 											run.Status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
+											_, _, taskResources := discovery.TaskResourceLimits(manifestTask)
+											run.Status.Tasks[i].Resources = taskResources
 											break
 										}
 									}
@@ -2876,6 +2921,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				if res.timeoutSeconds > 0 {
 					status.Tasks[i].TimeoutSeconds = res.timeoutSeconds
 				}
+				if res.resources != nil {
+					status.Tasks[i].Resources = res.resources
+				}
 			}
 		}
 		status.Summary = ComputeRunSummary(status.Tasks)
@@ -2931,6 +2979,7 @@ type taskExecutionResult struct {
 	logPath         string
 	sampleRange     *v1alpha1.SampleRange
 	timeoutSeconds  int
+	resources       *v1alpha1.TaskResources
 }
 
 func (r *RunReconciler) handleStepExecutionFailure(
@@ -3413,6 +3462,16 @@ func (r *RunReconciler) executeSandboxTask(
 			sampleRange: effRange,
 		}
 	}
+	if err := discovery.ValidateTaskResources(targetTask); err != nil {
+		logger.Error(err, "Task invalid resources", "task", taskID)
+		return taskExecutionResult{
+			taskID:      taskID,
+			phase:       v1alpha1.TaskPhaseFailed,
+			message:     err.Error(),
+			sampleRange: effRange,
+		}
+	}
+	_, _, effectiveResources := discovery.TaskResourceLimits(targetTask)
 
 	// Ensure /workspace/out exists
 	mkdirContext, mkdirCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
@@ -3443,6 +3502,7 @@ func (r *RunReconciler) executeSandboxTask(
 	commandCancel()
 	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
 		failedResult.timeoutSeconds = effectiveTimeoutSeconds
+		failedResult.resources = effectiveResources
 		return failedResult
 	}
 
@@ -3452,6 +3512,7 @@ func (r *RunReconciler) executeSandboxTask(
 	readCancel()
 	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "results file", readContext, readErr, taskID, effRange); failed {
 		failedResult.timeoutSeconds = effectiveTimeoutSeconds
+		failedResult.resources = effectiveResources
 		return failedResult
 	}
 
@@ -3466,6 +3527,7 @@ func (r *RunReconciler) executeSandboxTask(
 			message:        message,
 			sampleRange:    effRange,
 			timeoutSeconds: effectiveTimeoutSeconds,
+			resources:      effectiveResources,
 		}
 	}
 	if aggregates.Samples == 0 {
@@ -3477,6 +3539,7 @@ func (r *RunReconciler) executeSandboxTask(
 			message:        message,
 			sampleRange:    effRange,
 			timeoutSeconds: effectiveTimeoutSeconds,
+			resources:      effectiveResources,
 		}
 	}
 
@@ -3525,6 +3588,7 @@ func (r *RunReconciler) executeSandboxTask(
 			message:        message,
 			sampleRange:    effRange,
 			timeoutSeconds: effectiveTimeoutSeconds,
+			resources:      effectiveResources,
 		}
 	}
 
@@ -3532,6 +3596,7 @@ func (r *RunReconciler) executeSandboxTask(
 		taskID:          taskID,
 		phase:           v1alpha1.TaskPhaseCompleted,
 		timeoutSeconds:  effectiveTimeoutSeconds,
+		resources:       effectiveResources,
 		samples:         aggregates.Samples,
 		successes:       aggregates.Successes,
 		meanScore:       aggregates.MeanScore,
