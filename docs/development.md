@@ -197,7 +197,7 @@ Options:
 - `--restart`: Restarts deployments after deploy.
 - `--dry-run`: Prints commands without executing mutating actions.
 
-If `artifactBucket` is configured, the controller and UI interact with GCS using Application Default Credentials (ADC). On non-GKE clusters, GCP Workload Identity Federation can be configured via `./dev/tasks/setup-workload-identity-federation` (see below), or ensure the node service account (or cloud IAM role provider) is granted `roles/storage.objectAdmin` on the bucket.
+If `artifactBucket` is configured, the controller and UI interact with GCS using Application Default Credentials (ADC). On non-GKE clusters, GCP Workload Identity Federation can be configured via `./dev/tasks/setup-workload-identity-federation` and `./dev/tasks/setup-artifact-bucket` (see below), or ensure the node service account (or cloud IAM role provider) is granted `roles/storage.objectAdmin` on the bucket.
 
 ### Deploying to GKE in one step (`dev/tasks/deploy-to-gke`)
 
@@ -209,9 +209,8 @@ For a fresh GKE cluster, `./dev/tasks/deploy-to-gke` (Python, standard library o
 
 It:
 1. Fetches cluster credentials into a dedicated kubeconfig (`~/.kube/eval-runner-<project>-<cluster>.kubeconfig`, never `~/.kube/config`, so your default context is untouched).
-2. Creates the artifact bucket `<project>-eval-runner` if needed.
-3. Grants the controller and UI Kubernetes ServiceAccounts access to the bucket through Workload Identity Federation principals (`principal://iam.googleapis.com/...`) without needing Google Service Account keys or KSA annotations.
-4. Delegates the remainder to `./dev/tasks/deploy-to-kube` with `IMAGE_PREFIX=gcr.io/<project>` and `--set artifactBucket=... --set artifactDir=none`.
+2. Provisions the artifact bucket and Workload Identity IAM bindings via `./dev/tasks/setup-artifact-bucket` (creates `<project>-eval-runner` if absent and binds controller and UI Kubernetes ServiceAccounts as direct principals without needing Google Service Account keys or KSA annotations).
+3. Delegates the remainder to `./dev/tasks/deploy-to-kube` with `IMAGE_PREFIX=gcr.io/<project>` and `--set artifactBucket=... --set artifactDir=none`.
 
 Every step is idempotent; `--dry-run` prints the commands instead of running them. Use `--set KEY=VALUE` for extra ConfigMap entries, `--bucket`, `--image-prefix` and `--kubeconfig` to override defaults, and `--skip-bucket`, `--skip-sandboxd-build`, or `--skip-deploy` to run only part of it. Use `--restart` to restart deployments after deploying if running a controller older than #277 (the controller and UI reload at runtime since #277).
 
@@ -223,7 +222,27 @@ gcloud projects add-iam-policy-binding <project> --member="user:<you>" --role="r
 
 ### Workload Identity Federation on non-GKE clusters (`dev/tasks/setup-workload-identity-federation`)
 
-For clusters running outside GKE (such as kOps on GCE, AWS EKS, or on-premises clusters), pods have no metadata-server credentials to obtain Google Cloud credentials. `./dev/tasks/setup-workload-identity-federation` configures GCP Workload Identity Federation using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required), establishes bucket IAM bindings, and applies the `eval-runner-gcp-credentials` ConfigMap.
+For clusters running outside GKE (such as kOps on GCE, AWS EKS, or on-premises clusters), pods have no metadata-server credentials to obtain Google Cloud credentials. Setup is split into two steps (cluster identity first, then bucket):
+
+1. **Cluster Identity (`./dev/tasks/setup-workload-identity-federation`)**:
+   Configures GCP Workload Identity Federation using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required), creates the Workload Identity Pool and OIDC provider, and applies the `eval-runner-gcp-credentials` ConfigMap:
+
+   ```bash
+   ./dev/tasks/setup-workload-identity-federation \
+       --project <project-id> \
+       --pool <workload-identity-pool-id>
+   ```
+
+2. **Artifact Bucket & IAM (`./dev/tasks/setup-artifact-bucket`)**:
+   Creates the GCS artifact bucket (if absent, with uniform bucket-level access) and grants direct principal IAM permissions to the controller (`roles/storage.objectAdmin`) and UI (`roles/storage.objectViewer`) Kubernetes ServiceAccounts in the pool:
+
+   ```bash
+   ./dev/tasks/setup-artifact-bucket \
+       --project <project-id> \
+       --bucket <bucket-name> \
+       --location <bucket-location> \
+       --workload-identity-pool <workload-identity-pool-id>
+   ```
 
 The `eval-runner-controller` and `eval-runner-ui` Deployments in `k8s/` wire this contract in optionally:
 - **Audience**: Projected ServiceAccount token with audience `eval-runner.gke-labs.dev/gcp-workload-identity` and `expirationSeconds: 3600`.
@@ -607,7 +626,7 @@ Writes happen exclusively from the controller pod using Application Default Cred
 
 ### One-Time Cloud Setup
 
-`./dev/tasks/deploy-to-gke` performs this setup automatically using Workload Identity Federation principals (`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/eval-runner/sa/eval-runner-controller`) bound directly on the bucket. The steps below are the manual alternative using a Google Service Account:
+`./dev/tasks/deploy-to-gke` performs this setup automatically (via `./dev/tasks/setup-artifact-bucket`) using Workload Identity Federation principals (`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/eval-runner/sa/eval-runner-controller`) bound directly on the bucket. The steps below are the manual alternative using a Google Service Account:
 
 1. **Create the Google Service Account (GSA):**
 

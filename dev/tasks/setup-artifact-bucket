@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Create an artifact storage bucket and configure Workload Identity IAM bindings.
+
+This task creates the GCS artifact bucket (if absent, with uniform bucket-level
+access) and grants:
+  - roles/storage.objectAdmin to the eval-runner controller ServiceAccount
+  - roles/storage.objectViewer to the eval-runner UI ServiceAccount
+
+Principal subjects are bound directly on the bucket using the Workload Identity
+Pool:
+  - GKE pools (<project>.svc.id.goog): ns/<namespace>/sa/<name>
+  - Other pools:                       system:serviceaccount:<namespace>:<name>
+
+Every step is idempotent. Use --dry-run to print commands without executing them.
+
+Only the Python standard library is used.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+# Ensure dev/tasks is on sys.path when invoked directly or via path
+TASKS_DIRECTORY = Path(__file__).resolve().parent
+if str(TASKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(TASKS_DIRECTORY))
+
+from task_helpers import (
+    CONTROLLER_SERVICE_ACCOUNT,
+    UI_SERVICE_ACCOUNT,
+    Runner,
+    permission_hint,
+    project_number,
+    whoami,
+)
+
+DEFAULT_NAMESPACE = "eval-runner"
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--project", required=True, help="GCP project ID")
+    parser.add_argument("--bucket", required=True, help="artifact storage bucket name")
+    parser.add_argument("--location", required=True, help="bucket location (e.g. us-central1)")
+    parser.add_argument(
+        "--workload-identity-pool",
+        "--pool",
+        dest="workload_identity_pool",
+        required=True,
+        help="Workload Identity Pool ID (e.g. <project>.svc.id.goog or custom pool ID)",
+    )
+    parser.add_argument(
+        "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help=f"Kubernetes namespace for eval-runner (default: {DEFAULT_NAMESPACE})",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="print commands without executing them")
+
+    arguments = parser.parse_args()
+    if not arguments.project.strip():
+        parser.error("--project is required")
+    if not arguments.bucket.strip():
+        parser.error("--bucket is required")
+    if not arguments.location.strip():
+        parser.error("--location is required")
+    if not arguments.workload_identity_pool.strip():
+        parser.error("--workload-identity-pool is required")
+
+    arguments.bucket = arguments.bucket.removeprefix("gs://").rstrip("/")
+    return arguments
+
+
+def principal_subject(pool: str, namespace: str, service_account: str) -> str:
+    """Format the IAM principal subject based on whether the pool is a GKE pool."""
+    if pool.endswith(".svc.id.goog"):
+        return f"ns/{namespace}/sa/{service_account}"
+    return f"system:serviceaccount:{namespace}:{service_account}"
+
+
+def ensure_bucket(runner: Runner, arguments: argparse.Namespace, account: str) -> None:
+    """Describe the artifact bucket, creating it with uniform access if absent."""
+    bucket_uri = f"gs://{arguments.bucket}"
+    exists_result = runner.run(
+        [
+            "gcloud", "storage", "buckets", "describe", bucket_uri,
+            f"--project={arguments.project}", "--format=value(name)",
+        ],
+        check=False,
+        capture=True,
+        mutating=False,
+    )
+    if exists_result.returncode == 0:
+        print(f"    bucket {bucket_uri} exists")
+    else:
+        create_result = runner.run(
+            [
+                "gcloud", "storage", "buckets", "create", bucket_uri,
+                f"--project={arguments.project}",
+                f"--location={arguments.location}",
+                "--uniform-bucket-level-access",
+            ],
+            check=False,
+            capture=True,
+        )
+        if create_result.returncode != 0:
+            sys.stderr.write(create_result.stderr)
+            if "denied" in create_result.stderr.lower() or "403" in create_result.stderr:
+                sys.stderr.write(permission_hint(account, arguments.project, create_result.stderr))
+            raise SystemExit("error: could not create the artifact bucket")
+        print(f"    created {bucket_uri} in {arguments.location}")
+
+
+def ensure_bucket_bindings(
+    runner: Runner,
+    arguments: argparse.Namespace,
+    numeric_project_number: str,
+    account: str,
+) -> None:
+    """Grant direct principal bucket IAM bindings to controller and UI KSAs."""
+    bucket_uri = f"gs://{arguments.bucket}"
+    principal_prefix = (
+        f"principal://iam.googleapis.com/projects/{numeric_project_number}/locations/global/"
+        f"workloadIdentityPools/{arguments.workload_identity_pool}/subject"
+    )
+    grants = [
+        (
+            principal_subject(arguments.workload_identity_pool, arguments.namespace, CONTROLLER_SERVICE_ACCOUNT),
+            "roles/storage.objectAdmin",
+        ),
+        (
+            principal_subject(arguments.workload_identity_pool, arguments.namespace, UI_SERVICE_ACCOUNT),
+            "roles/storage.objectViewer",
+        ),
+    ]
+    for subject, role in grants:
+        member = f"{principal_prefix}/{subject}"
+        binding_result = runner.run(
+            [
+                "gcloud", "storage", "buckets", "add-iam-policy-binding", bucket_uri,
+                f"--project={arguments.project}",
+                f"--member={member}",
+                f"--role={role}",
+                "--format=none",
+            ],
+            check=False,
+            capture=True,
+        )
+        if binding_result.returncode != 0:
+            sys.stderr.write(binding_result.stderr)
+            if "denied" in binding_result.stderr.lower() or "403" in binding_result.stderr:
+                sys.stderr.write(permission_hint(account, arguments.project, binding_result.stderr))
+            raise SystemExit("error: could not grant bucket access")
+        print(f"    {role} -> {subject}")
+
+
+def main() -> None:
+    arguments = parse_arguments()
+    runner = Runner(dry_run=arguments.dry_run)
+    if arguments.dry_run:
+        print("dry run: mutating commands are printed, not executed")
+
+    account = whoami(runner, arguments.project)
+    numeric_project_number = project_number(runner, arguments.project)
+
+    ensure_bucket(runner, arguments, account)
+    ensure_bucket_bindings(runner, arguments, numeric_project_number, account)
+
+
+if __name__ == "__main__":
+    main()
