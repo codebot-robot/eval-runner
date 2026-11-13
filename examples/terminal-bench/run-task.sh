@@ -41,6 +41,10 @@ LOGS_DIRECTORY="${LOGS_DIRECTORY:-/logs}"
 OUT_DIRECTORY="${OUT_DIRECTORY:-/out}"
 SOLUTION_DIRECTORY="${SOLUTION_DIRECTORY:-/solution}"
 TESTS_DIRECTORY="${TESTS_DIRECTORY:-/tests}"
+FETCH_CHECKOUT_DIRECTORY="${FETCH_CHECKOUT_DIRECTORY:-/tmp/terminal-bench}"
+REPOSITORY_URL="${REPOSITORY_URL:-https://github.com/laude-institute/terminal-bench-2.git}"
+
+fetch_checkout_directory=""
 
 write_results_and_exit() {
   local passed="$1"
@@ -111,7 +115,7 @@ fetch_task() {
 
   if [ -z "${task_source_directory}" ]; then
     fetch_log="${OUT_DIRECTORY}/logs/fetch.log"
-    fetch_checkout_directory="/tmp/terminal-bench"
+    fetch_checkout_directory="${FETCH_CHECKOUT_DIRECTORY}"
     rm -rf "${fetch_checkout_directory}"
     mkdir -p "${fetch_checkout_directory}"
 
@@ -128,15 +132,15 @@ fetch_task() {
       if command -v git >/dev/null 2>&1; then
         cd "${fetch_checkout_directory}"
         git init
-        git remote add origin "https://github.com/laude-institute/terminal-bench-2.git"
+        git remote add origin "${REPOSITORY_URL}"
         git fetch --depth 1 origin "${pinned_commit}"
         git checkout FETCH_HEAD
       elif command -v curl >/dev/null 2>&1; then
-        curl -LsSf "https://github.com/laude-institute/terminal-bench-2/archive/${pinned_commit}.tar.gz" | tar -xz -C "${fetch_checkout_directory}" --strip-components=1
+        curl -LsSf "${REPOSITORY_URL%.git}/archive/${pinned_commit}.tar.gz" | tar -xz -C "${fetch_checkout_directory}" --strip-components=1
       elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "https://github.com/laude-institute/terminal-bench-2/archive/${pinned_commit}.tar.gz" | tar -xz -C "${fetch_checkout_directory}" --strip-components=1
+        wget -qO- "${REPOSITORY_URL%.git}/archive/${pinned_commit}.tar.gz" | tar -xz -C "${fetch_checkout_directory}" --strip-components=1
       elif command -v python3 >/dev/null 2>&1; then
-        python3 -c "import urllib.request, tarfile, io; r = urllib.request.urlopen('https://github.com/laude-institute/terminal-bench-2/archive/${pinned_commit}.tar.gz'); tarfile.open(fileobj=io.BytesIO(r.read()), mode='r:gz').extractall('${fetch_checkout_directory}')" && \
+        python3 -c "import urllib.request, tarfile, io; r = urllib.request.urlopen('${REPOSITORY_URL%.git}/archive/${pinned_commit}.tar.gz'); tarfile.open(fileobj=io.BytesIO(r.read()), mode='r:gz').extractall('${fetch_checkout_directory}')" && \
         if [ -d "${fetch_checkout_directory}/terminal-bench-2-${pinned_commit}" ]; then
           cp -a "${fetch_checkout_directory}/terminal-bench-2-${pinned_commit}/." "${fetch_checkout_directory}/"
         fi && test -d "${fetch_checkout_directory}/${task_name}"
@@ -145,6 +149,9 @@ fetch_task() {
         false
       fi
     ) > "${fetch_log}" 2>&1; then
+      if [ "${mode}" != "oracle" ]; then
+        rm -rf "${fetch_checkout_directory}"
+      fi
       write_results_and_exit false 0.0 "failed to fetch repository: $(tail -n 20 "${fetch_log}" 2>/dev/null)"
     fi
 
@@ -152,6 +159,9 @@ fetch_task() {
   fi
 
   if [ ! -d "${task_source_directory}" ]; then
+    if [ "${mode}" != "oracle" ] && [ -n "${fetch_checkout_directory}" ]; then
+      rm -rf "${fetch_checkout_directory}"
+    fi
     write_results_and_exit false 0.0 "task directory not found: ${task_name}"
   fi
 }
@@ -162,18 +172,35 @@ prepare_task() {
 
   fetch_task
 
+  local prepare_error=""
   if [ -f "${task_source_directory}/instruction.md" ]; then
     cp -f "${task_source_directory}/instruction.md" "${OUT_DIRECTORY}/instruction.md"
   elif [ "${mode}" = "prepare" ] || [ "${mode}" = "agent" ]; then
-    write_results_and_exit false 0.0 "task instruction.md not found: ${task_name}"
+    prepare_error="task instruction.md not found: ${task_name}"
   fi
 
-  if [ -d "${task_source_directory}/tests" ]; then
-    rm -rf "${TESTS_DIRECTORY:?}"/*
-    cp -a "${task_source_directory}/tests/." "${TESTS_DIRECTORY}/"
-    chmod -R +x "${TESTS_DIRECTORY}" 2>/dev/null || true
-  else
-    write_results_and_exit false 0.0 "task tests directory not found: ${task_name}"
+  if [ -z "${prepare_error}" ]; then
+    if [ -d "${task_source_directory}/tests" ]; then
+      rm -rf "${TESTS_DIRECTORY:?}"/*
+      cp -a "${task_source_directory}/tests/." "${TESTS_DIRECTORY}/"
+      chmod -R +x "${TESTS_DIRECTORY}" 2>/dev/null || true
+    else
+      prepare_error="task tests directory not found: ${task_name}"
+    fi
+  fi
+
+  if [ -z "${prepare_error}" ] && { [ "${mode}" = "prepare" ] || [ "${mode}" = "agent" ]; }; then
+    if [ ! -f "${TESTS_DIRECTORY}/test.sh" ]; then
+      prepare_error="task test script not found: ${task_name}"
+    fi
+  fi
+
+  if [ "${mode}" != "oracle" ] && [ -n "${fetch_checkout_directory}" ]; then
+    rm -rf "${fetch_checkout_directory}"
+  fi
+
+  if [ -n "${prepare_error}" ]; then
+    write_results_and_exit false 0.0 "${prepare_error}"
   fi
 
   if [ -n "${task_workdir}" ]; then
@@ -201,16 +228,16 @@ solve_task() {
 }
 
 verify_task() {
-  if [ "${mode}" != "oracle" ]; then
-    rm -rf "${SOLUTION_DIRECTORY}"
-  fi
-
-  if [ ! -f "${TESTS_DIRECTORY}/test.sh" ]; then
+  if [ "${mode}" = "verify" ] && [ ! -f "${TESTS_DIRECTORY}/test.sh" ]; then
     echo "prepare has not been run: ${TESTS_DIRECTORY}/test.sh not found" >&2
     write_results_and_exit false 0.0 "prepare has not been run: ${TESTS_DIRECTORY}/test.sh not found" 1
   fi
 
   mkdir -p "${LOGS_DIRECTORY}/verifier" "${OUT_DIRECTORY}/logs"
+
+  reward_json_file="${LOGS_DIRECTORY}/verifier/reward.json"
+  reward_text_file="${LOGS_DIRECTORY}/verifier/reward.txt"
+  rm -f "${reward_json_file}" "${reward_text_file}"
 
   if [ -n "${task_workdir}" ]; then
     mkdir -p "${task_workdir}"
@@ -218,12 +245,13 @@ verify_task() {
   fi
 
   verifier_log="${OUT_DIRECTORY}/logs/verifier.log"
-  bash "${TESTS_DIRECTORY}/test.sh" > "${verifier_log}" 2>&1 || true
+  if [ -f "${TESTS_DIRECTORY}/test.sh" ]; then
+    bash "${TESTS_DIRECTORY}/test.sh" > "${verifier_log}" 2>&1 || true
+  else
+    printf "test script not found at %s/test.sh\n" "${TESTS_DIRECTORY}" > "${verifier_log}"
+  fi
 
-  reward_json_file="${LOGS_DIRECTORY}/verifier/reward.json"
-  reward_text_file="${LOGS_DIRECTORY}/verifier/reward.txt"
   raw_reward=""
-
   if [ -f "${reward_json_file}" ]; then
     raw_reward="$(awk '
       /"reward"[[:space:]]*:[[:space:]]*/ {

@@ -16,6 +16,7 @@ package terminalbench
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +26,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 )
 
-type taskFixtureEnv struct {
+type taskFixtureEnvironment struct {
 	temporaryDirectory      string
 	workingDirectory        string
 	taskDirectory           string
@@ -37,7 +38,7 @@ type taskFixtureEnv struct {
 	runTaskScript           string
 }
 
-func newTaskFixtureEnv(t *testing.T, taskName string, testScriptBody string, instructionBody string) *taskFixtureEnv {
+func newTaskFixtureEnvironment(t *testing.T, taskName string, testScriptBody string, instructionBody string) *taskFixtureEnvironment {
 	t.Helper()
 
 	temporaryDirectory := t.TempDir()
@@ -83,7 +84,7 @@ func newTaskFixtureEnv(t *testing.T, taskName string, testScriptBody string, ins
 		t.Fatalf("failed to resolve run-task.sh path: %v", err)
 	}
 
-	return &taskFixtureEnv{
+	return &taskFixtureEnvironment{
 		temporaryDirectory:      temporaryDirectory,
 		workingDirectory:        workingDirectory,
 		taskDirectory:           taskDirectory,
@@ -96,23 +97,23 @@ func newTaskFixtureEnv(t *testing.T, taskName string, testScriptBody string, ins
 	}
 }
 
-func (env *taskFixtureEnv) run(mode string, taskName string) ([]byte, error) {
-	command := exec.Command("bash", env.runTaskScript, taskName, mode, env.workingDirectory)
-	command.Dir = env.temporaryDirectory
+func (environment *taskFixtureEnvironment) run(mode string, taskName string) ([]byte, error) {
+	command := exec.Command("bash", environment.runTaskScript, taskName, mode, environment.workingDirectory)
+	command.Dir = environment.temporaryDirectory
 	command.Env = append(
 		os.Environ(),
-		"TASK_DIRECTORY="+env.temporaryDirectory,
-		"LOGS_DIRECTORY="+env.logsDirectory,
-		"OUT_DIRECTORY="+env.outputDirectory,
-		"SOLUTION_DIRECTORY="+env.targetSolutionDirectory,
-		"TESTS_DIRECTORY="+env.targetTestsDirectory,
+		"TASK_DIRECTORY="+environment.temporaryDirectory,
+		"LOGS_DIRECTORY="+environment.logsDirectory,
+		"OUT_DIRECTORY="+environment.outputDirectory,
+		"SOLUTION_DIRECTORY="+environment.targetSolutionDirectory,
+		"TESTS_DIRECTORY="+environment.targetTestsDirectory,
 	)
 	return command.CombinedOutput()
 }
 
-func (env *taskFixtureEnv) readResults(t *testing.T) artifacts.ResultsFile {
+func (environment *taskFixtureEnvironment) readResults(t *testing.T) artifacts.ResultsFile {
 	t.Helper()
-	resultsPath := filepath.Join(env.outputDirectory, "results.json")
+	resultsPath := filepath.Join(environment.outputDirectory, "results.json")
 	resultsBytes, err := os.ReadFile(resultsPath)
 	if err != nil {
 		t.Fatalf("failed to read results.json: %v", err)
@@ -127,13 +128,13 @@ func (env *taskFixtureEnv) readResults(t *testing.T) artifacts.ResultsFile {
 func runScriptInEnvironment(t *testing.T, taskName string, testScriptBody string) artifacts.ResultsFile {
 	t.Helper()
 
-	env := newTaskFixtureEnv(t, taskName, testScriptBody, "Oracle test instruction\n")
-	output, err := env.run("oracle", taskName)
+	environment := newTaskFixtureEnvironment(t, taskName, testScriptBody, "Oracle test instruction\n")
+	output, err := environment.run("oracle", taskName)
 	if err != nil {
 		t.Fatalf("run-task.sh failed: %v\noutput: %s", err, string(output))
 	}
 
-	return env.readResults(t)
+	return environment.readResults(t)
 }
 
 func TestRunTask(t *testing.T) {
@@ -209,40 +210,102 @@ func TestRunTask(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			results := runScriptInEnvironment(t, "sample-task", tc.testScript)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			results := runScriptInEnvironment(t, "sample-task", testCase.testScript)
 			if len(results.Samples) != 1 {
 				t.Fatalf("expected 1 sample, got %d", len(results.Samples))
 			}
 			sample := results.Samples[0]
-			if sample.Passed == nil || *sample.Passed != tc.wantPassed {
-				t.Errorf("Passed = %v, want %v (message: %s)", sample.Passed, tc.wantPassed, sample.Message)
+			if sample.Passed == nil || *sample.Passed != testCase.wantPassed {
+				t.Errorf("Passed = %v, want %v (message: %s)", sample.Passed, testCase.wantPassed, sample.Message)
 			}
-			if sample.Score == nil || *sample.Score != tc.wantScore {
-				t.Errorf("Score = %v, want %v", sample.Score, tc.wantScore)
+			if sample.Score == nil || *sample.Score != testCase.wantScore {
+				t.Errorf("Score = %v, want %v", sample.Score, testCase.wantScore)
 			}
-			if tc.wantMessagePart != "" && !strings.Contains(sample.Message, tc.wantMessagePart) {
-				t.Errorf("Message %q does not contain %q", sample.Message, tc.wantMessagePart)
+			if testCase.wantMessagePart != "" && !strings.Contains(sample.Message, testCase.wantMessagePart) {
+				t.Errorf("Message %q does not contain %q", sample.Message, testCase.wantMessagePart)
 			}
-			if tc.wantPassed && sample.Message != "" {
+			if testCase.wantPassed && sample.Message != "" {
 				t.Errorf("expected empty message on success, got %q", sample.Message)
 			}
 		})
 	}
 }
 
+func TestRunTask_OracleExecutesSolution(t *testing.T) {
+	environment := newTaskFixtureEnvironment(t, "solve-check-task", "", "Oracle solve check instruction\n")
+
+	solveScript := "#!/bin/bash\necho 'solution marker' > solution_applied.marker\n"
+	if err := os.WriteFile(filepath.Join(environment.taskDirectory, "solution", "solve.sh"), []byte(solveScript), 0755); err != nil {
+		t.Fatalf("failed to write solve.sh: %v", err)
+	}
+
+	testScript := "#!/bin/bash\n" +
+		"mkdir -p \"${LOGS_DIRECTORY}/verifier\"\n" +
+		"if [ -f solution_applied.marker ]; then\n" +
+		"  echo 1 > \"${LOGS_DIRECTORY}/verifier/reward.txt\"\n" +
+		"else\n" +
+		"  echo 'solution was not executed'\n" +
+		"  echo 0 > \"${LOGS_DIRECTORY}/verifier/reward.txt\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(environment.taskDirectory, "tests", "test.sh"), []byte(testScript), 0755); err != nil {
+		t.Fatalf("failed to write test.sh: %v", err)
+	}
+
+	output, err := environment.run("oracle", "solve-check-task")
+	if err != nil {
+		t.Fatalf("oracle run failed: %v\noutput: %s", err, string(output))
+	}
+
+	results := environment.readResults(t)
+	if len(results.Samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(results.Samples))
+	}
+	sample := results.Samples[0]
+	if sample.Passed == nil || !*sample.Passed {
+		t.Errorf("expected passed: true, got %v (message: %s)", sample.Passed, sample.Message)
+	}
+	if sample.Score == nil || *sample.Score != 1.0 {
+		t.Errorf("expected score: 1.0, got %v", sample.Score)
+	}
+}
+
+func TestRunTask_OracleMissingTestScriptExitsZero(t *testing.T) {
+	environment := newTaskFixtureEnvironment(t, "missing-test-task", "", "Test instruction\n")
+	// Remove test.sh so tests/ directory exists but test.sh is absent
+	testScriptPath := filepath.Join(environment.taskDirectory, "tests", "test.sh")
+	_ = os.Remove(testScriptPath)
+
+	output, err := environment.run("oracle", "missing-test-task")
+	if err != nil {
+		t.Fatalf("oracle exited non-zero when test.sh was missing: %v\noutput: %s", err, string(output))
+	}
+
+	results := environment.readResults(t)
+	if len(results.Samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(results.Samples))
+	}
+	sample := results.Samples[0]
+	if sample.Passed == nil || *sample.Passed {
+		t.Errorf("expected passed: false, got %v", sample.Passed)
+	}
+	if !strings.Contains(sample.Message, "verifier did not write reward file: test script not found at") {
+		t.Errorf("expected message to mention 'test script not found', got %q", sample.Message)
+	}
+}
+
 func TestRunTask_Prepare(t *testing.T) {
 	expectedInstruction := "## Task Instructions\nFix the bug in the code.\n"
-	env := newTaskFixtureEnv(t, "sample-task", "#!/bin/bash\necho 1 > reward.txt\n", expectedInstruction)
+	environment := newTaskFixtureEnvironment(t, "sample-task", "#!/bin/bash\necho 1 > reward.txt\n", expectedInstruction)
 
-	out, err := env.run("prepare", "sample-task")
+	output, err := environment.run("prepare", "sample-task")
 	if err != nil {
-		t.Fatalf("prepare failed: %v\noutput: %s", err, string(out))
+		t.Fatalf("prepare failed: %v\noutput: %s", err, string(output))
 	}
 
 	// 1. Instruction written to OUT_DIRECTORY/instruction.md
-	instructionPath := filepath.Join(env.outputDirectory, "instruction.md")
+	instructionPath := filepath.Join(environment.outputDirectory, "instruction.md")
 	instructionBytes, err := os.ReadFile(instructionPath)
 	if err != nil {
 		t.Fatalf("expected instruction.md to exist: %v", err)
@@ -252,7 +315,7 @@ func TestRunTask_Prepare(t *testing.T) {
 	}
 
 	// 2. Tests installed to TESTS_DIRECTORY
-	installedTestScript := filepath.Join(env.targetTestsDirectory, "test.sh")
+	installedTestScript := filepath.Join(environment.targetTestsDirectory, "test.sh")
 	testBytes, err := os.ReadFile(installedTestScript)
 	if err != nil {
 		t.Fatalf("expected test.sh in tests directory: %v", err)
@@ -262,28 +325,28 @@ func TestRunTask_Prepare(t *testing.T) {
 	}
 
 	// 3. Solution directory must NOT be present
-	if _, err := os.Stat(env.targetSolutionDirectory); !os.IsNotExist(err) {
+	if _, err := os.Stat(environment.targetSolutionDirectory); !os.IsNotExist(err) {
 		t.Errorf("expected solution directory to not exist, but stat returned: %v", err)
 	}
 
 	// 4. results.json should NOT be written on successful prepare
-	resultsPath := filepath.Join(env.outputDirectory, "results.json")
+	resultsPath := filepath.Join(environment.outputDirectory, "results.json")
 	if _, err := os.Stat(resultsPath); !os.IsNotExist(err) {
 		t.Errorf("expected results.json to not exist after successful prepare")
 	}
 }
 
 func TestRunTask_PrepareFailure(t *testing.T) {
-	env := newTaskFixtureEnv(t, "sample-task", "#!/bin/bash\necho 1\n", "instruction")
+	environment := newTaskFixtureEnvironment(t, "sample-task", "#!/bin/bash\necho 1\n", "instruction")
 
 	// Run prepare with a nonexistent task
-	out, err := env.run("prepare", "nonexistent-task")
+	output, err := environment.run("prepare", "nonexistent-task")
 	if err == nil {
-		t.Fatalf("expected prepare for nonexistent task to fail, but succeeded\noutput: %s", string(out))
+		t.Fatalf("expected prepare for nonexistent task to fail, but succeeded\noutput: %s", string(output))
 	}
 
 	// Failure must write failing results.json and exit non-zero
-	results := env.readResults(t)
+	results := environment.readResults(t)
 	if len(results.Samples) != 1 {
 		t.Fatalf("expected 1 sample, got %d", len(results.Samples))
 	}
@@ -296,31 +359,164 @@ func TestRunTask_PrepareFailure(t *testing.T) {
 	}
 }
 
+func TestRunTask_PrepareMissingTestScriptFails(t *testing.T) {
+	environment := newTaskFixtureEnvironment(t, "missing-test-task", "", "Test instruction\n")
+	testScriptPath := filepath.Join(environment.taskDirectory, "tests", "test.sh")
+	_ = os.Remove(testScriptPath)
+
+	output, err := environment.run("prepare", "missing-test-task")
+	if err == nil {
+		t.Fatalf("expected prepare to fail when test.sh is missing, but succeeded\noutput: %s", string(output))
+	}
+
+	results := environment.readResults(t)
+	if len(results.Samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(results.Samples))
+	}
+	sample := results.Samples[0]
+	if sample.Passed == nil || *sample.Passed {
+		t.Errorf("expected passed: false, got %v", sample.Passed)
+	}
+	if !strings.Contains(sample.Message, "task test script not found") {
+		t.Errorf("expected message to mention 'task test script not found', got %q", sample.Message)
+	}
+}
+
+func TestRunTask_PrepareFetchDeletesSolutions(t *testing.T) {
+	taskName := "fetch-task"
+	repositoryDirectory := t.TempDir()
+	taskDirectory := filepath.Join(repositoryDirectory, taskName)
+	solutionDirectory := filepath.Join(taskDirectory, "solution")
+	testsDirectory := filepath.Join(taskDirectory, "tests")
+
+	if err := os.MkdirAll(solutionDirectory, 0755); err != nil {
+		t.Fatalf("failed to create solution directory: %v", err)
+	}
+	if err := os.MkdirAll(testsDirectory, 0755); err != nil {
+		t.Fatalf("failed to create tests directory: %v", err)
+	}
+
+	expectedInstruction := "Instruction via fetch path\n"
+	if err := os.WriteFile(filepath.Join(taskDirectory, "instruction.md"), []byte(expectedInstruction), 0644); err != nil {
+		t.Fatalf("failed to write instruction.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(solutionDirectory, "solve.sh"), []byte("#!/bin/bash\necho solve\n"), 0755); err != nil {
+		t.Fatalf("failed to write solve.sh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(testsDirectory, "test.sh"), []byte("#!/bin/bash\necho 1 > reward.txt\n"), 0755); err != nil {
+		t.Fatalf("failed to write test.sh: %v", err)
+	}
+
+	runGit := func(arguments ...string) string {
+		command := exec.Command("git", arguments...)
+		command.Dir = repositoryDirectory
+		command.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + repositoryDirectory,
+		}
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s failed: %v\noutput: %s", strings.Join(arguments, " "), err, string(output))
+		}
+		return strings.TrimSpace(string(output))
+	}
+
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	runGit("add", ".")
+	runGit("commit", "-m", "initial commit")
+	commitHash := runGit("rev-parse", "HEAD")
+
+	sandboxDirectory := t.TempDir()
+	workingDirectory := filepath.Join(sandboxDirectory, "app")
+	logsDirectory := filepath.Join(sandboxDirectory, "logs")
+	outputDirectory := filepath.Join(sandboxDirectory, "out")
+	targetSolutionDirectory := filepath.Join(sandboxDirectory, "solution")
+	targetTestsDirectory := filepath.Join(sandboxDirectory, "tests")
+	checkoutDirectory := filepath.Join(sandboxDirectory, "tmp", "checkout")
+
+	runTaskScript, err := filepath.Abs("run-task.sh")
+	if err != nil {
+		t.Fatalf("failed to resolve run-task.sh path: %v", err)
+	}
+
+	command := exec.Command("bash", runTaskScript, taskName, "prepare", workingDirectory)
+	command.Dir = sandboxDirectory
+	command.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + sandboxDirectory,
+		"PINNED_COMMIT=" + commitHash,
+		"REPOSITORY_URL=" + repositoryDirectory,
+		"FETCH_CHECKOUT_DIRECTORY=" + checkoutDirectory,
+		"LOGS_DIRECTORY=" + logsDirectory,
+		"OUT_DIRECTORY=" + outputDirectory,
+		"SOLUTION_DIRECTORY=" + targetSolutionDirectory,
+		"TESTS_DIRECTORY=" + targetTestsDirectory,
+	}
+
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prepare via fetch failed: %v\noutput: %s", err, string(output))
+	}
+
+	// Verify instruction was written
+	instructionBytes, err := os.ReadFile(filepath.Join(outputDirectory, "instruction.md"))
+	if err != nil {
+		t.Fatalf("failed to read instruction.md: %v", err)
+	}
+	if string(instructionBytes) != expectedInstruction {
+		t.Errorf("instruction.md = %q, want %q", string(instructionBytes), expectedInstruction)
+	}
+
+	// Verify test script was installed
+	if _, err := os.Stat(filepath.Join(targetTestsDirectory, "test.sh")); err != nil {
+		t.Fatalf("test.sh was not installed: %v", err)
+	}
+
+	// Assert no solution directory or solve.sh exists anywhere within sandboxDirectory
+	err = filepath.WalkDir(sandboxDirectory, func(path string, d fs.DirEntry, walkError error) error {
+		if walkError != nil {
+			return walkError
+		}
+		if d.IsDir() && d.Name() == "solution" {
+			t.Errorf("found solution directory in sandbox: %s", path)
+		}
+		if !d.IsDir() && d.Name() == "solve.sh" {
+			t.Errorf("found solve.sh file in sandbox: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to walk sandbox directory: %v", err)
+	}
+}
+
 func TestRunTask_VerifyAfterPrepare(t *testing.T) {
 	t.Run("passing reward 1", func(t *testing.T) {
 		testScript := "#!/bin/bash\n" +
 			"mkdir -p \"${LOGS_DIRECTORY}/verifier\"\n" +
 			"echo 1 > \"${LOGS_DIRECTORY}/verifier/reward.txt\"\n"
-		env := newTaskFixtureEnv(t, "sample-task", testScript, "Test instruction")
+		environment := newTaskFixtureEnvironment(t, "sample-task", testScript, "Test instruction")
 
 		// 1. Run prepare
-		prepOut, err := env.run("prepare", "sample-task")
+		prepareOutput, err := environment.run("prepare", "sample-task")
 		if err != nil {
-			t.Fatalf("prepare failed: %v\noutput: %s", err, string(prepOut))
+			t.Fatalf("prepare failed: %v\noutput: %s", err, string(prepareOutput))
 		}
 
 		// Solution must not exist after prepare
-		if _, err := os.Stat(env.targetSolutionDirectory); !os.IsNotExist(err) {
+		if _, err := os.Stat(environment.targetSolutionDirectory); !os.IsNotExist(err) {
 			t.Fatalf("expected solution directory to not exist after prepare")
 		}
 
 		// 2. Run verify
-		verifyOut, err := env.run("verify", "sample-task")
+		verifyOutput, err := environment.run("verify", "sample-task")
 		if err != nil {
-			t.Fatalf("verify failed: %v\noutput: %s", err, string(verifyOut))
+			t.Fatalf("verify failed: %v\noutput: %s", err, string(verifyOutput))
 		}
 
-		results := env.readResults(t)
+		results := environment.readResults(t)
 		if len(results.Samples) != 1 {
 			t.Fatalf("expected 1 sample, got %d", len(results.Samples))
 		}
@@ -333,7 +529,7 @@ func TestRunTask_VerifyAfterPrepare(t *testing.T) {
 		}
 
 		// Solution must not exist after verify
-		if _, err := os.Stat(env.targetSolutionDirectory); !os.IsNotExist(err) {
+		if _, err := os.Stat(environment.targetSolutionDirectory); !os.IsNotExist(err) {
 			t.Errorf("expected solution directory to not exist after verify")
 		}
 	})
@@ -343,21 +539,21 @@ func TestRunTask_VerifyAfterPrepare(t *testing.T) {
 			"mkdir -p \"${LOGS_DIRECTORY}/verifier\"\n" +
 			"echo 'verification failure details'\n" +
 			"echo 0 > \"${LOGS_DIRECTORY}/verifier/reward.txt\"\n"
-		env := newTaskFixtureEnv(t, "sample-task", testScript, "Test instruction")
+		environment := newTaskFixtureEnvironment(t, "sample-task", testScript, "Test instruction")
 
 		// 1. Run prepare
-		prepOut, err := env.run("prepare", "sample-task")
+		prepareOutput, err := environment.run("prepare", "sample-task")
 		if err != nil {
-			t.Fatalf("prepare failed: %v\noutput: %s", err, string(prepOut))
+			t.Fatalf("prepare failed: %v\noutput: %s", err, string(prepareOutput))
 		}
 
 		// 2. Run verify
-		verifyOut, err := env.run("verify", "sample-task")
+		verifyOutput, err := environment.run("verify", "sample-task")
 		if err != nil {
-			t.Fatalf("verify exited non-zero on reward 0: %v\noutput: %s", err, string(verifyOut))
+			t.Fatalf("verify exited non-zero on reward 0: %v\noutput: %s", err, string(verifyOutput))
 		}
 
-		results := env.readResults(t)
+		results := environment.readResults(t)
 		if len(results.Samples) != 1 {
 			t.Fatalf("expected 1 sample, got %d", len(results.Samples))
 		}
@@ -374,20 +570,61 @@ func TestRunTask_VerifyAfterPrepare(t *testing.T) {
 	})
 }
 
+func TestRunTask_VerifyStaleRewardIgnored(t *testing.T) {
+	// testScript writes nothing to verifier logs
+	testScript := "#!/bin/bash\necho 'verifier produced no reward'\n"
+	environment := newTaskFixtureEnvironment(t, "sample-task", testScript, "Test instruction")
+
+	prepareOutput, err := environment.run("prepare", "sample-task")
+	if err != nil {
+		t.Fatalf("prepare failed: %v\noutput: %s", err, string(prepareOutput))
+	}
+
+	// Write stale reward files to simulate an agent leaving rewards behind
+	verifierLogsDirectory := filepath.Join(environment.logsDirectory, "verifier")
+	if err := os.MkdirAll(verifierLogsDirectory, 0755); err != nil {
+		t.Fatalf("failed to create verifier log directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(verifierLogsDirectory, "reward.txt"), []byte("1\n"), 0644); err != nil {
+		t.Fatalf("failed to write stale reward.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(verifierLogsDirectory, "reward.json"), []byte("{\"reward\": 1.0}\n"), 0644); err != nil {
+		t.Fatalf("failed to write stale reward.json: %v", err)
+	}
+
+	// Verify must remove the stale rewards and fail because testScript writes nothing
+	verifyOutput, err := environment.run("verify", "sample-task")
+	if err != nil {
+		t.Fatalf("verify failed unexpectedly: %v\noutput: %s", err, string(verifyOutput))
+	}
+
+	results := environment.readResults(t)
+	if len(results.Samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(results.Samples))
+	}
+	sample := results.Samples[0]
+	if sample.Passed == nil || *sample.Passed {
+		t.Errorf("expected passed: false, got %v", sample.Passed)
+	}
+	if !strings.Contains(sample.Message, "verifier did not write reward file") {
+		t.Errorf("expected message to mention 'verifier did not write reward file', got %q", sample.Message)
+	}
+}
+
 func TestRunTask_VerifyWithoutPrepareFailsClearly(t *testing.T) {
-	env := newTaskFixtureEnv(t, "sample-task", "#!/bin/bash\necho 1\n", "Test instruction")
+	environment := newTaskFixtureEnvironment(t, "sample-task", "#!/bin/bash\necho 1\n", "Test instruction")
 
 	// Call verify directly without running prepare
-	out, err := env.run("verify", "sample-task")
+	output, err := environment.run("verify", "sample-task")
 	if err == nil {
-		t.Fatalf("expected verify without prepare to fail, but succeeded\noutput: %s", string(out))
+		t.Fatalf("expected verify without prepare to fail, but succeeded\noutput: %s", string(output))
 	}
 
-	if !strings.Contains(string(out), "prepare") {
-		t.Errorf("expected output to mention 'prepare', got: %s", string(out))
+	if !strings.Contains(string(output), "prepare") {
+		t.Errorf("expected output to mention 'prepare', got: %s", string(output))
 	}
 
-	results := env.readResults(t)
+	results := environment.readResults(t)
 	if len(results.Samples) != 1 {
 		t.Fatalf("expected 1 sample, got %d", len(results.Samples))
 	}
