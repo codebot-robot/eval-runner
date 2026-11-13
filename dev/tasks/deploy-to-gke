@@ -18,11 +18,10 @@
 This wraps the one-time cloud setup that ./dev/tasks/deploy-to-kube does not do:
 
   1. Fetch cluster credentials into a dedicated kubeconfig (never ~/.kube/config).
-  2. Create the artifact bucket if it does not exist.
-  3. Grant the controller and UI Kubernetes ServiceAccounts access to the bucket
-     through Workload Identity Federation principals (no Google service
-     accounts, no KSA annotations).
-  4. Delegate generic cluster bring-up, ConfigMap, deploy, and verification
+  2. Create the artifact bucket if it does not exist and grant the controller and
+     UI Kubernetes ServiceAccounts access through Workload Identity Federation
+     principals via ./dev/tasks/setup-artifact-bucket.
+  3. Delegate generic cluster bring-up, ConfigMap, deploy, and verification
      to ./dev/tasks/deploy-to-kube.
 
 Every step is idempotent, so re-running after fixing a permission problem is
@@ -48,19 +47,11 @@ if str(TASKS_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(TASKS_DIRECTORY))
 
 from task_helpers import (
-    CONTROLLER_SERVICE_ACCOUNT,
-    UI_SERVICE_ACCOUNT,
     Runner,
     Step,
     gcloud_json,
-    permission_hint,
-    project_number,
     whoami,
 )
-
-NAMESPACE = "eval-runner"
-CONTROLLER_KSA = CONTROLLER_SERVICE_ACCOUNT
-UI_KSA = UI_SERVICE_ACCOUNT
 
 CLUSTER_PATH_RE = re.compile(
     r"^projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)/clusters/(?P<cluster>[^/]+)$"
@@ -173,52 +164,6 @@ def workload_identity_pool(r: Runner, args: argparse.Namespace) -> str:
     return pool
 
 
-def ensure_bucket(r: Runner, args: argparse.Namespace, account: str) -> None:
-    uri = f"gs://{args.bucket}"
-    exists = r.run(
-        ["gcloud", "storage", "buckets", "describe", uri, f"--project={args.project}", "--format=value(name)"],
-        check=False, capture=True, mutating=False,
-    )
-    if exists.returncode == 0:
-        print(f"    bucket {uri} exists")
-    else:
-        res = r.run(
-            [
-                "gcloud", "storage", "buckets", "create", uri, f"--project={args.project}",
-                f"--location={args.bucket_location}", "--uniform-bucket-level-access",
-            ],
-            check=False, capture=True,
-        )
-        if res.returncode != 0:
-            sys.stderr.write(res.stderr)
-            if "denied" in res.stderr.lower() or "403" in res.stderr:
-                sys.stderr.write(permission_hint(account, args.project, res.stderr))
-            raise SystemExit("error: could not create the artifact bucket")
-        print(f"    created {uri} in {args.bucket_location}")
-
-    pool = workload_identity_pool(r, args)
-    number = project_number(r, args.project)
-    base = f"principal://iam.googleapis.com/projects/{number}/locations/global/workloadIdentityPools/{pool}/subject"
-    grants = [
-        (f"ns/{NAMESPACE}/sa/{CONTROLLER_KSA}", "roles/storage.objectAdmin"),
-        (f"ns/{NAMESPACE}/sa/{UI_KSA}", "roles/storage.objectViewer"),
-    ]
-    for subject, role in grants:
-        res = r.run(
-            [
-                "gcloud", "storage", "buckets", "add-iam-policy-binding", uri, f"--project={args.project}",
-                f"--member={base}/{subject}", f"--role={role}", "--format=none",
-            ],
-            check=False, capture=True,
-        )
-        if res.returncode != 0:
-            sys.stderr.write(res.stderr)
-            if "denied" in res.stderr.lower() or "403" in res.stderr:
-                sys.stderr.write(permission_hint(account, args.project, res.stderr))
-            raise SystemExit("error: could not grant bucket access")
-        print(f"    {role} -> {subject}")
-
-
 def main() -> None:
     args = parse_args()
     root = repo_root()
@@ -227,7 +172,7 @@ def main() -> None:
         print("dry run: mutating commands are printed, not executed")
 
     Step("Who am I")
-    account = whoami(r, args.project)
+    whoami(r, args.project)
 
     Step(f"Cluster credentials for {args.cluster} ({args.location})")
     ensure_kubeconfig(r, args)
@@ -237,7 +182,17 @@ def main() -> None:
         print("    --skip-bucket: sample trajectories will not be viewable in the UI")
     else:
         Step(f"Artifact bucket gs://{args.bucket}")
-        ensure_bucket(r, args, account)
+        pool = workload_identity_pool(r, args)
+        setup_artifact_bucket_command = [
+            str(root / "dev" / "tasks" / "setup-artifact-bucket"),
+            f"--project={args.project}",
+            f"--bucket={args.bucket}",
+            f"--location={args.bucket_location}",
+            f"--workload-identity-pool={pool}",
+        ]
+        if args.dry_run:
+            setup_artifact_bucket_command.append("--dry-run")
+        r.run(setup_artifact_bucket_command, mutating=False)
 
     Step("Deploying eval-runner via deploy-to-kube")
     cmd = [

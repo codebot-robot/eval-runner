@@ -21,9 +21,7 @@ Federation:
   1. Reads the cluster OIDC issuer and JWKS signing keys via kubectl.
   2. Ensures the GCP Workload Identity Pool exists.
   3. Creates or updates the OIDC provider with the uploaded JWKS and allowed audiences.
-  4. Grants artifact storage bucket access directly to the controller and UI
-     Kubernetes ServiceAccounts (no Google service accounts or impersonation).
-  5. Applies a credential configuration ConfigMap (eval-runner-gcp-credentials)
+  4. Applies a credential configuration ConfigMap (eval-runner-gcp-credentials)
      for external account authentication with GCP STS.
 
 Every step is idempotent: re-running this script refreshes the uploaded JWKS
@@ -46,11 +44,8 @@ if str(TASKS_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(TASKS_DIRECTORY))
 
 from task_helpers import (
-    CONTROLLER_SERVICE_ACCOUNT,
-    UI_SERVICE_ACCOUNT,
     Runner,
     Step,
-    permission_hint,
     project_number,
     whoami,
 )
@@ -79,7 +74,6 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--project", required=True, help="GCP project ID")
-    parser.add_argument("--bucket", required=True, help="artifact storage bucket name")
     parser.add_argument("--pool", required=True, help="Workload Identity Pool ID")
     parser.add_argument(
         "--provider",
@@ -98,7 +92,6 @@ def parse_arguments() -> argparse.Namespace:
     if not arguments.project.strip():
         parser.error("--project is required")
 
-    arguments.bucket = arguments.bucket.removeprefix("gs://").rstrip("/")
     if arguments.kubeconfig:
         arguments.kubeconfig = Path(arguments.kubeconfig).expanduser()
     return arguments
@@ -227,47 +220,6 @@ def ensure_oidc_provider(
     return default_audience
 
 
-def ensure_bucket_access(
-    runner: Runner,
-    arguments: argparse.Namespace,
-    numeric_project_number: str,
-    account: str,
-) -> Tuple[str, str]:
-    """Grant direct principal bucket IAM bindings to controller and UI KSAs."""
-    bucket_uri = f"gs://{arguments.bucket}"
-    principal_prefix = (
-        f"principal://iam.googleapis.com/projects/{numeric_project_number}/locations/global/"
-        f"workloadIdentityPools/{arguments.pool}/subject"
-    )
-    controller_principal = (
-        f"{principal_prefix}/system:serviceaccount:{arguments.namespace}:{CONTROLLER_SERVICE_ACCOUNT}"
-    )
-    ui_principal = (
-        f"{principal_prefix}/system:serviceaccount:{arguments.namespace}:{UI_SERVICE_ACCOUNT}"
-    )
-    grants = [
-        (controller_principal, "roles/storage.objectAdmin"),
-        (ui_principal, "roles/storage.objectViewer"),
-    ]
-    for member, role in grants:
-        result = runner.run(
-            [
-                "gcloud", "storage", "buckets", "add-iam-policy-binding", bucket_uri,
-                f"--project={arguments.project}", f"--member={member}", f"--role={role}", "--format=none",
-            ],
-            check=False,
-            capture=True,
-            mutating=True,
-        )
-        if result.returncode != 0:
-            sys.stderr.write(result.stderr)
-            if "denied" in result.stderr.lower() or "403" in result.stderr:
-                sys.stderr.write(permission_hint(account, arguments.project, result.stderr))
-            raise SystemExit(f"error: could not grant bucket access to {member}")
-        print(f"    {role} -> {member}")
-    return controller_principal, ui_principal
-
-
 def ensure_credential_configmap(
     runner: Runner,
     arguments: argparse.Namespace,
@@ -312,10 +264,10 @@ def print_summary(arguments: argparse.Namespace, issuer_uri: str) -> None:
     print(f"    Provider:  {arguments.provider}")
     print(f"    Issuer:    {issuer_uri}")
     print()
-    print("Next step: set artifactBucket in eval-runner-config, e.g.:")
+    print("Next step: grant bucket access with ./dev/tasks/setup-artifact-bucket, e.g.:")
     print(
-        f"    kubectl -n {arguments.namespace} patch configmap eval-runner-config "
-        f"--type=merge -p '{{\"data\":{{\"artifactBucket\":\"{arguments.bucket}\"}}}}'"
+        f"    ./dev/tasks/setup-artifact-bucket --project {arguments.project} "
+        f"--bucket <bucket-name> --location <location> --workload-identity-pool {arguments.pool}"
     )
 
 
@@ -326,7 +278,7 @@ def main() -> None:
         print("dry run: mutating commands are printed, not executed")
 
     Step("Who am I")
-    account = whoami(runner, arguments.project)
+    whoami(runner, arguments.project)
     numeric_project_number = project_number(runner, arguments.project)
 
     # 1. Read the issuer and JWKS from the cluster
@@ -347,15 +299,11 @@ def main() -> None:
         jwks_raw,
     )
 
-    # 4. Bucket access as direct principal bindings
-    Step(f"Bucket IAM bindings on gs://{arguments.bucket}")
-    ensure_bucket_access(runner, arguments, numeric_project_number, account)
-
-    # 5. Credential configuration ConfigMap
+    # 4. Credential configuration ConfigMap
     Step(f"Credential configuration ConfigMap {arguments.namespace}/{CONFIGMAP_NAME}")
     ensure_credential_configmap(runner, arguments, default_audience)
 
-    # 6. Summary
+    # 5. Summary
     Step("Workload Identity Federation summary")
     print_summary(arguments, issuer_uri)
 
