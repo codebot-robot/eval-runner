@@ -197,7 +197,7 @@ Options:
 - `--restart`: Restarts deployments after deploy.
 - `--dry-run`: Prints commands without executing mutating actions.
 
-If `artifactBucket` is configured, the controller and UI interact with GCS using Application Default Credentials (ADC). On non-GKE clusters, ensure the node service account (or cloud IAM role provider) is granted `roles/storage.objectAdmin` on the bucket.
+If `artifactBucket` is configured, the controller and UI interact with GCS using Application Default Credentials (ADC). On non-GKE clusters, GCP Workload Identity Federation can be configured via `./dev/tasks/setup-workload-identity-federation` (see below), or ensure the node service account (or cloud IAM role provider) is granted `roles/storage.objectAdmin` on the bucket.
 
 ### Deploying to GKE in one step (`dev/tasks/deploy-to-gke`)
 
@@ -220,6 +220,18 @@ Granting bucket access needs `storage.buckets.setIamPolicy`. If that step is den
 ```bash
 gcloud projects add-iam-policy-binding <project> --member="user:<you>" --role="roles/storage.admin"
 ```
+
+### Workload Identity Federation on non-GKE clusters (`dev/tasks/setup-workload-identity-federation`)
+
+For clusters running outside GKE (such as kOps on GCE, AWS EKS, or on-premises clusters), pods have no metadata-server credentials to obtain Google Cloud credentials. `./dev/tasks/setup-workload-identity-federation` configures GCP Workload Identity Federation using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required), establishes bucket IAM bindings, and applies the `eval-runner-gcp-credentials` ConfigMap.
+
+The `eval-runner-controller` and `eval-runner-ui` Deployments in `k8s/` wire this contract in optionally:
+- **Audience**: Projected ServiceAccount token with audience `eval-runner.gke-labs.dev/gcp-workload-identity` and `expirationSeconds: 3600`.
+- **Token path**: Mounted read-only at `/var/run/secrets/eval-runner/gcp` with path `token` (`/var/run/secrets/eval-runner/gcp/token`).
+- **Config path**: ConfigMap volume `eval-runner-gcp-credentials` (`optional: true`) mounted read-only at `/etc/eval-runner/gcp` (`/etc/eval-runner/gcp/credential-config.json`).
+- **Environment variable**: `GOOGLE_APPLICATION_CREDENTIALS` populated from `configMapKeyRef` (`name: eval-runner-gcp-credentials`, `key: GOOGLE_APPLICATION_CREDENTIALS`, `optional: true`), pointing to `/etc/eval-runner/gcp/credential-config.json`.
+
+When `eval-runner-gcp-credentials` is absent (such as on GKE or kind), `GOOGLE_APPLICATION_CREDENTIALS` remains unset and Application Default Credentials fall back to standard behavior.
 
 Alternatively, invoke `ap deploy` directly by setting a unique tag:
 
