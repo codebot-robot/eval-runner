@@ -49,6 +49,9 @@ const (
 	// DiscoveryContainerName is the container name in the discovery sandbox.
 	DiscoveryContainerName = "agent"
 
+	// TaskContainerName is the container name for the evaluated task in the task sandbox.
+	TaskContainerName = DiscoveryContainerName
+
 	// SandboxdInitContainerName is the init container name that injects sandboxd.
 	SandboxdInitContainerName = "install-sandboxd"
 
@@ -181,6 +184,7 @@ type TaskSandboxConfig struct {
 	CloneRepo          bool
 	StepTimeoutSeconds int
 	SandboxTask        bool
+	Limits             corev1.ResourceList
 }
 
 // BuildTaskSandbox constructs the Sandbox CR for executing an eval task for a Run.
@@ -198,6 +202,13 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 	}
 	if image == "" {
 		image = DefaultSampleRunnerImage
+	}
+	limits := cfg.Limits
+	if limits == nil {
+		limits = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(v1alpha1.DefaultTaskCPULimit),
+			corev1.ResourceMemory: resource.MustParse(v1alpha1.DefaultTaskMemoryLimit),
+		}
 	}
 	sbName := TaskSandboxNameForRun(run.Name, taskID)
 	serverCertSecret := cfg.ServerCertSecret
@@ -441,7 +452,7 @@ fi
 						InitContainers:               initContainers,
 						Containers: []corev1.Container{
 							{
-								Name:    DiscoveryContainerName,
+								Name:    TaskContainerName,
 								Image:   image,
 								EnvFrom: envFrom,
 								Command: cmd,
@@ -481,10 +492,7 @@ fi
 										corev1.ResourceCPU:    resource.MustParse("100m"),
 										corev1.ResourceMemory: resource.MustParse("128Mi"),
 									},
-									Limits: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("500m"),
-										corev1.ResourceMemory: resource.MustParse("512Mi"),
-									},
+									Limits: limits.DeepCopy(),
 								},
 								VolumeMounts: []corev1.VolumeMount{
 									{
