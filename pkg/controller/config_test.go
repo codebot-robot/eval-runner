@@ -767,6 +767,34 @@ func TestResolveConfig_InconclusivePolicy(t *testing.T) {
 	}
 }
 
+func TestResolveConfig_GCPWorkloadIdentityProvider(t *testing.T) {
+	// 1. Built-in default is empty
+	defCfg := DefaultClusterConfig()
+	if defCfg.GCPWorkloadIdentityProvider != "" {
+		t.Errorf("expected default GCPWorkloadIdentityProvider empty, got %q", defCfg.GCPWorkloadIdentityProvider)
+	}
+
+	const provider = "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider"
+
+	// 2. ConfigMap override (trimmed)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			ConfigMapKeyGCPWorkloadIdentityProvider: "  " + provider + "  ",
+		},
+	}
+	cfg, err := ResolveConfig(cm, RawFlags{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GCPWorkloadIdentityProvider != provider {
+		t.Errorf("expected GCPWorkloadIdentityProvider %q, got %q", provider, cfg.GCPWorkloadIdentityProvider)
+	}
+}
+
 func TestResolveConfig_GitHubAppSecret(t *testing.T) {
 	// 1. Built-in default
 	defCfg := DefaultClusterConfig()
@@ -2272,7 +2300,7 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 	var factoryCalls []string
 	var createdSinks []*trackingTestSink
 
-	mockFactory := func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+	mockFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
 		factoryCalls = append(factoryCalls, bucket)
 		sink := &trackingTestSink{bucket: bucket, dir: dir}
 		createdSinks = append(createdSinks, sink)
@@ -2285,7 +2313,7 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 		t.Fatalf("failed to resolve initial config: %v", err)
 	}
 
-	initialSink, err := mockFactory(ctx, initialCfg.ArtifactBucket, initialCfg.ArtifactDir, initialCfg.ArtifactMaxUploadBytes)
+	initialSink, err := mockFactory(ctx, initialCfg.ArtifactBucket, initialCfg.ArtifactDir, initialCfg.GCPWorkloadIdentityProvider, initialCfg.ArtifactMaxUploadBytes)
 	if err != nil {
 		t.Fatalf("failed to construct initial sink: %v", err)
 	}
@@ -2441,6 +2469,80 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 	}
 	if !createdSinks[1].closed.Load() {
 		t.Fatal("expected createdSinks[1] to be closed after in-flight upload completes")
+	}
+}
+
+func TestConfigReloader_UpdatesWorkloadIdentityProvider_SinkReloaded(t *testing.T) {
+	ctx := t.Context()
+
+	initialCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "my-bucket",
+		},
+	}
+
+	var factoryCalls int
+	var capturedProvider string
+	mockFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+		factoryCalls++
+		capturedProvider = workloadIdentityProvider
+		return &trackingTestSink{bucket: bucket, dir: dir}, nil
+	}
+
+	rawFlags := RawFlags{}
+	initialCfg, err := ResolveConfig(initialCM, rawFlags)
+	if err != nil {
+		t.Fatalf("failed to resolve initial config: %v", err)
+	}
+
+	initialSink, err := mockFactory(ctx, initialCfg.ArtifactBucket, initialCfg.ArtifactDir, initialCfg.GCPWorkloadIdentityProvider, initialCfg.ArtifactMaxUploadBytes)
+	if err != nil {
+		t.Fatalf("failed to construct initial sink: %v", err)
+	}
+	reloadableSink := artifacts.NewReloadableSink(initialSink)
+	defer reloadableSink.Close()
+
+	reloader := NewConfigReloader(ConfigReloaderOptions{
+		RawFlags:       rawFlags,
+		Logger:         logr.Discard(),
+		SinkFactory:    mockFactory,
+		ReloadableSink: reloadableSink,
+		InitialConfig:  &initialCfg,
+	})
+
+	// Reload with same config: no reload
+	if err := reloader.Reload(ctx, initialCM); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("expected factoryCalls=1, got %d", factoryCalls)
+	}
+
+	// Reload with gcpWorkloadIdentityProvider added: sink should be reloaded
+	const provider = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr"
+	updatedCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket:              "my-bucket",
+			configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: provider,
+		},
+	}
+
+	if err := reloader.Reload(ctx, updatedCM); err != nil {
+		t.Fatalf("Reload with provider failed: %v", err)
+	}
+	if factoryCalls != 2 {
+		t.Fatalf("expected factoryCalls=2 after adding provider, got %d", factoryCalls)
+	}
+	if capturedProvider != provider {
+		t.Fatalf("expected provider %q passed on reload, got %q", provider, capturedProvider)
 	}
 }
 
@@ -2830,7 +2932,7 @@ func TestConfigReloader_ProbeCredentials_UnavailableOnFailure(t *testing.T) {
 	fakeStorage := fakes.NewFakeStorageClient()
 	fakeStorage.BucketAccessError = probeErr
 
-	mockFactory := func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+	mockFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
 		if bucket == "failing-bucket" {
 			return gcs.New(ctx, bucket, gcs.WithStorageClient(fakeStorage))
 		}

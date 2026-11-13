@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -754,4 +755,84 @@ func TestStoreManifest_ErrorNamesSinkOperation(t *testing.T) {
 	if !strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("expected error to preserve underlying cause, got: %v", err)
 	}
+}
+
+func TestWorkloadIdentityConfig(t *testing.T) {
+	const provider = "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider"
+
+	cfg := workloadIdentityConfig(provider)
+
+	if cfg.Audience != provider {
+		t.Errorf("Audience = %q, want %q", cfg.Audience, provider)
+	}
+	if cfg.SubjectTokenType != "urn:ietf:params:oauth:token-type:jwt" {
+		t.Errorf("SubjectTokenType = %q, want urn:ietf:params:oauth:token-type:jwt", cfg.SubjectTokenType)
+	}
+	if cfg.TokenURL != "https://sts.googleapis.com/v1/token" {
+		t.Errorf("TokenURL = %q, want https://sts.googleapis.com/v1/token", cfg.TokenURL)
+	}
+	if cfg.CredentialSource == nil || cfg.CredentialSource.File != DefaultTokenFilePath {
+		t.Errorf("CredentialSource.File = %v, want %q", cfg.CredentialSource, DefaultTokenFilePath)
+	}
+	expectedScopes := []string{"https://www.googleapis.com/auth/cloud-platform"}
+	if !reflect.DeepEqual(cfg.Scopes, expectedScopes) {
+		t.Errorf("Scopes = %v, want %v", cfg.Scopes, expectedScopes)
+	}
+}
+
+func TestBuildClientOptions(t *testing.T) {
+	ctx := t.Context()
+
+	tests := []struct {
+		name          string
+		provider      string
+		expectOptions int
+	}{
+		{
+			name:          "empty provider",
+			provider:      "",
+			expectOptions: 0,
+		},
+		{
+			name:          "whitespace provider",
+			provider:      "   ",
+			expectOptions: 0,
+		},
+		{
+			name:          "valid provider",
+			provider:      "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+			expectOptions: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := BuildClientOptions(ctx, tt.provider)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(opts) != tt.expectOptions {
+				t.Errorf("expected %d options, got %d", tt.expectOptions, len(opts))
+			}
+			if tt.expectOptions > 0 {
+				optStr := fmt.Sprintf("%#v", opts[0])
+				if !strings.Contains(optStr, "withTokenSource") {
+					t.Errorf("expected option to be WithTokenSource, got %s", optStr)
+				}
+			}
+		})
+	}
+
+	// Real storage client construction: when provider is set, storage.NewClient
+	// initializes cleanly with the token source without making network calls.
+	const audience = "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider"
+	sinkReal, err := New(ctx, "eval-bucket", WithWorkloadIdentityProvider(audience))
+	if err != nil {
+		t.Fatalf("New with real storage client and workload identity failed: %v", err)
+	}
+	defer func() {
+		if closeErr := sinkReal.Close(); closeErr != nil {
+			t.Errorf("Close failed: %v", closeErr)
+		}
+	}()
 }

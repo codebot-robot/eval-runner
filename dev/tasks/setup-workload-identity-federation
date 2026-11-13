@@ -21,8 +21,6 @@ Federation:
   1. Reads the cluster OIDC issuer and JWKS signing keys via kubectl.
   2. Ensures the GCP Workload Identity Pool exists.
   3. Creates or updates the OIDC provider with the uploaded JWKS and allowed audiences.
-  4. Applies a credential configuration ConfigMap (eval-runner-gcp-credentials)
-     for external account authentication with GCP STS.
 
 Every step is idempotent: re-running this script refreshes the uploaded JWKS
 after cluster ServiceAccount signing-key rotations.
@@ -53,19 +51,13 @@ from task_helpers import (
 # Fixed audience allowing deployment manifests to project tokens without project or pool details.
 FIXED_AUDIENCE = "eval-runner.gke-labs.dev/gcp-workload-identity"
 
-# Contract paths for the projected token and external account credential configuration.
-CREDENTIAL_SOURCE_FILE = "/var/run/secrets/eval-runner/gcp/token"
-GOOGLE_APPLICATION_CREDENTIALS_PATH = "/etc/eval-runner/gcp/credential-config.json"
-
 ATTRIBUTE_MAPPING = (
     "google.subject=assertion.sub,"
     "attribute.namespace=assertion['kubernetes.io']['namespace'],"
     "attribute.service_account_name=assertion['kubernetes.io']['serviceaccount']['name']"
 )
 
-DEFAULT_NAMESPACE = "eval-runner"
 DEFAULT_PROVIDER = "kubernetes"
-CONFIGMAP_NAME = "eval-runner-gcp-credentials"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -81,11 +73,6 @@ def parse_arguments() -> argparse.Namespace:
         help=f"OIDC provider ID within the pool (default: {DEFAULT_PROVIDER})",
     )
     parser.add_argument("--kubeconfig", help="path to dedicated kubeconfig file (optional)")
-    parser.add_argument(
-        "--namespace",
-        default=DEFAULT_NAMESPACE,
-        help=f"Kubernetes namespace for eval-runner (default: {DEFAULT_NAMESPACE})",
-    )
     parser.add_argument("--dry-run", action="store_true", help="print commands without executing them")
 
     arguments = parser.parse_args()
@@ -220,55 +207,26 @@ def ensure_oidc_provider(
     return default_audience
 
 
-def ensure_credential_configmap(
-    runner: Runner,
+def print_summary(
     arguments: argparse.Namespace,
+    issuer_uri: str,
     default_audience: str,
 ) -> None:
-    """Apply the external account credential configuration ConfigMap."""
-    credential_config = {
-        "type": "external_account",
-        "audience": default_audience,
-        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-        "token_url": "https://sts.googleapis.com/v1/token",
-        "credential_source": {
-            "file": CREDENTIAL_SOURCE_FILE,
-        },
-    }
-    config_map_manifest = json.dumps(
-        {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {
-                "name": CONFIGMAP_NAME,
-                "namespace": arguments.namespace,
-            },
-            "data": {
-                "GOOGLE_APPLICATION_CREDENTIALS": GOOGLE_APPLICATION_CREDENTIALS_PATH,
-                "credential-config.json": json.dumps(credential_config, indent=2),
-            },
-        },
-        indent=2,
-    )
-    runner.run(
-        ["kubectl", "apply", "-f", "-"],
-        stdin=config_map_manifest,
-        mutating=True,
-    )
-    print(f"    ConfigMap {arguments.namespace}/{CONFIGMAP_NAME} applied")
-
-
-def print_summary(arguments: argparse.Namespace, issuer_uri: str) -> None:
     """Print a summary of the configured Workload Identity Federation resources."""
     print(f"    Pool:      {arguments.pool}")
     print(f"    Provider:  {arguments.provider}")
+    print(f"    Resource:  {default_audience}")
     print(f"    Issuer:    {issuer_uri}")
     print()
-    print("Next step: grant bucket access with ./dev/tasks/setup-artifact-bucket, e.g.:")
+    print("Next steps:")
+    print("1. Grant bucket access with ./dev/tasks/setup-artifact-bucket, e.g.:")
     print(
         f"    ./dev/tasks/setup-artifact-bucket --project {arguments.project} "
         f"--bucket <bucket-name> --location <location> --workload-identity-pool {arguments.pool}"
     )
+    print()
+    print("2. Set gcpWorkloadIdentityProvider in eval-runner-config ConfigMap, e.g.:")
+    print(f'    gcpWorkloadIdentityProvider: "{default_audience}"')
 
 
 def main() -> None:
@@ -299,13 +257,9 @@ def main() -> None:
         jwks_raw,
     )
 
-    # 4. Credential configuration ConfigMap
-    Step(f"Credential configuration ConfigMap {arguments.namespace}/{CONFIGMAP_NAME}")
-    ensure_credential_configmap(runner, arguments, default_audience)
-
-    # 5. Summary
+    # 4. Summary
     Step("Workload Identity Federation summary")
-    print_summary(arguments, issuer_uri)
+    print_summary(arguments, issuer_uri, default_audience)
 
 
 if __name__ == "__main__":

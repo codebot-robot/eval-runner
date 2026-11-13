@@ -49,19 +49,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          valueFrom:
-            configMapKeyRef:
-              name: eval-runner-gcp-credentials
-              key: GOOGLE_APPLICATION_CREDENTIALS
-              optional: true
         ports:
         - name: http
           containerPort: 8080
         volumeMounts:
-        - name: gcp-credentials
-          mountPath: /etc/eval-runner/gcp
-          readOnly: true
         - name: gcp-token
           mountPath: /var/run/secrets/eval-runner/gcp
           readOnly: true
@@ -94,10 +85,6 @@ spec:
             cpu: 250m
             memory: 256Mi
       volumes:
-      - name: gcp-credentials
-        configMap:
-          name: eval-runner-gcp-credentials
-          optional: true
       - name: gcp-token
         projected:
           sources:

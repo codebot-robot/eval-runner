@@ -152,7 +152,7 @@ func main() {
 
 	var sink artifacts.ArtifactSink
 	if bucket != "" || dir != "" {
-		s, err := sinkconfig.NewArtifactSink(ctx, bucket, dir, 0)
+		s, err := sinkconfig.NewArtifactSink(ctx, bucket, dir, artCfg.GCPWorkloadIdentityProvider, 0)
 		if err != nil {
 			log.Printf("warning: unable to configure artifact sink (bucket=%q, dir=%q): %v", bucket, dir, err)
 		} else {

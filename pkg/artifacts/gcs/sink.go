@@ -28,9 +28,15 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
+	"golang.org/x/oauth2/google/externalaccount"
+	"google.golang.org/api/option"
 )
 
 const (
+	// DefaultTokenFilePath is the default path to the projected Kubernetes ServiceAccount token.
+	DefaultTokenFilePath = configkeys.DefaultWorkloadIdentityTokenFile
+
 	// DefaultMaxUploadBytes is the default cap on uploaded artifact size (10 MiB).
 	DefaultMaxUploadBytes int64 = 10 * 1024 * 1024
 
@@ -103,11 +109,12 @@ func (c *realStorageClient) Close() error {
 
 // GCSSink implements artifacts.ArtifactSink to write Inspect logs and summary.json to Google Cloud Storage.
 type GCSSink struct {
-	bucket         string
-	maxUploadBytes int64
-	client         StorageClient
-	mu             sync.Mutex
-	closed         bool
+	bucket                   string
+	maxUploadBytes           int64
+	client                   StorageClient
+	workloadIdentityProvider string
+	mu                       sync.Mutex
+	closed                   bool
 }
 
 var _ artifacts.ArtifactSink = (*GCSSink)(nil)
@@ -130,6 +137,41 @@ func WithMaxUploadBytes(bytes int64) Option {
 	}
 }
 
+// WithWorkloadIdentityProvider configures the Workload Identity Federation provider resource name.
+func WithWorkloadIdentityProvider(provider string) Option {
+	return func(s *GCSSink) {
+		s.workloadIdentityProvider = strings.TrimSpace(provider)
+	}
+}
+
+func workloadIdentityConfig(provider string) externalaccount.Config {
+	return externalaccount.Config{
+		Audience:         provider,
+		SubjectTokenType: "urn:ietf:params:oauth:token-type:jwt",
+		TokenURL:         "https://sts.googleapis.com/v1/token",
+		CredentialSource: &externalaccount.CredentialSource{
+			File: DefaultTokenFilePath,
+		},
+		Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
+	}
+}
+
+// BuildClientOptions constructs google client options for GCS client initialization.
+// When workloadIdentityProvider is empty, no option is returned (falling back to Application Default Credentials).
+// When workloadIdentityProvider is non-empty, an external account TokenSource is constructed
+// using the provider resource name as the audience and returned as an option.WithTokenSource.
+func BuildClientOptions(ctx context.Context, workloadIdentityProvider string) ([]option.ClientOption, error) {
+	provider := strings.TrimSpace(workloadIdentityProvider)
+	if provider == "" {
+		return nil, nil
+	}
+	tokenSource, err := externalaccount.NewTokenSource(ctx, workloadIdentityConfig(provider))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create workload identity federation token source: %w", err)
+	}
+	return []option.ClientOption{option.WithTokenSource(tokenSource)}, nil
+}
+
 // New creates a new GCSSink targeting the specified bucket.
 func New(ctx context.Context, bucket string, opts ...Option) (*GCSSink, error) {
 	b, err := normalizeAndValidateBucket(bucket)
@@ -146,7 +188,11 @@ func New(ctx context.Context, bucket string, opts ...Option) (*GCSSink, error) {
 	}
 
 	if sink.client == nil {
-		sc, err := storage.NewClient(ctx)
+		clientOpts, err := BuildClientOptions(ctx, sink.workloadIdentityProvider)
+		if err != nil {
+			return nil, fmt.Errorf("failed to configure GCS credentials: %w", err)
+		}
+		sc, err := storage.NewClient(ctx, clientOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create GCS client: %w", err)
 		}

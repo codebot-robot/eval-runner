@@ -48,17 +48,18 @@ const (
 )
 
 // SinkFactory is a constructor function for ArtifactSink instances.
-type SinkFactory func(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error)
+type SinkFactory func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error)
 
 // Config holds the artifact storage settings extracted from the cluster ConfigMap.
 type Config struct {
-	ArtifactBucket string
-	ArtifactDir    string
+	ArtifactBucket              string
+	ArtifactDir                 string
+	GCPWorkloadIdentityProvider string
 }
 
 // NewArtifactSink constructs an ArtifactSink using the settings in c.
 func (c Config) NewArtifactSink(ctx context.Context, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
-	return NewArtifactSink(ctx, c.ArtifactBucket, c.ArtifactDir, maxUploadBytes)
+	return NewArtifactSink(ctx, c.ArtifactBucket, c.ArtifactDir, c.GCPWorkloadIdentityProvider, maxUploadBytes)
 }
 
 // LoadConfigMap retrieves the cluster ConfigMap using reader.
@@ -88,7 +89,7 @@ func LoadConfigMap(ctx context.Context, reader client.Reader, namespace, name st
 	return &cm, nil
 }
 
-// LoadArtifactConfig reads the cluster ConfigMap and extracts artifactBucket and artifactDir.
+// LoadArtifactConfig reads the cluster ConfigMap and extracts artifact storage settings.
 // If name is empty, DefaultConfigMapName is used.
 // If namespace is empty, DefaultNamespace is used.
 // If the ConfigMap is not found, an empty Config is returned with a nil error.
@@ -105,15 +106,18 @@ func LoadArtifactConfig(ctx context.Context, reader client.Reader, namespace, na
 		if d := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactDir]); d != "" && !strings.EqualFold(d, configkeys.ConfigSentinelDisabled) {
 			cfg.ArtifactDir = d
 		}
+		if p := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider]); p != "" {
+			cfg.GCPWorkloadIdentityProvider = p
+		}
 	}
 	return cfg, nil
 }
 
-// NewArtifactSink constructs an ArtifactSink based on the provided bucket and local directory.
-// If bucket is non-empty, a GCSSink is returned (with optional maxUploadBytes cap).
+// NewArtifactSink constructs an ArtifactSink based on the provided bucket, local directory, and optional workload identity provider.
+// If bucket is non-empty, a GCSSink is returned (with optional maxUploadBytes cap and workload identity provider).
 // If dir is non-empty, a LocalDirSink is returned.
 // If neither is configured, nil is returned without error.
-func NewArtifactSink(ctx context.Context, bucket, dir string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+func NewArtifactSink(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
 	bucket = strings.TrimSpace(bucket)
 	if strings.EqualFold(bucket, configkeys.ConfigSentinelDisabled) {
 		bucket = ""
@@ -126,6 +130,9 @@ func NewArtifactSink(ctx context.Context, bucket, dir string, maxUploadBytes int
 		var gcsOpts []gcs.Option
 		if maxUploadBytes > 0 {
 			gcsOpts = append(gcsOpts, gcs.WithMaxUploadBytes(maxUploadBytes))
+		}
+		if provider := strings.TrimSpace(workloadIdentityProvider); provider != "" {
+			gcsOpts = append(gcsOpts, gcs.WithWorkloadIdentityProvider(provider))
 		}
 		return gcs.New(ctx, bucket, gcsOpts...)
 	}

@@ -348,6 +348,7 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Strict configuration | `--strict-config` | `false` | When true, fails controller startup immediately if `eval-runner-config` contains unrecognised keys. |
 | Sample runner image | `--sample-runner-image` | `""` (derived from controller pod image) | Container image used for sample task sandboxes (derived from controller pod image when unset). |
 | Artifact bucket | `--artifact-bucket` / ConfigMap `artifactBucket` | `""` (in-memory sink) | GCS bucket URI (`gs://<bucket>`) or name where manifests, Inspect logs, and `summary.json` are stored. |
+| GCP Workload Identity provider | ConfigMap `gcpWorkloadIdentityProvider` | `""` (ADC) | Full GCP Workload Identity Federation provider resource name (`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`) for non-GKE clusters. |
 | Artifact directory | `--artifact-dir` | `""` (in-memory sink) | Local filesystem directory for storing manifests, evaluation logs, and comparison artifacts when GCS is not configured. |
 | Artifact upload size | `--artifact-max-upload-bytes` / ConfigMap `artifactMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded artifact (default 10 MiB, equal to sandbox ReadFile limit); manifests error above cap; task logs are capped and recorded with `capped` in `summary.json`. |
 | Artifact load size | `DefaultMaxLoadBytes` | `10485760` (10 MiB) | Maximum size of an artifact loaded from the sink. |

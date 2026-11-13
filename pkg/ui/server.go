@@ -150,6 +150,7 @@ type Server struct {
 	sinkMu           sync.RWMutex
 	lastBucket       string
 	lastDir          string
+	lastProvider     string
 	configuredOnce   bool
 }
 
@@ -232,6 +233,7 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 	}
 	effBucket := flagBucket
 	effDir := flagDir
+	effProvider := ""
 	if cm != nil && cm.Data != nil {
 		if effBucket == "" {
 			effBucket = cm.Data[configkeys.ConfigMapKeyArtifactBucket]
@@ -239,6 +241,7 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 		if effDir == "" {
 			effDir = cm.Data[configkeys.ConfigMapKeyArtifactDir]
 		}
+		effProvider = strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider])
 	}
 	effBucket = strings.TrimSpace(effBucket)
 	if strings.EqualFold(effBucket, configkeys.ConfigSentinelDisabled) {
@@ -250,7 +253,7 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 	}
 
 	s.sinkMu.Lock()
-	if effBucket == s.lastBucket && effDir == s.lastDir && s.configuredOnce {
+	if effBucket == s.lastBucket && effDir == s.lastDir && effProvider == s.lastProvider && s.configuredOnce {
 		s.sinkMu.Unlock()
 		return nil
 	}
@@ -258,7 +261,7 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 
 	var newSink artifacts.ArtifactSink
 	if effBucket != "" || effDir != "" {
-		s, err := sinkFactory(ctx, effBucket, effDir, 0)
+		s, err := sinkFactory(ctx, effBucket, effDir, effProvider, 0)
 		if err != nil {
 			return fmt.Errorf("unable to configure artifact sink (bucket=%q, dir=%q): %w", effBucket, effDir, err)
 		}
@@ -274,6 +277,7 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 	s.sinkMu.Lock()
 	s.lastBucket = effBucket
 	s.lastDir = effDir
+	s.lastProvider = effProvider
 	s.configuredOnce = true
 	s.sinkMu.Unlock()
 

@@ -35,11 +35,6 @@ const (
 	expectedWorkloadIdentityPath       = "token"
 	expectedWorkloadIdentityExpiration = int64(3600)
 	expectedWorkloadIdentityTokenMount = "/var/run/secrets/eval-runner/gcp"
-
-	expectedCredentialsConfigMapName = "eval-runner-gcp-credentials"
-	expectedCredentialsConfigMount   = "/etc/eval-runner/gcp"
-	expectedCredentialsEnvVarName    = "GOOGLE_APPLICATION_CREDENTIALS"
-	expectedCredentialsEnvVarKey     = "GOOGLE_APPLICATION_CREDENTIALS"
 )
 
 func findRepoRoot(t *testing.T) string {
@@ -96,9 +91,9 @@ func loadDeploymentsFromManifest(t *testing.T, path string) []*appsv1.Deployment
 }
 
 // TestDeploymentManifests_GCPWorkloadIdentity asserts that controller and UI
-// deployments declare the projected token volume, the optional ConfigMap volume,
-// both volume mounts, and the optional GOOGLE_APPLICATION_CREDENTIALS env var
-// on the controller and UI containers, and on no other container.
+// deployments declare the projected token volume and volume mount on the controller
+// and UI containers, and that no credentials ConfigMap volume, mount, or
+// GOOGLE_APPLICATION_CREDENTIALS env var exists.
 func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 	root := findRepoRoot(t)
 
@@ -141,9 +136,8 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 
 			podSpec := deploy.Spec.Template.Spec
 
-			// 1. Locate projected token volume and optional configmap volume
+			// 1. Locate projected token volume and ensure no credentials configmap volume exists
 			var tokenVolumeName string
-			var configMapVolumeName string
 
 			for _, vol := range podSpec.Volumes {
 				if vol.Projected != nil {
@@ -165,12 +159,8 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 						}
 					}
 				}
-				if vol.ConfigMap != nil && vol.ConfigMap.Name == expectedCredentialsConfigMapName {
-					configMapVolumeName = vol.Name
-					if vol.ConfigMap.Optional == nil || !*vol.ConfigMap.Optional {
-						t.Errorf("volume %q ConfigMap %q optional = %v, want true",
-							vol.Name, expectedCredentialsConfigMapName, vol.ConfigMap.Optional)
-					}
+				if vol.Name == "gcp-credentials" {
+					t.Errorf("unexpected credentials volume %q found in %s", vol.Name, tc.manifestPath)
 				}
 			}
 
@@ -179,24 +169,15 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 					t.Fatalf("expected projected ServiceAccount token volume with audience %q in %s",
 						expectedWorkloadIdentityAudience, tc.manifestPath)
 				}
-				if configMapVolumeName == "" {
-					t.Fatalf("expected optional ConfigMap volume %q in %s",
-						expectedCredentialsConfigMapName, tc.manifestPath)
-				}
 			} else {
 				if tokenVolumeName != "" {
 					t.Errorf("unexpected projected ServiceAccount token volume %q in %s", tokenVolumeName, tc.manifestPath)
-				}
-				if configMapVolumeName != "" {
-					t.Errorf("unexpected ConfigMap volume %q in %s", configMapVolumeName, tc.manifestPath)
 				}
 			}
 
 			// Helper to check containers
 			assertContainer := func(c corev1.Container, isTarget bool) {
 				hasTokenMount := false
-				hasConfigMount := false
-				var envKeyRef *corev1.ConfigMapKeySelector
 
 				for _, vm := range c.VolumeMounts {
 					if vm.MountPath == expectedWorkloadIdentityTokenMount {
@@ -209,25 +190,14 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 								c.Name, expectedWorkloadIdentityTokenMount, vm.Name, tokenVolumeName)
 						}
 					}
-					if vm.MountPath == expectedCredentialsConfigMount {
-						hasConfigMount = true
-						if !vm.ReadOnly {
-							t.Errorf("container %q mount %q readOnly = false, want true", c.Name, expectedCredentialsConfigMount)
-						}
-						if configMapVolumeName != "" && vm.Name != configMapVolumeName {
-							t.Errorf("container %q mount %q volume name = %q, want %q",
-								c.Name, expectedCredentialsConfigMount, vm.Name, configMapVolumeName)
-						}
+					if vm.Name == "gcp-credentials" || vm.MountPath == "/etc/eval-runner/gcp" {
+						t.Errorf("container %q has unexpected credentials mount at %q", c.Name, vm.MountPath)
 					}
 				}
 
 				for _, env := range c.Env {
-					if env.Name == expectedCredentialsEnvVarName {
-						if env.ValueFrom != nil && env.ValueFrom.ConfigMapKeyRef != nil {
-							envKeyRef = env.ValueFrom.ConfigMapKeyRef
-						} else {
-							t.Errorf("container %q env %s missing configMapKeyRef", c.Name, expectedCredentialsEnvVarName)
-						}
+					if env.Name == "GOOGLE_APPLICATION_CREDENTIALS" {
+						t.Errorf("container %q has unexpected env var GOOGLE_APPLICATION_CREDENTIALS", c.Name)
 					}
 				}
 
@@ -235,34 +205,9 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 					if !hasTokenMount {
 						t.Errorf("container %q missing mount at %q", c.Name, expectedWorkloadIdentityTokenMount)
 					}
-					if !hasConfigMount {
-						t.Errorf("container %q missing mount at %q", c.Name, expectedCredentialsConfigMount)
-					}
-					if envKeyRef == nil {
-						t.Errorf("container %q missing env var %s", c.Name, expectedCredentialsEnvVarName)
-					} else {
-						if envKeyRef.Name != expectedCredentialsConfigMapName {
-							t.Errorf("container %q env %s configMapKeyRef.name = %q, want %q",
-								c.Name, expectedCredentialsEnvVarName, envKeyRef.Name, expectedCredentialsConfigMapName)
-						}
-						if envKeyRef.Key != expectedCredentialsEnvVarKey {
-							t.Errorf("container %q env %s configMapKeyRef.key = %q, want %q",
-								c.Name, expectedCredentialsEnvVarKey, envKeyRef.Key, expectedCredentialsEnvVarKey)
-						}
-						if envKeyRef.Optional == nil || !*envKeyRef.Optional {
-							t.Errorf("container %q env %s configMapKeyRef.optional = %v, want true",
-								c.Name, expectedCredentialsEnvVarName, envKeyRef.Optional)
-						}
-					}
 				} else {
 					if hasTokenMount {
 						t.Errorf("non-target container %q has unexpected token mount at %q", c.Name, expectedWorkloadIdentityTokenMount)
-					}
-					if hasConfigMount {
-						t.Errorf("non-target container %q has unexpected config mount at %q", c.Name, expectedCredentialsConfigMount)
-					}
-					if envKeyRef != nil {
-						t.Errorf("non-target container %q has unexpected env var %s", c.Name, expectedCredentialsEnvVarName)
 					}
 				}
 			}

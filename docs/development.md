@@ -225,7 +225,7 @@ gcloud projects add-iam-policy-binding <project> --member="user:<you>" --role="r
 For clusters running outside GKE (such as kOps on GCE, AWS EKS, or on-premises clusters), pods have no metadata-server credentials to obtain Google Cloud credentials. Setup is split into two steps (cluster identity first, then bucket):
 
 1. **Cluster Identity (`./dev/tasks/setup-workload-identity-federation`)**:
-   Configures GCP Workload Identity Federation using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required), creates the Workload Identity Pool and OIDC provider, and applies the `eval-runner-gcp-credentials` ConfigMap:
+   Configures GCP Workload Identity Federation using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required) and creates the Workload Identity Pool and OIDC provider:
 
    ```bash
    ./dev/tasks/setup-workload-identity-federation \
@@ -244,13 +244,26 @@ For clusters running outside GKE (such as kOps on GCE, AWS EKS, or on-premises c
        --workload-identity-pool <workload-identity-pool-id>
    ```
 
-The `eval-runner-controller` and `eval-runner-ui` Deployments in `k8s/` wire this contract in optionally:
-- **Audience**: Projected ServiceAccount token with audience `eval-runner.gke-labs.dev/gcp-workload-identity` and `expirationSeconds: 3600`.
-- **Token path**: Mounted read-only at `/var/run/secrets/eval-runner/gcp` with path `token` (`/var/run/secrets/eval-runner/gcp/token`).
-- **Config path**: ConfigMap volume `eval-runner-gcp-credentials` (`optional: true`) mounted read-only at `/etc/eval-runner/gcp` (`/etc/eval-runner/gcp/credential-config.json`).
-- **Environment variable**: `GOOGLE_APPLICATION_CREDENTIALS` populated from `configMapKeyRef` (`name: eval-runner-gcp-credentials`, `key: GOOGLE_APPLICATION_CREDENTIALS`, `optional: true`), pointing to `/etc/eval-runner/gcp/credential-config.json`.
+3. **Configure `eval-runner-config`**:
+   Set `gcpWorkloadIdentityProvider` in the `eval-runner-config` ConfigMap to the provider resource name output by `setup-workload-identity-federation`:
 
-When `eval-runner-gcp-credentials` is absent (such as on GKE or kind), `GOOGLE_APPLICATION_CREDENTIALS` remains unset and Application Default Credentials fall back to standard behavior.
+   ```yaml
+   apiVersion: v1
+   kind: ConfigMap
+   metadata:
+     name: eval-runner-config
+     namespace: eval-runner
+   data:
+     artifactBucket: "gs://<bucket-name>"
+     gcpWorkloadIdentityProvider: "//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>"
+   ```
+
+The `eval-runner-controller` and `eval-runner-ui` Deployments in `k8s/` wire this contract in:
+- **Audience**: Projected ServiceAccount token with audience `eval-runner.gke-labs.dev/gcp-workload-identity` and `expirationSeconds: 3600`.
+- **Token path**: Mounted read-only at `/var/run/secrets/eval-runner/gcp/token`.
+- **In-process TokenSource**: When `gcpWorkloadIdentityProvider` is set, the GCS client builds its token source in-process from `golang.org/x/oauth2/google/externalaccount` using that audience and projected token file. No credential configuration file, separate ConfigMap, or `GOOGLE_APPLICATION_CREDENTIALS` environment variable is needed.
+
+When `gcpWorkloadIdentityProvider` is absent or unset (such as on GKE or kind), Application Default Credentials fall back to standard behavior.
 
 Alternatively, invoke `ap deploy` directly by setting a unique tag:
 
@@ -744,6 +757,7 @@ Supported ConfigMap keys include:
 - `defaultModel`: Default model identifier for webhook-created Runs (e.g. `mockllm/model`).
 - `discoveryDeadline`: Overall deadline for discovery to complete (default `10m`).
 - `executionDeadline`: Overall deadline for sample execution to complete (default `30m`).
+- `gcpWorkloadIdentityProvider`: Full GCP Workload Identity Federation provider resource name (`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`) used for in-process token exchange with GCP STS when authenticating to GCS on non-GKE clusters.
 - `githubAppSecret`: Name of Secret in controller namespace containing GitHub App credentials.
 - `githubTokenSecret`: Name of Secret in controller namespace containing GitHub credentials (default `github-token`).
 - `githubWebhookSecret`: Name of Secret in controller namespace containing GitHub webhook secret (default `github-webhook`).
@@ -764,7 +778,7 @@ Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the Conf
 ### Runtime Configuration Reloading
 
 Both the controller and UI watch `eval-runner-config` and dynamically apply configuration changes at runtime without requiring a deployment restart:
-- **Artifact Sink**: When `artifactBucket`, `artifactDir`, or `artifactMaxUploadBytes` is modified (e.g. setting `artifactBucket` after initial cluster deploy), the controller and UI construct the new artifact sink and safely retire the previous one. In-flight uploads and reads are permitted to complete before the old sink is closed. *(Note: Swapping away from the default in-memory sink discards previously stored in-memory artifacts, so Runs or Comparisons in flight at that moment may encounter unreadable artifacts.)*
+- **Artifact Sink**: When `artifactBucket`, `artifactDir`, `artifactMaxUploadBytes`, or `gcpWorkloadIdentityProvider` is modified (e.g. setting `artifactBucket` after initial cluster deploy), the controller and UI construct the new artifact sink and safely retire the previous one. In-flight uploads and reads are permitted to complete before the old sink is closed. *(Note: Swapping away from the default in-memory sink discards previously stored in-memory artifacts, so Runs or Comparisons in flight at that moment may encounter unreadable artifacts.)*
 - **Reloadable Settings**: Changes to deadlines (`discoveryDeadline`, `executionDeadline`), concurrency limits (`maxParallelTasks`), progress polling intervals (`pollProgressInterval`), sandbox task grace periods (`taskGracePeriod`), sandbox images (`sandboxdImage`), model credentials (`modelSecret`), token pricing (`modelPrices`), command authorizers (`commandUsers`), GitHub credentials (`githubTokenSecret`, `githubAppSecret`), PR reporting (`uiBaseURL`, `inconclusivePolicy`), head top-up loop (`headTopUpInterval`, `headTargetCIHalfWidth`, `headMaxSamplesPerTask`), completed comparison retention expiry, and task affinity (`affinityMode`) take effect immediately for subsequent evaluations.
 - **Observability**: When settings reload, the controller logs a single `"effective cluster settings"` line reflecting all active values, and the UI increments its internal `config_generation` value and updates the artifact sink status in page footers (`artifacts: gs://bucket`).
 
