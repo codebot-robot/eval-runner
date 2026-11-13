@@ -119,7 +119,7 @@ spec:
 
 		// Assert /tmp/artifacts/runs/<commit>/manifest.json exists in kind
 		manifestPathSuffix := fmt.Sprintf("artifacts/runs/%s/manifest.json", commit)
-		findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -path '*/%s' -type f", manifestPathSuffix)
+		findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", manifestPathSuffix)
 		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
 		foundFiles := harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd)
 		if strings.TrimSpace(foundFiles) == "" {
