@@ -15,6 +15,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -188,6 +189,18 @@ type TaskStatus struct {
 	// TimeoutSeconds records the effective execution timeout applied to the task command in seconds.
 	// +optional
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+
+	// Resources records the compute resource limits applied to the task sandbox container.
+	// Only set for sandbox tasks.
+	// +optional
+	Resources *TaskResources `json:"resources,omitempty"`
+}
+
+// TaskResources describes compute resource requirements and limits for a task container.
+type TaskResources struct {
+	// Limits describes the maximum amount of compute resources allowed.
+	// +optional
+	Limits corev1.ResourceList `json:"limits,omitempty"`
 }
 
 // TaskLatency records latency percentiles (in seconds) aggregated across evaluated samples.
@@ -295,6 +308,11 @@ type RunSpec struct {
 type ManifestResource struct {
 	// Type is the resource type (e.g., docker, kind, kubernetes-namespace, sandbox).
 	Type string `json:"type"`
+
+	// Limits specifies the maximum resource limits for the task sandbox container.
+	// Only valid when Type is "sandbox". Supported keys are "cpu" and "memory".
+	// +optional
+	Limits corev1.ResourceList `json:"limits,omitempty"`
 }
 
 const (
@@ -369,6 +387,18 @@ const (
 
 	// MaxTaskTimeoutSeconds is the maximum allowed timeout in seconds for a task command (2 hours).
 	MaxTaskTimeoutSeconds = 7200
+
+	// DefaultTaskCPULimit is the fallback CPU limit applied to a sandbox task container when unset.
+	DefaultTaskCPULimit = "500m"
+
+	// DefaultTaskMemoryLimit is the fallback memory limit applied to a sandbox task container when unset.
+	DefaultTaskMemoryLimit = "512Mi"
+
+	// MaxTaskCPULimit is the maximum allowed CPU limit for a sandbox task (16 cores).
+	MaxTaskCPULimit = "16"
+
+	// MaxTaskMemoryLimit is the maximum allowed memory limit for a sandbox task (64Gi).
+	MaxTaskMemoryLimit = "64Gi"
 )
 
 // Manifest is the parsed output of .evals/list.
