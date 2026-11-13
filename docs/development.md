@@ -86,6 +86,34 @@ docker buildx build --platform linux/amd64,linux/arm64 -f packages/sandboxd/Dock
 ```
 Note: Pushing the multi-arch image to the registry is a maintainer step whenever the fork commit changes. After pushing, update the pinned image digest in `pkg/discovery/sandbox.go`.
 
+### Model Portal (Explicit Service Mode)
+
+The model portal (`k8s/model-portal.yaml`) deploys [gke-labs/service-portals](https://github.com/gke-labs/service-portals) (`cmd/service-portal`) as a standalone Deployment and Service in explicit service mode in the `eval-runner` namespace.
+
+**What the portal is for**: It acts as a reverse proxy in front of the upstream model provider (the Gemini OpenAI-compatible endpoint). Sandbox workloads speak to the portal using dummy or placeholder tokens, keeping real credentials entirely out of untrusted sandbox containers. When proxying outbound requests upstream, the portal replaces the placeholder token with the real API key from cluster secret `model-portal-secret`.
+
+**Base URL clients use**: Clients configure their OpenAI-compatible SDK base URL to:
+```text
+http://model-portal.eval-runner.svc/v1beta/openai
+```
+(or `http://model-portal/v1beta/openai` within the `eval-runner` namespace). When an OpenAI SDK client sends a request (such as `POST /v1beta/openai/chat/completions`), the portal proxies the request to `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, replacing the incoming `Authorization` header with `Authorization: Bearer <token>`.
+
+**Configuring the Secret (`model-portal-secret`)**:
+The Secret is untracked and created once per cluster by the operator:
+```bash
+kubectl create secret generic model-portal-secret -n eval-runner --from-literal=token="${GEMINI_API_KEY}"
+kubectl rollout restart deployment/model-portal -n eval-runner
+```
+The Secret reference in `k8s/model-portal.yaml` is optional (`optional: true`), so the `model-portal` pod starts cleanly and becomes Ready without the Secret present (returning upstream authentication errors). Because `UPSTREAM_AUTH_TOKEN` is injected as a container environment variable read once at process startup, creating or rotating `model-portal-secret` requires restarting the deployment with `kubectl rollout restart deployment/model-portal -n eval-runner` for the pod to pick up the token.
+
+#### Building the `service-portal` Image
+`service-portals` publishes no prebuilt image. Its generic portal image (`images/service-portal/Dockerfile`) cross-compiles using `FROM --platform=$BUILDPLATFORM` from the pinned commit in `dev/tasks/versions.sh` (`SERVICE_PORTALS_COMMIT`). Like the other images in `images/`, it is discovered by `ap` and built/tagged under `IMAGE_PREFIX` as `service-portal:<IMAGE_TAG>` via `./dev/tasks/deploy` (or `ap build`).
+
+For manual multi-platform builds:
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -f images/service-portal/Dockerfile -t <IMAGE_PREFIX>/service-portal:<IMAGE_TAG> --push .
+```
+
 ### CA Bootstrap and Rotation Procedure
 
 The controller maintains a self-signed CA that issues the controller's client certificate and per-sandbox server certificates:
