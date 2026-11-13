@@ -106,7 +106,6 @@ spec:
             cpu: 50m
             memory: 64Mi
           limits:
-            cpu: 250m
             memory: 256Mi
         volumeMounts:
         - name: rules-volume
@@ -149,7 +148,6 @@ spec:
             cpu: 50m
             memory: 64Mi
           limits:
-            cpu: 250m
             memory: 256Mi
         volumeMounts:
         - name: ca-volume
@@ -163,9 +161,14 @@ spec:
           mountPath: /run/service-portal
       volumes:
       - name: rules-volume
-        secret:
-          secretName: portal-rules
-          optional: true
+        projected:
+          sources:
+          - secret:
+              name: portal-rules
+              optional: true
+          - configMap:
+              name: portal-passthrough-rules
+              optional: true
       - name: ca-volume
         hostPath:
           path: /etc/service-portal/ca

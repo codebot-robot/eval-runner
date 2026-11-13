@@ -639,11 +639,11 @@ The `portal-node-agent` DaemonSet (`k8s/portal-node-agent.yaml`) runs in namespa
 
 #### Node Prerequisite
 
-The node agent requires containerd with NRI enabled. NRI is enabled by default starting in containerd 2.0 (standard in kind v0.33+ node images and modern Kubernetes distributions).
+The node agent requires containerd with NRI enabled (the default starting in containerd 2.0 or newer).
 
 #### Configuring Rules (`portal-rules` Secret)
 
-Model credentials and egress rules are configured via the `portal-rules` Secret in the `service-portal-system` namespace. The DaemonSet mounts this Secret optionally into the proxy container at `/etc/portals`.
+Model credentials and egress rules are configured via the `portal-rules` Secret in the `service-portal-system` namespace. The DaemonSet mounts this Secret optionally into the proxy container at `/etc/portals` alongside an optional `portal-passthrough-rules` ConfigMap.
 
 To configure a `PortalRule` for the Gemini API (`generativelanguage.googleapis.com`):
 
@@ -659,7 +659,7 @@ spec:
   authToken: ${GEMINI_API_KEY}"
 ```
 
-Rule changes require restarting the DaemonSet:
+Rule changes take effect when the proxy receives a SIGHUP signal, or by restarting the DaemonSet:
 
 ```bash
 kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
