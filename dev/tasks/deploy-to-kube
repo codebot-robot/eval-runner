@@ -37,6 +37,8 @@ SKIP_SAMPLE_RUNNER_BUILD=false
 SKIP_DEPLOY=false
 RESTART=false
 SET_ITEMS=()
+BUILDKIT_HOST="${BUILDKIT_HOST:-}"
+BUILD_KUBECONFIG="${BUILD_KUBECONFIG:-}"
 
 usage() {
   cat << 'EOF'
@@ -52,6 +54,8 @@ Options:
   --gateway-namespace NS     Gateway namespace for HTTPRoute (defaults to default).
   --set KEY=VALUE            Extra eval-runner-config ConfigMap entries (repeatable),
                              e.g. --set artifactBucket=my-bucket --set defaultModel=gemini-2.5-flash
+  --buildkit-host HOST       BuildKit host to use for building images (e.g. k8s).
+  --build-kubeconfig PATH    Kubeconfig for the build cluster running BuildKit.
   --skip-sandboxd-build      Skip building and pushing sandboxd; reuse an existing image.
   --skip-sample-runner-build Skip building and loading sample-runner; reuse an existing image.
   --skip-deploy              Provision dependencies and ConfigMap only; do not run dev/tasks/deploy.
@@ -63,6 +67,22 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --buildkit-host)
+      BUILDKIT_HOST="$2"
+      shift 2
+      ;;
+    --buildkit-host=*)
+      BUILDKIT_HOST="${1#*=}"
+      shift
+      ;;
+    --build-kubeconfig)
+      BUILD_KUBECONFIG="$2"
+      shift 2
+      ;;
+    --build-kubeconfig=*)
+      BUILD_KUBECONFIG="${1#*=}"
+      shift
+      ;;
     --image-prefix)
       IMAGE_PREFIX="$2"
       shift 2
@@ -400,6 +420,12 @@ else
   DEPLOY_ARGS=()
   if [[ "${IS_KIND}" == "true" ]]; then
     DEPLOY_ARGS+=(--skip-push)
+  fi
+  if [[ -n "${BUILDKIT_HOST}" ]]; then
+    DEPLOY_ARGS+=(--buildkit-host "${BUILDKIT_HOST}")
+  fi
+  if [[ -n "${BUILD_KUBECONFIG}" ]]; then
+    DEPLOY_ARGS+=(--build-kubeconfig "${BUILD_KUBECONFIG}")
   fi
 
   if [[ "${DRY_RUN}" == "true" ]]; then

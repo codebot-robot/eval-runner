@@ -36,6 +36,7 @@ Only the Python standard library is used.
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -80,6 +81,16 @@ def parse_args() -> argparse.Namespace:
         "--kubeconfig",
         help="kubeconfig file to write credentials into "
         "(default: ~/.kube/eval-runner-<project>-<cluster>.kubeconfig; never ~/.kube/config)",
+    )
+    p.add_argument(
+        "--buildkit-host",
+        default=os.environ.get("BUILDKIT_HOST"),
+        help="BuildKit host to use for building images (e.g. k8s)",
+    )
+    p.add_argument(
+        "--build-kubeconfig",
+        default=os.environ.get("BUILD_KUBECONFIG"),
+        help="kubeconfig for the build cluster running BuildKit",
     )
     p.add_argument(
         "--set",
@@ -203,6 +214,10 @@ def main() -> None:
         cmd.extend(["--set", f"artifactBucket={args.bucket}", "--set", "artifactDir=none"])
     for item in args.set:
         cmd.extend(["--set", item])
+    if args.buildkit_host:
+        cmd.append(f"--buildkit-host={args.buildkit_host}")
+    if args.build_kubeconfig:
+        cmd.append(f"--build-kubeconfig={args.build_kubeconfig}")
     if args.skip_sandboxd_build:
         cmd.append("--skip-sandboxd-build")
     if args.skip_deploy:

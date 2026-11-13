@@ -172,6 +172,27 @@ For example, on Google Kubernetes Engine (GKE):
 IMAGE_PREFIX=gcr.io/my-gke-project ./dev/tasks/deploy
 ```
 
+### Deploying with BuildKit (`BUILDKIT_HOST` and `BUILD_KUBECONFIG`)
+
+On a workstation without a working local Docker daemon (or without emulation for the target architecture), images can be built using an in-cluster BuildKit daemon by setting `BUILDKIT_HOST=k8s` (or passing `--buildkit-host k8s`).
+
+If the target cluster does not have BuildKit installed, images can be built against a separate build cluster running BuildKit by specifying `BUILD_KUBECONFIG=<path>` (or passing `--build-kubeconfig <path>`). The build step uses the build cluster's kubeconfig, while manifests are applied to the target cluster.
+
+```bash
+BUILDKIT_HOST=k8s BUILD_KUBECONFIG=~/.kube/build.kubeconfig IMAGE_PREFIX=gcr.io/my-project ./dev/tasks/deploy
+```
+
+These settings are also passed through by `./dev/tasks/deploy-to-kube` and `./dev/tasks/deploy-to-gke`:
+
+```bash
+./dev/tasks/deploy-to-gke \
+    --cluster projects/<project>/locations/<region>/clusters/<cluster> \
+    --buildkit-host k8s \
+    --build-kubeconfig ~/.kube/build.kubeconfig
+```
+
+When `BUILDKIT_HOST` is active, images under `images/*` are built one directory at a time to prevent port-forward collisions. Pushed image indices are verified for `linux/amd64` using `docker manifest inspect` when Docker is present, or registry tools (`gcloud artifacts docker images describe` / `gcloud container images describe` for Google registries, or `crane`), failing closed if no verification tool is available.
+
 ### Deploying to any Kubernetes cluster in one step (`dev/tasks/deploy-to-kube`)
 
 For generic Kubernetes clusters (kind, kops, EKS, etc.), `./dev/tasks/deploy-to-kube` (bash, standard library tools only) handles cluster bring-up and deployment idempotently in one step:
@@ -192,6 +213,8 @@ On kind clusters (active context matching `kind-*`), `IMAGE_PREFIX` defaults to 
 
 Options:
 - `--set KEY=VALUE`: Merges extra ConfigMap entries (repeatable), for example `--set artifactBucket=my-bucket` or `--set defaultModel=gemini-2.5-flash`.
+- `--buildkit-host HOST`: Remote BuildKit host (e.g. `k8s`) for building images without a local Docker daemon.
+- `--build-kubeconfig PATH`: Dedicated build cluster kubeconfig for the image build step.
 - `--skip-sandboxd-build`: Skips building and pushing `sandboxd`, reusing an already pushed image index.
 - `--skip-deploy`: Provisions namespaces, `agent-sandbox`, `sandboxd`, and ConfigMap without running `./dev/tasks/deploy`.
 - `--restart`: Restarts deployments after deploy.
@@ -274,9 +297,9 @@ IMAGE_TAG=$(git rev-parse --short HEAD) IMAGE_PREFIX=<registry> ap deploy
 (`ap` honours `IMAGE_TAG`.)
 
 `./dev/tasks/deploy` will:
-1. Build the `eval-runner` container image (for `linux/amd64` and `linux/arm64`, pinned in `.ap/images.yaml`).
-2. Tag and push the multi-platform image index to `<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`.
-3. Inspect the pushed index with `docker buildx imagetools inspect` and verify it contains `linux/amd64`, failing immediately before applying manifests if absent.
+1. Build the container images under `images/*` (for `linux/amd64` and `linux/arm64`, pinned in `.ap/images.yaml`).
+2. Tag and push multi-platform image indices to `<IMAGE_PREFIX>/<name>:<IMAGE_TAG>`.
+3. Inspect each pushed index (using `docker manifest inspect` when Docker is present, or registry tools like `gcloud` for Google registries, or `crane`) and verify it contains `linux/amd64`, failing immediately before applying manifests if absent.
 4. Apply the manifests in `k8s/` in order (`00-namespaces.yaml`, `evalrunner.gke-labs.dev_runs.yaml`, `rbac.yaml`, `sandbox-networkpolicy.yaml`, `runner-deployment.yaml`).
 5. Substitute the `eval-runner` image reference in the deployment with the full pushed image reference (`<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`).
 6. Wait for the CRD to be established and the deployment to become available.
