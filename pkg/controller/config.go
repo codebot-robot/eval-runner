@@ -53,6 +53,8 @@ const (
 	ConfigMapKeyArtifactDir = configkeys.ConfigMapKeyArtifactDir
 	// ConfigMapKeyArtifactMaxUploadBytes is the ConfigMap key for the maximum artifact upload byte limit.
 	ConfigMapKeyArtifactMaxUploadBytes = configkeys.ConfigMapKeyArtifactMaxUploadBytes
+	// ConfigMapKeyGCPWorkloadIdentityProvider is the ConfigMap key for the GCP Workload Identity Federation provider resource name.
+	ConfigMapKeyGCPWorkloadIdentityProvider = configkeys.ConfigMapKeyGCPWorkloadIdentityProvider
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.
 	ConfigMapKeyDiscoveryDeadline = configkeys.ConfigMapKeyDiscoveryDeadline
 	// ConfigMapKeyExecutionDeadline is the ConfigMap key for sample execution deadline.
@@ -146,6 +148,9 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyHeadTopUpInterval:        {},
 	configkeys.ConfigMapKeyHeadTargetCIHalfWidth:    {},
 	configkeys.ConfigMapKeyHeadMaxSamplesPerTask:    {},
+
+	// Workload Identity Federation
+	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -209,6 +214,9 @@ type ClusterConfig struct {
 	LsRemoteInterval         time.Duration
 	FullReconcileInterval    time.Duration
 	RateLimitFloorPercent    int
+
+	// GCPWorkloadIdentityProvider is the GCP Workload Identity Federation provider resource name.
+	GCPWorkloadIdentityProvider string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -276,6 +284,8 @@ func DefaultClusterConfig() ClusterConfig {
 		LsRemoteInterval:         syncer.DefaultLsRemoteInterval,
 		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
 		RateLimitFloorPercent:    syncer.DefaultRateFloorPercent,
+
+		GCPWorkloadIdentityProvider: "",
 	}
 }
 
@@ -369,6 +379,11 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 					cfg.ArtifactDir = trimmed
 				}
 			}
+		}
+
+		// 1c. gcpWorkloadIdentityProvider
+		if val, ok := cm.Data[ConfigMapKeyGCPWorkloadIdentityProvider]; ok {
+			cfg.GCPWorkloadIdentityProvider = strings.TrimSpace(val)
 		}
 
 		// 2. discoveryDeadline
@@ -1066,20 +1081,23 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 	sinkChanged := r.lastConfig == nil ||
 		r.lastConfig.ArtifactBucket != resolved.ArtifactBucket ||
 		r.lastConfig.ArtifactDir != resolved.ArtifactDir ||
-		r.lastConfig.ArtifactMaxUploadBytes != resolved.ArtifactMaxUploadBytes
+		r.lastConfig.ArtifactMaxUploadBytes != resolved.ArtifactMaxUploadBytes ||
+		r.lastConfig.GCPWorkloadIdentityProvider != resolved.GCPWorkloadIdentityProvider
 
 	if sinkChanged && r.reloadableSink != nil {
-		newSink, err := r.sinkFactory(ctx, resolved.ArtifactBucket, resolved.ArtifactDir, resolved.ArtifactMaxUploadBytes)
+		newSink, err := r.sinkFactory(ctx, resolved.ArtifactBucket, resolved.ArtifactDir, resolved.GCPWorkloadIdentityProvider, resolved.ArtifactMaxUploadBytes)
 		if err != nil {
 			r.logger.Error(err, "unable to configure artifact sink; retaining active sink", "bucket", resolved.ArtifactBucket, "dir", resolved.ArtifactDir)
 			if r.lastConfig != nil {
 				resolved.ArtifactBucket = r.lastConfig.ArtifactBucket
 				resolved.ArtifactDir = r.lastConfig.ArtifactDir
 				resolved.ArtifactMaxUploadBytes = r.lastConfig.ArtifactMaxUploadBytes
+				resolved.GCPWorkloadIdentityProvider = r.lastConfig.GCPWorkloadIdentityProvider
 			} else {
 				resolved.ArtifactBucket = ""
 				resolved.ArtifactDir = ""
 				resolved.ArtifactMaxUploadBytes = 0
+				resolved.GCPWorkloadIdentityProvider = ""
 			}
 		} else {
 			if resolved.ArtifactBucket != "" && newSink != nil {

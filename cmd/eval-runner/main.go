@@ -357,7 +357,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sink, err := sinkconfig.NewArtifactSink(context.Background(), clusterConfig.ArtifactBucket, clusterConfig.ArtifactDir, clusterConfig.ArtifactMaxUploadBytes)
+	sink, err := sinkconfig.NewArtifactSink(context.Background(), clusterConfig.ArtifactBucket, clusterConfig.ArtifactDir, clusterConfig.GCPWorkloadIdentityProvider, clusterConfig.ArtifactMaxUploadBytes)
 	if err != nil {
 		setupLog.Error(err, "unable to configure GCS artifact sink", "bucket", clusterConfig.ArtifactBucket)
 		os.Exit(1)

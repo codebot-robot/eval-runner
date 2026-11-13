@@ -51,7 +51,7 @@ func TestNewArtifactSink(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("empty bucket and dir returns nil without error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "", "", 0)
+		sink, err := NewArtifactSink(ctx, "", "", "", 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestNewArtifactSink(t *testing.T) {
 	})
 
 	t.Run("disabled sentinel returns nil without error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "none", "none", 0)
+		sink, err := NewArtifactSink(ctx, "none", "none", "", 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -72,7 +72,7 @@ func TestNewArtifactSink(t *testing.T) {
 
 	t.Run("local directory sink", func(t *testing.T) {
 		dir := t.TempDir()
-		sink, err := NewArtifactSink(ctx, "", dir, 0)
+		sink, err := NewArtifactSink(ctx, "", dir, "", 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -88,7 +88,7 @@ func TestNewArtifactSink(t *testing.T) {
 	t.Run("gcs bucket sink", func(t *testing.T) {
 		// Point the storage client at an emulator so no ADC lookup happens; nothing is dialed at construction time.
 		t.Setenv("STORAGE_EMULATOR_HOST", "127.0.0.1:1")
-		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", 1024*1024)
+		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", "", 1024*1024)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -104,8 +104,23 @@ func TestNewArtifactSink(t *testing.T) {
 		}
 	})
 
+	t.Run("gcs bucket sink with workload identity provider", func(t *testing.T) {
+		const provider = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr"
+		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", provider, 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		gcsSink, ok := sink.(*gcs.GCSSink)
+		if !ok {
+			t.Fatalf("expected *gcs.GCSSink, got %T", sink)
+		}
+		if gcsSink.Bucket() != "my-eval-bucket" {
+			t.Errorf("expected bucket my-eval-bucket, got %q", gcsSink.Bucket())
+		}
+	})
+
 	t.Run("invalid gcs bucket returns error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "invalid bucket name with spaces", "", 0)
+		sink, err := NewArtifactSink(ctx, "invalid bucket name with spaces", "", "", 0)
 		if err == nil {
 			t.Fatalf("expected error for invalid bucket, got sink: %v", sink)
 		}
@@ -114,16 +129,37 @@ func TestNewArtifactSink(t *testing.T) {
 
 func TestConfig_NewArtifactSink(t *testing.T) {
 	ctx := t.Context()
-	cfg := Config{
-		ArtifactDir: t.TempDir(),
-	}
-	sink, err := cfg.NewArtifactSink(ctx, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, ok := sink.(*artifacts.LocalDirSink); !ok {
-		t.Fatalf("expected *artifacts.LocalDirSink, got %T", sink)
-	}
+	t.Run("local dir sink", func(t *testing.T) {
+		cfg := Config{
+			ArtifactDir: t.TempDir(),
+		}
+		sink, err := cfg.NewArtifactSink(ctx, 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := sink.(*artifacts.LocalDirSink); !ok {
+			t.Fatalf("expected *artifacts.LocalDirSink, got %T", sink)
+		}
+	})
+
+	t.Run("gcs bucket sink with workload identity provider", func(t *testing.T) {
+		const provider = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr"
+		cfg := Config{
+			ArtifactBucket:              "my-eval-bucket",
+			GCPWorkloadIdentityProvider: provider,
+		}
+		sink, err := cfg.NewArtifactSink(ctx, 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		gcsSink, ok := sink.(*gcs.GCSSink)
+		if !ok {
+			t.Fatalf("expected *gcs.GCSSink, got %T", sink)
+		}
+		if gcsSink.Bucket() != "my-eval-bucket" {
+			t.Errorf("expected bucket my-eval-bucket, got %q", gcsSink.Bucket())
+		}
+	})
 }
 
 func TestLoadConfigMap(t *testing.T) {
@@ -227,15 +263,17 @@ func TestLoadArtifactConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("populates both bucket and dir", func(t *testing.T) {
+	t.Run("populates bucket, dir, and workload identity provider", func(t *testing.T) {
+		const provider = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr"
 		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "test-ns",
 				Name:      "test-cm",
 			},
 			Data: map[string]string{
-				configkeys.ConfigMapKeyArtifactBucket: "gs://eval-bucket",
-				configkeys.ConfigMapKeyArtifactDir:    "/var/artifacts",
+				configkeys.ConfigMapKeyArtifactBucket:              "gs://eval-bucket",
+				configkeys.ConfigMapKeyArtifactDir:                 "/var/artifacts",
+				configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: provider,
 			},
 		}
 		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
@@ -248,6 +286,9 @@ func TestLoadArtifactConfig(t *testing.T) {
 		}
 		if cfg.ArtifactDir != "/var/artifacts" {
 			t.Errorf("expected ArtifactDir /var/artifacts, got %q", cfg.ArtifactDir)
+		}
+		if cfg.GCPWorkloadIdentityProvider != provider {
+			t.Errorf("expected GCPWorkloadIdentityProvider %q, got %q", provider, cfg.GCPWorkloadIdentityProvider)
 		}
 	})
 

@@ -35,6 +35,10 @@ const (
 	ConfigMapKeyArtifactDir = "artifactDir"
 	// ConfigMapKeyArtifactMaxUploadBytes is the ConfigMap key for the maximum artifact upload byte limit.
 	ConfigMapKeyArtifactMaxUploadBytes = "artifactMaxUploadBytes"
+	// ConfigMapKeyGCPWorkloadIdentityProvider is the ConfigMap key for the GCP Workload Identity Federation provider resource name.
+	ConfigMapKeyGCPWorkloadIdentityProvider = "gcpWorkloadIdentityProvider"
+	// DefaultWorkloadIdentityTokenFile is the contract path for the projected Kubernetes ServiceAccount token.
+	DefaultWorkloadIdentityTokenFile = "/var/run/secrets/eval-runner/gcp/token"
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.
 	ConfigMapKeyDiscoveryDeadline = "discoveryDeadline"
 	// ConfigMapKeyExecutionDeadline is the ConfigMap key for sample execution deadline.
