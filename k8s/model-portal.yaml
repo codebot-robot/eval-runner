@@ -86,3 +86,78 @@ spec:
   - name: http
     port: 80
     targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemini-portal
+  namespace: eval-runner
+  labels:
+    app: gemini-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gemini-portal
+  template:
+    metadata:
+      labels:
+        app: gemini-portal
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: gemini-portal
+        image: service-portal
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: TARGET_URL
+          value: "https://generativelanguage.googleapis.com"
+        - name: UPSTREAM_AUTH_HEADER
+          value: "x-goog-api-key"
+        - name: UPSTREAM_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: model-portal-secret
+              key: token
+              optional: true
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemini-portal
+  namespace: eval-runner
+  labels:
+    app: gemini-portal
+spec:
+  selector:
+    app: gemini-portal
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080

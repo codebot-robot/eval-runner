@@ -405,22 +405,22 @@ else
   if [[ "${DRY_RUN}" == "true" ]]; then
     run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run "${DEPLOY_ARGS[@]}"
     if [[ "${RESTART}" == "true" ]]; then
-      for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal; do
+      for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal gemini-portal; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
       done
     fi
-    for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal; do
+    for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal gemini-portal; do
       run_cmd kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
     run_cmd kubectl -n eval-runner logs deployment/eval-runner-controller --since-time="${STARTED_TIME}"
   else
     "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]}"
     if [[ "${RESTART}" == "true" ]]; then
-      for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal; do
+      for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal gemini-portal; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
       done
     fi
-    for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal; do
+    for d in eval-runner-controller eval-runner-ui eval-runner-webhook model-portal gemini-portal; do
       kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
 
