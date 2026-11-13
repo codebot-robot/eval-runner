@@ -421,7 +421,7 @@ spec:
 		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
 		loadInspectSampleIDs := func(task v1alpha1.TaskStatus) map[string]bool {
 			logSuffix := strings.TrimPrefix(task.LogPath, "/tmp/")
-			findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -path '*/%s' -type f", logSuffix)
+			findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", logSuffix)
 			foundFile := strings.TrimSpace(harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd))
 			if foundFile == "" {
 				t.Fatalf("Log file not found on node for %s", task.LogPath)
