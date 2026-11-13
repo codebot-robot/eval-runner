@@ -13,8 +13,9 @@ This directory contains automation and development task scripts.
 ## Workload Identity Federation (`setup-workload-identity-federation`)
 
 For Kubernetes clusters running outside GKE (such as kOps on GCE, AWS EKS, or on-premises clusters), pods cannot access the GKE metadata server. In order for the `eval-runner` controller and UI to authenticate to GCP and access the artifact storage bucket, cluster identity must be established with GCP Workload Identity Federation:
-1. Run `./dev/tasks/setup-workload-identity-federation` first to configure the Workload Identity Pool, OIDC provider, and credential configuration ConfigMap using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required).
+1. Run `./dev/tasks/setup-workload-identity-federation` first to configure the Workload Identity Pool and OIDC provider using uploaded cluster JWKS keys (no publicly reachable cluster OIDC endpoint required).
 2. Run `./dev/tasks/setup-artifact-bucket` next to create the artifact storage bucket and grant IAM permissions to the controller and UI ServiceAccounts.
+3. Set `gcpWorkloadIdentityProvider` in `eval-runner-config` with the provider resource name printed by `setup-workload-identity-federation`.
 
 ### Usage
 
@@ -23,7 +24,6 @@ For Kubernetes clusters running outside GKE (such as kOps on GCE, AWS EKS, or on
     --project <project-id> \
     --pool <workload-identity-pool-id> \
     [--provider <provider-id>] \
-    [--namespace <namespace>] \
     [--kubeconfig <path>] \
     [--dry-run]
 ```
@@ -33,16 +33,14 @@ For Kubernetes clusters running outside GKE (such as kOps on GCE, AWS EKS, or on
 1. **Read Cluster OIDC Issuer and JWKS**: Retrieves the OIDC issuer from `kubectl get --raw /.well-known/openid-configuration` (validating it is an `https://` URL) and signing keys from `kubectl get --raw /openid/v1/jwks`.
 2. **Workload Identity Pool**: Ensures the global workload identity pool exists in the target GCP project (`gcloud iam workload-identity-pools create`).
 3. **OIDC Provider**: Creates or updates the OIDC provider (`create-oidc` / `update-oidc`) with the uploaded JWKS, attribute mapping (`google.subject`, `attribute.namespace`, `attribute.service_account_name`), and allowed audiences (the provider's default audience plus the fixed audience `eval-runner.gke-labs.dev/gcp-workload-identity`).
-4. **Credential Configuration ConfigMap**: Applies `eval-runner-gcp-credentials` in `<namespace>` with:
-   - `credential-config.json`: GCP STS external account configuration for exchanging projected tokens.
-   - `GOOGLE_APPLICATION_CREDENTIALS`: Points to `/etc/eval-runner/gcp/credential-config.json`.
+4. **Summary & Instructions**: Outputs the provider resource name to set as `gcpWorkloadIdentityProvider` in `eval-runner-config`.
 
-### ConfigMap Contract
+### Federation Contract
 
-The script defines the deployment manifest contract:
-- The projected Kubernetes ServiceAccount token must be mounted at `/var/run/secrets/eval-runner/gcp/token`.
-- The credential configuration from `credential-config.json` is mounted at `/etc/eval-runner/gcp/credential-config.json`.
-- The environment variable `GOOGLE_APPLICATION_CREDENTIALS` is set to `/etc/eval-runner/gcp/credential-config.json`.
+The deployment manifest contract requires:
+- The projected Kubernetes ServiceAccount token mounted at `/var/run/secrets/eval-runner/gcp/token` (audience: `eval-runner.gke-labs.dev/gcp-workload-identity`).
+- The provider resource name set via `gcpWorkloadIdentityProvider` in `eval-runner-config`.
+- Credentials are built in-process by the controller and UI using `golang.org/x/oauth2/google/externalaccount` without requiring a credential configuration file or `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
 
 ### ServiceAccount Signing-Key Rotation
 
