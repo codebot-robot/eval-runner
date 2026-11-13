@@ -33,6 +33,7 @@ GATEWAY_NAME="${GATEWAY_NAME:-hello-gw}"
 GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-default}"
 DRY_RUN=false
 SKIP_SANDBOXD_BUILD=false
+SKIP_SAMPLE_RUNNER_BUILD=false
 SKIP_DEPLOY=false
 RESTART=false
 SET_ITEMS=()
@@ -52,6 +53,7 @@ Options:
   --set KEY=VALUE            Extra eval-runner-config ConfigMap entries (repeatable),
                              e.g. --set artifactBucket=my-bucket --set defaultModel=gemini-2.5-flash
   --skip-sandboxd-build      Skip building and pushing sandboxd; reuse an existing image.
+  --skip-sample-runner-build Skip building and loading sample-runner; reuse an existing image.
   --skip-deploy              Provision dependencies and ConfigMap only; do not run dev/tasks/deploy.
   --restart                  Restart controller/UI/webhook deployments after deploy.
   --dry-run                  Print commands without executing mutating actions.
@@ -97,6 +99,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_SANDBOXD_BUILD=true
       shift
       ;;
+    --skip-sample-runner-build)
+      SKIP_SAMPLE_RUNNER_BUILD=true
+      shift
+      ;;
     --skip-deploy)
       SKIP_DEPLOY=true
       shift
@@ -138,6 +144,7 @@ if [[ "${CURRENT_CONTEXT}" == kind-* ]]; then
 fi
 
 if [[ "${IS_KIND}" == "true" ]]; then
+  unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
   IMAGE_PREFIX="${IMAGE_PREFIX:-images.local}"
   export IMAGE_TAG="${IMAGE_TAG:-dev}"
 else
@@ -229,6 +236,14 @@ run_cmd kubectl apply -f "${AGENT_SANDBOX_URL}"
 run_cmd kubectl wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout=60s
 run_cmd kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=120s
 
+GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+if [[ "${DRY_RUN}" == "true" ]] || ! kubectl get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1; then
+  step "Installing Gateway API CRDs (${GATEWAY_API_VERSION})"
+  run_cmd kubectl apply -f "${GATEWAY_API_URL}"
+  run_cmd kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
+  run_cmd kubectl wait --for=condition=Established crd/referencegrants.gateway.networking.k8s.io --timeout=60s
+fi
+
 # Step 3: Sandboxd image
 step "Sandboxd image (${SANDBOXD_TAG})"
 DEFAULT_SANDBOXD_IMAGE="${IMAGE_PREFIX}/sandboxd:${SANDBOXD_TAG}"
@@ -250,6 +265,18 @@ else
     run_cmd kind load docker-image "${DEFAULT_SANDBOXD_IMAGE}" --name "${KIND_CLUSTER_NAME}"
   else
     run_cmd env IMAGE_TAG="${SANDBOXD_TAG}" "${REPO_ROOT}/dev/tasks/sandboxd-image" --push
+  fi
+fi
+
+# Step 3b: Sample-runner image
+SAMPLE_RUNNER_IMAGE="${IMAGE_PREFIX}/sample-runner:${IMAGE_TAG}"
+if [[ "${SKIP_SAMPLE_RUNNER_BUILD}" == "true" ]]; then
+  echo "    --skip-sample-runner-build: reusing existing image ${SAMPLE_RUNNER_IMAGE}"
+else
+  if [[ "${IS_KIND}" == "true" ]]; then
+    step "Sample-runner image (${SAMPLE_RUNNER_IMAGE})"
+    run_cmd "${DOCKER:-docker}" build -t "${SAMPLE_RUNNER_IMAGE}" -f "${REPO_ROOT}/images/sample-runner/Dockerfile" "${REPO_ROOT}/images/sample-runner"
+    run_cmd kind load docker-image "${SAMPLE_RUNNER_IMAGE}" --name "${KIND_CLUSTER_NAME}"
   fi
 fi
 
@@ -370,8 +397,13 @@ else
   step "Deploy images ${IMAGE_PREFIX}/* and manifests"
   STARTED_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
+  DEPLOY_ARGS=()
+  if [[ "${IS_KIND}" == "true" ]]; then
+    DEPLOY_ARGS+=(--skip-push)
+  fi
+
   if [[ "${DRY_RUN}" == "true" ]]; then
-    run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run
+    run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run "${DEPLOY_ARGS[@]}"
     if [[ "${RESTART}" == "true" ]]; then
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
@@ -382,7 +414,7 @@ else
     done
     run_cmd kubectl -n eval-runner logs deployment/eval-runner-controller --since-time="${STARTED_TIME}"
   else
-    "${REPO_ROOT}/dev/tasks/deploy"
+    "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]}"
     if [[ "${RESTART}" == "true" ]]; then
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
