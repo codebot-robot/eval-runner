@@ -24,8 +24,8 @@ cd "${REPO_ROOT}"
 
 DOCKER="${DOCKER:-docker}"
 if ! command -v "${DOCKER}" >/dev/null 2>&1; then
-  for d in "${HOME:-/root}/.cache/ap/tools/docker"/*/bin/docker; do
-    [[ -x "${d}" ]] && DOCKER="${d}" && break
+  for docker_candidate in "${HOME:-/root}/.cache/ap/tools/docker"/*/bin/docker; do
+    [[ -x "${docker_candidate}" ]] && DOCKER="${docker_candidate}" && break
   done
 fi
 
@@ -45,12 +45,21 @@ AP_CMD=(go run "github.com/gke-labs/gke-labs-infra/ap@${AP_VERSION}")
 verify_index_has_amd64() {
   local inspect_output="$1"
   local image_name="${2:-<image>}"
-  local check_py='import json, sys
+  if echo "${inspect_output}" | grep -q "linux/amd64"; then
+    return 0
+  fi
+  local check_amd64_script='
+import json, sys
 def has_amd64(o):
-  return (o.get("os")=="linux" and o.get("architecture")=="amd64") if isinstance(o, dict) else any(has_amd64(v) for v in (o.values() if isinstance(o, dict) else o)) if isinstance(o, (dict, list)) else False
-try: sys.exit(0 if has_amd64(json.load(sys.stdin)) else 1)
-except Exception: sys.exit(1)'
-  if echo "${inspect_output}" | grep -q "linux/amd64" || echo "${inspect_output}" | python3 -c "${check_py}" 2>/dev/null; then
+    if isinstance(o, dict):
+        return (o.get("os") == "linux" and o.get("architecture") == "amd64") or any(has_amd64(v) for v in o.values())
+    return any(has_amd64(x) for x in o) if isinstance(o, list) else False
+try:
+    sys.exit(0 if has_amd64(json.load(sys.stdin)) else 1)
+except Exception:
+    sys.exit(1)
+'
+  if echo "${inspect_output}" | python3 -c "${check_amd64_script}" 2>/dev/null; then
     return 0
   fi
   echo "ERROR: Pushed image index '${image_name}' does not contain 'linux/amd64' platform." >&2
@@ -61,25 +70,16 @@ except Exception: sys.exit(1)'
 }
 
 detect_verification_method() {
-  local image="${1:-}"
-  if command -v "${DOCKER}" >/dev/null 2>&1; then
-    echo "docker manifest inspect"
-  elif [[ "${image}" == *"docker.pkg.dev"* ]] && command -v gcloud >/dev/null 2>&1; then
-    echo "gcloud artifacts docker images describe"
-  elif [[ "${image}" == *"gcr.io"* ]] && command -v gcloud >/dev/null 2>&1; then
-    echo "gcloud container images describe"
-  elif command -v crane >/dev/null 2>&1; then
-    echo "crane manifest"
-  else
-    return 1
-  fi
+  command -v "${DOCKER}" >/dev/null 2>&1 && { echo "docker manifest inspect"; return 0; }
+  command -v crane >/dev/null 2>&1 && { echo "crane manifest"; return 0; }
+  return 1
 }
 
 verify_pushed_image() {
   local image="$1"
   local method
-  if ! method="$(detect_verification_method "${image}")"; then
-    echo "ERROR: Failed to inspect pushed image index '${image}': no verification method available (missing docker, gcloud for Google registries, or crane)." >&2
+  if ! method="$(detect_verification_method)"; then
+    echo "ERROR: Failed to inspect pushed image index '${image}': no verification method available (missing docker or crane)." >&2
     echo "Aborting deploy before applying manifests." >&2
     return 1
   fi
@@ -87,8 +87,6 @@ verify_pushed_image() {
   local inspect_out
   case "${method}" in
     "docker manifest inspect") inspect_out="$("${DOCKER}" manifest inspect --insecure "${image}" 2>&1)" ;;
-    "gcloud artifacts docker images describe") inspect_out="$(gcloud artifacts docker images describe "${image}" --format=json 2>&1)" ;;
-    "gcloud container images describe") inspect_out="$(gcloud container images describe "${image}" --format=json 2>&1)" ;;
     "crane manifest") inspect_out="$(crane manifest "${image}" 2>&1)" ;;
     *) echo "ERROR: Unknown verification method: ${method}" >&2; return 1 ;;
   esac || {
@@ -199,45 +197,20 @@ run_deploy() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --dry-run)
-        dry_run=true
-        deploy_args+=("$1")
-        shift
-        ;;
-      --skip-push)
-        skip_push=true
-        deploy_args+=("$1")
-        shift
-        ;;
-      --buildkit-host)
-        buildkit_host="$2"
-        shift 2
-        ;;
-      --buildkit-host=*)
-        buildkit_host="${1#*=}"
-        shift
-        ;;
-      --build-kubeconfig)
-        build_kubeconfig="$2"
-        shift 2
-        ;;
-      --build-kubeconfig=*)
-        build_kubeconfig="${1#*=}"
-        shift
-        ;;
-      *)
-        deploy_args+=("$1")
-        shift
-        ;;
+      --dry-run) dry_run=true ;;
+      --skip-push) skip_push=true ;;
+      --buildkit-host) buildkit_host="$2"; shift ;;
+      --buildkit-host=*) buildkit_host="${1#*=}" ;;
+      --build-kubeconfig) build_kubeconfig="$2"; shift ;;
+      --build-kubeconfig=*) build_kubeconfig="${1#*=}" ;;
+      *) deploy_args+=("$1") ;;
     esac
+    shift
   done
 
   if [[ -n "${buildkit_host}" ]]; then
     export BUILDKIT_HOST="${buildkit_host}"
   fi
-
-  local build_env=()
-  [[ -n "${build_kubeconfig}" ]] && build_env=(KUBECONFIG="${build_kubeconfig}")
 
   # Guard: always verify manifests before building, pushing, or applying
   local dry_run_out
@@ -252,36 +225,53 @@ run_deploy() {
     echo "${dry_run_out}"
     if [[ -n "${buildkit_host}" ]]; then
       local method
-      method="$(detect_verification_method "${image_repo}/eval-runner:${IMAGE_TAG}" 2>/dev/null || echo "none (missing docker, gcloud, or crane)")"
+      method="$(detect_verification_method 2>/dev/null || echo "none (missing docker or crane)")"
       echo "Verification method: ${method}"
-      for img_dir in images/*; do
-        [[ -d "${img_dir}" ]] || continue
-        echo "${build_env[*]}${build_env:+ }${AP_CMD[*]} build --push ${img_dir}"
+      for image_directory in images/*; do
+        [[ -d "${image_directory}" ]] || continue
+        if [[ -n "${build_kubeconfig}" ]]; then
+          echo "KUBECONFIG=${build_kubeconfig} ${AP_CMD[*]} build --push ${image_directory}"
+        else
+          echo "${AP_CMD[*]} build --push ${image_directory}"
+        fi
       done
+      local deploy_cmd=("${AP_CMD[@]}" deploy --skip-push)
+      if [[ ${#deploy_args[@]} -gt 0 ]]; then
+        deploy_cmd+=("${deploy_args[@]}")
+      fi
+      if [[ -n "${build_kubeconfig}" ]]; then
+        echo "env -u BUILDKIT_HOST ${deploy_cmd[*]}"
+      else
+        echo "${deploy_cmd[*]}"
+      fi
     fi
     return 0
   fi
 
   if [[ "${skip_push}" == "true" ]]; then
-    exec "${AP_CMD[@]}" deploy "${deploy_args[@]+"${deploy_args[@]}"}"
+    exec "${AP_CMD[@]}" deploy --skip-push "${deploy_args[@]+"${deploy_args[@]}"}"
   fi
 
   # 1. Build and push image index (pinned to linux/amd64 and linux/arm64 in .ap/images.yaml)
   if [[ -n "${buildkit_host}" ]]; then
-    for img_dir in images/*; do
-      [[ -d "${img_dir}" ]] || continue
-      env "${build_env[@]}" "${AP_CMD[@]}" build --push "${img_dir}"
+    for image_directory in images/*; do
+      [[ -d "${image_directory}" ]] || continue
+      if [[ -n "${build_kubeconfig}" ]]; then
+        KUBECONFIG="${build_kubeconfig}" "${AP_CMD[@]}" build --push "${image_directory}"
+      else
+        "${AP_CMD[@]}" build --push "${image_directory}"
+      fi
     done
   else
     "${AP_CMD[@]}" build --push "${deploy_args[@]+"${deploy_args[@]}"}"
   fi
 
   # 2. Verify that pushed index contains linux/amd64 before applying manifests
-  for img_dir in images/*; do
-    [[ -d "${img_dir}" ]] || continue
-    local img_name
-    img_name="$(basename "${img_dir}")"
-    verify_pushed_image "${image_repo}/${img_name}:${IMAGE_TAG}"
+  for image_directory in images/*; do
+    [[ -d "${image_directory}" ]] || continue
+    local image_name
+    image_name="$(basename "${image_directory}")"
+    verify_pushed_image "${image_repo}/${image_name}:${IMAGE_TAG}"
   done
 
   # 3. Apply manifests

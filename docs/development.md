@@ -191,7 +191,7 @@ These settings are also passed through by `./dev/tasks/deploy-to-kube` and `./de
     --build-kubeconfig ~/.kube/build.kubeconfig
 ```
 
-When `BUILDKIT_HOST` is active, images under `images/*` are built one directory at a time to prevent port-forward collisions. Pushed image indices are verified for `linux/amd64` using `docker manifest inspect` when Docker is present, or registry tools (`gcloud artifacts docker images describe` / `gcloud container images describe` for Google registries, or `crane`), failing closed if no verification tool is available.
+When `BUILDKIT_HOST` is active, images under `images/*` are built one directory at a time to prevent port-forward collisions. Pushed image indices are verified for `linux/amd64` using `docker manifest inspect` when Docker is present, or `crane manifest`, failing closed if no verification tool is available.
 
 ### Deploying to any Kubernetes cluster in one step (`dev/tasks/deploy-to-kube`)
 
@@ -299,7 +299,7 @@ IMAGE_TAG=$(git rev-parse --short HEAD) IMAGE_PREFIX=<registry> ap deploy
 `./dev/tasks/deploy` will:
 1. Build the container images under `images/*` (for `linux/amd64` and `linux/arm64`, pinned in `.ap/images.yaml`).
 2. Tag and push multi-platform image indices to `<IMAGE_PREFIX>/<name>:<IMAGE_TAG>`.
-3. Inspect each pushed index (using `docker manifest inspect` when Docker is present, or registry tools like `gcloud` for Google registries, or `crane`) and verify it contains `linux/amd64`, failing immediately before applying manifests if absent.
+3. Inspect each pushed index (using `docker manifest inspect` when Docker is present, or `crane manifest`) and verify it contains `linux/amd64`, failing immediately before applying manifests if absent.
 4. Apply the manifests in `k8s/` in order (`00-namespaces.yaml`, `evalrunner.gke-labs.dev_runs.yaml`, `rbac.yaml`, `sandbox-networkpolicy.yaml`, `runner-deployment.yaml`).
 5. Substitute the `eval-runner` image reference in the deployment with the full pushed image reference (`<IMAGE_PREFIX>/eval-runner:<IMAGE_TAG>`).
 6. Wait for the CRD to be established and the deployment to become available.

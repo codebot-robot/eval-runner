@@ -67,22 +67,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --buildkit-host)
-      BUILDKIT_HOST="$2"
-      shift 2
-      ;;
-    --buildkit-host=*)
-      BUILDKIT_HOST="${1#*=}"
-      shift
-      ;;
-    --build-kubeconfig)
-      BUILD_KUBECONFIG="$2"
-      shift 2
-      ;;
-    --build-kubeconfig=*)
-      BUILD_KUBECONFIG="${1#*=}"
-      shift
-      ;;
+    --buildkit-host) BUILDKIT_HOST="$2"; shift 2 ;;
+    --buildkit-host=*) BUILDKIT_HOST="${1#*=}"; shift ;;
+    --build-kubeconfig) BUILD_KUBECONFIG="$2"; shift 2 ;;
+    --build-kubeconfig=*) BUILD_KUBECONFIG="${1#*=}"; shift ;;
     --image-prefix)
       IMAGE_PREFIX="$2"
       shift 2
@@ -429,7 +417,7 @@ else
   fi
 
   if [[ "${DRY_RUN}" == "true" ]]; then
-    run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run "${DEPLOY_ARGS[@]}"
+    run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run "${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}"
     if [[ "${RESTART}" == "true" ]]; then
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
@@ -440,7 +428,7 @@ else
     done
     run_cmd kubectl -n eval-runner logs deployment/eval-runner-controller --since-time="${STARTED_TIME}"
   else
-    "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]}"
+    "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}"
     if [[ "${RESTART}" == "true" ]]; then
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
