@@ -50,7 +50,9 @@ func TestPortalNodeAgentInterception(t *testing.T) {
 
 	namespace := harness.CreateNamespace()
 
-	// 1. Deploy an in-cluster HTTP echo backend (Deployment + Service returning request headers).
+	// 1. Deploy an in-cluster HTTP echo backend with two Services:
+	// - echo-backend: will have a matching PortalRule with credential injection.
+	// - unlisted-backend: will have no PortalRule, remaining reachable only for unintercepted traffic.
 	echoBackendManifest := fmt.Sprintf(`
 apiVersion: apps/v1
 kind: Deployment
@@ -71,7 +73,7 @@ spec:
     spec:
       containers:
       - name: echo-server
-        image: ealen/echo-server:latest
+        image: ealen/echo-server:0.9.2
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 80
@@ -80,6 +82,19 @@ apiVersion: v1
 kind: Service
 metadata:
   name: echo-backend
+  namespace: %[1]s
+spec:
+  selector:
+    app: echo-backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: unlisted-backend
   namespace: %[1]s
 spec:
   selector:
@@ -128,7 +143,7 @@ stringData:
 	harness.runCmd("kubectl", "-n", "service-portal-system", "rollout", "restart", "daemonset/portal-node-agent")
 	harness.runCmd("kubectl", "-n", "service-portal-system", "rollout", "status", "daemonset/portal-node-agent", "--timeout=90s")
 
-	// 3. Start client pod with label service-portal.gke.io/intercept: "true" and annotation service-portal.gke.io/policy: "*".
+	// 3. Start both an intercepted client pod and an unlabelled client pod.
 	interceptedClientPodManifest := fmt.Sprintf(`
 apiVersion: v1
 kind: Pod
@@ -148,9 +163,28 @@ spec:
     command: ["sleep", "3600"]
 `, namespace)
 	harness.KubectlApplyContent(interceptedClientPodManifest)
-	harness.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=ready", "pod/client-intercepted", "--timeout=90s")
 
-	// 4(a). Assert the backend saw the test token, not the placeholder.
+	unlabeledClientPodManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client-unlabeled
+  namespace: %[1]s
+  labels:
+    app: client-unlabeled
+spec:
+  containers:
+  - name: curl
+    image: curlimages/curl:8.12.1
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "3600"]
+`, namespace)
+	harness.KubectlApplyContent(unlabeledClientPodManifest)
+
+	harness.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=ready", "pod/client-intercepted", "--timeout=90s")
+	harness.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=ready", "pod/client-unlabeled", "--timeout=90s")
+
+	// 4(a). Assert the backend saw the test token injected for the intercepted client, not the placeholder.
 	backendURL := fmt.Sprintf("http://%s", backendServiceHostname)
 	interceptedCurlOutput := harness.runCmd("kubectl", "exec", "-n", namespace, "client-intercepted", "--",
 		"curl", "-s", "-H", fmt.Sprintf("x-goog-api-key: %s", placeholderAuthToken), backendURL)
@@ -168,34 +202,33 @@ spec:
 		t.Fatalf("backend received placeholder token %q: credential was not injected by node proxy", placeholderAuthToken)
 	}
 
-	// 4(b). Assert a request to a host with no rule fails (DNS NXDOMAIN or HTTP 403 Forbidden).
-	unlistedHostCommand := exec.Command("kubectl", "exec", "-n", namespace, "client-intercepted", "--",
-		"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "5", "http://unlisted-host-without-rule.invalid")
-	unlistedHostOutput, unlistedHostError := unlistedHostCommand.CombinedOutput()
-	unlistedHttpStatus := strings.TrimSpace(string(unlistedHostOutput))
-	if unlistedHostError == nil && unlistedHttpStatus != "403" {
-		t.Fatalf("expected request to unlisted host to fail with DNS error or 403 Forbidden, but succeeded with status code: %s", unlistedHttpStatus)
+	// 4(b). Assert a request to an in-cluster host with no rule is refused for the intercepted client,
+	// while the unlabelled client reaches the exact same host successfully with HTTP 200.
+	unlistedBackendURL := fmt.Sprintf("http://unlisted-backend.%s.svc", namespace)
+
+	unlabeledUnlistedOutput := harness.runCmd("kubectl", "exec", "-n", namespace, "client-unlabeled", "--",
+		"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "5", unlistedBackendURL)
+	if strings.TrimSpace(unlabeledUnlistedOutput) != "200" {
+		t.Fatalf("expected unlabelled client to reach unlisted backend with HTTP 200, got: %s", unlabeledUnlistedOutput)
+	}
+
+	interceptedUnlistedCommand := exec.Command("kubectl", "exec", "-n", namespace, "client-intercepted", "--",
+		"curl", "-s", "-S", "-o", "/dev/null", "-w", "%{http_code}", "-m", "5", unlistedBackendURL)
+	interceptedUnlistedOutput, interceptedUnlistedError := interceptedUnlistedCommand.CombinedOutput()
+	interceptedUnlistedStatus := strings.TrimSpace(string(interceptedUnlistedOutput))
+
+	if interceptedUnlistedError == nil {
+		if interceptedUnlistedStatus != "403" {
+			t.Fatalf("expected request to unlisted host to fail with DNS error or 403 Forbidden, but got HTTP status: %s", interceptedUnlistedStatus)
+		}
+	} else {
+		outputString := string(interceptedUnlistedOutput)
+		if !strings.Contains(outputString, "Could not resolve host") && !strings.Contains(outputString, "exit status 6") {
+			t.Fatalf("expected DNS resolution failure (exit code 6 / Could not resolve host), but got error %v with output: %s", interceptedUnlistedError, outputString)
+		}
 	}
 
 	// 4(c). Assert a client pod without the label reaches the backend directly and sees the placeholder.
-	unlabeledClientPodManifest := fmt.Sprintf(`
-apiVersion: v1
-kind: Pod
-metadata:
-  name: client-unlabeled
-  namespace: %[1]s
-  labels:
-    app: client-unlabeled
-spec:
-  containers:
-  - name: curl
-    image: curlimages/curl:8.12.1
-    imagePullPolicy: IfNotPresent
-    command: ["sleep", "3600"]
-`, namespace)
-	harness.KubectlApplyContent(unlabeledClientPodManifest)
-	harness.runCmd("kubectl", "wait", "--namespace", namespace, "--for=condition=ready", "pod/client-unlabeled", "--timeout=90s")
-
 	unlabeledCurlOutput := harness.runCmd("kubectl", "exec", "-n", namespace, "client-unlabeled", "--",
 		"curl", "-s", "-H", fmt.Sprintf("x-goog-api-key: %s", placeholderAuthToken), backendURL)
 
