@@ -391,9 +391,11 @@ fi
 
 # Step 5b: Service portal TLS certificates
 step "Service portal TLS certificates"
+CERTS_GENERATED=false
 if [[ "${DRY_RUN}" == "true" ]]; then
   run_cmd kubectl get secret service-portal-controller-tls -n service-portal-system
   run_cmd kubectl get secret service-portal-controller-ca -n service-portal-system
+  run_cmd kubectl get secret service-portal-controller-ca -n eval-runner
 else
   kubectl create namespace service-portal-system --dry-run=client -o yaml | kubectl apply -f -
   kubectl label namespace service-portal-system pod-security.kubernetes.io/enforce=privileged --overwrite
@@ -426,9 +428,22 @@ EOF
       --from-file=tls.crt="${CERT_TMPDIR}/ca.crt" \
       -n service-portal-system --dry-run=client -o yaml | kubectl apply -f -
 
+    kubectl create secret generic service-portal-controller-ca \
+      --from-file=tls.crt="${CERT_TMPDIR}/ca.crt" \
+      -n eval-runner --dry-run=client -o yaml | kubectl apply -f -
+
     rm -rf "${CERT_TMPDIR}"
+    CERTS_GENERATED=true
   else
-    echo "    secrets service-portal-controller-tls and service-portal-controller-ca present"
+    echo "    secrets service-portal-controller-tls and service-portal-controller-ca present in service-portal-system"
+  fi
+
+  if ! kubectl get secret service-portal-controller-ca -n eval-runner >/dev/null 2>&1; then
+    echo "    copying service-portal-controller-ca secret to eval-runner namespace..."
+    CA_CERT="$(kubectl get secret service-portal-controller-ca -n service-portal-system -o jsonpath='{.data.tls\.crt}' | base64 -d)"
+    kubectl create secret generic service-portal-controller-ca \
+      --from-literal=tls.crt="${CA_CERT}" \
+      -n eval-runner --dry-run=client -o yaml | kubectl apply -f -
   fi
 fi
 
@@ -451,6 +466,8 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
       done
+    fi
+    if [[ "${RESTART}" == "true" || "${CERTS_GENERATED}" == "true" ]]; then
       run_cmd kubectl -n service-portal-system rollout restart deployment/service-portal-controller
       run_cmd kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
     fi
@@ -466,6 +483,8 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
       done
+    fi
+    if [[ "${RESTART}" == "true" || "${CERTS_GENERATED}" == "true" ]]; then
       kubectl -n service-portal-system rollout restart deployment/service-portal-controller
       kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
     fi
@@ -479,9 +498,9 @@ else
     DEADLINE=$(( $(date +%s) + 60 ))
     STREAM_CONNECTED=false
     while [[ $(date +%s) -lt ${DEADLINE} ]]; do
-      CTRL_LOGS="$(kubectl -n service-portal-system logs deployment/service-portal-controller --tail=50 2>/dev/null || true)"
-      NODE_LOGS="$(kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=50 2>/dev/null || true)"
-      if echo "${CTRL_LOGS}" | grep -q "node stream connected" || echo "${NODE_LOGS}" | grep -q "controller: stream connected"; then
+      CONTROLLER_LOGS="$(kubectl -n service-portal-system logs deployment/service-portal-controller --tail=1000 2>/dev/null || true)"
+      NODE_AGENT_LOGS="$(kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=1000 2>/dev/null || true)"
+      if echo "${CONTROLLER_LOGS}" | grep -q "node stream connected" || echo "${NODE_AGENT_LOGS}" | grep -q "controller: stream connected"; then
         STREAM_CONNECTED=true
         echo "    service-portal node agent stream connected to controller"
         break
@@ -489,7 +508,12 @@ else
       sleep 2
     done
     if [[ "${STREAM_CONNECTED}" != "true" ]]; then
-      echo "    WARNING: node agent stream to controller not detected within 60s"
+      echo "ERROR: node agent stream to service-portal-controller did not connect within 60s" >&2
+      echo "--- Last controller logs ---" >&2
+      kubectl -n service-portal-system logs deployment/service-portal-controller --tail=50 >&2 || true
+      echo "--- Last node agent proxy logs ---" >&2
+      kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=50 >&2 || true
+      exit 1
     fi
 
     SINCE_ARG=""

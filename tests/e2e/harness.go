@@ -83,17 +83,8 @@ func (h *Harness) Setup() {
 		}
 	}
 
-	kindConfigFile := filepath.Join(gitRoot, "dev", "kind-config.yaml")
-
 	if !exists {
-		h.t.Logf("Creating kind cluster %s", h.clusterName)
-		var createArgs []string
-		if _, err := os.Stat(kindConfigFile); err == nil {
-			createArgs = []string{"create", "cluster", "--name", h.clusterName, "--config", kindConfigFile}
-		} else {
-			createArgs = []string{"create", "cluster", "--name", h.clusterName}
-		}
-		h.runCmd("kind", createArgs...)
+		h.createKindCluster()
 		h.t.Cleanup(func() {
 			if os.Getenv("SKIP_CLEANUP") == "" {
 				h.t.Logf("Deleting kind cluster %s", h.clusterName)
@@ -104,27 +95,22 @@ func (h *Harness) Setup() {
 		})
 	} else {
 		h.t.Logf("Reusing existing kind cluster %s", h.clusterName)
-		checkCmd := exec.Command("docker", "exec", h.clusterName+"-control-plane", "test", "-S", "/var/run/nri/nri.sock")
-		if err := checkCmd.Run(); err != nil {
+		checkCommand := exec.Command("docker", "exec", h.clusterName+"-control-plane", "test", "-S", "/var/run/nri/nri.sock")
+		if err := checkCommand.Run(); err != nil {
 			h.t.Logf("NRI socket not found in cluster %s, recreating with NRI enabled...", h.clusterName)
 			h.runCmd("kind", "delete", "cluster", "--name", h.clusterName)
-			var createArgs []string
-			if _, statErr := os.Stat(kindConfigFile); statErr == nil {
-				createArgs = []string{"create", "cluster", "--name", h.clusterName, "--config", kindConfigFile}
-			} else {
-				createArgs = []string{"create", "cluster", "--name", h.clusterName}
-			}
-			h.runCmd("kind", createArgs...)
+			h.createKindCluster()
 		}
-	}
-
-	// Clamp MSS to PMTU in kind container network to prevent packet loss when host MTU < 1500
-	if err := exec.Command("docker", "exec", h.clusterName+"-control-plane", "iptables", "-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run(); err != nil {
-		h.t.Logf("warning: failed to clamp MSS on kind cluster %s: %v", h.clusterName, err)
 	}
 
 	contextName := "kind-" + h.clusterName
 	h.runCmd("kubectl", "config", "use-context", contextName)
+}
+
+func (h *Harness) createKindCluster() {
+	kindConfigFile := filepath.Join(h.GetGitRoot(), "dev", "kind-config.yaml")
+	h.t.Logf("Creating kind cluster %s with %s", h.clusterName, kindConfigFile)
+	h.runCmd("kind", "create", "cluster", "--name", h.clusterName, "--config", kindConfigFile)
 }
 
 func (h *Harness) DeployEvalRunner() {
@@ -145,8 +131,8 @@ func (h *Harness) DeployEvalRunner() {
 
 	// Verify service-portal controller and node agent are ready
 	h.t.Log("Verifying service-portal-controller and portal-node-agent readiness...")
-	ctrlRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "deployment/service-portal-controller", "--timeout=60s")
-	h.t.Logf("service-portal-controller: %s", strings.TrimSpace(ctrlRollout))
+	controllerRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "deployment/service-portal-controller", "--timeout=60s")
+	h.t.Logf("service-portal-controller: %s", strings.TrimSpace(controllerRollout))
 	agentRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "daemonset/portal-node-agent", "--timeout=60s")
 	h.t.Logf("portal-node-agent: %s", strings.TrimSpace(agentRollout))
 
