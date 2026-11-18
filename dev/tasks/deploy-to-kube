@@ -389,6 +389,49 @@ else
   fi
 fi
 
+# Step 5b: Service portal TLS certificates
+step "Service portal TLS certificates"
+if [[ "${DRY_RUN}" == "true" ]]; then
+  run_cmd kubectl get secret service-portal-controller-tls -n service-portal-system
+  run_cmd kubectl get secret service-portal-controller-ca -n service-portal-system
+else
+  kubectl create namespace service-portal-system --dry-run=client -o yaml | kubectl apply -f -
+  kubectl label namespace service-portal-system pod-security.kubernetes.io/enforce=privileged --overwrite
+
+  if ! kubectl get secret service-portal-controller-tls -n service-portal-system >/dev/null 2>&1 || \
+     ! kubectl get secret service-portal-controller-ca -n service-portal-system >/dev/null 2>&1; then
+    echo "    generating throwaway CA and server certificate for service-portal-controller..."
+    CERT_TMPDIR="$(mktemp -d)"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "${CERT_TMPDIR}/ca.key" -out "${CERT_TMPDIR}/ca.crt" -days 365 \
+      -subj "/CN=service-portal-ca" 2>/dev/null
+
+    openssl req -newkey rsa:2048 -nodes \
+      -keyout "${CERT_TMPDIR}/tls.key" -out "${CERT_TMPDIR}/server.csr" \
+      -subj "/CN=service-portal-controller" 2>/dev/null
+
+    cat << 'EOF' > "${CERT_TMPDIR}/extfile.cnf"
+subjectAltName = DNS:service-portal-controller,DNS:service-portal-controller.service-portal-system,DNS:service-portal-controller.service-portal-system.svc,DNS:service-portal-controller.service-portal-system.svc.cluster.local,DNS:localhost,IP:127.0.0.1
+EOF
+
+    openssl x509 -req -in "${CERT_TMPDIR}/server.csr" \
+      -CA "${CERT_TMPDIR}/ca.crt" -CAkey "${CERT_TMPDIR}/ca.key" -CAcreateserial \
+      -out "${CERT_TMPDIR}/tls.crt" -days 365 -extfile "${CERT_TMPDIR}/extfile.cnf" 2>/dev/null
+
+    kubectl create secret tls service-portal-controller-tls \
+      --cert="${CERT_TMPDIR}/tls.crt" --key="${CERT_TMPDIR}/tls.key" \
+      -n service-portal-system --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl create secret generic service-portal-controller-ca \
+      --from-file=tls.crt="${CERT_TMPDIR}/ca.crt" \
+      -n service-portal-system --dry-run=client -o yaml | kubectl apply -f -
+
+    rm -rf "${CERT_TMPDIR}"
+  else
+    echo "    secrets service-portal-controller-tls and service-portal-controller-ca present"
+  fi
+fi
+
 # Step 6: Deploy manifests and images
 if [[ "${SKIP_DEPLOY}" == "true" ]]; then
   step "Deploy (skipped)"
@@ -408,11 +451,13 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
       done
+      run_cmd kubectl -n service-portal-system rollout restart deployment/service-portal-controller
       run_cmd kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
     fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       run_cmd kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
+    run_cmd kubectl -n service-portal-system rollout status deployment/service-portal-controller --timeout=300s
     run_cmd kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
     run_cmd kubectl -n eval-runner logs deployment/eval-runner-controller --since-time="${STARTED_TIME}"
   else
@@ -421,12 +466,31 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
       done
+      kubectl -n service-portal-system rollout restart deployment/service-portal-controller
       kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
     fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
+    kubectl -n service-portal-system rollout status deployment/service-portal-controller --timeout=300s
     kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
+
+    echo "    waiting up to 60s for node agent stream to connect to service-portal-controller..."
+    DEADLINE=$(( $(date +%s) + 60 ))
+    STREAM_CONNECTED=false
+    while [[ $(date +%s) -lt ${DEADLINE} ]]; do
+      CTRL_LOGS="$(kubectl -n service-portal-system logs deployment/service-portal-controller --tail=50 2>/dev/null || true)"
+      NODE_LOGS="$(kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=50 2>/dev/null || true)"
+      if echo "${CTRL_LOGS}" | grep -q "node stream connected" || echo "${NODE_LOGS}" | grep -q "controller: stream connected"; then
+        STREAM_CONNECTED=true
+        echo "    service-portal node agent stream connected to controller"
+        break
+      fi
+      sleep 2
+    done
+    if [[ "${STREAM_CONNECTED}" != "true" ]]; then
+      echo "    WARNING: node agent stream to controller not detected within 60s"
+    fi
 
     SINCE_ARG=""
     if [[ "${CONFIGMAP_CHANGED}" == "true" ]]; then

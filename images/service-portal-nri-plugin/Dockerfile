@@ -15,7 +15,7 @@
 FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
-ARG SERVICE_PORTALS_COMMIT=1d6a9416d9ca1be59fdf45b9c78e5d1ee9fbaa03
+ARG SERVICE_PORTALS_COMMIT=62eed0917a323d2e6669c3899c7ac54083ce9428
 
 RUN git clone https://github.com/gke-labs/service-portals.git /src && \
     cd /src && \
@@ -24,11 +24,14 @@ RUN git clone https://github.com/gke-labs/service-portals.git /src && \
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /portal-node-proxy ./cmd/all-in-one-portal
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /service-portal-nri-plugin ./cmd/service-portal-nri-plugin
 
-FROM gcr.io/distroless/static:nonroot
-WORKDIR /
-COPY --from=builder /portal-node-proxy .
-USER 65532:65532
+FROM debian:bookworm-slim
 
-ENTRYPOINT ["/portal-node-proxy"]
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends iptables iproute2 util-linux && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /service-portal-nri-plugin /usr/local/bin/service-portal-nri-plugin
+
+ENTRYPOINT ["/usr/local/bin/service-portal-nri-plugin"]
