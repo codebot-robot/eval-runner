@@ -22,33 +22,51 @@ import (
 func TestBuildServicePortalEgressPolicy(t *testing.T) {
 	testCases := []struct {
 		name           string
-		hosts          []string
+		httpsHosts     []string
+		httpHosts      []string
 		wantHttpHosts  []string
 		wantHttpsHosts []string
 	}{
 		{
 			name:           "empty hosts produces empty policy",
-			hosts:          nil,
+			httpsHosts:     nil,
+			httpHosts:      nil,
 			wantHttpHosts:  nil,
 			wantHttpsHosts: nil,
 		},
 		{
-			name:           "only api hosts produces https rule only",
-			hosts:          []string{"*.googleapis.com", "github.com"},
+			name:           "only https hosts produces https rule only",
+			httpsHosts:     []string{"*.googleapis.com", "github.com"},
+			httpHosts:      nil,
 			wantHttpHosts:  nil,
 			wantHttpsHosts: []string{"*.googleapis.com", "github.com"},
 		},
 		{
-			name:           "package mirrors produce both http and https rules",
-			hosts:          []string{"deb.debian.org", "archive.ubuntu.com"},
+			name:           "only http hosts produces http rule only",
+			httpsHosts:     nil,
+			httpHosts:      []string{"deb.debian.org", "archive.ubuntu.com"},
 			wantHttpHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHttpsHosts: []string{"deb.debian.org", "archive.ubuntu.com"},
+			wantHttpsHosts: nil,
+		},
+		{
+			name:           "both http and https hosts configure their respective rules",
+			httpsHosts:     []string{"*.googleapis.com", "github.com"},
+			httpHosts:      []string{"deb.debian.org", "archive.ubuntu.com"},
+			wantHttpHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
+			wantHttpsHosts: []string{"*.googleapis.com", "github.com"},
+		},
+		{
+			name:           "defaults produce package mirrors for http and all default hosts for https",
+			httpsHosts:     DefaultServicePortalAllowedHosts,
+			httpHosts:      DefaultServicePortalAllowedHTTPHosts,
+			wantHttpHosts:  DefaultServicePortalAllowedHTTPHosts,
+			wantHttpsHosts: DefaultServicePortalAllowedHosts,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			policy := BuildServicePortalEgressPolicy(tc.hosts)
+			policy := BuildServicePortalEgressPolicy(tc.httpsHosts, tc.httpHosts)
 			if err := policy.Validate(); err != nil {
 				t.Fatalf("policy failed validation: %v", err)
 			}
