@@ -631,39 +631,16 @@ The default sample runner sandbox image (`images/sample-runner`) includes Inspec
 
 For evaluations requiring other model providers or custom environments, a repository can declare custom images in `.evals/list` using the manifest's top-level `images[]` declarations and `tasks[].images[]` references (see concept §2.2 in `docs/concept/functionality.md`).
 
-### Service Portal NRI Node Agent (Model Gateway Interception)
+### Service Portal NRI Mode with Central Controller (Model Gateway Interception)
 
-The `portal-node-agent` DaemonSet (`k8s/portal-node-agent.yaml`) runs in namespace `service-portal-system` using Node Resource Interface (NRI) per-node interception mode from `gke-labs/service-portals`. It consists of two containers:
-- `proxy` (`portal-node-proxy`): an all-in-one portal proxy that dynamically terminates and mints TLS certificates using a node-local Root CA and swaps authentication headers upstream based on `PortalRule` definitions.
-- `nri-plugin` (`portal-nri-plugin`): an NRI plugin connecting to containerd (`/var/run/nri/nri.sock`) that synchronously configures host network redirection for intercepted pods and injects the node CA certificate into containers.
+The `service-portal-controller` Deployment and `portal-node-agent` DaemonSet run in namespace `service-portal-system` using Node Resource Interface (NRI) mode deployed from `gke-labs/service-portals`.
+
+- `service-portal-controller`: Central gRPC controller that receives egress policies from the sandbox controller and pushes them to node agents.
+- `portal-node-agent`: Per-node agent connecting to containerd (`/var/run/nri/nri.sock`) that redirects intercepted traffic to a local proxy, dynamically mints TLS certificates, and swaps authentic credentials based on bound egress policies.
 
 #### Node Prerequisite
 
-The node agent requires containerd with NRI enabled (the default starting in containerd 2.0 or newer).
-
-#### Configuring Rules (`portal-rules` Secret)
-
-Model credentials and egress rules are configured via the `portal-rules` Secret in the `service-portal-system` namespace. The DaemonSet mounts this Secret optionally into the proxy container at `/etc/portals` alongside an optional `portal-passthrough-rules` ConfigMap.
-
-To configure a `PortalRule` for the Gemini API (`generativelanguage.googleapis.com`):
-
-```bash
-kubectl -n service-portal-system create secret generic portal-rules \
-  --from-literal=gemini.yaml="apiVersion: portals.gke.io/v1alpha1
-kind: PortalRule
-metadata:
-  name: gemini
-spec:
-  host: generativelanguage.googleapis.com
-  authHeader: x-goog-api-key
-  authToken: ${GEMINI_API_KEY}"
-```
-
-Rule changes take effect when the proxy receives a SIGHUP signal, or by restarting the DaemonSet:
-
-```bash
-kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
-```
+The node agent requires containerd with NRI enabled (configured via `containerdConfigPatches` on kind, or default in containerd 2.0+).
 
 ## Results in GCS
 

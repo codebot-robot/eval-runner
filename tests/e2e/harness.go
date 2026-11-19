@@ -84,8 +84,7 @@ func (h *Harness) Setup() {
 	}
 
 	if !exists {
-		h.t.Logf("Creating kind cluster %s", h.clusterName)
-		h.runCmd("kind", "create", "cluster", "--name", h.clusterName)
+		h.createKindCluster()
 		h.t.Cleanup(func() {
 			if os.Getenv("SKIP_CLEANUP") == "" {
 				h.t.Logf("Deleting kind cluster %s", h.clusterName)
@@ -96,10 +95,22 @@ func (h *Harness) Setup() {
 		})
 	} else {
 		h.t.Logf("Reusing existing kind cluster %s", h.clusterName)
+		checkCommand := exec.Command("docker", "exec", h.clusterName+"-control-plane", "test", "-S", "/var/run/nri/nri.sock")
+		if err := checkCommand.Run(); err != nil {
+			h.t.Logf("NRI socket not found in cluster %s, recreating with NRI enabled...", h.clusterName)
+			h.runCmd("kind", "delete", "cluster", "--name", h.clusterName)
+			h.createKindCluster()
+		}
 	}
 
 	contextName := "kind-" + h.clusterName
 	h.runCmd("kubectl", "config", "use-context", contextName)
+}
+
+func (h *Harness) createKindCluster() {
+	kindConfigFile := filepath.Join(h.GetGitRoot(), "dev", "kind-config.yaml")
+	h.t.Logf("Creating kind cluster %s with %s", h.clusterName, kindConfigFile)
+	h.runCmd("kind", "create", "cluster", "--name", h.clusterName, "--config", kindConfigFile)
 }
 
 func (h *Harness) DeployEvalRunner() {
@@ -117,6 +128,13 @@ func (h *Harness) DeployEvalRunner() {
 		"--set", "pollProgressInterval=2s",
 		"--set", "allowedCloneHosts=github.com,git-server.eval-runner-sandbox.svc",
 	)
+
+	// Verify service portal controller and service portal node agent readiness
+	h.t.Log("Verifying service portal controller and service portal node agent readiness...")
+	controllerRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "deployment/service-portal-controller", "--timeout=60s")
+	h.t.Logf("service portal controller: %s", strings.TrimSpace(controllerRollout))
+	agentRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "daemonset/portal-node-agent", "--timeout=60s")
+	h.t.Logf("service portal node agent: %s", strings.TrimSpace(agentRollout))
 
 	// Apply Secret for eval-runner-webhook HMAC signature verification
 	secManifest := `
