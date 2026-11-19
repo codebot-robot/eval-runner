@@ -126,6 +126,9 @@ func main() {
 	var pollProgressInterval time.Duration
 	var affinityMode string
 	var sandboxEgressHosts string
+	var servicePortalControllerAddress string
+	var servicePortalCAFile string
+	var servicePortalTokenFile string
 	var showVersion bool
 
 	flag.StringVar(&evalRunnerNamespace, "namespace", discovery.DefaultControllerNamespace, "Namespace in which the controller operates")
@@ -158,6 +161,9 @@ func main() {
 	var leaderElect bool
 	flag.BoolVar(&leaderElect, "leader-elect", true, "Enable leader election for controller manager. Enabling this will ensure only one instance of the controller is active.")
 	flag.StringVar(&sandboxEgressHosts, "sandbox-egress-hosts", "", "Comma-separated allow-list of FQDN hostnames for sandbox HTTPS egress")
+	flag.StringVar(&servicePortalControllerAddress, "service-portal-controller-address", "", "Address of the Service Portal Controller (host:port)")
+	flag.StringVar(&servicePortalCAFile, "service-portal-controller-ca-file", "", "Path to CA certificate file for verifying Service Portal Controller TLS certificate")
+	flag.StringVar(&servicePortalTokenFile, "service-portal-token-file", "", "Path to projected service account token file for authenticating with Service Portal Controller")
 	var forgeDBPath string
 	flag.StringVar(&forgeDBPath, "forge-db", "/tmp/forge.db", "Filesystem path to local bbolt database for forge state")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
@@ -210,6 +216,9 @@ func main() {
 		pollProgressInterval,
 		affinityMode,
 		sandboxEgressHosts,
+		servicePortalControllerAddress,
+		servicePortalCAFile,
+		servicePortalTokenFile,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -329,6 +338,12 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "failed to load cluster configuration", "configmap", controller.DefaultConfigMapName, "namespace", evalRunnerNamespace)
 		os.Exit(1)
+	}
+
+	if clusterConfig.ServicePortalControllerAddress != "" {
+		setupLog.Info("Service Portal enabled", "controllerAddress", clusterConfig.ServicePortalControllerAddress, "caFile", clusterConfig.ServicePortalCAFile, "tokenFile", clusterConfig.ServicePortalTokenFile)
+	} else {
+		setupLog.Info("Service Portal disabled (no controller address configured)")
 	}
 
 	// Operational visibility check for model credentials secret at startup

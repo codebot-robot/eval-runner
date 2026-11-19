@@ -541,19 +541,28 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	pollInterval := fs.Duration("poll-progress-interval", 10*time.Second, "poll progress interval")
 	affinityMode := fs.String("affinity-mode", configkeys.AffinityModeOrder, "affinity mode")
 	sandboxEgressHosts := fs.String("sandbox-egress-hosts", "", "sandbox egress hosts")
+	servicePortalAddress := fs.String("service-portal-controller-address", "", "service portal controller address")
+	servicePortalCA := fs.String("service-portal-controller-ca-file", "", "service portal controller ca file")
+	servicePortalToken := fs.String("service-portal-token-file", "", "service portal token file")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--service-portal-controller-address=127.0.0.1:8443"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
 	if !rawFlags.IsExplicit("sandbox-egress-hosts") {
 		t.Errorf("expected sandbox-egress-hosts to be explicit")
+	}
+	if !rawFlags.IsExplicit("service-portal-controller-address") {
+		t.Errorf("expected service-portal-controller-address to be explicit")
+	}
+	if rawFlags.IsExplicit("service-portal-controller-ca-file") {
+		t.Errorf("expected service-portal-controller-ca-file to NOT be explicit")
 	}
 	if !rawFlags.IsExplicit("inconclusive-policy") {
 		t.Errorf("expected inconclusive-policy to be explicit")
@@ -3105,4 +3114,28 @@ func TestResolveConfig_HeadTopUpKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveConfig_ServicePortal(t *testing.T) {
+	t.Run("empty address leaves service portal off", func(t *testing.T) {
+		cfg, err := ResolveConfig(nil, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ServicePortalControllerAddress != "" {
+			t.Errorf("ServicePortalControllerAddress = %q, want empty", cfg.ServicePortalControllerAddress)
+		}
+	})
+
+	t.Run("address without CA or token file fails", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalControllerAddress: "127.0.0.1:8443",
+			},
+		}
+		if _, err := ResolveConfig(cm, RawFlags{}); err == nil {
+			t.Fatal("expected error for address without CA file, got nil")
+		}
+	})
 }
