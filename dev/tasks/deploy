@@ -24,14 +24,10 @@ cd "${REPO_ROOT}"
 
 export PATH="${PATH}:${REPO_ROOT}/.build/bin"
 
-TAG="$(git rev-parse --short HEAD)"
-if [[ -n "$(git status --porcelain)" ]]; then
-  TAG="${TAG}-dirty"
-fi
-export IMAGE_TAG="${IMAGE_TAG:-${TAG}}"
-
 # shellcheck source=dev/tasks/versions.sh
 source "${REPO_ROOT}/dev/tasks/versions.sh"
+
+export IMAGE_TAG="${IMAGE_TAG:-${DEFAULT_IMAGE_TAG}}"
 
 verify_deploy_manifests_output() {
   local dry_run_output="$1"

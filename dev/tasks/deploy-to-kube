@@ -152,6 +152,7 @@ else
     echo "error: IMAGE_PREFIX must be set when deploying to a non-kind cluster (e.g. IMAGE_PREFIX=gcr.io/my-project)" >&2
     exit 1
   fi
+  export IMAGE_TAG="${IMAGE_TAG:-${DEFAULT_IMAGE_TAG}}"
 fi
 export IMAGE_PREFIX
 
