@@ -826,6 +826,22 @@ if [ "$1" = "clone" ]; then
         echo "fatal: repository 'fail-clone' not found" >&2
         exit 128
     fi
+    if [ "$url" = "fail-clone-retry" ]; then
+        echo "fatal: unable to look up git-server (port 9418) (Try again)" >&2
+        exit 128
+    fi
+    if [ "$url" = "retry-clone" ]; then
+        attempt_marker="$target.attempt"
+        if [ ! -f "$attempt_marker" ]; then
+            touch "$attempt_marker"
+            mkdir -p "$target/partial_state"
+            echo "fatal: unable to look up git-server (port 9418) (Try again)" >&2
+            exit 128
+        fi
+        rm -f "$attempt_marker"
+        mkdir -p "$target"
+        exit 0
+    fi
     if [ "$url" = "timeout-clone" ]; then
         exit 124
     fi
@@ -853,6 +869,7 @@ exit 0
 		name                 string
 		repositoryURL        string
 		repositoryCommit     string
+		timeoutSeconds       string
 		expectedExitCode     int
 		expectedMessagePart  string
 		expectRepoDirCreated bool
@@ -863,6 +880,22 @@ exit 0
 			repositoryCommit:     "v1.0.0",
 			expectedExitCode:     0,
 			expectRepoDirCreated: true,
+		},
+		{
+			name:                 "RetrySuccess",
+			repositoryURL:        "retry-clone",
+			repositoryCommit:     "v1.0.0",
+			timeoutSeconds:       "5",
+			expectedExitCode:     0,
+			expectRepoDirCreated: true,
+		},
+		{
+			name:                "RetryExhausted",
+			repositoryURL:       "fail-clone-retry",
+			repositoryCommit:    "main",
+			timeoutSeconds:       "1",
+			expectedExitCode:    128,
+			expectedMessagePart: "step git clone failed with exit code 128",
 		},
 		{
 			name:                "PlainCloneFailure",
@@ -904,13 +937,17 @@ exit 0
 			terminationLogPath := filepath.Join(caseDirectory, "termination-log")
 
 			command := exec.Command("sh", "-c", checkoutScript)
-			command.Env = append(os.Environ(),
+			envVars := append(os.Environ(),
 				"PATH="+binDirectory+":"+os.Getenv("PATH"),
 				"WORKSPACE_ROOT="+workspaceDirectory,
 				"TERMINATION_LOG="+terminationLogPath,
 				"REPO_URL="+tc.repositoryURL,
 				"REPO_COMMIT="+tc.repositoryCommit,
 			)
+			if tc.timeoutSeconds != "" {
+				envVars = append(envVars, "TIMEOUT_SECONDS="+tc.timeoutSeconds)
+			}
+			command.Env = envVars
 
 			output, err := command.CombinedOutput()
 			exitCode := 0
@@ -941,6 +978,10 @@ exit 0
 				repoDirectory := filepath.Join(workspaceDirectory, "repo")
 				if info, statErr := os.Stat(repoDirectory); statErr != nil || !info.IsDir() {
 					t.Errorf("expected repo directory to be created at %q, err: %v", repoDirectory, statErr)
+				}
+				partialStatePath := filepath.Join(repoDirectory, "partial_state")
+				if _, statErr := os.Stat(partialStatePath); statErr == nil {
+					t.Errorf("expected partial clone to be cleaned up, but %q still exists", partialStatePath)
 				}
 			}
 		})
