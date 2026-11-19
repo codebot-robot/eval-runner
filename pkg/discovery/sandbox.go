@@ -97,6 +97,10 @@ const (
 	// LabelServicePortalIntercept is the pod label opting the sandbox into NRI service portal interception.
 	LabelServicePortalIntercept = "service-portal.gke.io/intercept"
 
+	// ServicePortalCACertificatePath is the container path where service-portal-nri-plugin
+	// mounts the node's interception CA certificate inside intercepted containers.
+	ServicePortalCACertificatePath = "/etc/service-portal/ca/tls.crt"
+
 	// PlaceholderModelCredential is a recognisable, non-functional placeholder string injected
 	// as a plain literal value into sample-runner pods so evaluation SDKs construct and send model
 	// requests normally without hanging. Authentic credentials belong exclusively to the controller
@@ -127,6 +131,19 @@ func SampleRunnerPlaceholderEnvironmentVariables() []corev1.EnvVar {
 		}
 	}
 	return environmentVariables
+}
+
+// ServicePortalCAEnvironmentVariables returns client-library CA bundle environment variables
+// pointing at ServicePortalCACertificatePath. service-portal-nri-plugin injects SSL_CERT_FILE
+// automatically, while tools such as git (GnuTLS libcurl), curl, Python requests (tiktoken),
+// and Node.js read their own CA bundle variables.
+func ServicePortalCAEnvironmentVariables() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "GIT_SSL_CAINFO", Value: ServicePortalCACertificatePath},
+		{Name: "CURL_CA_BUNDLE", Value: ServicePortalCACertificatePath},
+		{Name: "REQUESTS_CA_BUNDLE", Value: ServicePortalCACertificatePath},
+		{Name: "NODE_EXTRA_CA_CERTS", Value: ServicePortalCACertificatePath},
+	}
 }
 
 // AuthTokenDigest calculates the hex SHA-256 digest of the given bearer token.
@@ -393,6 +410,12 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 				Value: strconv.Itoa(cfg.StepTimeoutSeconds),
 			})
 		}
+		if cfg.ServicePortalIntercept {
+			checkoutEnv = append(checkoutEnv, corev1.EnvVar{
+				Name:  "GIT_SSL_CAINFO",
+				Value: ServicePortalCACertificatePath,
+			})
+		}
 
 		checkoutScript := `status=0
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
@@ -498,6 +521,9 @@ fi
 	var taskEnvironmentVariables []corev1.EnvVar
 	if !cfg.SandboxTask {
 		taskEnvironmentVariables = SampleRunnerPlaceholderEnvironmentVariables()
+	}
+	if cfg.ServicePortalIntercept {
+		taskEnvironmentVariables = append(taskEnvironmentVariables, ServicePortalCAEnvironmentVariables()...)
 	}
 
 	return &sandboxv1beta1.Sandbox{

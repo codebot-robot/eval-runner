@@ -550,3 +550,60 @@ func TestParseHostList(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderServicePortalEgressNetworkPolicy_Golden(t *testing.T) {
+	policy := RenderServicePortalEgressNetworkPolicy(DefaultSandboxNamespace)
+	if policy == nil {
+		t.Fatal("RenderServicePortalEgressNetworkPolicy returned nil")
+	}
+
+	if policy.Name != DefaultServicePortalEgressNetworkPolicyName {
+		t.Errorf("expected name %s, got %s", DefaultServicePortalEgressNetworkPolicyName, policy.Name)
+	}
+	if policy.Namespace != DefaultSandboxNamespace {
+		t.Errorf("expected namespace %s, got %s", DefaultSandboxNamespace, policy.Namespace)
+	}
+	if len(policy.Spec.PodSelector.MatchLabels) != 1 || policy.Spec.PodSelector.MatchLabels[LabelServicePortalIntercept] != "true" {
+		t.Errorf("expected podSelector %s=true, got %v", LabelServicePortalIntercept, policy.Spec.PodSelector.MatchLabels)
+	}
+	if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Fatalf("expected policyTypes [Egress], got %v", policy.Spec.PolicyTypes)
+	}
+	if len(policy.Spec.Egress) != 1 {
+		t.Fatalf("expected 1 egress rule, got %d", len(policy.Spec.Egress))
+	}
+
+	rule := policy.Spec.Egress[0]
+	if len(rule.To) != 0 {
+		t.Errorf("expected empty To peers (all destinations on local proxy ports), got %v", rule.To)
+	}
+
+	type protoPort struct {
+		proto corev1.Protocol
+		port  int32
+	}
+	expectedPorts := map[protoPort]bool{
+		{proto: corev1.ProtocolUDP, port: 1053}: false,
+		{proto: corev1.ProtocolTCP, port: 1053}: false,
+		{proto: corev1.ProtocolTCP, port: 8080}: false,
+		{proto: corev1.ProtocolTCP, port: 8443}: false,
+	}
+	if len(rule.Ports) != len(expectedPorts) {
+		t.Fatalf("expected %d ports, got %d", len(expectedPorts), len(rule.Ports))
+	}
+	for _, port := range rule.Ports {
+		if port.Protocol == nil || port.Port == nil {
+			t.Fatalf("expected explicit protocol and port, got %+v", port)
+		}
+		key := protoPort{proto: *port.Protocol, port: port.Port.IntVal}
+		if _, ok := expectedPorts[key]; !ok {
+			t.Errorf("unexpected port %s/%d", key.proto, key.port)
+		}
+		expectedPorts[key] = true
+	}
+	for key, found := range expectedPorts {
+		if !found {
+			t.Errorf("missing expected port %s/%d", key.proto, key.port)
+		}
+	}
+}

@@ -33,6 +33,10 @@ const (
 	// DefaultSandboxEgressNetworkPolicyName is the default name for the sandbox egress NetworkPolicy.
 	DefaultSandboxEgressNetworkPolicyName = "eval-runner-sandbox-egress"
 
+	// DefaultServicePortalEgressNetworkPolicyName is the default name for the companion
+	// NetworkPolicy permitting intercepted sandbox pods to reach the local service-portal node proxy.
+	DefaultServicePortalEgressNetworkPolicyName = "eval-runner-sandbox-service-portal-egress"
+
 	// DefaultFQDNNetworkPolicyName is the default name for the sandbox FQDNNetworkPolicy.
 	DefaultFQDNNetworkPolicyName = "eval-runner-sandbox-fqdn-egress"
 
@@ -377,6 +381,76 @@ func RenderSandboxEgressNetworkPolicyWithName(name, namespace string, fqdnActive
 				networkingv1.PolicyTypeEgress,
 			},
 			Egress: egressRules,
+		},
+	}
+}
+
+// RenderServicePortalEgressNetworkPolicy renders the companion egress NetworkPolicy
+// permitting pods opted into service-portal NRI interception to reach the local node
+// proxy ports (UDP/TCP 1053 for DNS, TCP 8080 for HTTP, TCP 8443 for HTTPS) after
+// host-side DNAT. Host-side PORTAL_EG_<iface> netfilter rules restrict intercepted
+// pods exclusively to <nodeIP>:1053/:8080/:8443.
+func RenderServicePortalEgressNetworkPolicy(namespace string) *networkingv1.NetworkPolicy {
+	return RenderServicePortalEgressNetworkPolicyWithName(DefaultServicePortalEgressNetworkPolicyName, namespace)
+}
+
+// RenderServicePortalEgressNetworkPolicyWithName renders the companion service-portal
+// egress NetworkPolicy with a specific name. All v1-defaulted fields are explicitly populated.
+func RenderServicePortalEgressNetworkPolicyWithName(name, namespace string) *networkingv1.NetworkPolicy {
+	if name == "" {
+		name = DefaultServicePortalEgressNetworkPolicyName
+	}
+	if namespace == "" {
+		namespace = DefaultSandboxNamespace
+	}
+
+	tcpProto := corev1.ProtocolTCP
+	udpProto := corev1.ProtocolUDP
+
+	port1053 := intstr.FromInt32(1053)
+	port8080 := intstr.FromInt32(8080)
+	port8443 := intstr.FromInt32(8443)
+
+	return &networkingv1.NetworkPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "networking.k8s.io/v1",
+			Kind:       "NetworkPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					LabelServicePortalIntercept: "true",
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeEgress,
+			},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: &udpProto,
+							Port:     &port1053,
+						},
+						{
+							Protocol: &tcpProto,
+							Port:     &port1053,
+						},
+						{
+							Protocol: &tcpProto,
+							Port:     &port8080,
+						},
+						{
+							Protocol: &tcpProto,
+							Port:     &port8443,
+						},
+					},
+				},
+			},
 		},
 	}
 }

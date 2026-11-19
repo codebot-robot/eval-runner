@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -163,6 +164,14 @@ func (h *Harness) DeployEvalRunner() {
 	gitRoot := h.GetGitRoot()
 
 	deployScript := filepath.Join(gitRoot, "dev/tasks/deploy-to-kube")
+	allowedServicePortalHosts := strings.Join(append([]string{
+		"git-server.eval-runner-sandbox.svc",
+		"git-server.eval-runner-sandbox.svc.cluster.local",
+	}, controller.DefaultServicePortalAllowedHosts...), ",")
+	allowedServicePortalHTTPHosts := strings.Join(append([]string{
+		"git-server.eval-runner-sandbox.svc",
+		"git-server.eval-runner-sandbox.svc.cluster.local",
+	}, controller.DefaultServicePortalAllowedHTTPHosts...), ",")
 	h.runCmd(deployScript,
 		"--set", "artifactDir=/tmp/artifacts",
 		"--set", "defaultModel=mockllm/model",
@@ -172,6 +181,8 @@ func (h *Harness) DeployEvalRunner() {
 		"--set", "webhookRepositories=gke-labs/eval-runner",
 		"--set", "pollProgressInterval=2s",
 		"--set", "allowedCloneHosts=github.com,git-server.eval-runner-sandbox.svc",
+		"--set", fmt.Sprintf("servicePortalAllowedHosts=%s", allowedServicePortalHosts),
+		"--set", fmt.Sprintf("servicePortalAllowedHTTPHosts=%s", allowedServicePortalHTTPHosts),
 	)
 
 	// Verify service portal controller and service portal node agent readiness
@@ -219,6 +230,10 @@ stringData:
 	if !reVersion.MatchString(controllerLogs) {
 		h.t.Fatalf("expected controller logs to report stamped 40-hex VCS revision, got:\n%s", controllerLogs)
 	}
+	if !strings.Contains(controllerLogs, "Service Portal enabled") {
+		h.t.Fatalf("expected controller logs to contain %q, got:\n%s", "Service Portal enabled", controllerLogs)
+	}
+	h.t.Log("Verified eval-runner-controller connected to service portal")
 
 	// Verify controller-owned sandbox egress NetworkPolicy reconciliation
 	out := h.runCmd("kubectl", "get", "networkpolicy", "eval-runner-sandbox-egress", "-n", "eval-runner-sandbox", "-o", "json")
@@ -252,6 +267,26 @@ stringData:
 		if !found {
 			h.t.Fatalf("0.0.0.0/0 internet rule missing expected TCP port %d", p)
 		}
+	}
+
+	// Verify companion service-portal egress NetworkPolicy reconciliation
+	servicePortalOut := h.runCmd("kubectl", "get", "networkpolicy", discovery.DefaultServicePortalEgressNetworkPolicyName, "-n", "eval-runner-sandbox", "-o", "json")
+	var servicePortalPolicy networkingv1.NetworkPolicy
+	if err := json.Unmarshal([]byte(servicePortalOut), &servicePortalPolicy); err != nil {
+		h.t.Fatalf("failed to decode %s into NetworkPolicy: %v", discovery.DefaultServicePortalEgressNetworkPolicyName, err)
+	}
+	if servicePortalPolicy.Spec.PodSelector.MatchLabels[discovery.LabelServicePortalIntercept] != "true" {
+		h.t.Fatalf("expected %s podSelector %s=true, got %v",
+			discovery.DefaultServicePortalEgressNetworkPolicyName,
+			discovery.LabelServicePortalIntercept,
+			servicePortalPolicy.Spec.PodSelector.MatchLabels,
+		)
+	}
+	if len(servicePortalPolicy.Spec.Egress) != 1 || len(servicePortalPolicy.Spec.Egress[0].Ports) != 4 {
+		h.t.Fatalf("expected 1 egress rule with 4 proxy ports in %s, got %+v",
+			discovery.DefaultServicePortalEgressNetworkPolicyName,
+			servicePortalPolicy.Spec.Egress,
+		)
 	}
 }
 
@@ -734,6 +769,20 @@ func (h *Harness) logTimeoutDiagnostics(namespace, runName string) {
 		h.t.Logf("Service portal node agent proxy logs (tail 1000):\n%s", string(nodeAgentLogs))
 	} else {
 		h.t.Logf("Failed to get service portal node agent proxy logs: %v (output: %s)", err, string(nodeAgentLogs))
+	}
+
+	// 7. Last ~200 lines of Service Portal Controller logs
+	if servicePortalControllerLogs, err := exec.Command("kubectl", "logs", "-n", "service-portal-system", "deployment/service-portal-controller", "--tail=200").CombinedOutput(); err == nil {
+		h.t.Logf("Service Portal Controller logs (tail 200):\n%s", string(servicePortalControllerLogs))
+	} else {
+		h.t.Logf("Failed to get Service Portal Controller logs: %v (output: %s)", err, string(servicePortalControllerLogs))
+	}
+
+	// 8. Last ~200 lines of Service Portal node agent nri-plugin logs
+	if nriLogs, err := exec.Command("kubectl", "logs", "-n", "service-portal-system", "daemonset/portal-node-agent", "-c", "nri-plugin", "--tail=200").CombinedOutput(); err == nil {
+		h.t.Logf("Service Portal node agent nri-plugin logs (tail 200):\n%s", string(nriLogs))
+	} else {
+		h.t.Logf("Failed to get Service Portal node agent nri-plugin logs: %v (output: %s)", err, string(nriLogs))
 	}
 
 	h.t.Logf("=== END TIMEOUT DIAGNOSTICS ===")

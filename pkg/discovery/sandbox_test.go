@@ -1165,10 +1165,13 @@ func TestBuildTaskSandbox_ServicePortalIntercept(t *testing.T) {
 	token := "auth-token-12345"
 	digest := AuthTokenDigest(token)
 
-	t.Run("intercept enabled adds label to sandbox and pod template", func(t *testing.T) {
-		sb := BuildTaskSandbox(run, "task-1", TaskSandboxConfig{
+	t.Run("intercept enabled adds label and CA env vars to sandbox and pod template", func(t *testing.T) {
+		runWithRepo := run.DeepCopy()
+		runWithRepo.Spec.Repo.URL = "https://github.com/example/repo.git"
+		sb := BuildTaskSandbox(runWithRepo, "task-1", TaskSandboxConfig{
 			Namespace:              "eval-runner-sandbox",
 			AuthTokenDigest:        digest,
+			CloneRepo:              true,
 			ServicePortalIntercept: true,
 		})
 
@@ -1178,12 +1181,41 @@ func TestBuildTaskSandbox_ServicePortalIntercept(t *testing.T) {
 		if got := sb.Spec.PodTemplate.ObjectMeta.Labels[LabelServicePortalIntercept]; got != "true" {
 			t.Errorf("expected pod template label %q=%q, got %q", LabelServicePortalIntercept, "true", got)
 		}
+
+		agentEnv := make(map[string]string)
+		for _, env := range sb.Spec.PodTemplate.Spec.Containers[0].Env {
+			agentEnv[env.Name] = env.Value
+		}
+		for _, want := range ServicePortalCAEnvironmentVariables() {
+			if got := agentEnv[want.Name]; got != want.Value {
+				t.Errorf("agent env %s = %q, want %q", want.Name, got, want.Value)
+			}
+		}
+
+		var checkoutEnv map[string]string
+		for _, initContainer := range sb.Spec.PodTemplate.Spec.InitContainers {
+			if initContainer.Name == RepoCheckoutInitContainerName {
+				checkoutEnv = make(map[string]string)
+				for _, env := range initContainer.Env {
+					checkoutEnv[env.Name] = env.Value
+				}
+			}
+		}
+		if checkoutEnv == nil {
+			t.Fatalf("expected %s init container to be present", RepoCheckoutInitContainerName)
+		}
+		if got := checkoutEnv["GIT_SSL_CAINFO"]; got != ServicePortalCACertificatePath {
+			t.Errorf("checkout-repo env GIT_SSL_CAINFO = %q, want %q", got, ServicePortalCACertificatePath)
+		}
 	})
 
-	t.Run("intercept disabled leaves label absent", func(t *testing.T) {
-		sb := BuildTaskSandbox(run, "task-1", TaskSandboxConfig{
+	t.Run("intercept disabled leaves label and CA env vars absent", func(t *testing.T) {
+		runWithRepo := run.DeepCopy()
+		runWithRepo.Spec.Repo.URL = "https://github.com/example/repo.git"
+		sb := BuildTaskSandbox(runWithRepo, "task-1", TaskSandboxConfig{
 			Namespace:              "eval-runner-sandbox",
 			AuthTokenDigest:        digest,
+			CloneRepo:              true,
 			ServicePortalIntercept: false,
 		})
 
@@ -1192,6 +1224,22 @@ func TestBuildTaskSandbox_ServicePortalIntercept(t *testing.T) {
 		}
 		if _, exists := sb.Spec.PodTemplate.ObjectMeta.Labels[LabelServicePortalIntercept]; exists {
 			t.Errorf("expected pod template label %q to be absent", LabelServicePortalIntercept)
+		}
+		for _, env := range sb.Spec.PodTemplate.Spec.Containers[0].Env {
+			for _, caEnv := range ServicePortalCAEnvironmentVariables() {
+				if env.Name == caEnv.Name {
+					t.Errorf("expected agent env %s to be absent when intercept disabled", caEnv.Name)
+				}
+			}
+		}
+		for _, initContainer := range sb.Spec.PodTemplate.Spec.InitContainers {
+			if initContainer.Name == RepoCheckoutInitContainerName {
+				for _, env := range initContainer.Env {
+					if env.Name == "GIT_SSL_CAINFO" {
+						t.Errorf("expected checkout-repo env GIT_SSL_CAINFO to be absent when intercept disabled")
+					}
+				}
+			}
 		}
 	})
 }
