@@ -3138,4 +3138,55 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 			t.Fatal("expected error for address without CA file, got nil")
 		}
 	})
+
+	t.Run("address with CA file but without token file fails", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalControllerAddress: "127.0.0.1:8443",
+				configkeys.ConfigMapKeyServicePortalControllerCAFile:  "/etc/service-portal/tls.crt",
+			},
+		}
+		if _, err := ResolveConfig(cm, RawFlags{}); err == nil {
+			t.Fatal("expected error for address without token file, got nil")
+		}
+	})
+
+	t.Run("address with token file but without CA file fails", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalControllerAddress: "127.0.0.1:8443",
+				configkeys.ConfigMapKeyServicePortalTokenFile:         "/var/run/secrets/service-portal/token",
+			},
+		}
+		if _, err := ResolveConfig(cm, RawFlags{}); err == nil {
+			t.Fatal("expected error for address without CA file, got nil")
+		}
+	})
+
+	t.Run("address with CA and token file configures service portal options", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalControllerAddress: "127.0.0.1:8443",
+				configkeys.ConfigMapKeyServicePortalControllerCAFile:  "/etc/service-portal/tls.crt",
+				configkeys.ConfigMapKeyServicePortalTokenFile:         "/var/run/secrets/service-portal/token",
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		options := cfg.ServicePortalOptions()
+		if options.ControllerAddr != "127.0.0.1:8443" {
+			t.Errorf("ControllerAddr = %q, want 127.0.0.1:8443", options.ControllerAddr)
+		}
+		if options.CAFile != "/etc/service-portal/tls.crt" {
+			t.Errorf("CAFile = %q, want /etc/service-portal/tls.crt", options.CAFile)
+		}
+		if options.TokenFile != "/var/run/secrets/service-portal/token" {
+			t.Errorf("TokenFile = %q, want /var/run/secrets/service-portal/token", options.TokenFile)
+		}
+	})
 }

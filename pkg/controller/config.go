@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"reflect"
@@ -35,7 +36,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	"github.com/gke-labs/eval-runner/pkg/github"
-	"github.com/gke-labs/eval-runner/pkg/serviceportal"
+	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -313,12 +314,12 @@ func DefaultClusterConfig() ClusterConfig {
 	}
 }
 
-// ServicePortalOptions returns the serviceportal.Options corresponding to the cluster configuration.
-func (cfg ClusterConfig) ServicePortalOptions() serviceportal.Options {
-	return serviceportal.Options{
-		ControllerAddress: cfg.ServicePortalControllerAddress,
-		CAFile:            cfg.ServicePortalCAFile,
-		TokenFile:         cfg.ServicePortalTokenFile,
+// ServicePortalOptions returns the service portal client.Options corresponding to the cluster configuration.
+func (cfg ClusterConfig) ServicePortalOptions() serviceportalclient.Options {
+	return serviceportalclient.Options{
+		ControllerAddr: cfg.ServicePortalControllerAddress,
+		CAFile:         cfg.ServicePortalCAFile,
+		TokenFile:      cfg.ServicePortalTokenFile,
 	}
 }
 
@@ -932,8 +933,11 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 
 	if cfg.ServicePortalControllerAddress != "" {
-		if err := cfg.ServicePortalOptions().Validate(); err != nil {
-			return cfg, err
+		if cfg.ServicePortalCAFile == "" {
+			return cfg, errors.New("service portal CA file is required when controller address is set")
+		}
+		if cfg.ServicePortalTokenFile == "" {
+			return cfg, errors.New("service portal token file is required when controller address is set")
 		}
 	}
 
