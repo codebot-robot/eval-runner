@@ -3178,15 +3178,15 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		opts := cfg.ServicePortalOptions()
-		if opts.ControllerAddr != "127.0.0.1:8443" {
-			t.Errorf("ControllerAddr = %q, want 127.0.0.1:8443", opts.ControllerAddr)
+		options := cfg.ServicePortalOptions()
+		if options.ControllerAddr != "127.0.0.1:8443" {
+			t.Errorf("ControllerAddr = %q, want 127.0.0.1:8443", options.ControllerAddr)
 		}
-		if opts.CAFile != "/etc/service-portal/tls.crt" {
-			t.Errorf("CAFile = %q, want /etc/service-portal/tls.crt", opts.CAFile)
+		if options.CAFile != "/etc/service-portal/tls.crt" {
+			t.Errorf("CAFile = %q, want /etc/service-portal/tls.crt", options.CAFile)
 		}
-		if opts.TokenFile != "/var/run/secrets/service-portal/token" {
-			t.Errorf("TokenFile = %q, want /var/run/secrets/service-portal/token", opts.TokenFile)
+		if options.TokenFile != "/var/run/secrets/service-portal/token" {
+			t.Errorf("TokenFile = %q, want /var/run/secrets/service-portal/token", options.TokenFile)
 		}
 	})
 }
