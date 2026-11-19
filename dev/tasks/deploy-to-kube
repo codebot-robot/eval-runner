@@ -229,6 +229,12 @@ ensure_cached_repo() {
   local target_dir="${cache_base}/${repo_name}/${commit}"
 
   if [[ -d "${target_dir}/.git" ]]; then
+    if [[ "$(git -C "${target_dir}" config --get extensions.refstorage 2>/dev/null || true)" == "reftable" ]]; then
+      git -C "${target_dir}" refs migrate --ref-format=files >/dev/null 2>&1 || rm -rf "${target_dir}"
+    fi
+  fi
+
+  if [[ -d "${target_dir}/.git" ]]; then
     local current_commit
     current_commit="$(git -C "${target_dir}" rev-parse HEAD 2>/dev/null || true)"
     if [[ "${current_commit}" == "${commit}"* ]]; then
@@ -240,7 +246,7 @@ ensure_cached_repo() {
   echo "    cloning ${repo_name} at ref ${commit}..." >&2
   mkdir -p "$(dirname "${target_dir}")"
   if [[ ! -d "${target_dir}/.git" ]]; then
-    git clone "${repo_url}" "${target_dir}" >&2
+    git -c init.defaultRefFormat=files clone "${repo_url}" "${target_dir}" >&2
   fi
   git -C "${target_dir}" fetch origin >&2
   git -C "${target_dir}" checkout "${commit}" >&2
