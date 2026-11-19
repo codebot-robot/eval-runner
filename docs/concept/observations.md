@@ -59,7 +59,7 @@ Entries in `Run.status.tasks[]` already function as observations, while `Run` is
 | `model` | `Run.spec.model` | Set at Run level, not per task. |
 | `harness` | *(none today)* | Implicit runtime environment (e.g. Inspect version in sandbox image). |
 | `sampleRange` | `Run.status.tasks[].sampleRange` | Nil when `spec.limit` or neither is set; nil represents window `1..spec.limit` or `1..tasks[].samples`. |
-| `time` | `Run.status.tasks[].startedAt` | Timestamp when task transitioned to Running; no per-task completion timestamp exists. |
+| `time` | `Run.status.tasks[].startedAt`, `finishedAt` | Timestamps when task transitioned to Running and reached a terminal phase. |
 | `score` | `status.tasks[].successRate` / `meanScore` | Point estimate: success rate for binary scorers, mean score for continuous scorers. |
 | `interval` | `status.tasks[].successRateCI` | Struct `{lower, upper, confidence, method}` (Wilson or Student-t). |
 | `sampleCount` | `status.tasks[].samples` | Number of evaluated and scored samples ($n$). |

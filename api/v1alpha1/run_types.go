@@ -111,6 +111,10 @@ type TaskStatus struct {
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 
+	// FinishedAt is the time when the task reached a terminal phase (Completed, Failed).
+	// +optional
+	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+
 	// Samples is the number of samples scored.
 	// +optional
 	Samples int `json:"samples"`
