@@ -5536,6 +5536,7 @@ func TestReconcileExecutionDeadlineExceeded(t *testing.T) {
 
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	pastDeadline := metav1.NewTime(now.Add(-10 * time.Second))
+	runningStartedAt := metav1.NewTime(now.Add(-3 * time.Minute))
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -5549,7 +5550,8 @@ func TestReconcileExecutionDeadlineExceeded(t *testing.T) {
 			Phase:             v1alpha1.RunPhaseRunning,
 			ExecutionDeadline: &pastDeadline,
 			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-1", Phase: v1alpha1.TaskPhaseRunning},
+				{ID: "task-running", Phase: v1alpha1.TaskPhaseRunning, StartedAt: &runningStartedAt},
+				{ID: "task-pending", Phase: v1alpha1.TaskPhasePending},
 			},
 		},
 	}
@@ -5574,13 +5576,196 @@ func TestReconcileExecutionDeadlineExceeded(t *testing.T) {
 	}
 
 	var updatedRun v1alpha1.Run
-	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
 
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
 		t.Errorf("Expected Run phase Failed, got %s", updatedRun.Status.Phase)
 	}
-	if !strings.Contains(updatedRun.Status.Message, "Execution deadline exceeded") {
-		t.Errorf("Expected deadline exceeded message, got %q", updatedRun.Status.Message)
+	expectedRunMessage := "Execution deadline exceeded (1 running, 1 not started cut off)"
+	if updatedRun.Status.Message != expectedRunMessage {
+		t.Errorf("Expected deadline exceeded message %q, got %q", expectedRunMessage, updatedRun.Status.Message)
+	}
+	if len(updatedRun.Status.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks, got %d", len(updatedRun.Status.Tasks))
+	}
+	taskRunning := updatedRun.Status.Tasks[0]
+	if taskRunning.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task-running Phase Failed, got %s", taskRunning.Phase)
+	}
+	expectedRunningMessage := "cut off by Run execution deadline after running for 3m0s"
+	if taskRunning.Message != expectedRunningMessage {
+		t.Errorf("Expected task-running Message %q, got %q", expectedRunningMessage, taskRunning.Message)
+	}
+	if taskRunning.StartedAt == nil || !taskRunning.StartedAt.Equal(&runningStartedAt) {
+		t.Errorf("Expected task-running StartedAt %v, got %v", runningStartedAt, taskRunning.StartedAt)
+	}
+	if taskRunning.FinishedAt == nil || !taskRunning.FinishedAt.Equal(&metav1.Time{Time: now}) {
+		t.Errorf("Expected task-running FinishedAt %v, got %v", now, taskRunning.FinishedAt)
+	}
+	taskPending := updatedRun.Status.Tasks[1]
+	if taskPending.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task-pending Phase Failed, got %s", taskPending.Phase)
+	}
+	expectedPendingMessage := "cut off by Run execution deadline (not started)"
+	if taskPending.Message != expectedPendingMessage {
+		t.Errorf("Expected task-pending Message %q, got %q", expectedPendingMessage, taskPending.Message)
+	}
+	if taskPending.StartedAt != nil {
+		t.Errorf("Expected task-pending StartedAt nil, got %v", taskPending.StartedAt)
+	}
+	if taskPending.FinishedAt == nil || !taskPending.FinishedAt.Equal(&metav1.Time{Time: now}) {
+		t.Errorf("Expected task-pending FinishedAt %v, got %v", now, taskPending.FinishedAt)
+	}
+}
+
+func TestReconcileExecutionDeadline_TaskCutOffDuringCommandExecution(t *testing.T) {
+	scheme := setupScheme(t)
+
+	startTime := time.Date(2026, 11, 19, 12, 27, 0, 0, time.UTC)
+	deadline := time.Date(2026, 11, 19, 12, 30, 0, 0, time.UTC)
+	deadlineTime := metav1.NewTime(deadline)
+
+	currentTime := startTime
+	var timeMutex sync.Mutex
+	nowFunc := func() time.Time {
+		timeMutex.Lock()
+		defer timeMutex.Unlock()
+		return currentTime
+	}
+
+	timeoutSeconds := 3600
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{
+				ID:             "polyglot-c-py",
+				Spec:           "eval.py@polyglot",
+				Image:          "custom-task-image:v1",
+				Command:        []string{"run-eval"},
+				Resources:      []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				TimeoutSeconds: &timeoutSeconds,
+			},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-cutoff-exec",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:             v1alpha1.RunPhaseRunning,
+			ExecutionDeadline: &deadlineTime,
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:    "polyglot-c-py",
+					Phase: v1alpha1.TaskPhasePending,
+				},
+			},
+		},
+	}
+
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			}
+			timeMutex.Lock()
+			currentTime = deadline
+			timeMutex.Unlock()
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    fakeClient,
+		Now:              nowFunc,
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-cutoff-exec"}}
+
+	// Turn 1: start pending task, transition to Running with StartedAt = 12:27:00, create sandbox
+	_, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 1 error: %v", err)
+	}
+
+	var sandboxList sandboxv1beta1.SandboxList
+	if err := cl.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil {
+		t.Fatalf("List error: %v", err)
+	}
+	if len(sandboxList.Items) == 0 {
+		t.Fatalf("Expected sandbox to be created")
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxList.Items[0].Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.0.75",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("Create pod error: %v", err)
+	}
+
+	// Turn 2: execute task command during which deadline expires (time reaches 12:30:00)
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected Run phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	expectedRunMessage := "Execution deadline exceeded (1 running cut off)"
+	if updatedRun.Status.Message != expectedRunMessage {
+		t.Errorf("Expected Run Message %q, got %q", expectedRunMessage, updatedRun.Status.Message)
+	}
+
+	if len(updatedRun.Status.Tasks) != 1 {
+		t.Fatalf("Expected 1 task, got %d", len(updatedRun.Status.Tasks))
+	}
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task Phase Failed, got %s", task.Phase)
+	}
+	expectedTaskMessage := "cut off by Run execution deadline after running for 3m0s"
+	if task.Message != expectedTaskMessage {
+		t.Errorf("Expected task Message %q, got %q", expectedTaskMessage, task.Message)
+	}
+	expectedStartedAt := metav1.NewTime(startTime)
+	if task.StartedAt == nil || !task.StartedAt.Equal(&expectedStartedAt) {
+		t.Errorf("Expected StartedAt %v, got %v", expectedStartedAt, task.StartedAt)
+	}
+	expectedFinishedAt := metav1.NewTime(deadline)
+	if task.FinishedAt == nil || !task.FinishedAt.Equal(&expectedFinishedAt) {
+		t.Errorf("Expected FinishedAt %v, got %v", expectedFinishedAt, task.FinishedAt)
 	}
 }
 

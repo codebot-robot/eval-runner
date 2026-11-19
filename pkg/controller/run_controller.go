@@ -2201,23 +2201,14 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	logger := log.FromContext(ctx)
 
 	// 1. Check execution deadline
-	if run.Status.ExecutionDeadline != nil && !r.now().Before(run.Status.ExecutionDeadline.Time) {
+	if r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline) {
 		r.evictCachedManifest(run.Namespace + "/" + run.Name)
-		msg := "Execution deadline exceeded"
-		logger.Info(msg, "run", run.Name)
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
 		}
-		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
-			status.Phase = v1alpha1.RunPhaseFailed
-			status.Message = msg
-			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-				Type:               "Completed",
-				Status:             metav1.ConditionFalse,
-				Reason:             "ExecutionDeadlineExceeded",
-				Message:            msg,
-				ObservedGeneration: gen,
-			})
+		logger.Info("Execution deadline exceeded", "run", run.Name)
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
+			r.markDeadlineCutOff(status, generation, nil)
 		})
 		return ctrl.Result{}, err
 	}
@@ -2486,6 +2477,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 						if failMsg, failed := failedTasks[tid]; failed {
 							status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
 							status.Tasks[i].Message = failMsg
+							status.Tasks[i].FinishedAt = &now
 						} else {
 							for _, s := range started {
 								if s == tid {
@@ -2517,6 +2509,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					if failMsg, failed := failedTasks[tid]; failed {
 						run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
 						run.Status.Tasks[i].Message = failMsg
+						run.Status.Tasks[i].FinishedAt = &now
 					} else {
 						for _, s := range started {
 							if s == tid {
@@ -2739,14 +2732,20 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 
 	if len(terminalFailures) > 0 || len(rescuedTasks) > 0 {
+		now := metav1.NewTime(r.now())
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			for i := range status.Tasks {
 				tid := status.Tasks[i].ID
 				if msg, failed := terminalFailures[tid]; failed {
 					status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
 					status.Tasks[i].Message = msg
+					status.Tasks[i].FinishedAt = &now
 				} else if info, ok := rescuedTasks[tid]; ok {
 					status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
+					if info.summary != nil && info.summary.FinishedAt != nil {
+						finishedAt := metav1.NewTime(*info.summary.FinishedAt)
+						status.Tasks[i].FinishedAt = &finishedAt
+					}
 					if status.Tasks[i].Message == "" {
 						status.Tasks[i].Message = "restart rescue"
 					} else if !strings.Contains(status.Tasks[i].Message, "restart rescue") {
@@ -2815,8 +2814,13 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			if msg, failed := terminalFailures[tid]; failed {
 				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
 				run.Status.Tasks[i].Message = msg
+				run.Status.Tasks[i].FinishedAt = &now
 			} else if info, ok := rescuedTasks[tid]; ok {
 				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
+				if info.summary != nil && info.summary.FinishedAt != nil {
+					finishedAt := metav1.NewTime(*info.summary.FinishedAt)
+					run.Status.Tasks[i].FinishedAt = &finishedAt
+				}
 				if run.Status.Tasks[i].Message == "" {
 					run.Status.Tasks[i].Message = "restart rescue"
 				}
@@ -2879,8 +2883,10 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		taskResults[res.taskID] = res
 	}
 
+	deadlineExceeded := r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline)
+
 	// Update task statuses FIRST before deleting sandboxes
-	err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+	err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
 		for i := range status.Tasks {
 			if res, ok := taskResults[status.Tasks[i].ID]; ok {
 				status.Tasks[i].Phase = res.phase
@@ -2902,6 +2908,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].CostUSD = res.costUSD
 				status.Tasks[i].CostSource = res.costSource
 				status.Tasks[i].PossibleSamples = res.possibleSamples
+				status.Tasks[i].FinishedAt = res.finishedAt
 				finalSamplesDone := res.samples
 				if res.phase != v1alpha1.TaskPhaseCompleted && status.Tasks[i].SamplesDone > finalSamplesDone {
 					finalSamplesDone = status.Tasks[i].SamplesDone
@@ -2943,9 +2950,22 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		if hasCost {
 			status.CostUSD = &totalCost
 		}
+
+		if deadlineExceeded {
+			r.markDeadlineCutOff(status, generation, taskResults)
+		}
 	})
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if deadlineExceeded {
+		r.evictCachedManifest(run.Namespace + "/" + run.Name)
+		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
+			logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
+		}
+		logger.Info("Execution deadline exceeded", "run", run.Name)
+		return ctrl.Result{}, nil
 	}
 
 	// Delete task sandboxes and clean up auth tokens only after status update succeeds
@@ -2960,6 +2980,76 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 
 	return ctrl.Result{Requeue: true}, nil
+}
+
+func (r *RunReconciler) isExecutionDeadlineExceeded(deadline *metav1.Time) bool {
+	return deadline != nil && !r.now().Before(deadline.Time)
+}
+
+func formatTaskDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	return duration.Round(time.Second).String()
+}
+
+func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generation int64, taskResults map[string]taskExecutionResult) {
+	now := metav1.NewTime(r.now())
+	runningCutOffCount := 0
+	pendingCutOffCount := 0
+
+	for i := range status.Tasks {
+		task := &status.Tasks[i]
+		if res, ok := taskResults[task.ID]; ok && res.cutOff {
+			task.Phase = v1alpha1.TaskPhaseFailed
+			if task.FinishedAt == nil {
+				task.FinishedAt = &now
+			}
+			var elapsed time.Duration
+			if task.StartedAt != nil {
+				elapsed = task.FinishedAt.Time.Sub(task.StartedAt.Time)
+			}
+			task.Message = fmt.Sprintf("cut off by Run execution deadline after running for %s", formatTaskDuration(elapsed))
+			runningCutOffCount++
+		} else if task.Phase == v1alpha1.TaskPhaseRunning {
+			task.Phase = v1alpha1.TaskPhaseFailed
+			task.FinishedAt = &now
+			var elapsed time.Duration
+			if task.StartedAt != nil {
+				elapsed = now.Time.Sub(task.StartedAt.Time)
+			}
+			task.Message = fmt.Sprintf("cut off by Run execution deadline after running for %s", formatTaskDuration(elapsed))
+			runningCutOffCount++
+		} else if task.Phase == v1alpha1.TaskPhasePending {
+			task.Phase = v1alpha1.TaskPhaseFailed
+			task.FinishedAt = &now
+			task.Message = "cut off by Run execution deadline (not started)"
+			pendingCutOffCount++
+		}
+	}
+
+	var parts []string
+	if runningCutOffCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d running", runningCutOffCount))
+	}
+	if pendingCutOffCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d not started", pendingCutOffCount))
+	}
+	message := "Execution deadline exceeded"
+	if len(parts) > 0 {
+		message = fmt.Sprintf("Execution deadline exceeded (%s cut off)", strings.Join(parts, ", "))
+	}
+
+	status.Phase = v1alpha1.RunPhaseFailed
+	status.Message = message
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type:               "Completed",
+		Status:             metav1.ConditionFalse,
+		Reason:             "ExecutionDeadlineExceeded",
+		Message:            message,
+		ObservedGeneration: generation,
+	})
+	status.Summary = ComputeRunSummary(status.Tasks)
 }
 
 type taskExecutionResult struct {
@@ -2984,6 +3074,8 @@ type taskExecutionResult struct {
 	sampleRange     *v1alpha1.SampleRange
 	timeoutSeconds  int
 	resources       *v1alpha1.TaskResources
+	finishedAt      *metav1.Time
+	cutOff          bool
 }
 
 func (r *RunReconciler) handleStepExecutionFailure(
@@ -3094,10 +3186,17 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	effRange := EffectiveSampleRange(run.Spec)
 
 	cohort := v1alpha1.DefaultCohort
-	// Ensure every return (including early error returns) carries the task cohort to status.tasks[].cohort.
+	// Ensure every return (including early error returns) carries the task cohort and finishedAt.
 	defer func() {
 		if res.cohort == "" {
 			res.cohort = cohort
+		}
+		if res.finishedAt == nil {
+			now := metav1.NewTime(r.now())
+			res.finishedAt = &now
+		}
+		if res.phase == v1alpha1.TaskPhaseFailed && r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline) {
+			res.cutOff = true
 		}
 	}()
 
