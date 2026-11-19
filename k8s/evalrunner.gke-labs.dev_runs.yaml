@@ -348,6 +348,11 @@ spec:
                       description: CostUSD is the estimated task evaluation cost in
                         USD from model prices.
                       type: number
+                    finishedAt:
+                      description: FinishedAt is the time when the task reached a
+                        terminal phase (Completed, Failed).
+                      format: date-time
+                      type: string
                     id:
                       description: ID is the unique identifier of the task (e.g. docs/readme_comprehension).
                       type: string

@@ -898,6 +898,10 @@ func (in *TaskStatus) DeepCopyInto(out *TaskStatus) {
 		in, out := &in.StartedAt, &out.StartedAt
 		*out = (*in).DeepCopy()
 	}
+	if in.FinishedAt != nil {
+		in, out := &in.FinishedAt, &out.FinishedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.MeanScore != nil {
 		in, out := &in.MeanScore, &out.MeanScore
 		*out = new(float64)
