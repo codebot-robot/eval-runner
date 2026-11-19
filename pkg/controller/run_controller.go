@@ -40,6 +40,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	"github.com/gke-labs/eval-runner/pkg/version"
+	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -294,10 +295,16 @@ type RunReconciler struct {
 	HeadTopUpInterval time.Duration
 
 	// ServicePortalClient binds egress policies to sandbox pods via the Service Portal Controller.
-	ServicePortalClient ServicePortalClient
+	ServicePortalClient *serviceportalclient.Client
+
+	// ServicePortalAllowedHosts is the list of allowed FQDN egress hostnames for the service portal.
+	ServicePortalAllowedHosts []string
 
 	// SandboxEgressHosts is the list of allowed FQDN egress hostnames for sandboxes.
 	SandboxEgressHosts []string
+
+	boundPodsMu            sync.RWMutex
+	boundServicePortalPods map[types.UID]bool
 
 	noCredsLoggedMu sync.Mutex
 	noCredsLogged   bool
@@ -786,6 +793,7 @@ func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.UIBaseURL = cfg.UIBaseURL
 	r.HeadTopUpInterval = cfg.HeadTopUpInterval
 	r.SandboxEgressHosts = cfg.SandboxEgressHosts
+	r.ServicePortalAllowedHosts = cfg.ServicePortalAllowedHosts
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
@@ -2717,6 +2725,17 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			continue
 		}
 
+		if r.ServicePortalClient != nil && !r.isServicePortalPodBound(pod.UID) {
+			bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+			bindError := r.bindServicePortalPolicy(bindContext, string(pod.UID))
+			bindCancel()
+			if bindError != nil {
+				terminalFailures[t.ID] = fmt.Sprintf("service portal bind failed: %v", bindError)
+				continue
+			}
+			r.markServicePortalPodBound(pod.UID)
+		}
+
 		if pod.Status.Phase == corev1.PodFailed {
 			terminalFailures[t.ID] = taskPodFailureMessage(&pod)
 			continue
@@ -3182,16 +3201,19 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}()
 
-	if r.servicePortalConfigured() {
-		if err := r.bindServicePortalPolicy(ctx, pod); err != nil {
+	if r.ServicePortalClient != nil && !r.isServicePortalPodBound(pod.UID) {
+		bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+		defer bindCancel()
+		if err := r.bindServicePortalPolicy(bindContext, string(pod.UID)); err != nil {
 			logger.Error(err, "service portal bind failed", "task", taskID, "podUID", pod.UID)
 			return taskExecutionResult{
 				taskID:      taskID,
 				phase:       v1alpha1.TaskPhaseFailed,
-				message:     err.Error(),
+				message:     fmt.Sprintf("service portal bind failed: %v", err),
 				sampleRange: effRange,
 			}
 		}
+		r.markServicePortalPodBound(pod.UID)
 	}
 
 	if isSandboxOnlyTask(*targetTask) {

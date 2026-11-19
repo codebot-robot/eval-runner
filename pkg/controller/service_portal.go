@@ -20,44 +20,81 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gke-labs/eval-runner/pkg/discovery"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
-// ServicePortalClient binds egress policies to sandbox pods via the Service Portal Controller.
-type ServicePortalClient interface {
-	Bind(ctx context.Context, podUID string, policy *portalsv1.EgressPolicy, secrets map[string][]byte) error
+// DefaultServicePortalAllowedHosts defines the default allowed hostnames for task sandboxes behind the service portal:
+// - Model APIs (*.googleapis.com)
+// - Git hosts (github.com, *.github.com, *.githubusercontent.com)
+// - Python package repositories (pypi.org, *.pypi.org, files.pythonhosted.org, *.pythonhosted.org)
+// - Tool and package distributors for Terminal-Bench tasks (astral.sh, *.astral.sh, deb.debian.org, security.debian.org, *.debian.org, archive.ubuntu.com, security.ubuntu.com, ports.ubuntu.com, *.ubuntu.com)
+var DefaultServicePortalAllowedHosts = []string{
+	"*.googleapis.com",
+	"github.com",
+	"*.github.com",
+	"*.githubusercontent.com",
+	"pypi.org",
+	"*.pypi.org",
+	"files.pythonhosted.org",
+	"*.pythonhosted.org",
+	"astral.sh",
+	"*.astral.sh",
+	"deb.debian.org",
+	"security.debian.org",
+	"*.debian.org",
+	"archive.ubuntu.com",
+	"security.ubuntu.com",
+	"ports.ubuntu.com",
+	"*.ubuntu.com",
+}
+
+func isPackageMirrorHost(host string) bool {
+	return host == "deb.debian.org" ||
+		host == "security.debian.org" ||
+		host == "*.debian.org" ||
+		host == "archive.ubuntu.com" ||
+		host == "security.ubuntu.com" ||
+		host == "ports.ubuntu.com" ||
+		host == "*.ubuntu.com" ||
+		strings.HasSuffix(host, ".debian.org") ||
+		strings.HasSuffix(host, ".ubuntu.com")
 }
 
 // BuildServicePortalEgressPolicy constructs an EgressPolicy proto for the given allowed hosts.
-// It creates HTTP and HTTPS allow rules for the specified hostnames without duplicates.
+// It creates an HTTPS allow rule for all hostnames and an HTTP allow rule only for package mirrors.
 func BuildServicePortalEgressPolicy(hosts []string) *portalsv1.EgressPolicy {
 	var cleanHosts []string
+	var httpHosts []string
 	seen := make(map[string]bool)
-	for _, h := range hosts {
-		trimmed := strings.TrimSpace(h)
+	for _, host := range hosts {
+		trimmed := strings.TrimSpace(host)
 		if trimmed != "" && !seen[trimmed] {
 			seen[trimmed] = true
 			cleanHosts = append(cleanHosts, trimmed)
+			if isPackageMirrorHost(trimmed) {
+				httpHosts = append(httpHosts, trimmed)
+			}
 		}
 	}
 	if len(cleanHosts) == 0 {
 		return &portalsv1.EgressPolicy{}
 	}
-	return &portalsv1.EgressPolicy{
-		Rules: []*portalsv1.EgressRule{
-			{
-				Http: &portalsv1.HttpRule{
-					Hostnames: append([]string(nil), cleanHosts...),
-				},
+	var rules []*portalsv1.EgressRule
+	if len(httpHosts) > 0 {
+		rules = append(rules, &portalsv1.EgressRule{
+			Http: &portalsv1.HttpRule{
+				Hostnames: httpHosts,
 			},
-			{
-				Https: &portalsv1.HttpsRule{
-					Hostnames: append([]string(nil), cleanHosts...),
-				},
-			},
+		})
+	}
+	rules = append(rules, &portalsv1.EgressRule{
+		Https: &portalsv1.HttpsRule{
+			Hostnames: append([]string(nil), cleanHosts...),
 		},
+	})
+	return &portalsv1.EgressPolicy{
+		Rules: rules,
 	}
 }
 
@@ -67,24 +104,39 @@ func (r *RunReconciler) servicePortalConfigured() bool {
 
 func (r *RunReconciler) servicePortalPolicy() *portalsv1.EgressPolicy {
 	r.cfgMu.RLock()
-	hosts := r.SandboxEgressHosts
+	hosts := r.ServicePortalAllowedHosts
 	r.cfgMu.RUnlock()
-	if len(hosts) == 0 {
-		hosts = discovery.DefaultSandboxEgressHosts
-	}
 	return BuildServicePortalEgressPolicy(hosts)
 }
 
-func (r *RunReconciler) bindServicePortalPolicy(ctx context.Context, pod *corev1.Pod) error {
-	if r.ServicePortalClient == nil {
-		return nil
-	}
-	if pod == nil || pod.UID == "" {
+func (r *RunReconciler) bindServicePortalPolicy(ctx context.Context, podUID string) error {
+	if podUID == "" {
 		return errors.New("service portal bind failed: pod UID is empty")
 	}
 	policy := r.servicePortalPolicy()
-	if err := r.ServicePortalClient.Bind(ctx, string(pod.UID), policy, nil); err != nil {
+	if err := r.ServicePortalClient.Bind(ctx, podUID, policy, nil); err != nil {
 		return fmt.Errorf("service portal bind failed: %w", err)
 	}
 	return nil
+}
+
+func (r *RunReconciler) isServicePortalPodBound(uid types.UID) bool {
+	r.boundPodsMu.RLock()
+	defer r.boundPodsMu.RUnlock()
+	return r.boundServicePortalPods != nil && r.boundServicePortalPods[uid]
+}
+
+func (r *RunReconciler) markServicePortalPodBound(uid types.UID) {
+	r.boundPodsMu.Lock()
+	defer r.boundPodsMu.Unlock()
+	if r.boundServicePortalPods == nil {
+		r.boundServicePortalPods = make(map[types.UID]bool)
+	}
+	r.boundServicePortalPods[uid] = true
+}
+
+func (r *RunReconciler) unmarkServicePortalPodBound(uid types.UID) {
+	r.boundPodsMu.Lock()
+	defer r.boundPodsMu.Unlock()
+	delete(r.boundServicePortalPods, uid)
 }

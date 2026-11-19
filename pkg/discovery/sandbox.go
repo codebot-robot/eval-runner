@@ -87,9 +87,6 @@ const (
 
 	// LabelServicePortalIntercept is the pod label opting the sandbox into NRI service portal interception.
 	LabelServicePortalIntercept = "service-portal.gke.io/intercept"
-
-	// ValueServicePortalInterceptTrue is the label value indicating service portal interception is enabled.
-	ValueServicePortalInterceptTrue = "true"
 )
 
 // AuthTokenDigest calculates the hex SHA-256 digest of the given bearer token.
@@ -275,7 +272,7 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 		labels[LabelRunUID] = string(run.UID)
 	}
 	if cfg.ServicePortalIntercept {
-		labels[LabelServicePortalIntercept] = ValueServicePortalInterceptTrue
+		labels[LabelServicePortalIntercept] = "true"
 	}
 
 	annotations := map[string]string{

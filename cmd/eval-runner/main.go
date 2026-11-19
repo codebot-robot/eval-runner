@@ -165,6 +165,8 @@ func main() {
 	flag.StringVar(&servicePortalControllerAddress, "service-portal-controller-address", "", "Address of the Service Portal Controller (host:port)")
 	flag.StringVar(&servicePortalCAFile, "service-portal-controller-ca-file", "", "Path to CA certificate file for verifying Service Portal Controller TLS certificate")
 	flag.StringVar(&servicePortalTokenFile, "service-portal-token-file", "", "Path to projected service account token file for authenticating with Service Portal Controller")
+	var servicePortalAllowedHosts string
+	flag.StringVar(&servicePortalAllowedHosts, "service-portal-allowed-hosts", "", "Comma-separated allow-list of FQDN hostnames for service portal egress ('disabled' for none)")
 	var forgeDBPath string
 	flag.StringVar(&forgeDBPath, "forge-db", "/tmp/forge.db", "Filesystem path to local bbolt database for forge state")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
@@ -220,6 +222,7 @@ func main() {
 		servicePortalControllerAddress,
 		servicePortalCAFile,
 		servicePortalTokenFile,
+		servicePortalAllowedHosts,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -341,17 +344,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	var spClient *serviceportalclient.Client
+	var servicePortalClient *serviceportalclient.Client
 	if clusterConfig.ServicePortalControllerAddress != "" {
 		setupLog.Info("Service Portal enabled", "controllerAddress", clusterConfig.ServicePortalControllerAddress, "caFile", clusterConfig.ServicePortalCAFile, "tokenFile", clusterConfig.ServicePortalTokenFile)
-		var spErr error
-		spClient, spErr = serviceportalclient.New(clusterConfig.ServicePortalOptions())
-		if spErr != nil {
-			setupLog.Error(spErr, "unable to create service portal client")
+		var servicePortalClientError error
+		servicePortalClient, servicePortalClientError = serviceportalclient.New(clusterConfig.ServicePortalOptions())
+		if servicePortalClientError != nil {
+			setupLog.Error(servicePortalClientError, "unable to create service portal client")
 			os.Exit(1)
 		}
 		defer func() {
-			if closeErr := spClient.Close(); closeErr != nil {
+			if closeErr := servicePortalClient.Close(); closeErr != nil {
 				setupLog.Error(closeErr, "error closing service portal client on shutdown")
 			}
 		}()
@@ -413,34 +416,35 @@ func main() {
 	}()
 
 	reconciler := &controller.RunReconciler{
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Scheme:               mgr.GetScheme(),
-		ClientFactory:        clientFactory,
-		ControllerNamespace:  evalRunnerNamespace,
-		SandboxNamespace:     sandboxNamespace,
-		PKIManager:           pkiManager,
-		SandboxdImage:        clusterConfig.SandboxdImage,
-		DiscoveryDeadline:    clusterConfig.DiscoveryDeadline,
-		ExecutionDeadline:    clusterConfig.ExecutionDeadline,
-		TaskGracePeriod:      clusterConfig.TaskGracePeriod,
-		MaxMessageBytes:      discovery.MaxMessageBytes,
-		MaxDiscoveryAttempts: maxDiscoveryAttempts,
-		MaxParallelTasks:     clusterConfig.MaxParallelTasks,
-		PollProgressInterval: clusterConfig.PollProgressInterval,
-		ModelSecret:          clusterConfig.ModelSecret,
-		ModelPrices:          clusterConfig.ModelPrices,
-		ModelPriceSources:    clusterConfig.ModelPriceSources,
-		ModelPricesDisabled:  clusterConfig.ModelPricesDisabled,
-		SampleRunnerImage:    sampleRunnerImage,
-		ArtifactSink:         reloadableSink,
-		ControllerVersion:    version.String(),
-		GitHubTokenSecret:    clusterConfig.GitHubTokenSecret,
-		GitHubAppSecret:      clusterConfig.GitHubAppSecret,
-		UIBaseURL:            clusterConfig.UIBaseURL,
-		HeadTopUpInterval:    clusterConfig.HeadTopUpInterval,
-		SandboxEgressHosts:   clusterConfig.SandboxEgressHosts,
-		ServicePortalClient:  spClient,
+		Client:                    mgr.GetClient(),
+		APIReader:                 mgr.GetAPIReader(),
+		Scheme:                    mgr.GetScheme(),
+		ClientFactory:             clientFactory,
+		ControllerNamespace:       evalRunnerNamespace,
+		SandboxNamespace:          sandboxNamespace,
+		PKIManager:                pkiManager,
+		SandboxdImage:             clusterConfig.SandboxdImage,
+		DiscoveryDeadline:         clusterConfig.DiscoveryDeadline,
+		ExecutionDeadline:         clusterConfig.ExecutionDeadline,
+		TaskGracePeriod:           clusterConfig.TaskGracePeriod,
+		MaxMessageBytes:           discovery.MaxMessageBytes,
+		MaxDiscoveryAttempts:      maxDiscoveryAttempts,
+		MaxParallelTasks:          clusterConfig.MaxParallelTasks,
+		PollProgressInterval:      clusterConfig.PollProgressInterval,
+		ModelSecret:               clusterConfig.ModelSecret,
+		ModelPrices:               clusterConfig.ModelPrices,
+		ModelPriceSources:         clusterConfig.ModelPriceSources,
+		ModelPricesDisabled:       clusterConfig.ModelPricesDisabled,
+		SampleRunnerImage:         sampleRunnerImage,
+		ArtifactSink:              reloadableSink,
+		ControllerVersion:         version.String(),
+		GitHubTokenSecret:         clusterConfig.GitHubTokenSecret,
+		GitHubAppSecret:           clusterConfig.GitHubAppSecret,
+		UIBaseURL:                 clusterConfig.UIBaseURL,
+		HeadTopUpInterval:         clusterConfig.HeadTopUpInterval,
+		SandboxEgressHosts:        clusterConfig.SandboxEgressHosts,
+		ServicePortalAllowedHosts: clusterConfig.ServicePortalAllowedHosts,
+		ServicePortalClient:       servicePortalClient,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

@@ -1055,11 +1055,11 @@ func TestBuildTaskSandbox_ServicePortalIntercept(t *testing.T) {
 			ServicePortalIntercept: true,
 		})
 
-		if got := sb.Labels[LabelServicePortalIntercept]; got != ValueServicePortalInterceptTrue {
-			t.Errorf("expected sandbox label %q=%q, got %q", LabelServicePortalIntercept, ValueServicePortalInterceptTrue, got)
+		if got := sb.Labels[LabelServicePortalIntercept]; got != "true" {
+			t.Errorf("expected sandbox label %q=%q, got %q", LabelServicePortalIntercept, "true", got)
 		}
-		if got := sb.Spec.PodTemplate.ObjectMeta.Labels[LabelServicePortalIntercept]; got != ValueServicePortalInterceptTrue {
-			t.Errorf("expected pod template label %q=%q, got %q", LabelServicePortalIntercept, ValueServicePortalInterceptTrue, got)
+		if got := sb.Spec.PodTemplate.ObjectMeta.Labels[LabelServicePortalIntercept]; got != "true" {
+			t.Errorf("expected pod template label %q=%q, got %q", LabelServicePortalIntercept, "true", got)
 		}
 	})
 
@@ -1078,4 +1078,3 @@ func TestBuildTaskSandbox_ServicePortalIntercept(t *testing.T) {
 		}
 	})
 }
-

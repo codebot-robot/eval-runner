@@ -102,6 +102,8 @@ const (
 	ConfigMapKeyServicePortalControllerCAFile = configkeys.ConfigMapKeyServicePortalControllerCAFile
 	// ConfigMapKeyServicePortalTokenFile is the ConfigMap key for the Service Portal Controller token file path.
 	ConfigMapKeyServicePortalTokenFile = configkeys.ConfigMapKeyServicePortalTokenFile
+	// ConfigMapKeyServicePortalAllowedHosts is the ConfigMap key for comma-separated allowed egress hosts for the service portal.
+	ConfigMapKeyServicePortalAllowedHosts = configkeys.ConfigMapKeyServicePortalAllowedHosts
 )
 
 const (
@@ -162,6 +164,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyServicePortalControllerAddress: {},
 	configkeys.ConfigMapKeyServicePortalControllerCAFile:  {},
 	configkeys.ConfigMapKeyServicePortalTokenFile:         {},
+	configkeys.ConfigMapKeyServicePortalAllowedHosts:      {},
 
 	// Workload Identity Federation
 	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
@@ -236,6 +239,7 @@ type ClusterConfig struct {
 	ServicePortalControllerAddress string
 	ServicePortalCAFile            string
 	ServicePortalTokenFile         string
+	ServicePortalAllowedHosts      []string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -261,6 +265,7 @@ type RawFlags struct {
 	ServicePortalControllerAddress string
 	ServicePortalCAFile            string
 	ServicePortalTokenFile         string
+	ServicePortalAllowedHosts      string
 	StrictConfig                   bool
 	Explicit                       map[string]bool
 }
@@ -311,6 +316,7 @@ func DefaultClusterConfig() ClusterConfig {
 		ServicePortalControllerAddress: "",
 		ServicePortalCAFile:            "",
 		ServicePortalTokenFile:         "",
+		ServicePortalAllowedHosts:      append([]string(nil), DefaultServicePortalAllowedHosts...),
 	}
 }
 
@@ -337,7 +343,7 @@ func FlagsFromFlagSet(
 	pollProgressInterval time.Duration,
 	affinityMode string,
 	sandboxEgressHosts string,
-	servicePortalControllerAddress, servicePortalCAFile, servicePortalTokenFile string,
+	servicePortalControllerAddress, servicePortalCAFile, servicePortalTokenFile, servicePortalAllowedHosts string,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -365,6 +371,7 @@ func FlagsFromFlagSet(
 		ServicePortalControllerAddress: servicePortalControllerAddress,
 		ServicePortalCAFile:            servicePortalCAFile,
 		ServicePortalTokenFile:         servicePortalTokenFile,
+		ServicePortalAllowedHosts:      servicePortalAllowedHosts,
 		StrictConfig:                   strictConfig,
 		Explicit:                       explicit,
 	}
@@ -815,6 +822,16 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[ConfigMapKeyServicePortalTokenFile]; ok {
 			cfg.ServicePortalTokenFile = strings.TrimSpace(val)
 		}
+		if val, ok := cm.Data[ConfigMapKeyServicePortalAllowedHosts]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
+					cfg.ServicePortalAllowedHosts = nil
+				} else {
+					cfg.ServicePortalAllowedHosts = discovery.ParseHostList(val)
+				}
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -930,6 +947,14 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 	if flags.IsExplicit("service-portal-token-file") {
 		cfg.ServicePortalTokenFile = strings.TrimSpace(flags.ServicePortalTokenFile)
+	}
+	if flags.IsExplicit("service-portal-allowed-hosts") {
+		trimmed := strings.TrimSpace(flags.ServicePortalAllowedHosts)
+		if strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
+			cfg.ServicePortalAllowedHosts = nil
+		} else {
+			cfg.ServicePortalAllowedHosts = discovery.ParseHostList(flags.ServicePortalAllowedHosts)
+		}
 	}
 
 	if cfg.ServicePortalControllerAddress != "" {
