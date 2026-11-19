@@ -36,19 +36,12 @@ func TestRunDiscovery(t *testing.T) {
 		t.Skip("skipping e2e test: RUN_E2E is not set")
 	}
 
-	clusterName := os.Getenv("KIND_CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "kind"
-	}
-
-	harness := NewHarness(t, clusterName)
-	harness.Setup()
-
-	// Deploy eval-runner controller from k8s manifests
-	harness.DeployEvalRunner()
-
-	// Deploy git server in eval-runner-sandbox namespace
-	harness.DeployGitServer("eval-runner-sandbox")
+	harness := GetSharedHarness(t)
+	t.Cleanup(func() {
+		harness.runCmd("kubectl", "delete", "run", "--all", "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "comparison", "--all", "-n", "eval-runner", "--ignore-not-found")
+		harness.WaitForAllSandboxesDeleted("eval-runner-sandbox", 30*time.Second)
+	})
 
 	commit := harness.GetGitServerCommit("eval-runner-sandbox", "support-agent.git")
 	t.Logf("Fixture repository commit: %s", commit)
