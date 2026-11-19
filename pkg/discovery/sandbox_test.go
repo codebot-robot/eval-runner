@@ -870,6 +870,7 @@ exit 0
 		repositoryURL        string
 		repositoryCommit     string
 		timeoutSeconds       string
+		cloneRetrySeconds    string
 		expectedExitCode     int
 		expectedMessagePart  string
 		expectRepoDirCreated bool
@@ -886,6 +887,15 @@ exit 0
 			repositoryURL:        "retry-clone",
 			repositoryCommit:     "v1.0.0",
 			timeoutSeconds:       "5",
+			cloneRetrySeconds:    "5",
+			expectedExitCode:     0,
+			expectRepoDirCreated: true,
+		},
+		{
+			name:                 "RetrySuccessWithoutStepTimeout",
+			repositoryURL:        "retry-clone",
+			repositoryCommit:     "v1.0.0",
+			cloneRetrySeconds:    "5",
 			expectedExitCode:     0,
 			expectRepoDirCreated: true,
 		},
@@ -893,7 +903,7 @@ exit 0
 			name:                "RetryExhausted",
 			repositoryURL:       "fail-clone-retry",
 			repositoryCommit:    "main",
-			timeoutSeconds:       "1",
+			cloneRetrySeconds:   "1",
 			expectedExitCode:    128,
 			expectedMessagePart: "step git clone failed with exit code 128",
 		},
@@ -901,6 +911,7 @@ exit 0
 			name:                "PlainCloneFailure",
 			repositoryURL:       "fail-clone",
 			repositoryCommit:    "main",
+			cloneRetrySeconds:   "1",
 			expectedExitCode:    128,
 			expectedMessagePart: "step git clone failed with exit code 128",
 		},
@@ -946,6 +957,9 @@ exit 0
 			)
 			if tc.timeoutSeconds != "" {
 				envVars = append(envVars, "TIMEOUT_SECONDS="+tc.timeoutSeconds)
+			}
+			if tc.cloneRetrySeconds != "" {
+				envVars = append(envVars, "CLONE_RETRY_SECONDS="+tc.cloneRetrySeconds)
 			}
 			command.Env = envVars
 

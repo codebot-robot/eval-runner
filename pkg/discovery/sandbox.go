@@ -58,6 +58,9 @@ const (
 	// RepoCheckoutInitContainerName is the init container name that checks out the repository.
 	RepoCheckoutInitContainerName = "checkout-repo"
 
+	// DefaultRepositoryCloneRetrySeconds is the default retry window in seconds for repository clone attempts in task sandboxes.
+	DefaultRepositoryCloneRetrySeconds = 60
+
 	// LabelRunName tracks the name of the Run that owns the sandbox.
 	LabelRunName = "evalrunner.gke-labs.dev/run-name"
 
@@ -364,65 +367,43 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
 repo_dir="$workspace_root/repo"
 termination_log="${TERMINATION_LOG:-/dev/termination-log}"
+clone_retry_seconds="${CLONE_RETRY_SECONDS:-` + strconv.Itoa(DefaultRepositoryCloneRetrySeconds) + `}"
 
 if [ -n "$TIMEOUT_SECONDS" ] && [ "$TIMEOUT_SECONDS" -gt 0 ] 2>/dev/null; then
-    step_timeout="$TIMEOUT_SECONDS"
-    start_time=$(date +%s)
-    deadline=$((start_time + step_timeout))
+    timeout_prefix="timeout $TIMEOUT_SECONDS"
+    if [ "$TIMEOUT_SECONDS" -lt "$clone_retry_seconds" ]; then
+        clone_retry_seconds="$TIMEOUT_SECONDS"
+    fi
 else
-    step_timeout=0
-    deadline=0
+    timeout_prefix=""
 fi
 
-backoff=1
-while :; do
-    if [ "$deadline" -gt 0 ]; then
-        current_time=$(date +%s)
-        remaining_seconds=$((deadline - current_time))
-        if [ "$remaining_seconds" -le 0 ]; then
-            break
-        fi
-        timeout_prefix="timeout $remaining_seconds"
-    else
-        timeout_prefix=""
-    fi
+start_time=$(date +%s)
+deadline=$((start_time + clone_retry_seconds))
 
+seconds_remaining() {
+    current_time=$(date +%s)
+    echo $((deadline - current_time))
+}
+
+while :; do
     rm -rf "$repo_dir"
     output=$($timeout_prefix git clone -- "$REPO_URL" "$repo_dir" 2>&1)
     status=$?
+    if [ "$status" -eq 0 ] || [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
+        break
+    fi
 
-    if [ "$status" -eq 0 ]; then
+    if [ $(seconds_remaining) -le 0 ]; then
         break
     fi
 
     rm -rf "$repo_dir"
-
-    if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
-        break
-    fi
-
-    if [ "$deadline" -le 0 ]; then
-        break
-    fi
-
-    current_time=$(date +%s)
-    remaining_seconds=$((deadline - current_time))
-    if [ "$remaining_seconds" -le 0 ]; then
-        break
-    fi
-
-    sleep_duration="$backoff"
-    if [ "$sleep_duration" -gt "$remaining_seconds" ]; then
-        sleep_duration="$remaining_seconds"
-    fi
-    sleep "$sleep_duration"
-    backoff=$((backoff * 2))
-    if [ "$backoff" -gt 10 ]; then
-        backoff=10
-    fi
+    sleep 1
 done
 
 if [ "$status" -ne 0 ]; then
+    rm -rf "$repo_dir"
     if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
         echo "step git clone failed: sandbox did not report completion" > "$termination_log" 2>/dev/null || true
     else
@@ -434,18 +415,6 @@ if [ "$status" -ne 0 ]; then
 fi
 
 if [ -n "$REPO_COMMIT" ]; then
-    if [ "$deadline" -gt 0 ]; then
-        current_time=$(date +%s)
-        remaining_seconds=$((deadline - current_time))
-        if [ "$remaining_seconds" -le 0 ]; then
-            remaining_seconds=1
-        fi
-        timeout_prefix="timeout $remaining_seconds"
-    elif [ "$step_timeout" -gt 0 ]; then
-        timeout_prefix="timeout $step_timeout"
-    else
-        timeout_prefix=""
-    fi
     output=$($timeout_prefix git -C "$repo_dir" checkout "$REPO_COMMIT" 2>&1)
     status=$?
     if [ "$status" -ne 0 ]; then
