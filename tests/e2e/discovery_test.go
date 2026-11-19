@@ -63,7 +63,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    url: http://git-server.eval-runner-sandbox.svc/support-agent.git
     commit: %s
 `, runName, commit)
 
@@ -183,7 +183,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    url: http://git-server.eval-runner-sandbox.svc/support-agent.git
     commit: "0000000000000000000000000000000000000000"
 `, runName)
 
@@ -236,7 +236,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/no-evals.git
+    url: http://git-server.eval-runner-sandbox.svc/no-evals.git
     commit: %s
 `, runName, noEvalsCommit)
 
@@ -286,7 +286,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-no-manifest.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-no-manifest.git
     commit: %s
 `, runName, docsNoManifestCommit)
 
@@ -323,7 +323,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    url: http://git-server.eval-runner-sandbox.svc/support-agent.git
     commit: %s
 `, runName, commit)
 
@@ -408,7 +408,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/support-agent.git
+    url: http://git-server.eval-runner-sandbox.svc/support-agent.git
     commit: %s
   model: mockllm/model
   tasks:
@@ -472,7 +472,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/terminal-bench.git
+    url: http://git-server.eval-runner-sandbox.svc/terminal-bench.git
     commit: %s
   model: mockllm/model
   tasks:
@@ -576,7 +576,7 @@ func runGitRemoteSmoke(t *testing.T, harness *Harness, sandboxNamespace string) 
 		t.Fatalf("failed to close listener: %v", err)
 	}
 
-	cmd := exec.Command("kubectl", "port-forward", "-n", sandboxNamespace, "svc/git-server", fmt.Sprintf("%d:9418", port))
+	cmd := exec.Command("kubectl", "port-forward", "-n", sandboxNamespace, "svc/git-server", fmt.Sprintf("%d:80", port))
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start git-server port-forward: %v", err)
 	}
@@ -609,7 +609,7 @@ func runGitRemoteSmoke(t *testing.T, harness *Harness, sandboxNamespace string) 
 	}
 
 	f := gitremote.New(gitremote.WithURLResolver(func(r forge.RepoRef) string {
-		return fmt.Sprintf("git://127.0.0.1:%d/%s.git", port, r.Name)
+		return fmt.Sprintf("http://127.0.0.1:%d/%s.git", port, r.Name)
 	}))
 
 	branches, err := f.Branches(t.Context(), ref)
