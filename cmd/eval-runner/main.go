@@ -165,8 +165,6 @@ func main() {
 	flag.StringVar(&servicePortalControllerAddress, "service-portal-controller-address", "", "Address of the Service Portal Controller (host:port)")
 	flag.StringVar(&servicePortalCAFile, "service-portal-controller-ca-file", "", "Path to CA certificate file for verifying Service Portal Controller TLS certificate")
 	flag.StringVar(&servicePortalTokenFile, "service-portal-token-file", "", "Path to projected service account token file for authenticating with Service Portal Controller")
-	var servicePortalAllowedHosts string
-	flag.StringVar(&servicePortalAllowedHosts, "service-portal-allowed-hosts", "", "Comma-separated allow-list of FQDN hostnames for service portal egress ('disabled' for none)")
 	var forgeDBPath string
 	flag.StringVar(&forgeDBPath, "forge-db", "/tmp/forge.db", "Filesystem path to local bbolt database for forge state")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
@@ -222,7 +220,6 @@ func main() {
 		servicePortalControllerAddress,
 		servicePortalCAFile,
 		servicePortalTokenFile,
-		servicePortalAllowedHosts,
 	)
 
 	cfg := ctrl.GetConfigOrDie()
@@ -416,35 +413,34 @@ func main() {
 	}()
 
 	reconciler := &controller.RunReconciler{
-		Client:                    mgr.GetClient(),
-		APIReader:                 mgr.GetAPIReader(),
-		Scheme:                    mgr.GetScheme(),
-		ClientFactory:             clientFactory,
-		ControllerNamespace:       evalRunnerNamespace,
-		SandboxNamespace:          sandboxNamespace,
-		PKIManager:                pkiManager,
-		SandboxdImage:             clusterConfig.SandboxdImage,
-		DiscoveryDeadline:         clusterConfig.DiscoveryDeadline,
-		ExecutionDeadline:         clusterConfig.ExecutionDeadline,
-		TaskGracePeriod:           clusterConfig.TaskGracePeriod,
-		MaxMessageBytes:           discovery.MaxMessageBytes,
-		MaxDiscoveryAttempts:      maxDiscoveryAttempts,
-		MaxParallelTasks:          clusterConfig.MaxParallelTasks,
-		PollProgressInterval:      clusterConfig.PollProgressInterval,
-		ModelSecret:               clusterConfig.ModelSecret,
-		ModelPrices:               clusterConfig.ModelPrices,
-		ModelPriceSources:         clusterConfig.ModelPriceSources,
-		ModelPricesDisabled:       clusterConfig.ModelPricesDisabled,
-		SampleRunnerImage:         sampleRunnerImage,
-		ArtifactSink:              reloadableSink,
-		ControllerVersion:         version.String(),
-		GitHubTokenSecret:         clusterConfig.GitHubTokenSecret,
-		GitHubAppSecret:           clusterConfig.GitHubAppSecret,
-		UIBaseURL:                 clusterConfig.UIBaseURL,
-		HeadTopUpInterval:         clusterConfig.HeadTopUpInterval,
-		SandboxEgressHosts:        clusterConfig.SandboxEgressHosts,
-		ServicePortalAllowedHosts: clusterConfig.ServicePortalAllowedHosts,
-		ServicePortalClient:       servicePortalClient,
+		Client:               mgr.GetClient(),
+		APIReader:            mgr.GetAPIReader(),
+		Scheme:               mgr.GetScheme(),
+		ClientFactory:        clientFactory,
+		ControllerNamespace:  evalRunnerNamespace,
+		SandboxNamespace:     sandboxNamespace,
+		PKIManager:           pkiManager,
+		SandboxdImage:        clusterConfig.SandboxdImage,
+		DiscoveryDeadline:    clusterConfig.DiscoveryDeadline,
+		ExecutionDeadline:    clusterConfig.ExecutionDeadline,
+		TaskGracePeriod:      clusterConfig.TaskGracePeriod,
+		MaxMessageBytes:      discovery.MaxMessageBytes,
+		MaxDiscoveryAttempts: maxDiscoveryAttempts,
+		MaxParallelTasks:     clusterConfig.MaxParallelTasks,
+		PollProgressInterval: clusterConfig.PollProgressInterval,
+		ModelSecret:          clusterConfig.ModelSecret,
+		ModelPrices:          clusterConfig.ModelPrices,
+		ModelPriceSources:    clusterConfig.ModelPriceSources,
+		ModelPricesDisabled:  clusterConfig.ModelPricesDisabled,
+		SampleRunnerImage:    sampleRunnerImage,
+		ArtifactSink:         reloadableSink,
+		ControllerVersion:    version.String(),
+		GitHubTokenSecret:    clusterConfig.GitHubTokenSecret,
+		GitHubAppSecret:      clusterConfig.GitHubAppSecret,
+		UIBaseURL:            clusterConfig.UIBaseURL,
+		HeadTopUpInterval:    clusterConfig.HeadTopUpInterval,
+		ServicePortalHosts:   clusterConfig.ServicePortalAllowedHosts,
+		ServicePortalClient:  servicePortalClient,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

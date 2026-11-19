@@ -54,11 +54,10 @@ const (
 )
 
 // DefaultSandboxEgressHosts defines the default allow-list of FQDN hostnames
-// permitted for egress from sandbox pods:
+// permitted for HTTPS egress from sandbox pods on GKE Dataplane V2:
 // - Model APIs (*.googleapis.com)
 // - Git hosts (github.com, *.github.com, *.githubusercontent.com)
 // - Python package repositories (pypi.org, *.pypi.org, files.pythonhosted.org, *.pythonhosted.org)
-// - Tool and package distributors for Terminal-Bench tasks (astral.sh, *.astral.sh, deb.debian.org, security.debian.org, *.debian.org, archive.ubuntu.com, security.ubuntu.com, ports.ubuntu.com, *.ubuntu.com)
 var DefaultSandboxEgressHosts = []string{
 	"*.googleapis.com",
 	"github.com",
@@ -68,15 +67,6 @@ var DefaultSandboxEgressHosts = []string{
 	"*.pypi.org",
 	"files.pythonhosted.org",
 	"*.pythonhosted.org",
-	"astral.sh",
-	"*.astral.sh",
-	"deb.debian.org",
-	"security.debian.org",
-	"*.debian.org",
-	"archive.ubuntu.com",
-	"security.ubuntu.com",
-	"ports.ubuntu.com",
-	"*.ubuntu.com",
 }
 
 // CloneSandboxEgressHosts returns a defensive copy of the provided hosts slice.

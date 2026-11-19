@@ -44,18 +44,6 @@ func TestBuildServicePortalEgressPolicy(t *testing.T) {
 			wantHttpHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
 			wantHttpsHosts: []string{"deb.debian.org", "archive.ubuntu.com"},
 		},
-		{
-			name:           "mixed hosts deduplicate and trim whitespace",
-			hosts:          []string{"  github.com ", "deb.debian.org", "github.com", "", "  ", "archive.ubuntu.com"},
-			wantHttpHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHttpsHosts: []string{"github.com", "deb.debian.org", "archive.ubuntu.com"},
-		},
-		{
-			name:           "default service portal allowed hosts produce valid rules",
-			hosts:          DefaultServicePortalAllowedHosts,
-			wantHttpHosts:  []string{"deb.debian.org", "security.debian.org", "*.debian.org", "archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com", "*.ubuntu.com"},
-			wantHttpsHosts: DefaultServicePortalAllowedHosts,
-		},
 	}
 
 	for _, tc := range testCases {

@@ -297,11 +297,8 @@ type RunReconciler struct {
 	// ServicePortalClient binds egress policies to sandbox pods via the Service Portal Controller.
 	ServicePortalClient *serviceportalclient.Client
 
-	// ServicePortalAllowedHosts is the list of allowed FQDN egress hostnames for the service portal.
-	ServicePortalAllowedHosts []string
-
-	// SandboxEgressHosts is the list of allowed FQDN egress hostnames for sandboxes.
-	SandboxEgressHosts []string
+	// ServicePortalHosts is the list of allowed FQDN egress hostnames for the service portal.
+	ServicePortalHosts []string
 
 	boundPodsMu            sync.RWMutex
 	boundServicePortalPods map[types.UID]bool
@@ -792,8 +789,7 @@ func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.GitHubAppSecret = cfg.GitHubAppSecret
 	r.UIBaseURL = cfg.UIBaseURL
 	r.HeadTopUpInterval = cfg.HeadTopUpInterval
-	r.SandboxEgressHosts = cfg.SandboxEgressHosts
-	r.ServicePortalAllowedHosts = cfg.ServicePortalAllowedHosts
+	r.ServicePortalHosts = cfg.ServicePortalAllowedHosts
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
@@ -2483,7 +2479,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					StepTimeoutSeconds:     int(r.executionStepTimeout().Seconds()),
 					SandboxTask:            isSandboxTask,
 					Limits:                 taskLimits,
-					ServicePortalIntercept: r.servicePortalConfigured(),
+					ServicePortalIntercept: r.ServicePortalClient != nil,
 				})
 				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
 					logger.Error(err, "Failed to create task sandbox", "task", taskID)
@@ -2726,25 +2722,31 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 
 		if r.ServicePortalClient != nil && !r.isServicePortalPodBound(pod.UID) {
+			if pod.Spec.NodeName == "" {
+				continue
+			}
 			bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 			bindError := r.bindServicePortalPolicy(bindContext, string(pod.UID))
 			bindCancel()
 			if bindError != nil {
-				terminalFailures[t.ID] = fmt.Sprintf("service portal bind failed: %v", bindError)
+				terminalFailures[t.ID] = bindError.Error()
 				continue
 			}
 			r.markServicePortalPodBound(pod.UID)
 		}
 
 		if pod.Status.Phase == corev1.PodFailed {
+			r.unmarkServicePortalPodBound(pod.UID)
 			terminalFailures[t.ID] = taskPodFailureMessage(&pod)
 			continue
 		}
 		if pod.Status.Phase == corev1.PodSucceeded {
+			r.unmarkServicePortalPodBound(pod.UID)
 			terminalFailures[t.ID] = "task pod succeeded unexpectedly before execution"
 			continue
 		}
 		if failureMessage := taskPodInitFailureMessage(&pod); failureMessage != "" {
+			r.unmarkServicePortalPodBound(pod.UID)
 			terminalFailures[t.ID] = failureMessage
 			continue
 		}
@@ -2893,6 +2895,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		wg.Add(1)
 		go func(task v1alpha1.TaskStatus, sb sandboxv1beta1.Sandbox, pod corev1.Pod) {
 			defer wg.Done()
+			defer r.unmarkServicePortalPodBound(pod.UID)
 			res := r.executeTask(ctx, run, task.ID, &sb, &pod)
 			resultsChan <- res
 		}(item.task, item.sandbox, item.pod)
@@ -3200,21 +3203,6 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			logger.Error(closeErr, "failed to close sandbox client")
 		}
 	}()
-
-	if r.ServicePortalClient != nil && !r.isServicePortalPodBound(pod.UID) {
-		bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-		defer bindCancel()
-		if err := r.bindServicePortalPolicy(bindContext, string(pod.UID)); err != nil {
-			logger.Error(err, "service portal bind failed", "task", taskID, "podUID", pod.UID)
-			return taskExecutionResult{
-				taskID:      taskID,
-				phase:       v1alpha1.TaskPhaseFailed,
-				message:     fmt.Sprintf("service portal bind failed: %v", err),
-				sampleRange: effRange,
-			}
-		}
-		r.markServicePortalPodBound(pod.UID)
-	}
 
 	if isSandboxOnlyTask(*targetTask) {
 		return r.executeSandboxTask(ctx, run, taskID, sbClient, *targetTask, effRange, startTime)

@@ -544,7 +544,6 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	servicePortalAddress := fs.String("service-portal-controller-address", "", "service portal controller address")
 	servicePortalCA := fs.String("service-portal-controller-ca-file", "", "service portal controller ca file")
 	servicePortalToken := fs.String("service-portal-token-file", "", "service portal token file")
-	servicePortalAllowedHosts := fs.String("service-portal-allowed-hosts", "", "service portal allowed hosts")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
 	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--service-portal-controller-address=127.0.0.1:8443"})
@@ -552,7 +551,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken, *servicePortalAllowedHosts)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -2235,60 +2234,6 @@ func TestResolveConfig_SandboxEgressHosts(t *testing.T) {
 	}
 	if cfgFlagNone.SandboxEgressHosts != nil {
 		t.Errorf("expected nil SandboxEgressHosts with flag none, got %v", cfgFlagNone.SandboxEgressHosts)
-	}
-}
-
-func TestResolveConfig_ServicePortalAllowedHosts(t *testing.T) {
-	// 1. Built-in default when nil or key omitted
-	cfgDef, err := ResolveConfig(nil, RawFlags{})
-	if err != nil {
-		t.Fatalf("unexpected error for nil ConfigMap: %v", err)
-	}
-	if !reflect.DeepEqual(cfgDef.ServicePortalAllowedHosts, DefaultServicePortalAllowedHosts) {
-		t.Errorf("expected default ServicePortalAllowedHosts %v, got %v", DefaultServicePortalAllowedHosts, cfgDef.ServicePortalAllowedHosts)
-	}
-
-	// 2. ConfigMap specifies comma-separated hosts
-	cmHosts := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
-		Data:       map[string]string{ConfigMapKeyServicePortalAllowedHosts: "github.com, *.googleapis.com, deb.debian.org"},
-	}
-	cfgHosts, err := ResolveConfig(cmHosts, RawFlags{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expectedHosts := []string{"github.com", "*.googleapis.com", "deb.debian.org"}
-	if !reflect.DeepEqual(cfgHosts.ServicePortalAllowedHosts, expectedHosts) {
-		t.Errorf("expected ServicePortalAllowedHosts %v, got %v", expectedHosts, cfgHosts.ServicePortalAllowedHosts)
-	}
-
-	// 3. ConfigMap specifies "disabled" (disables allowed hosts, resulting in empty policy)
-	cmDisabled := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigMapName, Namespace: "eval-runner"},
-		Data:       map[string]string{ConfigMapKeyServicePortalAllowedHosts: "disabled"},
-	}
-	cfgDisabled, err := ResolveConfig(cmDisabled, RawFlags{})
-	if err != nil {
-		t.Fatalf("unexpected error for disabled sentinel: %v", err)
-	}
-	if len(cfgDisabled.ServicePortalAllowedHosts) != 0 {
-		t.Errorf("expected empty ServicePortalAllowedHosts for disabled sentinel, got %v", cfgDisabled.ServicePortalAllowedHosts)
-	}
-
-	// 4. Flag override
-	flagsOverride := RawFlags{
-		ServicePortalAllowedHosts: "repo.example.com, api.example.com",
-		Explicit: map[string]bool{
-			"service-portal-allowed-hosts": true,
-		},
-	}
-	cfgFlag, err := ResolveConfig(cmHosts, flagsOverride)
-	if err != nil {
-		t.Fatalf("unexpected error with flag override: %v", err)
-	}
-	expectedFlagHosts := []string{"repo.example.com", "api.example.com"}
-	if !reflect.DeepEqual(cfgFlag.ServicePortalAllowedHosts, expectedFlagHosts) {
-		t.Errorf("expected flag override %v, got %v", expectedFlagHosts, cfgFlag.ServicePortalAllowedHosts)
 	}
 }
 

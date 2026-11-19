@@ -16,7 +16,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -50,35 +49,20 @@ var DefaultServicePortalAllowedHosts = []string{
 }
 
 func isPackageMirrorHost(host string) bool {
-	return host == "deb.debian.org" ||
-		host == "security.debian.org" ||
-		host == "*.debian.org" ||
-		host == "archive.ubuntu.com" ||
-		host == "security.ubuntu.com" ||
-		host == "ports.ubuntu.com" ||
-		host == "*.ubuntu.com" ||
-		strings.HasSuffix(host, ".debian.org") ||
-		strings.HasSuffix(host, ".ubuntu.com")
+	return strings.HasSuffix(host, ".debian.org") || strings.HasSuffix(host, ".ubuntu.com")
 }
 
 // BuildServicePortalEgressPolicy constructs an EgressPolicy proto for the given allowed hosts.
 // It creates an HTTPS allow rule for all hostnames and an HTTP allow rule only for package mirrors.
 func BuildServicePortalEgressPolicy(hosts []string) *portalsv1.EgressPolicy {
-	var cleanHosts []string
-	var httpHosts []string
-	seen := make(map[string]bool)
-	for _, host := range hosts {
-		trimmed := strings.TrimSpace(host)
-		if trimmed != "" && !seen[trimmed] {
-			seen[trimmed] = true
-			cleanHosts = append(cleanHosts, trimmed)
-			if isPackageMirrorHost(trimmed) {
-				httpHosts = append(httpHosts, trimmed)
-			}
-		}
-	}
-	if len(cleanHosts) == 0 {
+	if len(hosts) == 0 {
 		return &portalsv1.EgressPolicy{}
+	}
+	var httpHosts []string
+	for _, host := range hosts {
+		if isPackageMirrorHost(host) {
+			httpHosts = append(httpHosts, host)
+		}
 	}
 	var rules []*portalsv1.EgressRule
 	if len(httpHosts) > 0 {
@@ -90,7 +74,7 @@ func BuildServicePortalEgressPolicy(hosts []string) *portalsv1.EgressPolicy {
 	}
 	rules = append(rules, &portalsv1.EgressRule{
 		Https: &portalsv1.HttpsRule{
-			Hostnames: append([]string(nil), cleanHosts...),
+			Hostnames: append([]string(nil), hosts...),
 		},
 	})
 	return &portalsv1.EgressPolicy{
@@ -98,21 +82,14 @@ func BuildServicePortalEgressPolicy(hosts []string) *portalsv1.EgressPolicy {
 	}
 }
 
-func (r *RunReconciler) servicePortalConfigured() bool {
-	return r.ServicePortalClient != nil
-}
-
 func (r *RunReconciler) servicePortalPolicy() *portalsv1.EgressPolicy {
 	r.cfgMu.RLock()
-	hosts := r.ServicePortalAllowedHosts
+	hosts := r.ServicePortalHosts
 	r.cfgMu.RUnlock()
 	return BuildServicePortalEgressPolicy(hosts)
 }
 
 func (r *RunReconciler) bindServicePortalPolicy(ctx context.Context, podUID string) error {
-	if podUID == "" {
-		return errors.New("service portal bind failed: pod UID is empty")
-	}
 	policy := r.servicePortalPolicy()
 	if err := r.ServicePortalClient.Bind(ctx, podUID, policy, nil); err != nil {
 		return fmt.Errorf("service portal bind failed: %w", err)

@@ -265,7 +265,6 @@ type RawFlags struct {
 	ServicePortalControllerAddress string
 	ServicePortalCAFile            string
 	ServicePortalTokenFile         string
-	ServicePortalAllowedHosts      string
 	StrictConfig                   bool
 	Explicit                       map[string]bool
 }
@@ -343,7 +342,7 @@ func FlagsFromFlagSet(
 	pollProgressInterval time.Duration,
 	affinityMode string,
 	sandboxEgressHosts string,
-	servicePortalControllerAddress, servicePortalCAFile, servicePortalTokenFile, servicePortalAllowedHosts string,
+	servicePortalControllerAddress, servicePortalCAFile, servicePortalTokenFile string,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
@@ -371,7 +370,6 @@ func FlagsFromFlagSet(
 		ServicePortalControllerAddress: servicePortalControllerAddress,
 		ServicePortalCAFile:            servicePortalCAFile,
 		ServicePortalTokenFile:         servicePortalTokenFile,
-		ServicePortalAllowedHosts:      servicePortalAllowedHosts,
 		StrictConfig:                   strictConfig,
 		Explicit:                       explicit,
 	}
@@ -947,14 +945,6 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 	if flags.IsExplicit("service-portal-token-file") {
 		cfg.ServicePortalTokenFile = strings.TrimSpace(flags.ServicePortalTokenFile)
-	}
-	if flags.IsExplicit("service-portal-allowed-hosts") {
-		trimmed := strings.TrimSpace(flags.ServicePortalAllowedHosts)
-		if strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
-			cfg.ServicePortalAllowedHosts = nil
-		} else {
-			cfg.ServicePortalAllowedHosts = discovery.ParseHostList(flags.ServicePortalAllowedHosts)
-		}
 	}
 
 	if cfg.ServicePortalControllerAddress != "" {
