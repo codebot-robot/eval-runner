@@ -500,7 +500,7 @@ else
 
   if [[ "${DRY_RUN}" == "true" ]]; then
     run_cmd "${SERVICE_PORTALS_DIR}/dev/tasks/configure" --client-allowlist=system:serviceaccount:eval-runner:eval-runner-controller
-    (cd "${SERVICE_PORTALS_DIR}" && run_cmd "${AP_CMD[@]}" deploy --dry-run "${SERVICE_PORTALS_DEPLOY_ARGS[@]}" k8s/controller.yaml k8s/node-agent.yaml)
+    (cd "${SERVICE_PORTALS_DIR}" && run_cmd "${AP_CMD[@]}" deploy --dry-run "${SERVICE_PORTALS_DEPLOY_ARGS[@]+"${SERVICE_PORTALS_DEPLOY_ARGS[@]}"}" k8s/controller.yaml k8s/node-agent.yaml)
     if [[ "${RESTART}" == "true" || "${SERVICE_PORTAL_CERTS_GENERATED}" == "true" ]]; then
       run_cmd kubectl -n service-portal-system rollout restart deployment/service-portal-controller
       run_cmd kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
@@ -509,7 +509,7 @@ else
     run_cmd kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
   else
     "${SERVICE_PORTALS_DIR}/dev/tasks/configure" --client-allowlist=system:serviceaccount:eval-runner:eval-runner-controller
-    (cd "${SERVICE_PORTALS_DIR}" && "${AP_CMD[@]}" deploy "${SERVICE_PORTALS_DEPLOY_ARGS[@]}" k8s/controller.yaml k8s/node-agent.yaml)
+    (cd "${SERVICE_PORTALS_DIR}" && "${AP_CMD[@]}" deploy "${SERVICE_PORTALS_DEPLOY_ARGS[@]+"${SERVICE_PORTALS_DEPLOY_ARGS[@]}"}" k8s/controller.yaml k8s/node-agent.yaml)
 
     if [[ "${RESTART}" == "true" || "${SERVICE_PORTAL_CERTS_GENERATED}" == "true" ]]; then
       kubectl -n service-portal-system rollout restart deployment/service-portal-controller
@@ -556,7 +556,7 @@ else
   fi
 
   if [[ "${DRY_RUN}" == "true" ]]; then
-    run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run "${DEPLOY_ARGS[@]}"
+    run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run "${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}"
     if [[ "${RESTART}" == "true" ]]; then
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
@@ -567,7 +567,7 @@ else
     done
     run_cmd kubectl -n eval-runner logs deployment/eval-runner-controller --since-time="${STARTED_TIME}"
   else
-    "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]}"
+    "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}"
     if [[ "${RESTART}" == "true" ]]; then
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
