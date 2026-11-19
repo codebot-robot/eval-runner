@@ -293,6 +293,12 @@ type RunReconciler struct {
 	// HeadTopUpInterval is the interval between periodic head top-up Runs.
 	HeadTopUpInterval time.Duration
 
+	// ServicePortalClient binds egress policies to sandbox pods via the Service Portal Controller.
+	ServicePortalClient ServicePortalClient
+
+	// SandboxEgressHosts is the list of allowed FQDN egress hostnames for sandboxes.
+	SandboxEgressHosts []string
+
 	noCredsLoggedMu sync.Mutex
 	noCredsLogged   bool
 
@@ -779,6 +785,7 @@ func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.GitHubAppSecret = cfg.GitHubAppSecret
 	r.UIBaseURL = cfg.UIBaseURL
 	r.HeadTopUpInterval = cfg.HeadTopUpInterval
+	r.SandboxEgressHosts = cfg.SandboxEgressHosts
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
@@ -2456,18 +2463,19 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				}
 
 				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
-					Namespace:          r.sandboxNamespace(),
-					SampleRunnerImage:  r.sampleRunnerImage(),
-					Image:              taskImage,
-					ModelSecret:        effectiveModelSecret,
-					AuthTokenDigest:    discovery.AuthTokenDigest(token),
-					ServerCertSecret:   pki.ServerSecretName(sbName),
-					CAConfigMap:        pki.DefaultCAConfigMapName,
-					SandboxdImage:      r.sandboxdImage(),
-					CloneRepo:          isSandboxTask && run.Spec.Repo.URL != "",
-					StepTimeoutSeconds: int(r.executionStepTimeout().Seconds()),
-					SandboxTask:        isSandboxTask,
-					Limits:             taskLimits,
+					Namespace:              r.sandboxNamespace(),
+					SampleRunnerImage:      r.sampleRunnerImage(),
+					Image:                  taskImage,
+					ModelSecret:            effectiveModelSecret,
+					AuthTokenDigest:        discovery.AuthTokenDigest(token),
+					ServerCertSecret:       pki.ServerSecretName(sbName),
+					CAConfigMap:            pki.DefaultCAConfigMapName,
+					SandboxdImage:          r.sandboxdImage(),
+					CloneRepo:              isSandboxTask && run.Spec.Repo.URL != "",
+					StepTimeoutSeconds:     int(r.executionStepTimeout().Seconds()),
+					SandboxTask:            isSandboxTask,
+					Limits:                 taskLimits,
+					ServicePortalIntercept: r.servicePortalConfigured(),
 				})
 				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
 					logger.Error(err, "Failed to create task sandbox", "task", taskID)
@@ -3173,6 +3181,18 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			logger.Error(closeErr, "failed to close sandbox client")
 		}
 	}()
+
+	if r.servicePortalConfigured() {
+		if err := r.bindServicePortalPolicy(ctx, pod); err != nil {
+			logger.Error(err, "service portal bind failed", "task", taskID, "podUID", pod.UID)
+			return taskExecutionResult{
+				taskID:      taskID,
+				phase:       v1alpha1.TaskPhaseFailed,
+				message:     err.Error(),
+				sampleRange: effRange,
+			}
+		}
+	}
 
 	if isSandboxOnlyTask(*targetTask) {
 		return r.executeSandboxTask(ctx, run, taskID, sbClient, *targetTask, effRange, startTime)
