@@ -58,6 +58,12 @@ spec:
         - name: gcp-token
           mountPath: /var/run/secrets/eval-runner/gcp
           readOnly: true
+        - name: service-portal-ca
+          mountPath: /etc/service-portal
+          readOnly: true
+        - name: service-portal-token
+          mountPath: /var/run/secrets/service-portal
+          readOnly: true
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -94,5 +100,17 @@ spec:
           sources:
           - serviceAccountToken:
               audience: eval-runner.gke-labs.dev/gcp-workload-identity
+              expirationSeconds: 3600
+              path: token
+      # Written into the eval-runner namespace by the service-portals install step; optional so the controller starts before the portal is installed.
+      - name: service-portal-ca
+        secret:
+          secretName: service-portal-controller-ca
+          optional: true
+      - name: service-portal-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: "https://service-portal-controller"
               expirationSeconds: 3600
               path: token

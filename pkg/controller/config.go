@@ -35,6 +35,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	"github.com/gke-labs/eval-runner/pkg/github"
+	"github.com/gke-labs/eval-runner/pkg/serviceportal"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -93,6 +94,13 @@ const (
 	ConfigMapKeySandboxEgressHosts = configkeys.ConfigMapKeySandboxEgressHosts
 	// ConfigMapKeyRepositories is the ConfigMap key for tracked repositories.
 	ConfigMapKeyRepositories = configkeys.ConfigMapKeyRepositories
+
+	// ConfigMapKeyServicePortalControllerAddress is the ConfigMap key for the Service Portal Controller address.
+	ConfigMapKeyServicePortalControllerAddress = configkeys.ConfigMapKeyServicePortalControllerAddress
+	// ConfigMapKeyServicePortalControllerCAFile is the ConfigMap key for the Service Portal Controller CA certificate file path.
+	ConfigMapKeyServicePortalControllerCAFile = configkeys.ConfigMapKeyServicePortalControllerCAFile
+	// ConfigMapKeyServicePortalTokenFile is the ConfigMap key for the Service Portal Controller token file path.
+	ConfigMapKeyServicePortalTokenFile = configkeys.ConfigMapKeyServicePortalTokenFile
 )
 
 const (
@@ -148,6 +156,11 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyHeadTopUpInterval:        {},
 	configkeys.ConfigMapKeyHeadTargetCIHalfWidth:    {},
 	configkeys.ConfigMapKeyHeadMaxSamplesPerTask:    {},
+
+	// Service Portal Controller
+	configkeys.ConfigMapKeyServicePortalControllerAddress: {},
+	configkeys.ConfigMapKeyServicePortalControllerCAFile:  {},
+	configkeys.ConfigMapKeyServicePortalTokenFile:         {},
 
 	// Workload Identity Federation
 	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
@@ -217,30 +230,38 @@ type ClusterConfig struct {
 
 	// GCPWorkloadIdentityProvider is the GCP Workload Identity Federation provider resource name.
 	GCPWorkloadIdentityProvider string
+
+	// Service Portal Controller settings
+	ServicePortalControllerAddress string
+	ServicePortalCAFile            string
+	ServicePortalTokenFile         string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
 type RawFlags struct {
-	ArtifactBucket         string
-	ArtifactDir            string
-	ArtifactMaxUploadBytes int64
-	DiscoveryDeadline      time.Duration
-	ExecutionDeadline      time.Duration
-	GitHubTokenSecret      string
-	GitHubAppSecret        string
-	InconclusivePolicy     string
-	MaxParallelTasks       int
-	ModelSecret            string
-	PollProgressInterval   time.Duration
-	SandboxdImage          string
-	TaskGracePeriod        time.Duration
-	UIBaseURL              string
-	ComparisonTTL          time.Duration
-	CommandUsers           string
-	AffinityMode           string
-	SandboxEgressHosts     string
-	StrictConfig           bool
-	Explicit               map[string]bool
+	ArtifactBucket                 string
+	ArtifactDir                    string
+	ArtifactMaxUploadBytes         int64
+	DiscoveryDeadline              time.Duration
+	ExecutionDeadline              time.Duration
+	GitHubTokenSecret              string
+	GitHubAppSecret                string
+	InconclusivePolicy             string
+	MaxParallelTasks               int
+	ModelSecret                    string
+	PollProgressInterval           time.Duration
+	SandboxdImage                  string
+	TaskGracePeriod                time.Duration
+	UIBaseURL                      string
+	ComparisonTTL                  time.Duration
+	CommandUsers                   string
+	AffinityMode                   string
+	SandboxEgressHosts             string
+	ServicePortalControllerAddress string
+	ServicePortalCAFile            string
+	ServicePortalTokenFile         string
+	StrictConfig                   bool
+	Explicit                       map[string]bool
 }
 
 // IsExplicit reports whether a flag by name was explicitly set on the command line.
@@ -285,7 +306,19 @@ func DefaultClusterConfig() ClusterConfig {
 		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
 		RateLimitFloorPercent:    syncer.DefaultRateFloorPercent,
 
-		GCPWorkloadIdentityProvider: "",
+		GCPWorkloadIdentityProvider:    "",
+		ServicePortalControllerAddress: "",
+		ServicePortalCAFile:            "",
+		ServicePortalTokenFile:         "",
+	}
+}
+
+// ServicePortalOptions returns the serviceportal.Options corresponding to the cluster configuration.
+func (cfg ClusterConfig) ServicePortalOptions() serviceportal.Options {
+	return serviceportal.Options{
+		ControllerAddress: cfg.ServicePortalControllerAddress,
+		CAFile:            cfg.ServicePortalCAFile,
+		TokenFile:         cfg.ServicePortalTokenFile,
 	}
 }
 
@@ -303,32 +336,36 @@ func FlagsFromFlagSet(
 	pollProgressInterval time.Duration,
 	affinityMode string,
 	sandboxEgressHosts string,
+	servicePortalControllerAddress, servicePortalCAFile, servicePortalTokenFile string,
 ) RawFlags {
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
 		explicit[f.Name] = true
 	})
 	return RawFlags{
-		ArtifactBucket:         artifactBucket,
-		ArtifactDir:            artifactDir,
-		ArtifactMaxUploadBytes: artifactMaxUploadBytes,
-		DiscoveryDeadline:      discoveryDeadline,
-		ExecutionDeadline:      executionDeadline,
-		GitHubTokenSecret:      gitHubTokenSecret,
-		GitHubAppSecret:        gitHubAppSecret,
-		InconclusivePolicy:     inconclusivePolicy,
-		MaxParallelTasks:       maxParallelTasks,
-		ModelSecret:            modelSecret,
-		PollProgressInterval:   pollProgressInterval,
-		SandboxdImage:          sandboxdImage,
-		TaskGracePeriod:        taskGracePeriod,
-		UIBaseURL:              uiBaseURL,
-		ComparisonTTL:          comparisonTTL,
-		CommandUsers:           commandUsers,
-		AffinityMode:           affinityMode,
-		SandboxEgressHosts:     sandboxEgressHosts,
-		StrictConfig:           strictConfig,
-		Explicit:               explicit,
+		ArtifactBucket:                 artifactBucket,
+		ArtifactDir:                    artifactDir,
+		ArtifactMaxUploadBytes:         artifactMaxUploadBytes,
+		DiscoveryDeadline:              discoveryDeadline,
+		ExecutionDeadline:              executionDeadline,
+		GitHubTokenSecret:              gitHubTokenSecret,
+		GitHubAppSecret:                gitHubAppSecret,
+		InconclusivePolicy:             inconclusivePolicy,
+		MaxParallelTasks:               maxParallelTasks,
+		ModelSecret:                    modelSecret,
+		PollProgressInterval:           pollProgressInterval,
+		SandboxdImage:                  sandboxdImage,
+		TaskGracePeriod:                taskGracePeriod,
+		UIBaseURL:                      uiBaseURL,
+		ComparisonTTL:                  comparisonTTL,
+		CommandUsers:                   commandUsers,
+		AffinityMode:                   affinityMode,
+		SandboxEgressHosts:             sandboxEgressHosts,
+		ServicePortalControllerAddress: servicePortalControllerAddress,
+		ServicePortalCAFile:            servicePortalCAFile,
+		ServicePortalTokenFile:         servicePortalTokenFile,
+		StrictConfig:                   strictConfig,
+		Explicit:                       explicit,
 	}
 }
 
@@ -766,6 +803,17 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		} else if cfg.DefaultMaxSamplesPerTask > 0 {
 			cfg.HeadMaxSamplesPerTask = cfg.DefaultMaxSamplesPerTask
 		}
+
+		// Service Portal Controller settings
+		if val, ok := cm.Data[ConfigMapKeyServicePortalControllerAddress]; ok {
+			cfg.ServicePortalControllerAddress = strings.TrimSpace(val)
+		}
+		if val, ok := cm.Data[ConfigMapKeyServicePortalControllerCAFile]; ok {
+			cfg.ServicePortalCAFile = strings.TrimSpace(val)
+		}
+		if val, ok := cm.Data[ConfigMapKeyServicePortalTokenFile]; ok {
+			cfg.ServicePortalTokenFile = strings.TrimSpace(val)
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -872,6 +920,21 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 	if flags.IsExplicit("command-users") {
 		cfg.CommandUsers = ParseUserList(flags.CommandUsers)
+	}
+	if flags.IsExplicit("service-portal-controller-address") {
+		cfg.ServicePortalControllerAddress = strings.TrimSpace(flags.ServicePortalControllerAddress)
+	}
+	if flags.IsExplicit("service-portal-controller-ca-file") {
+		cfg.ServicePortalCAFile = strings.TrimSpace(flags.ServicePortalCAFile)
+	}
+	if flags.IsExplicit("service-portal-token-file") {
+		cfg.ServicePortalTokenFile = strings.TrimSpace(flags.ServicePortalTokenFile)
+	}
+
+	if cfg.ServicePortalControllerAddress != "" {
+		if err := cfg.ServicePortalOptions().Validate(); err != nil {
+			return cfg, err
+		}
 	}
 
 	return cfg, nil

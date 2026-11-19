@@ -140,6 +140,12 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 			var tokenVolumeName string
 
 			for _, vol := range podSpec.Volumes {
+				if vol.Name != "gcp-token" {
+					if vol.Name == "gcp-credentials" {
+						t.Errorf("unexpected credentials volume %q found in %s", vol.Name, tc.manifestPath)
+					}
+					continue
+				}
 				if vol.Projected != nil {
 					for _, src := range vol.Projected.Sources {
 						if src.ServiceAccountToken != nil {
@@ -158,9 +164,6 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 							}
 						}
 					}
-				}
-				if vol.Name == "gcp-credentials" {
-					t.Errorf("unexpected credentials volume %q found in %s", vol.Name, tc.manifestPath)
 				}
 			}
 

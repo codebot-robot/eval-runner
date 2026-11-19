@@ -66,6 +66,15 @@ const (
 	// ConfigMapKeyModelPrices is the ConfigMap key for model pricing table (JSON map model -> {inputPer1M, outputPer1M} in USD).
 	ConfigMapKeyModelPrices = "modelPrices"
 
+	// Service Portal keys (Service Portal Controller)
+
+	// ConfigMapKeyServicePortalControllerAddress is the ConfigMap key for the Service Portal Controller address (host:port).
+	ConfigMapKeyServicePortalControllerAddress = "servicePortalControllerAddress"
+	// ConfigMapKeyServicePortalControllerCAFile is the ConfigMap key for the Service Portal Controller CA certificate file path.
+	ConfigMapKeyServicePortalControllerCAFile = "servicePortalControllerCAFile"
+	// ConfigMapKeyServicePortalTokenFile is the ConfigMap key for the Service Portal Controller token file path.
+	ConfigMapKeyServicePortalTokenFile = "servicePortalTokenFile"
+
 	// Webhook keys
 
 	// ConfigMapKeyGitHubWebhookSecret is the ConfigMap key for the webhook secret name (used by eval-runner-webhook).
