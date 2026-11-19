@@ -25,13 +25,6 @@ fi
 
 export GOTOOLCHAIN=auto
 
-AP_CMD=()
-if command -v ap >/dev/null 2>&1; then
-  AP_CMD=(ap)
-else
-  AP_CMD=(go run github.com/gke-labs/gke-labs-infra/ap@latest)
-fi
-
 # shellcheck source=dev/tasks/versions.sh
 source "${REPO_ROOT}/dev/tasks/versions.sh"
 
@@ -486,13 +479,11 @@ if [[ "${SKIP_DEPLOY}" == "true" ]]; then
 else
   step "Service portal deployment (${SERVICE_PORTALS_COMMIT})"
 
-  SERVICE_PORTALS_DIR="${SERVICE_PORTALS_DIR:-}"
-  if [[ -z "${SERVICE_PORTALS_DIR}" ]]; then
-    if [[ -d "${REPO_ROOT}/../service-portals/.git" ]]; then
-      SERVICE_PORTALS_DIR="${REPO_ROOT}/../service-portals"
-    else
-      SERVICE_PORTALS_DIR="$(ensure_cached_repo "service-portals" "https://github.com/gke-labs/service-portals.git" "${SERVICE_PORTALS_COMMIT}")"
-    fi
+  if [[ -n "${SERVICE_PORTALS_DIR:-}" ]]; then
+    OVERRIDE_COMMIT="$(git -C "${SERVICE_PORTALS_DIR}" rev-parse HEAD 2>/dev/null || echo "unknown")"
+    echo "    using SERVICE_PORTALS_DIR override at commit ${OVERRIDE_COMMIT} (${SERVICE_PORTALS_DIR})"
+  else
+    SERVICE_PORTALS_DIR="$(ensure_cached_repo "service-portals" "https://github.com/gke-labs/service-portals.git" "${SERVICE_PORTALS_COMMIT}")"
   fi
 
   PARENT_DIR="$(cd "$(dirname "${SERVICE_PORTALS_DIR}")" 2>/dev/null && pwd || true)"

@@ -26,3 +26,8 @@ GATEWAY_API_VERSION="v1.2.0"
 SANDBOXD_COMMIT="0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7"
 SANDBOXD_TAG="0d9e0d2"
 SERVICE_PORTALS_COMMIT="e50614235606f3fbdc233d5fd5ae432d26eb52b3"
+
+# Determine ap version from .ap/ap.yaml; always invoke via go run, never use a PATH binary
+AP_VERSION="$(awk -F': *' '/^[[:space:]]*version:[[:space:]]*/ {gsub(/["'\'' ]/, "", $2); print $2}' "${REPO_ROOT}/.ap/ap.yaml" 2>/dev/null || true)"
+AP_VERSION="${AP_VERSION:-latest}"
+AP_CMD=(go run "github.com/gke-labs/gke-labs-infra/ap@${AP_VERSION}")

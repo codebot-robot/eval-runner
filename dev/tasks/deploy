@@ -32,10 +32,8 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 export IMAGE_TAG="${IMAGE_TAG:-${TAG}}"
 
-# Determine ap version from .ap/ap.yaml; always invoke via go run, never use a PATH binary
-AP_VERSION="$(awk -F': *' '/^[[:space:]]*version:[[:space:]]*/ {gsub(/["'\'' ]/, "", $2); print $2}' "${REPO_ROOT}/.ap/ap.yaml" 2>/dev/null || true)"
-AP_VERSION="${AP_VERSION:-latest}"
-AP_CMD=(go run "github.com/gke-labs/gke-labs-infra/ap@${AP_VERSION}")
+# shellcheck source=dev/tasks/versions.sh
+source "${REPO_ROOT}/dev/tasks/versions.sh"
 
 verify_index_has_amd64() {
   local inspect_output="$1"
