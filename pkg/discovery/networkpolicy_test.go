@@ -294,8 +294,8 @@ func TestRenderSandboxEgressNetworkPolicy_Golden(t *testing.T) {
 	if gitPort.Protocol == nil || *gitPort.Protocol != corev1.ProtocolTCP {
 		t.Errorf("expected TCP protocol for git fixture, got %v", gitPort.Protocol)
 	}
-	if gitPort.Port == nil || gitPort.Port.IntVal != 9418 {
-		t.Errorf("expected port 9418 for git fixture, got %v", gitPort.Port)
+	if gitPort.Port == nil || gitPort.Port.IntVal != 80 {
+		t.Errorf("expected port 80 for git fixture, got %v", gitPort.Port)
 	}
 }
 

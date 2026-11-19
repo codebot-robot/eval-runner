@@ -346,7 +346,7 @@ func RenderSandboxEgressNetworkPolicyWithName(name, namespace string, fqdnActive
 		Ports: []networkingv1.NetworkPolicyPort{
 			{
 				Protocol: &tcpProto,
-				Port:     &port9418,
+				Port:     &port80,
 			},
 		},
 	}
