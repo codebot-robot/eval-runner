@@ -633,10 +633,10 @@ For evaluations requiring other model providers or custom environments, a reposi
 
 ### Service Portal NRI Mode with Central Controller (Model Gateway Interception)
 
-The `service-portal-controller` Deployment (`k8s/service-portal-controller.yaml`) and `portal-node-agent` DaemonSet (`k8s/service-portal-node-agent.yaml`) run in namespace `service-portal-system` using Node Resource Interface (NRI) mode from `gke-labs/service-portals`.
+The `service-portal-controller` Deployment and `portal-node-agent` DaemonSet run in namespace `service-portal-system` using Node Resource Interface (NRI) mode deployed from `gke-labs/service-portals`.
 
-- `service-portal-controller` (`service-portal-controller`): Central gRPC controller that receives egress policies from the sandbox controller and pushes them to node agents.
-- `portal-node-agent` (`service-portal-agent`, `service-portal-nri-plugin`): Per-node agent connecting to containerd (`/var/run/nri/nri.sock`) that redirects intercepted traffic to a local proxy, dynamically mints TLS certificates, and swaps authentic credentials based on bound egress policies.
+- `service-portal-controller`: Central gRPC controller that receives egress policies from the sandbox controller and pushes them to node agents.
+- `portal-node-agent`: Per-node agent connecting to containerd (`/var/run/nri/nri.sock`) that redirects intercepted traffic to a local proxy, dynamically mints TLS certificates, and swaps authentic credentials based on bound egress policies.
 
 #### Node Prerequisite
 

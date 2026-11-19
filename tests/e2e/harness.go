@@ -129,12 +129,12 @@ func (h *Harness) DeployEvalRunner() {
 		"--set", "allowedCloneHosts=github.com,git-server.eval-runner-sandbox.svc",
 	)
 
-	// Verify service-portal controller and node agent are ready
-	h.t.Log("Verifying service-portal-controller and portal-node-agent readiness...")
+	// Verify service portal controller and service portal node agent readiness
+	h.t.Log("Verifying service portal controller and service portal node agent readiness...")
 	controllerRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "deployment/service-portal-controller", "--timeout=60s")
-	h.t.Logf("service-portal-controller: %s", strings.TrimSpace(controllerRollout))
+	h.t.Logf("service portal controller: %s", strings.TrimSpace(controllerRollout))
 	agentRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "daemonset/portal-node-agent", "--timeout=60s")
-	h.t.Logf("portal-node-agent: %s", strings.TrimSpace(agentRollout))
+	h.t.Logf("service portal node agent: %s", strings.TrimSpace(agentRollout))
 
 	// Apply Secret for eval-runner-webhook HMAC signature verification
 	secManifest := `

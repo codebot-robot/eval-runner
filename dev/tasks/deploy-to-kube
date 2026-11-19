@@ -25,6 +25,13 @@ fi
 
 export GOTOOLCHAIN=auto
 
+AP_CMD=()
+if command -v ap >/dev/null 2>&1; then
+  AP_CMD=(ap)
+else
+  AP_CMD=(go run github.com/gke-labs/gke-labs-infra/ap@latest)
+fi
+
 # shellcheck source=dev/tasks/versions.sh
 source "${REPO_ROOT}/dev/tasks/versions.sh"
 
@@ -221,6 +228,32 @@ wait_for_effective_settings() {
   echo "    the deploy succeeded. Check with: kubectl -n eval-runner logs deployment/eval-runner-controller | grep 'effective cluster settings'"
 }
 
+ensure_cached_repo() {
+  local repo_name="$1"
+  local repo_url="$2"
+  local commit="$3"
+  local cache_base="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/eval-runner"
+  local target_dir="${cache_base}/${repo_name}/${commit}"
+
+  if [[ -d "${target_dir}/.git" ]]; then
+    local current_commit
+    current_commit="$(git -C "${target_dir}" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "${current_commit}" == "${commit}"* ]]; then
+      echo "${target_dir}"
+      return 0
+    fi
+  fi
+
+  echo "    cloning ${repo_name} at ref ${commit}..." >&2
+  mkdir -p "$(dirname "${target_dir}")"
+  if [[ ! -d "${target_dir}/.git" ]]; then
+    git clone "${repo_url}" "${target_dir}" >&2
+  fi
+  git -C "${target_dir}" fetch origin >&2
+  git -C "${target_dir}" checkout "${commit}" >&2
+  echo "${target_dir}"
+}
+
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "dry run: mutating commands are printed, not executed"
 fi
@@ -389,9 +422,9 @@ else
   fi
 fi
 
-# Step 5b: Service portal TLS certificates
+# Step 6: Service portal TLS certificates
 step "Service portal TLS certificates"
-CERTS_GENERATED=false
+SERVICE_PORTAL_CERTS_GENERATED=false
 if [[ "${DRY_RUN}" == "true" ]]; then
   run_cmd kubectl get secret service-portal-controller-tls -n service-portal-system
   run_cmd kubectl get secret service-portal-controller-ca -n service-portal-system
@@ -433,7 +466,7 @@ EOF
       -n eval-runner --dry-run=client -o yaml | kubectl apply -f -
 
     rm -rf "${CERT_TMPDIR}"
-    CERTS_GENERATED=true
+    SERVICE_PORTAL_CERTS_GENERATED=true
   else
     echo "    secrets service-portal-controller-tls and service-portal-controller-ca present in service-portal-system"
   fi
@@ -447,7 +480,78 @@ EOF
   fi
 fi
 
-# Step 6: Deploy manifests and images
+# Step 7: Service portal deployment
+if [[ "${SKIP_DEPLOY}" == "true" ]]; then
+  step "Service portal deployment (skipped)"
+else
+  step "Service portal deployment (${SERVICE_PORTALS_COMMIT})"
+
+  SERVICE_PORTALS_DIR="${SERVICE_PORTALS_DIR:-}"
+  if [[ -z "${SERVICE_PORTALS_DIR}" ]]; then
+    if [[ -d "${REPO_ROOT}/../service-portals/.git" ]]; then
+      SERVICE_PORTALS_DIR="${REPO_ROOT}/../service-portals"
+    else
+      SERVICE_PORTALS_DIR="$(ensure_cached_repo "service-portals" "https://github.com/gke-labs/service-portals.git" "${SERVICE_PORTALS_COMMIT}")"
+    fi
+  fi
+
+  PARENT_DIR="$(cd "$(dirname "${SERVICE_PORTALS_DIR}")" 2>/dev/null && pwd || true)"
+  RESOLVED_DIR="${PARENT_DIR}/$(basename "${SERVICE_PORTALS_DIR}")"
+  if [[ "${RESOLVED_DIR}" == "${REPO_ROOT}"* ]]; then
+    echo "ERROR: SERVICE_PORTALS_DIR (${RESOLVED_DIR}) is inside REPO_ROOT (${REPO_ROOT})." >&2
+    exit 1
+  fi
+
+  SERVICE_PORTALS_DEPLOY_ARGS=()
+  if [[ "${IS_KIND}" == "true" ]]; then
+    SERVICE_PORTALS_DEPLOY_ARGS+=(--skip-push)
+  fi
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    run_cmd "${SERVICE_PORTALS_DIR}/dev/tasks/configure" --client-allowlist=system:serviceaccount:eval-runner:eval-runner-controller
+    (cd "${SERVICE_PORTALS_DIR}" && run_cmd "${AP_CMD[@]}" deploy --dry-run "${SERVICE_PORTALS_DEPLOY_ARGS[@]}" k8s/controller.yaml k8s/node-agent.yaml)
+    if [[ "${RESTART}" == "true" || "${SERVICE_PORTAL_CERTS_GENERATED}" == "true" ]]; then
+      run_cmd kubectl -n service-portal-system rollout restart deployment/service-portal-controller
+      run_cmd kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
+    fi
+    run_cmd kubectl -n service-portal-system rollout status deployment/service-portal-controller --timeout=300s
+    run_cmd kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
+  else
+    "${SERVICE_PORTALS_DIR}/dev/tasks/configure" --client-allowlist=system:serviceaccount:eval-runner:eval-runner-controller
+    (cd "${SERVICE_PORTALS_DIR}" && "${AP_CMD[@]}" deploy "${SERVICE_PORTALS_DEPLOY_ARGS[@]}" k8s/controller.yaml k8s/node-agent.yaml)
+
+    if [[ "${RESTART}" == "true" || "${SERVICE_PORTAL_CERTS_GENERATED}" == "true" ]]; then
+      kubectl -n service-portal-system rollout restart deployment/service-portal-controller
+      kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
+    fi
+    kubectl -n service-portal-system rollout status deployment/service-portal-controller --timeout=300s
+    kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
+
+    echo "    waiting up to 60s for service portal node agent stream to connect to service-portal-controller..."
+    DEADLINE=$(( $(date +%s) + 60 ))
+    SERVICE_PORTAL_STREAM_CONNECTED=false
+    while [[ $(date +%s) -lt ${DEADLINE} ]]; do
+      CONTROLLER_LOGS="$(kubectl -n service-portal-system logs deployment/service-portal-controller --tail=1000 2>/dev/null || true)"
+      NODE_AGENT_LOGS="$(kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=1000 2>/dev/null || true)"
+      if echo "${CONTROLLER_LOGS}" | grep -q "node stream connected" || echo "${NODE_AGENT_LOGS}" | grep -q "controller: stream connected"; then
+        SERVICE_PORTAL_STREAM_CONNECTED=true
+        echo "    service portal node agent stream connected to controller"
+        break
+      fi
+      sleep 2
+    done
+    if [[ "${SERVICE_PORTAL_STREAM_CONNECTED}" != "true" ]]; then
+      echo "ERROR: service portal node agent stream to service-portal-controller did not connect within 60s" >&2
+      echo "--- Last controller logs ---" >&2
+      kubectl -n service-portal-system logs deployment/service-portal-controller --tail=50 >&2 || true
+      echo "--- Last node agent proxy logs ---" >&2
+      kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=50 >&2 || true
+      exit 1
+    fi
+  fi
+fi
+
+# Step 8: Deploy manifests and images
 if [[ "${SKIP_DEPLOY}" == "true" ]]; then
   step "Deploy (skipped)"
   echo "    --skip-deploy: run later with: IMAGE_PREFIX=${IMAGE_PREFIX} ./dev/tasks/deploy"
@@ -467,15 +571,9 @@ else
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
       done
     fi
-    if [[ "${RESTART}" == "true" || "${CERTS_GENERATED}" == "true" ]]; then
-      run_cmd kubectl -n service-portal-system rollout restart deployment/service-portal-controller
-      run_cmd kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
-    fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       run_cmd kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
-    run_cmd kubectl -n service-portal-system rollout status deployment/service-portal-controller --timeout=300s
-    run_cmd kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
     run_cmd kubectl -n eval-runner logs deployment/eval-runner-controller --since-time="${STARTED_TIME}"
   else
     "${REPO_ROOT}/dev/tasks/deploy" "${DEPLOY_ARGS[@]}"
@@ -484,37 +582,9 @@ else
         kubectl -n eval-runner rollout restart "deployment/${d}"
       done
     fi
-    if [[ "${RESTART}" == "true" || "${CERTS_GENERATED}" == "true" ]]; then
-      kubectl -n service-portal-system rollout restart deployment/service-portal-controller
-      kubectl -n service-portal-system rollout restart daemonset/portal-node-agent
-    fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
     done
-    kubectl -n service-portal-system rollout status deployment/service-portal-controller --timeout=300s
-    kubectl -n service-portal-system rollout status daemonset/portal-node-agent --timeout=300s
-
-    echo "    waiting up to 60s for node agent stream to connect to service-portal-controller..."
-    DEADLINE=$(( $(date +%s) + 60 ))
-    STREAM_CONNECTED=false
-    while [[ $(date +%s) -lt ${DEADLINE} ]]; do
-      CONTROLLER_LOGS="$(kubectl -n service-portal-system logs deployment/service-portal-controller --tail=1000 2>/dev/null || true)"
-      NODE_AGENT_LOGS="$(kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=1000 2>/dev/null || true)"
-      if echo "${CONTROLLER_LOGS}" | grep -q "node stream connected" || echo "${NODE_AGENT_LOGS}" | grep -q "controller: stream connected"; then
-        STREAM_CONNECTED=true
-        echo "    service-portal node agent stream connected to controller"
-        break
-      fi
-      sleep 2
-    done
-    if [[ "${STREAM_CONNECTED}" != "true" ]]; then
-      echo "ERROR: node agent stream to service-portal-controller did not connect within 60s" >&2
-      echo "--- Last controller logs ---" >&2
-      kubectl -n service-portal-system logs deployment/service-portal-controller --tail=50 >&2 || true
-      echo "--- Last node agent proxy logs ---" >&2
-      kubectl -n service-portal-system logs daemonset/portal-node-agent -c proxy --tail=50 >&2 || true
-      exit 1
-    fi
 
     SINCE_ARG=""
     if [[ "${CONFIGMAP_CHANGED}" == "true" ]]; then
