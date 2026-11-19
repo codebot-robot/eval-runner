@@ -70,7 +70,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   limit: 8
@@ -209,7 +209,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   limit: 10
@@ -223,7 +223,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   limit: 10
@@ -322,7 +322,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -338,7 +338,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -354,7 +354,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -496,7 +496,7 @@ metadata:
     evalrunner.gke-labs.dev/branch: main
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   limit: 1
@@ -637,7 +637,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -653,7 +653,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -738,7 +738,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -754,7 +754,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -846,7 +846,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -860,7 +860,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -901,7 +901,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
     commit: %s
   model: mockllm/model
   sampleRange:
@@ -961,7 +961,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval-slow.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval-slow.git
     commit: %s
   model: mockllm/model
   limit: 2
@@ -1149,7 +1149,7 @@ metadata:
   namespace: eval-runner
 spec:
   repo:
-    url: git://git-server.eval-runner-sandbox.svc/docs-eval-slow.git
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval-slow.git
     commit: %s
   model: mockllm/model
   limit: 2
@@ -1273,7 +1273,7 @@ spec:
 		baseRunName := fmt.Sprintf("base-%s", shortSHA)
 
 		// 1. Configure repositories in ConfigMap to in-cluster git server
-		configPatch := `{"data":{"defaultModel":"mockllm/model","repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
+		configPatch := `{"data":{"defaultModel":"mockllm/model","repositories":"- name: http://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
 		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", configPatch)
 
 		t.Cleanup(func() {
@@ -1343,7 +1343,7 @@ spec:
 		reSyncStartTime := time.Now().UTC().Format(time.RFC3339)
 
 		// Re-add repository to trigger immediate SyncRepo in reloader
-		reAddPatch := `{"data":{"repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
+		reAddPatch := `{"data":{"repositories":"- name: http://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
 		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", reAddPatch)
 
 		// Wait and verify that the re-sync actually executed
@@ -1376,10 +1376,10 @@ spec:
 	t.Run("PollingWithoutWebhook_NewBranchCreatesRun", func(t *testing.T) {
 		branchName := fmt.Sprintf("poll-test-%d", time.Now().UnixNano()%1000000)
 		pollInterval := 5 * time.Second
-		configPatch := fmt.Sprintf(`{"data":{"lsRemoteInterval":"%v","repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main, %s]\n"}}`, pollInterval, branchName)
+		configPatch := fmt.Sprintf(`{"data":{"lsRemoteInterval":"%v","repositories":"- name: http://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main, %s]\n"}}`, pollInterval, branchName)
 		harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", configPatch)
 		defer func() {
-			restorePatch := `{"data":{"lsRemoteInterval":"60s","repositories":"- name: git://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
+			restorePatch := `{"data":{"lsRemoteInterval":"60s","repositories":"- name: http://git-server.eval-runner-sandbox.svc/docs-eval.git\n  branches: [main]\n"}}`
 			harness.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", restorePatch)
 		}()
 		time.Sleep(2 * time.Second)
@@ -1483,7 +1483,7 @@ spec:
       "repo": {
         "name": "eval-runner",
         "full_name": "codebot-robot/eval-runner",
-        "clone_url": "git://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git",
+        "clone_url": "http://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git",
         "owner": {"login": "codebot-robot"}
       }
     },
@@ -1493,7 +1493,7 @@ spec:
       "repo": {
         "name": "eval-runner",
         "full_name": "gke-labs/eval-runner",
-        "clone_url": "git://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
+        "clone_url": "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
         "owner": {"login": "gke-labs"}
       }
     }
@@ -1501,7 +1501,7 @@ spec:
   "repository": {
     "name": "eval-runner",
     "full_name": "gke-labs/eval-runner",
-    "clone_url": "git://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
+    "clone_url": "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
     "owner": {"login": "gke-labs"}
   }
 }`, prNum, prNum, forkCommit, baseCommit)
@@ -1531,7 +1531,7 @@ spec:
 
 		// 5. Assert Candidate Run, Baseline Run, and Comparison are created by the consumer
 		candRun := harness.WaitForRunExists("eval-runner", candRunName, 30*time.Second)
-		if candRun.Spec.Repo.URL != "git://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git" {
+		if candRun.Spec.Repo.URL != "http://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git" {
 			t.Errorf("expected candidate repo URL to be the fork, got %s", candRun.Spec.Repo.URL)
 		}
 		if candRun.Spec.Repo.Commit != forkCommit {
@@ -1539,7 +1539,7 @@ spec:
 		}
 
 		baseRun := harness.WaitForRunExists("eval-runner", baseRunName, 30*time.Second)
-		if baseRun.Spec.Repo.URL != "git://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git" {
+		if baseRun.Spec.Repo.URL != "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git" {
 			t.Errorf("expected baseline repo URL to be the base repo, got %s", baseRun.Spec.Repo.URL)
 		}
 
