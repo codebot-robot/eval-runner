@@ -255,7 +255,7 @@ spec:
           seccompProfile:
             type: RuntimeDefault
         ports:
-        - containerPort: 9418
+        - containerPort: 80
         volumeMounts:
         - name: git-data
           mountPath: /git
@@ -272,8 +272,8 @@ spec:
   selector:
     app: git-server
   ports:
-  - port: 9418
-    targetPort: 9418
+  - port: 80
+    targetPort: 80
 `, namespace, namespace)
 
 	h.KubectlApplyContent(manifest)

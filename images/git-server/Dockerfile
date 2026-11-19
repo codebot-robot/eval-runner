@@ -13,7 +13,8 @@
 # limitations under the License.
 
 FROM alpine:3.21
-RUN apk add --no-cache git git-daemon
+RUN apk add --no-cache git git-daemon lighttpd
+COPY images/git-server/lighttpd.conf /etc/lighttpd/lighttpd.conf
 WORKDIR /work
 COPY examples/support-agent/ ./
 RUN git config --global user.email "test@example.com" && \
@@ -82,5 +83,5 @@ RUN sed -i '/readme_comprehension_blind/s/},/}/; /terminal-bench/d' .evals/list 
     git config --system --add safe.directory '*' && \
     rm -rf /docs-work
 USER 65534:65534
-EXPOSE 9418
-CMD ["git", "daemon", "--reuseaddr", "--base-path=/git", "--export-all", "--verbose", "/git"]
+EXPOSE 80
+CMD ["lighttpd", "-D", "-f", "/etc/lighttpd/lighttpd.conf"]
