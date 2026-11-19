@@ -84,6 +84,9 @@ const (
 
 	// AnnotationTaskID tracks the original task ID on the sandbox.
 	AnnotationTaskID = "evalrunner.gke-labs.dev/task-id"
+
+	// LabelServicePortalIntercept is the pod label opting the sandbox into NRI service portal interception.
+	LabelServicePortalIntercept = "service-portal.gke.io/intercept"
 )
 
 // AuthTokenDigest calculates the hex SHA-256 digest of the given bearer token.
@@ -173,18 +176,19 @@ func TaskSandboxNameForRun(runName, taskID string) string {
 
 // TaskSandboxConfig configures task sandbox creation.
 type TaskSandboxConfig struct {
-	Namespace          string
-	SampleRunnerImage  string
-	Image              string
-	ModelSecret        string
-	AuthTokenDigest    string
-	ServerCertSecret   string
-	CAConfigMap        string
-	SandboxdImage      string
-	CloneRepo          bool
-	StepTimeoutSeconds int
-	SandboxTask        bool
-	Limits             corev1.ResourceList
+	Namespace              string
+	SampleRunnerImage      string
+	Image                  string
+	ModelSecret            string
+	AuthTokenDigest        string
+	ServerCertSecret       string
+	CAConfigMap            string
+	SandboxdImage          string
+	CloneRepo              bool
+	StepTimeoutSeconds     int
+	SandboxTask            bool
+	Limits                 corev1.ResourceList
+	ServicePortalIntercept bool
 }
 
 // BuildTaskSandbox constructs the Sandbox CR for executing an eval task for a Run.
@@ -266,6 +270,9 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 	}
 	if run.UID != "" {
 		labels[LabelRunUID] = string(run.UID)
+	}
+	if cfg.ServicePortalIntercept {
+		labels[LabelServicePortalIntercept] = "true"
 	}
 
 	annotations := map[string]string{

@@ -1037,3 +1037,44 @@ func TestBuildTaskSandbox_ResourceLimits_DefaultsWhenAbsent(t *testing.T) {
 		t.Errorf("Expected default task container Memory limit %v, got %v", defaultMemoryLimit, taskContainer.Resources.Limits.Memory())
 	}
 }
+
+func TestBuildTaskSandbox_ServicePortalIntercept(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-service-portal",
+			Namespace: "eval-runner",
+		},
+	}
+	token := "auth-token-12345"
+	digest := AuthTokenDigest(token)
+
+	t.Run("intercept enabled adds label to sandbox and pod template", func(t *testing.T) {
+		sb := BuildTaskSandbox(run, "task-1", TaskSandboxConfig{
+			Namespace:              "eval-runner-sandbox",
+			AuthTokenDigest:        digest,
+			ServicePortalIntercept: true,
+		})
+
+		if got := sb.Labels[LabelServicePortalIntercept]; got != "true" {
+			t.Errorf("expected sandbox label %q=%q, got %q", LabelServicePortalIntercept, "true", got)
+		}
+		if got := sb.Spec.PodTemplate.ObjectMeta.Labels[LabelServicePortalIntercept]; got != "true" {
+			t.Errorf("expected pod template label %q=%q, got %q", LabelServicePortalIntercept, "true", got)
+		}
+	})
+
+	t.Run("intercept disabled leaves label absent", func(t *testing.T) {
+		sb := BuildTaskSandbox(run, "task-1", TaskSandboxConfig{
+			Namespace:              "eval-runner-sandbox",
+			AuthTokenDigest:        digest,
+			ServicePortalIntercept: false,
+		})
+
+		if _, exists := sb.Labels[LabelServicePortalIntercept]; exists {
+			t.Errorf("expected sandbox label %q to be absent", LabelServicePortalIntercept)
+		}
+		if _, exists := sb.Spec.PodTemplate.ObjectMeta.Labels[LabelServicePortalIntercept]; exists {
+			t.Errorf("expected pod template label %q to be absent", LabelServicePortalIntercept)
+		}
+	})
+}

@@ -41,6 +41,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/version"
+	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -340,8 +341,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	var servicePortalClient *serviceportalclient.Client
 	if clusterConfig.ServicePortalControllerAddress != "" {
 		setupLog.Info("Service Portal enabled", "controllerAddress", clusterConfig.ServicePortalControllerAddress, "caFile", clusterConfig.ServicePortalCAFile, "tokenFile", clusterConfig.ServicePortalTokenFile)
+		var servicePortalClientError error
+		servicePortalClient, servicePortalClientError = serviceportalclient.New(clusterConfig.ServicePortalOptions())
+		if servicePortalClientError != nil {
+			setupLog.Error(servicePortalClientError, "unable to create service portal client")
+			os.Exit(1)
+		}
+		defer func() {
+			if closeErr := servicePortalClient.Close(); closeErr != nil {
+				setupLog.Error(closeErr, "error closing service portal client on shutdown")
+			}
+		}()
 	} else {
 		setupLog.Info("Service Portal disabled (no controller address configured)")
 	}
@@ -426,6 +439,8 @@ func main() {
 		GitHubAppSecret:      clusterConfig.GitHubAppSecret,
 		UIBaseURL:            clusterConfig.UIBaseURL,
 		HeadTopUpInterval:    clusterConfig.HeadTopUpInterval,
+		ServicePortalHosts:   clusterConfig.ServicePortalAllowedHosts,
+		ServicePortalClient:  servicePortalClient,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

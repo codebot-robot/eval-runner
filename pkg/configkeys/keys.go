@@ -74,6 +74,8 @@ const (
 	ConfigMapKeyServicePortalControllerCAFile = "servicePortalControllerCAFile"
 	// ConfigMapKeyServicePortalTokenFile is the ConfigMap key for the Service Portal Controller token file path.
 	ConfigMapKeyServicePortalTokenFile = "servicePortalTokenFile"
+	// ConfigMapKeyServicePortalAllowedHosts is the ConfigMap key for comma-separated allowed egress hosts for the service portal.
+	ConfigMapKeyServicePortalAllowedHosts = "servicePortalAllowedHosts"
 
 	// Webhook keys
 

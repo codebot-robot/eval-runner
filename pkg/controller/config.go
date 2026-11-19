@@ -102,6 +102,8 @@ const (
 	ConfigMapKeyServicePortalControllerCAFile = configkeys.ConfigMapKeyServicePortalControllerCAFile
 	// ConfigMapKeyServicePortalTokenFile is the ConfigMap key for the Service Portal Controller token file path.
 	ConfigMapKeyServicePortalTokenFile = configkeys.ConfigMapKeyServicePortalTokenFile
+	// ConfigMapKeyServicePortalAllowedHosts is the ConfigMap key for comma-separated allowed egress hosts for the service portal.
+	ConfigMapKeyServicePortalAllowedHosts = configkeys.ConfigMapKeyServicePortalAllowedHosts
 )
 
 const (
@@ -162,6 +164,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyServicePortalControllerAddress: {},
 	configkeys.ConfigMapKeyServicePortalControllerCAFile:  {},
 	configkeys.ConfigMapKeyServicePortalTokenFile:         {},
+	configkeys.ConfigMapKeyServicePortalAllowedHosts:      {},
 
 	// Workload Identity Federation
 	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
@@ -236,6 +239,7 @@ type ClusterConfig struct {
 	ServicePortalControllerAddress string
 	ServicePortalCAFile            string
 	ServicePortalTokenFile         string
+	ServicePortalAllowedHosts      []string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -311,6 +315,7 @@ func DefaultClusterConfig() ClusterConfig {
 		ServicePortalControllerAddress: "",
 		ServicePortalCAFile:            "",
 		ServicePortalTokenFile:         "",
+		ServicePortalAllowedHosts:      append([]string(nil), DefaultServicePortalAllowedHosts...),
 	}
 }
 
@@ -814,6 +819,16 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		}
 		if val, ok := cm.Data[ConfigMapKeyServicePortalTokenFile]; ok {
 			cfg.ServicePortalTokenFile = strings.TrimSpace(val)
+		}
+		if val, ok := cm.Data[ConfigMapKeyServicePortalAllowedHosts]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
+					cfg.ServicePortalAllowedHosts = nil
+				} else {
+					cfg.ServicePortalAllowedHosts = discovery.ParseHostList(val)
+				}
+			}
 		}
 	}
 
