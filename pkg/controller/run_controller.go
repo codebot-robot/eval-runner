@@ -300,6 +300,9 @@ type RunReconciler struct {
 	// ServicePortalHosts is the list of allowed FQDN egress hostnames for the service portal.
 	ServicePortalHosts []string
 
+	// ServicePortalHTTPHosts is the list of allowed cleartext HTTP egress hostnames for the service portal.
+	ServicePortalHTTPHosts []string
+
 	boundPodsMu            sync.RWMutex
 	boundServicePortalPods map[types.UID]bool
 
@@ -790,6 +793,7 @@ func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.UIBaseURL = cfg.UIBaseURL
 	r.HeadTopUpInterval = cfg.HeadTopUpInterval
 	r.ServicePortalHosts = cfg.ServicePortalAllowedHosts
+	r.ServicePortalHTTPHosts = cfg.ServicePortalAllowedHTTPHosts
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {

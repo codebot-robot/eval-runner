@@ -3189,4 +3189,59 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 			t.Errorf("TokenFile = %q, want /var/run/secrets/service-portal/token", options.TokenFile)
 		}
 	})
+
+	t.Run("default allowed hosts and http hosts match defaults", func(t *testing.T) {
+		cfg, err := ResolveConfig(nil, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(cfg.ServicePortalAllowedHosts, DefaultServicePortalAllowedHosts) {
+			t.Errorf("ServicePortalAllowedHosts = %v, want %v", cfg.ServicePortalAllowedHosts, DefaultServicePortalAllowedHosts)
+		}
+		if !reflect.DeepEqual(cfg.ServicePortalAllowedHTTPHosts, DefaultServicePortalAllowedHTTPHosts) {
+			t.Errorf("ServicePortalAllowedHTTPHosts = %v, want %v", cfg.ServicePortalAllowedHTTPHosts, DefaultServicePortalAllowedHTTPHosts)
+		}
+	})
+
+	t.Run("allowed hosts and http hosts parsed from configmap", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalAllowedHosts:     "*.googleapis.com, github.com",
+				configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts: "deb.debian.org, archive.ubuntu.com",
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		wantHosts := []string{"*.googleapis.com", "github.com"}
+		wantHTTPHosts := []string{"deb.debian.org", "archive.ubuntu.com"}
+		if !reflect.DeepEqual(cfg.ServicePortalAllowedHosts, wantHosts) {
+			t.Errorf("ServicePortalAllowedHosts = %v, want %v", cfg.ServicePortalAllowedHosts, wantHosts)
+		}
+		if !reflect.DeepEqual(cfg.ServicePortalAllowedHTTPHosts, wantHTTPHosts) {
+			t.Errorf("ServicePortalAllowedHTTPHosts = %v, want %v", cfg.ServicePortalAllowedHTTPHosts, wantHTTPHosts)
+		}
+	})
+
+	t.Run("none sentinel disables allowed hosts and http hosts", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalAllowedHosts:     "none",
+				configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts: "none",
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ServicePortalAllowedHosts != nil {
+			t.Errorf("expected nil ServicePortalAllowedHosts, got %v", cfg.ServicePortalAllowedHosts)
+		}
+		if cfg.ServicePortalAllowedHTTPHosts != nil {
+			t.Errorf("expected nil ServicePortalAllowedHTTPHosts, got %v", cfg.ServicePortalAllowedHTTPHosts)
+		}
+	})
 }

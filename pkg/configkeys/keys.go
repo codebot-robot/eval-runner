@@ -76,6 +76,8 @@ const (
 	ConfigMapKeyServicePortalTokenFile = "servicePortalTokenFile"
 	// ConfigMapKeyServicePortalAllowedHosts is the ConfigMap key for comma-separated allowed egress hosts for the service portal.
 	ConfigMapKeyServicePortalAllowedHosts = "servicePortalAllowedHosts"
+	// ConfigMapKeyServicePortalAllowedHTTPHosts is the ConfigMap key for comma-separated allowed cleartext HTTP egress hosts for the service portal.
+	ConfigMapKeyServicePortalAllowedHTTPHosts = "servicePortalAllowedHTTPHosts"
 
 	// Webhook keys
 

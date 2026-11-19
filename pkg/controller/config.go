@@ -104,6 +104,8 @@ const (
 	ConfigMapKeyServicePortalTokenFile = configkeys.ConfigMapKeyServicePortalTokenFile
 	// ConfigMapKeyServicePortalAllowedHosts is the ConfigMap key for comma-separated allowed egress hosts for the service portal.
 	ConfigMapKeyServicePortalAllowedHosts = configkeys.ConfigMapKeyServicePortalAllowedHosts
+	// ConfigMapKeyServicePortalAllowedHTTPHosts is the ConfigMap key for comma-separated allowed cleartext HTTP egress hosts for the service portal.
+	ConfigMapKeyServicePortalAllowedHTTPHosts = configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts
 )
 
 const (
@@ -165,6 +167,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyServicePortalControllerCAFile:  {},
 	configkeys.ConfigMapKeyServicePortalTokenFile:         {},
 	configkeys.ConfigMapKeyServicePortalAllowedHosts:      {},
+	configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts:  {},
 
 	// Workload Identity Federation
 	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
@@ -240,6 +243,7 @@ type ClusterConfig struct {
 	ServicePortalCAFile            string
 	ServicePortalTokenFile         string
 	ServicePortalAllowedHosts      []string
+	ServicePortalAllowedHTTPHosts  []string
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -316,6 +320,7 @@ func DefaultClusterConfig() ClusterConfig {
 		ServicePortalCAFile:            "",
 		ServicePortalTokenFile:         "",
 		ServicePortalAllowedHosts:      append([]string(nil), DefaultServicePortalAllowedHosts...),
+		ServicePortalAllowedHTTPHosts:  append([]string(nil), DefaultServicePortalAllowedHTTPHosts...),
 	}
 }
 
@@ -827,6 +832,16 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 					cfg.ServicePortalAllowedHosts = nil
 				} else {
 					cfg.ServicePortalAllowedHosts = discovery.ParseHostList(val)
+				}
+			}
+		}
+		if val, ok := cm.Data[ConfigMapKeyServicePortalAllowedHTTPHosts]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
+					cfg.ServicePortalAllowedHTTPHosts = nil
+				} else {
+					cfg.ServicePortalAllowedHTTPHosts = discovery.ParseHostList(val)
 				}
 			}
 		}
