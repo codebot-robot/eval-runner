@@ -63,7 +63,8 @@ const (
 	ConfigMapKeyMaxParallelTasks = configkeys.ConfigMapKeyMaxParallelTasks
 	// ConfigMapKeyPollProgressInterval is the ConfigMap key for task progress polling interval.
 	ConfigMapKeyPollProgressInterval = configkeys.ConfigMapKeyPollProgressInterval
-	// ConfigMapKeyModelSecret is the ConfigMap key for default model credentials Secret name.
+	// ConfigMapKeyModelSecret is the legacy ConfigMap key for default model credentials Secret name.
+	// Deprecated: modelSecret is no longer used; the model credential is never attached to pods.
 	ConfigMapKeyModelSecret = configkeys.ConfigMapKeyModelSecret
 	// ConfigMapKeySandboxdImage is the ConfigMap key for sandboxd init container image.
 	ConfigMapKeySandboxdImage = configkeys.ConfigMapKeySandboxdImage
@@ -223,9 +224,6 @@ type ClusterConfig struct {
 	// Defaults to DefaultMaxParallelTasks (4) if <= 0.
 	MaxParallelTasks int
 
-	// ModelSecret is the name of a Secret in SandboxNamespace containing model credentials.
-	ModelSecret string
-
 	// ModelPrices maps model identifier to token pricing in USD per 1M tokens.
 	ModelPrices map[string]ModelPrice
 
@@ -246,8 +244,7 @@ type ClusterConfig struct {
 	TaskGracePeriod time.Duration
 
 	// UIBaseURL is the base URL of the eval-runner UI for links in check runs.
-	UIBaseURL string
-
+	UIBaseURL                string
 	ComparisonTTL            time.Duration
 	CommandUsers             []string
 	AffinityMode             string
@@ -286,7 +283,6 @@ type RawFlags struct {
 	GitHubAppSecret                string
 	InconclusivePolicy             string
 	MaxParallelTasks               int
-	ModelSecret                    string
 	PollProgressInterval           time.Duration
 	SandboxdImage                  string
 	TaskGracePeriod                time.Duration
@@ -322,7 +318,6 @@ func DefaultClusterConfig() ClusterConfig {
 		GitHubAppSecret:          "",
 		InconclusivePolicy:       DefaultInconclusivePolicy,
 		MaxParallelTasks:         DefaultMaxParallelTasks,
-		ModelSecret:              DefaultModelSecret,
 		ModelPrices:              DefaultModelPrices(),
 		ModelPriceSources:        DefaultModelPriceSources(),
 		PollProgressInterval:     DefaultPollProgressInterval,
@@ -358,7 +353,7 @@ func DefaultClusterConfig() ClusterConfig {
 // FlagsFromFlagSet extracts RawFlags from a parsed flag.FlagSet.
 func FlagsFromFlagSet(
 	fs *flag.FlagSet,
-	artifactBucket, artifactDir, modelSecret, sandboxdImage, gitHubTokenSecret, gitHubAppSecret, uiBaseURL string,
+	artifactBucket, artifactDir, sandboxdImage, gitHubTokenSecret, gitHubAppSecret, uiBaseURL string,
 	discoveryDeadline, executionDeadline, taskGracePeriod time.Duration,
 	maxParallelTasks int,
 	strictConfig bool,
@@ -385,7 +380,6 @@ func FlagsFromFlagSet(
 		GitHubAppSecret:                gitHubAppSecret,
 		InconclusivePolicy:             inconclusivePolicy,
 		MaxParallelTasks:               maxParallelTasks,
-		ModelSecret:                    modelSecret,
 		PollProgressInterval:           pollProgressInterval,
 		SandboxdImage:                  sandboxdImage,
 		TaskGracePeriod:                taskGracePeriod,
@@ -516,20 +510,7 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			}
 		}
 
-		// 5. modelSecret
-		if val, ok := cm.Data[ConfigMapKeyModelSecret]; ok {
-			trimmed := strings.TrimSpace(val)
-			if trimmed != "" {
-				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.ModelSecret = ""
-				} else {
-					if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
-						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyModelSecret, val, ns, name, strings.Join(errs, "; "))
-					}
-					cfg.ModelSecret = trimmed
-				}
-			}
-		}
+		// 5. modelSecret is deprecated and ignored; model credentials are never attached to pods.
 
 		// 6. taskGracePeriod
 		if val, ok := cm.Data[ConfigMapKeyTaskGracePeriod]; ok {
@@ -947,13 +928,6 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		}
 		cfg.PollProgressInterval = flags.PollProgressInterval
 	}
-	if flags.IsExplicit("model-secret") {
-		if strings.EqualFold(flags.ModelSecret, ConfigSentinelDisabled) {
-			cfg.ModelSecret = ""
-		} else {
-			cfg.ModelSecret = flags.ModelSecret
-		}
-	}
 	if flags.IsExplicit("sandboxd-image") {
 		if strings.EqualFold(flags.SandboxdImage, ConfigSentinelDisabled) {
 			return cfg, fmt.Errorf("invalid sandboxd-image %q: sandboxd-image cannot be disabled", flags.SandboxdImage)
@@ -1066,6 +1040,9 @@ func LoadAndResolveClusterConfig(
 		if unknown := UnknownConfigMapKeys(cm); len(unknown) > 0 {
 			logger.Info("warning: unrecognised keys in ConfigMap", "unrecognisedKeys", unknown, "namespace", cm.Namespace, "name", cm.Name)
 		}
+		if _, ok := cm.Data[ConfigMapKeyModelSecret]; ok {
+			logger.Info("modelSecret is no longer used; the model credential is never attached to pods")
+		}
 	} else {
 		logger.Info("per-cluster configmap not found; using defaults", "namespace", namespace, "name", name)
 	}
@@ -1090,7 +1067,6 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"executionDeadline", resolved.ExecutionDeadline,
 		"githubTokenSecret", resolved.GitHubTokenSecret,
 		"maxParallelTasks", resolved.MaxParallelTasks,
-		"modelSecret", resolved.ModelSecret,
 		"pollProgressInterval", resolved.PollProgressInterval,
 		"sandboxdImage", resolved.SandboxdImage,
 		"taskGracePeriod", resolved.TaskGracePeriod,

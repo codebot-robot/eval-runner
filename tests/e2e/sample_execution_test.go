@@ -36,6 +36,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/controller"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/webhook"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestRunSampleExecution(t *testing.T) {
@@ -57,6 +58,22 @@ func TestRunSampleExecution(t *testing.T) {
 		t.Run("DocsComprehensionCompleted", func(t *testing.T) {
 			t.Parallel()
 			harness := harness.WithT(t)
+
+			modelCredentialsSecret := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: model-credentials
+  namespace: eval-runner-sandbox
+type: Opaque
+stringData:
+  GEMINI_API_KEY: dummy-key
+`
+			harness.KubectlApplyContent(modelCredentialsSecret)
+			t.Cleanup(func() {
+				_ = exec.Command("kubectl", "delete", "secret", "model-credentials", "-n", "eval-runner-sandbox", "--ignore-not-found").Run()
+			})
+
 			runName := "docs-comprehension-sample-run"
 			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
@@ -80,6 +97,7 @@ spec:
 			var progressObservedAt time.Duration
 			var firstSeenRunning time.Time
 			var run *v1alpha1.Run
+			var podObserved bool
 			for {
 				cmd := exec.Command("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "json")
 				out, err := cmd.Output()
@@ -101,6 +119,17 @@ spec:
 									t.Logf("Observed live task progress: task=%s, phase=%s, samplesDone=%d, samplesPlanned=%d, lastProgressAt=%v after %v",
 										task.ID, task.Phase, task.SamplesDone, task.SamplesPlanned, task.LastProgressAt, progressObservedAt)
 								}
+								if !podObserved {
+									sandboxName := discovery.TaskSandboxNameForRun(runName, task.ID)
+									podOut, podErr := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "-o", "json").CombinedOutput()
+									if podErr == nil {
+										var pod corev1.Pod
+										if json.Unmarshal(podOut, &pod) == nil && len(pod.Spec.Containers) > 0 {
+											podObserved = true
+											harness.AssertPodHasNoModelSecret(pod, "sample-runner task")
+										}
+									}
+								}
 							}
 						}
 						if string(r.Status.Phase) == string(v1alpha1.RunPhaseCompleted) {
@@ -113,6 +142,9 @@ spec:
 					t.Fatalf("Timeout waiting for Run %s to complete", runName)
 				}
 				time.Sleep(500 * time.Millisecond)
+			}
+			if !podObserved {
+				t.Fatalf("Expected to observe sample-runner sandbox pod during run %s", runName)
 			}
 			totalDuration := time.Since(startTime)
 			var taskRunningDuration time.Duration
@@ -172,18 +204,12 @@ spec:
 
 			// Assert that per-sandbox server cert secrets were deleted
 			for _, task := range run.Status.Tasks {
-				sbName := discovery.TaskSandboxNameForRun(runName, task.ID)
-				secName := "sb-tls-" + sbName
-				tlsSec := harness.runCmd("kubectl", "get", "secret", secName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-				if strings.TrimSpace(tlsSec) != "" {
-					t.Errorf("Expected server cert secret %s to be deleted, but found:\n%s", secName, tlsSec)
+				sandboxName := discovery.TaskSandboxNameForRun(runName, task.ID)
+				secretName := "sb-tls-" + sandboxName
+				tlsSecret := harness.runCmd("kubectl", "get", "secret", secretName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+				if strings.TrimSpace(tlsSecret) != "" {
+					t.Errorf("Expected server cert secret %s to be deleted, but found:\n%s", secretName, tlsSecret)
 				}
-			}
-
-			// Assert that no model Secret was mounted
-			secretsOut := harness.runCmd("kubectl", "get", "secrets", "-n", "eval-runner-sandbox", "-o", "jsonpath={.items[*].metadata.name}")
-			if strings.Contains(secretsOut, "model") || strings.Contains(secretsOut, "gemini") {
-				t.Errorf("Unexpected model secret found in eval-runner-sandbox: %s", secretsOut)
 			}
 		})
 

@@ -182,7 +182,6 @@ type TaskSandboxConfig struct {
 	Namespace              string
 	SampleRunnerImage      string
 	Image                  string
-	ModelSecret            string
 	AuthTokenDigest        string
 	ServerCertSecret       string
 	CAConfigMap            string
@@ -280,17 +279,6 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 
 	annotations := map[string]string{
 		AnnotationTaskID: taskID,
-	}
-
-	var envFrom []corev1.EnvFromSource
-	if cfg.ModelSecret != "" {
-		envFrom = append(envFrom, corev1.EnvFromSource{
-			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: cfg.ModelSecret,
-				},
-			},
-		})
 	}
 
 	cmd := []string{
@@ -491,7 +479,6 @@ fi
 							{
 								Name:    TaskContainerName,
 								Image:   image,
-								EnvFrom: envFrom,
 								Command: cmd,
 								Ports: []corev1.ContainerPort{
 									{

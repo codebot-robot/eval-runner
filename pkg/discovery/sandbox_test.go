@@ -318,7 +318,7 @@ func TestTaskSandboxNameForRun(t *testing.T) {
 	}
 }
 
-func TestBuildTaskSandbox_WithAndWithoutModelSecret(t *testing.T) {
+func TestBuildTaskSandbox_NoModelSecretInjected(t *testing.T) {
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-run",
@@ -330,58 +330,45 @@ func TestBuildTaskSandbox_WithAndWithoutModelSecret(t *testing.T) {
 	token := "sample-task-auth-token-12345"
 	digest := AuthTokenDigest(token)
 
-	// Case 1: Without model secret
-	sbNoSecret := BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
+	sb := BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
 		Namespace:         "eval-runner-sandbox",
 		SampleRunnerImage: "sample-runner:e2e",
-		ModelSecret:       "",
 		AuthTokenDigest:   digest,
 	})
 
-	if sbNoSecret.Labels[LabelRole] != RoleSample {
-		t.Errorf("Expected role %s, got %s", RoleSample, sbNoSecret.Labels[LabelRole])
+	if sb.Labels[LabelRole] != RoleSample {
+		t.Errorf("Expected role %s, got %s", RoleSample, sb.Labels[LabelRole])
 	}
-	if sbNoSecret.Labels[LabelSandbox] != "true" {
-		t.Errorf("Expected sandbox label 'true', got %s", sbNoSecret.Labels[LabelSandbox])
+	if sb.Labels[LabelSandbox] != "true" {
+		t.Errorf("Expected sandbox label 'true', got %s", sb.Labels[LabelSandbox])
 	}
-	if sbNoSecret.Annotations[AnnotationTaskID] != "docs/readme_comprehension" {
-		t.Errorf("Expected task ID annotation, got %s", sbNoSecret.Annotations[AnnotationTaskID])
+	if sb.Annotations[AnnotationTaskID] != "docs/readme_comprehension" {
+		t.Errorf("Expected task ID annotation, got %s", sb.Annotations[AnnotationTaskID])
 	}
 
-	cNoSecret := sbNoSecret.Spec.PodTemplate.Spec.Containers[0]
-	if cNoSecret.Image != "sample-runner:e2e" {
-		t.Errorf("Expected image sample-runner:e2e, got %s", cNoSecret.Image)
+	c := sb.Spec.PodTemplate.Spec.Containers[0]
+	if c.Image != "sample-runner:e2e" {
+		t.Errorf("Expected image sample-runner:e2e, got %s", c.Image)
 	}
-	if len(cNoSecret.EnvFrom) != 0 {
-		t.Errorf("Expected no EnvFrom when modelSecret is empty, got: %v", cNoSecret.EnvFrom)
+	if len(c.EnvFrom) != 0 {
+		t.Errorf("Expected no EnvFrom in task sandbox container, got: %v", c.EnvFrom)
+	}
+	for _, envVar := range c.Env {
+		if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+			t.Errorf("Expected no Secret-backed environment variable in task sandbox container: %s", envVar.Name)
+		}
 	}
 
 	expectedFlag := "--auth-token-sha256=" + digest
 	var foundFlag bool
-	for _, arg := range cNoSecret.Command {
+	for _, arg := range c.Command {
 		if arg == expectedFlag {
 			foundFlag = true
 			break
 		}
 	}
 	if !foundFlag {
-		t.Errorf("Expected command to contain %q, got: %v", expectedFlag, cNoSecret.Command)
-	}
-
-	// Case 2: With model secret
-	sbWithSecret := BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
-		Namespace:         "eval-runner-sandbox",
-		SampleRunnerImage: "sample-runner:e2e",
-		ModelSecret:       "gemini-credentials",
-		AuthTokenDigest:   digest,
-	})
-
-	cWithSecret := sbWithSecret.Spec.PodTemplate.Spec.Containers[0]
-	if len(cWithSecret.EnvFrom) != 1 {
-		t.Fatalf("Expected 1 EnvFrom source, got %d", len(cWithSecret.EnvFrom))
-	}
-	if cWithSecret.EnvFrom[0].SecretRef == nil || cWithSecret.EnvFrom[0].SecretRef.Name != "gemini-credentials" {
-		t.Errorf("Expected SecretRef 'gemini-credentials', got: %+v", cWithSecret.EnvFrom[0].SecretRef)
+		t.Errorf("Expected command to contain %q, got: %v", expectedFlag, c.Command)
 	}
 }
 
@@ -420,7 +407,6 @@ func TestBuildTaskSandbox_NoGCSCredentialsOrVolumes(t *testing.T) {
 	sb := BuildTaskSandbox(run, "docs/readme_comprehension", TaskSandboxConfig{
 		Namespace:         "eval-runner-sandbox",
 		SampleRunnerImage: "sample-runner:latest",
-		ModelSecret:       "model-secret",
 		AuthTokenDigest:   AuthTokenDigest("dummy-token"),
 	})
 

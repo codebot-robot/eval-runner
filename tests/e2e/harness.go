@@ -965,3 +965,45 @@ func (h *Harness) runCmd(name string, args ...string) string {
 	}
 	return stdout.String()
 }
+
+// AssertPodHasNoModelSecret asserts that the given pod does not reference model-credentials
+// in containers, initContainers, or volumes.
+func (h *Harness) AssertPodHasNoModelSecret(pod corev1.Pod, podDescription string) {
+	h.t.Helper()
+	for _, container := range pod.Spec.Containers {
+		for _, envFromSource := range container.EnvFrom {
+			if envFromSource.SecretRef != nil && envFromSource.SecretRef.Name == "model-credentials" {
+				h.t.Errorf("[%s] Container %q has EnvFrom referencing model-credentials: %+v", podDescription, container.Name, envFromSource)
+			}
+		}
+		for _, environmentVariable := range container.Env {
+			if environmentVariable.ValueFrom != nil && environmentVariable.ValueFrom.SecretKeyRef != nil && environmentVariable.ValueFrom.SecretKeyRef.Name == "model-credentials" {
+				h.t.Errorf("[%s] Container %q has Env referencing model-credentials: %+v", podDescription, container.Name, environmentVariable)
+			}
+		}
+	}
+	for _, initContainer := range pod.Spec.InitContainers {
+		for _, envFromSource := range initContainer.EnvFrom {
+			if envFromSource.SecretRef != nil && envFromSource.SecretRef.Name == "model-credentials" {
+				h.t.Errorf("[%s] Init container %q has EnvFrom referencing model-credentials: %+v", podDescription, initContainer.Name, envFromSource)
+			}
+		}
+		for _, environmentVariable := range initContainer.Env {
+			if environmentVariable.ValueFrom != nil && environmentVariable.ValueFrom.SecretKeyRef != nil && environmentVariable.ValueFrom.SecretKeyRef.Name == "model-credentials" {
+				h.t.Errorf("[%s] Init container %q has Env referencing model-credentials: %+v", podDescription, initContainer.Name, environmentVariable)
+			}
+		}
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Secret != nil && volume.Secret.SecretName == "model-credentials" {
+			h.t.Errorf("[%s] Volume %q references model-credentials: %+v", podDescription, volume.Name, volume)
+		}
+		if volume.Projected != nil {
+			for _, projectedSource := range volume.Projected.Sources {
+				if projectedSource.Secret != nil && projectedSource.Secret.Name == "model-credentials" {
+					h.t.Errorf("[%s] Projected volume %q references model-credentials: %+v", podDescription, volume.Name, volume)
+				}
+			}
+		}
+	}
+}
