@@ -1,0 +1,27 @@
+    ,
+    {
+      "id": "terminal-bench/regex-log-agent",
+      "spec": "terminal-bench/regex-log",
+      "image": "alexgshaw/regex-log:20251031",
+      "command": ["bash", "examples/terminal-bench/run-task.sh", "regex-log", "verify", "/app"],
+      "timeoutSeconds": 1800,
+      "resources": [{"type": "sandbox", "limits": {"cpu": "1", "memory": "2G"}}],
+      "agent": {
+        "prepareCommand": ["bash", "examples/terminal-bench/run-task.sh", "regex-log", "prepare", "/app"],
+        "instructionPath": "/workspace/repo/solve-instruction.md",
+        "timeoutSeconds": 900
+      }
+    },
+    {
+      "id": "terminal-bench/regex-log-noop",
+      "spec": "terminal-bench/regex-log",
+      "image": "alexgshaw/regex-log:20251031",
+      "command": ["bash", "examples/terminal-bench/run-task.sh", "regex-log", "verify", "/app"],
+      "timeoutSeconds": 1800,
+      "resources": [{"type": "sandbox", "limits": {"cpu": "1", "memory": "2G"}}],
+      "agent": {
+        "prepareCommand": ["bash", "examples/terminal-bench/run-task.sh", "regex-log", "prepare", "/app"],
+        "instructionPath": "/workspace/repo/noop-instruction.md",
+        "timeoutSeconds": 900
+      }
+    }

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/agent"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
@@ -415,6 +416,7 @@ func main() {
 		SandboxNamespace:     sandboxNamespace,
 		PKIManager:           pkiManager,
 		Config:               clusterConfig,
+		AgentModel:           agent.NewScriptedModel(),
 		MaxMessageBytes:      discovery.MaxMessageBytes,
 		MaxDiscoveryAttempts: maxDiscoveryAttempts,
 		SampleRunnerImage:    sampleRunnerImage,

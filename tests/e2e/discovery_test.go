@@ -530,8 +530,8 @@ spec:
 		if run.Status.Discovery == nil {
 			t.Fatalf("Expected status.discovery to be populated")
 		}
-		if run.Status.Discovery.TaskCount != 89 {
-			t.Fatalf("Expected 89 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+		if run.Status.Discovery.TaskCount != 91 {
+			t.Fatalf("Expected 91 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
 		}
 
 		if len(run.Status.Tasks) != 1 {
@@ -567,6 +567,74 @@ spec:
 		memoryLimit := task.Resources.Limits[corev1.ResourceMemory]
 		if memoryLimit.String() != "2G" {
 			t.Errorf("Expected task.Resources.Limits[memory] 2G for %s, got %s", task.ID, memoryLimit.String())
+		}
+
+		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+	})
+
+	t.Run("TerminalBenchAgentTasksCompleted", func(t *testing.T) {
+		terminalBenchCommit := harness.GetGitServerCommit("eval-runner-sandbox", "terminal-bench.git")
+		runName := "terminal-bench-agent-run"
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/terminal-bench.git
+    commit: %s
+  model: mockllm/model
+  tasks:
+  - terminal-bench/regex-log-agent
+  - terminal-bench/regex-log-noop
+`, runName, terminalBenchCommit)
+
+		harness.KubectlApplyContent(manifest)
+
+		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 600*time.Second)
+		if len(run.Status.Tasks) != 2 {
+			t.Fatalf("Expected 2 tasks in status.tasks, got %d", len(run.Status.Tasks))
+		}
+
+		taskByID := make(map[string]v1alpha1.TaskStatus)
+		for _, task := range run.Status.Tasks {
+			taskByID[task.ID] = task
+		}
+
+		solveTask, ok := taskByID["terminal-bench/regex-log-agent"]
+		if !ok {
+			t.Fatalf("task terminal-bench/regex-log-agent not found in status.tasks")
+		}
+		if solveTask.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected solve task Completed, got %s (msg: %s)", solveTask.Phase, solveTask.Message)
+		}
+		if solveTask.Samples != 1 {
+			t.Errorf("Expected 1 sample for solve task, got %d", solveTask.Samples)
+		}
+		if solveTask.Successes != 1 {
+			t.Errorf("Expected 1 success for solve task, got %d", solveTask.Successes)
+		}
+		if solveTask.MeanScore == nil || *solveTask.MeanScore != 1.0 {
+			t.Errorf("Expected meanScore 1.0 for solve task, got %v", solveTask.MeanScore)
+		}
+
+		noopTask, ok := taskByID["terminal-bench/regex-log-noop"]
+		if !ok {
+			t.Fatalf("task terminal-bench/regex-log-noop not found in status.tasks")
+		}
+		if noopTask.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("Expected noop task Completed, got %s", noopTask.Phase)
+		}
+		if noopTask.Message != "" {
+			t.Errorf("Expected empty message for noop task, got %q", noopTask.Message)
+		}
+		if noopTask.Successes != 0 {
+			t.Errorf("Expected 0 successes for failing verify with noop model, got %d", noopTask.Successes)
+		}
+		if noopTask.MeanScore == nil || *noopTask.MeanScore != 0.0 {
+			t.Errorf("Expected meanScore 0.0 for failing verify with noop model, got %v", noopTask.MeanScore)
 		}
 
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
