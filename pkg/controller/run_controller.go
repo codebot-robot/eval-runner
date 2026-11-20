@@ -38,6 +38,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/github"
+	"github.com/gke-labs/eval-runner/pkg/modelclient/gemini"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -190,7 +191,10 @@ type RunReconciler struct {
 	// Config holds the cluster configuration for this reconciler.
 	Config ClusterConfig
 
-	// AgentModel is the model client used to drive agent loops on tasks with an agent block.
+	// NewAgentModel constructs an agent.Model for a Run.
+	NewAgentModel func(run *v1alpha1.Run) (agent.Model, error)
+
+	// AgentModel is an optional fixed model client used directly instead of NewAgentModel (for testing).
 	AgentModel agent.Model
 
 	// DiscoveryStepTimeout is the maximum duration for a single discovery Execute call.
@@ -2397,11 +2401,13 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					}
 				}
 
-				if isAgentTask && !isMockModel(run.Spec.Model) {
-					msg := fmt.Sprintf("unsupported model %q for agent task: only mock models are supported", run.Spec.Model)
-					logger.Info("Rejecting agent task launch due to unsupported model", "task", taskID, "model", run.Spec.Model, "message", msg)
-					failedTasks[taskID] = msg
-					continue
+				if isAgentTask {
+					if _, err := r.agentModelForRun(run); err != nil {
+						msg := err.Error()
+						logger.Info("Rejecting agent task launch", "task", taskID, "model", run.Spec.Model, "message", msg)
+						failedTasks[taskID] = msg
+						continue
+					}
 				}
 
 				sandboxName := discovery.TaskSandboxNameForRun(run.Name, taskID)
@@ -3545,6 +3551,80 @@ func isMockModel(model string) bool {
 // MaxInstructionBytes is the maximum allowed size of an agent instruction file (64 KiB).
 const MaxInstructionBytes = 64 * 1024
 
+type taskTokensAndCost struct {
+	artifactTokens *artifacts.TaskTokens
+	v1Tokens       *v1alpha1.TaskTokens
+	costUSD        *float64
+	costSource     v1alpha1.CostSource
+}
+
+func (r *RunReconciler) computeAgentTokensAndCost(model string, agentResult *agent.Result) *taskTokensAndCost {
+	if agentResult == nil || (agentResult.InputTokens == 0 && agentResult.OutputTokens == 0) {
+		return nil
+	}
+	totalTokens := agentResult.InputTokens + agentResult.OutputTokens
+	tc := &taskTokensAndCost{
+		artifactTokens: &artifacts.TaskTokens{
+			Input:  agentResult.InputTokens,
+			Output: agentResult.OutputTokens,
+			Total:  totalTokens,
+		},
+		v1Tokens: &v1alpha1.TaskTokens{
+			Input:  agentResult.InputTokens,
+			Output: agentResult.OutputTokens,
+			Total:  totalTokens,
+		},
+	}
+	if price, source, ok := r.lookupModelPrice(model); ok {
+		cost := (float64(agentResult.InputTokens)*price.InputPer1M + float64(agentResult.OutputTokens)*price.OutputPer1M) / 1_000_000.0
+		tc.costUSD = &cost
+		tc.costSource = source
+	}
+	return tc
+}
+
+func applyTokensAndCost(res *taskExecutionResult, tc *taskTokensAndCost) {
+	if tc != nil && res != nil {
+		res.tokens = tc.v1Tokens
+		res.costUSD = tc.costUSD
+		res.costSource = tc.costSource
+	}
+}
+
+// DefaultAgentModelConstructor returns a constructor that creates a scripted model
+// for mock models, a Gemini client for Gemini models using the provided API key,
+// and rejects unsupported models or missing credentials.
+func DefaultAgentModelConstructor(geminiAPIKey string) func(run *v1alpha1.Run) (agent.Model, error) {
+	return func(run *v1alpha1.Run) (agent.Model, error) {
+		if run == nil {
+			return nil, errors.New("run is required")
+		}
+		if isMockModel(run.Spec.Model) {
+			return agent.NewScriptedModel(), nil
+		}
+		if !gemini.IsGeminiModel(run.Spec.Model) {
+			return nil, fmt.Errorf("unsupported model %q for agent task: only Gemini models are supported", run.Spec.Model)
+		}
+		if geminiAPIKey == "" {
+			return nil, errors.New("controller has no model credential")
+		}
+		return gemini.New(gemini.Options{
+			Model:  run.Spec.Model,
+			APIKey: geminiAPIKey,
+		})
+	}
+}
+
+func (r *RunReconciler) agentModelForRun(run *v1alpha1.Run) (agent.Model, error) {
+	if r.AgentModel != nil {
+		return r.AgentModel, nil
+	}
+	if r.NewAgentModel == nil {
+		return nil, errors.New("no agent model configured")
+	}
+	return r.NewAgentModel(run)
+}
+
 func (r *RunReconciler) executeAgentPhase(
 	ctx context.Context,
 	run *v1alpha1.Run,
@@ -3555,7 +3635,7 @@ func (r *RunReconciler) executeAgentPhase(
 	effectiveTimeoutSeconds int,
 	effectiveResources *v1alpha1.TaskResources,
 	effRange *v1alpha1.SampleRange,
-) (string, *taskExecutionResult) {
+) (string, *agent.Result, *taskExecutionResult) {
 	fail := func(message string) *taskExecutionResult {
 		return &taskExecutionResult{
 			taskID:         taskID,
@@ -3567,8 +3647,9 @@ func (r *RunReconciler) executeAgentPhase(
 		}
 	}
 
-	if r.AgentModel == nil {
-		return "", fail("no agent model configured")
+	agentModel, err := r.agentModelForRun(run)
+	if err != nil {
+		return "", nil, fail(err.Error())
 	}
 
 	if len(targetTask.Agent.PrepareCommand) > 0 {
@@ -3581,13 +3662,13 @@ func (r *RunReconciler) executeAgentPhase(
 		if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "agent prepare command", prepareContext, prepareResult, prepareError, taskID, effRange); failed {
 			failedResult.timeoutSeconds = effectiveTimeoutSeconds
 			failedResult.resources = effectiveResources
-			return "", &failedResult
+			return "", nil, &failedResult
 		}
 	}
 
 	cleanedPath := path.Clean(targetTask.Agent.InstructionPath)
 	if !strings.HasPrefix(cleanedPath, "/workspace/") && cleanedPath != "/workspace" {
-		return "", fail(fmt.Sprintf("instructionPath %q must be an absolute path inside /workspace", targetTask.Agent.InstructionPath))
+		return "", nil, fail(fmt.Sprintf("instructionPath %q must be an absolute path inside /workspace", targetTask.Agent.InstructionPath))
 	}
 	cleanPath := strings.TrimPrefix(cleanedPath, "/workspace")
 	readInstructionContext, readInstructionCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
@@ -3596,10 +3677,10 @@ func (r *RunReconciler) executeAgentPhase(
 	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "agent instruction file", readInstructionContext, readInstructionError, taskID, effRange); failed {
 		failedResult.timeoutSeconds = effectiveTimeoutSeconds
 		failedResult.resources = effectiveResources
-		return "", &failedResult
+		return "", nil, &failedResult
 	}
 	if len(instructionBytes) > MaxInstructionBytes {
-		return "", fail(fmt.Sprintf("agent instruction file %s exceeds %d bytes (%d bytes)", targetTask.Agent.InstructionPath, MaxInstructionBytes, len(instructionBytes)))
+		return "", nil, fail(fmt.Sprintf("agent instruction file %s exceeds %d bytes (%d bytes)", targetTask.Agent.InstructionPath, MaxInstructionBytes, len(instructionBytes)))
 	}
 
 	agentTimeout := r.executionStepTimeout()
@@ -3608,7 +3689,7 @@ func (r *RunReconciler) executeAgentPhase(
 	}
 	agentContext, agentCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, agentTimeout)
 	executor := &sandboxAgentExecutor{client: sbClient, cwd: cwd}
-	agentResult, agentError := agent.Run(agentContext, r.AgentModel, executor, agent.Options{
+	agentResult, agentError := agent.Run(agentContext, agentModel, executor, agent.Options{
 		Instruction: string(instructionBytes),
 	})
 	agentCancel()
@@ -3618,7 +3699,8 @@ func (r *RunReconciler) executeAgentPhase(
 		if agentError != nil {
 			errorMessage = agentError.Error()
 		}
-		return "", fail(fmt.Sprintf("agent model error: %s", truncateMessage(errorMessage, r.maxMessageBytes())))
+		failedResult := fail(fmt.Sprintf("agent model error: %s", truncateMessage(errorMessage, r.maxMessageBytes())))
+		return "", agentResult, failedResult
 	}
 
 	loopEndingMessage := ""
@@ -3628,7 +3710,7 @@ func (r *RunReconciler) executeAgentPhase(
 	case agent.StopReasonContextDone:
 		loopEndingMessage = "agent loop stopped: timeout"
 	}
-	return loopEndingMessage, nil
+	return loopEndingMessage, agentResult, nil
 }
 
 func (r *RunReconciler) executeSandboxTask(
@@ -3643,6 +3725,7 @@ func (r *RunReconciler) executeSandboxTask(
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 
 	var loopEndingMessage string
+	var agentResult *agent.Result
 	defer func() {
 		if loopEndingMessage != "" {
 			if result.message == "" {
@@ -3702,11 +3785,14 @@ func (r *RunReconciler) executeSandboxTask(
 	if targetTask.Agent != nil {
 		effectiveTimeoutSeconds := r.effectiveTaskCommandTimeoutSeconds(targetTask, run.Status.ExecutionDeadline)
 		var failedResult *taskExecutionResult
-		loopEndingMessage, failedResult = r.executeAgentPhase(ctx, run, taskID, sbClient, targetTask, cwd, effectiveTimeoutSeconds, effectiveResources, effRange)
+		loopEndingMessage, agentResult, failedResult = r.executeAgentPhase(ctx, run, taskID, sbClient, targetTask, cwd, effectiveTimeoutSeconds, effectiveResources, effRange)
 		if failedResult != nil {
+			applyTokensAndCost(failedResult, r.computeAgentTokensAndCost(run.Spec.Model, agentResult))
 			return *failedResult
 		}
 	}
+
+	tokensAndCost := r.computeAgentTokensAndCost(run.Spec.Model, agentResult)
 
 	taskCommandTimeout := r.executionStepTimeout()
 	if targetTask.TimeoutSeconds != nil {
@@ -3724,6 +3810,7 @@ func (r *RunReconciler) executeSandboxTask(
 	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
 		failedResult.timeoutSeconds = effectiveTimeoutSeconds
 		failedResult.resources = effectiveResources
+		applyTokensAndCost(&failedResult, tokensAndCost)
 		return failedResult
 	}
 
@@ -3734,6 +3821,7 @@ func (r *RunReconciler) executeSandboxTask(
 	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "results file", readContext, readErr, taskID, effRange); failed {
 		failedResult.timeoutSeconds = effectiveTimeoutSeconds
 		failedResult.resources = effectiveResources
+		applyTokensAndCost(&failedResult, tokensAndCost)
 		return failedResult
 	}
 
@@ -3742,7 +3830,7 @@ func (r *RunReconciler) executeSandboxTask(
 	if parseErr != nil {
 		message := fmt.Sprintf("failed to parse results file: %v", parseErr)
 		logger.Error(parseErr, "Task step parse results failed", "task", taskID)
-		return taskExecutionResult{
+		failedResult := taskExecutionResult{
 			taskID:         taskID,
 			phase:          v1alpha1.TaskPhaseFailed,
 			message:        message,
@@ -3750,11 +3838,13 @@ func (r *RunReconciler) executeSandboxTask(
 			timeoutSeconds: effectiveTimeoutSeconds,
 			resources:      effectiveResources,
 		}
+		applyTokensAndCost(&failedResult, tokensAndCost)
+		return failedResult
 	}
 	if aggregates.Samples == 0 {
 		message := "no scored samples"
 		logger.Error(errors.New(message), "Task completed without scored samples", "task", taskID)
-		return taskExecutionResult{
+		failedResult := taskExecutionResult{
 			taskID:         taskID,
 			phase:          v1alpha1.TaskPhaseFailed,
 			message:        message,
@@ -3762,6 +3852,8 @@ func (r *RunReconciler) executeSandboxTask(
 			timeoutSeconds: effectiveTimeoutSeconds,
 			resources:      effectiveResources,
 		}
+		applyTokensAndCost(&failedResult, tokensAndCost)
+		return failedResult
 	}
 
 	// Step 4: Compute statistics
@@ -3776,6 +3868,14 @@ func (r *RunReconciler) executeSandboxTask(
 			Start: effRange.Start,
 			End:   effRange.End,
 		}
+	}
+	var metaTokens *artifacts.TaskTokens
+	var metaCostUSD *float64
+	var metaCostSource v1alpha1.CostSource
+	if tokensAndCost != nil {
+		metaTokens = tokensAndCost.artifactTokens
+		metaCostUSD = tokensAndCost.costUSD
+		metaCostSource = tokensAndCost.costSource
 	}
 	meta := artifacts.RunMetadata{
 		RunName:           run.Name,
@@ -3795,6 +3895,9 @@ func (r *RunReconciler) executeSandboxTask(
 		StartedAt:         &startTime,
 		FinishedAt:        &finishTime,
 		SampleRange:       artifactSampleRange,
+		Tokens:            metaTokens,
+		CostUSD:           metaCostUSD,
+		CostSource:        metaCostSource,
 		PossibleSamples:   aggregates.Samples,
 	}
 	sinkContext, sinkCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
@@ -3803,7 +3906,7 @@ func (r *RunReconciler) executeSandboxTask(
 	if storeErr != nil {
 		message := fmt.Sprintf("failed to store artifact: %v", storeErr)
 		logger.Error(storeErr, "Failed to store artifact in sink", "task", taskID)
-		return taskExecutionResult{
+		failedResult := taskExecutionResult{
 			taskID:         taskID,
 			phase:          v1alpha1.TaskPhaseFailed,
 			message:        message,
@@ -3811,9 +3914,11 @@ func (r *RunReconciler) executeSandboxTask(
 			timeoutSeconds: effectiveTimeoutSeconds,
 			resources:      effectiveResources,
 		}
+		applyTokensAndCost(&failedResult, tokensAndCost)
+		return failedResult
 	}
 
-	return taskExecutionResult{
+	completedResult := taskExecutionResult{
 		taskID:          taskID,
 		phase:           v1alpha1.TaskPhaseCompleted,
 		timeoutSeconds:  effectiveTimeoutSeconds,
@@ -3830,6 +3935,8 @@ func (r *RunReconciler) executeSandboxTask(
 		logPath:         logPath,
 		sampleRange:     effRange,
 	}
+	applyTokensAndCost(&completedResult, tokensAndCost)
+	return completedResult
 }
 
 func (r *RunReconciler) pollTaskProgress(

@@ -135,6 +135,12 @@ func parseModelName(modelName string) (string, error) {
 	return normalized, nil
 }
 
+// IsGeminiModel reports whether modelName refers to a supported Gemini model.
+func IsGeminiModel(modelName string) bool {
+	_, err := parseModelName(modelName)
+	return err == nil
+}
+
 // New creates a new Gemini model client.
 func New(options Options) (*Client, error) {
 	modelName, err := parseModelName(options.Model)
