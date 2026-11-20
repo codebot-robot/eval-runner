@@ -36,20 +36,24 @@ if [ -z "${PINNED_COMMIT:-}" ]; then
   exit 1
 fi
 
-REPOSITORY_URL="https://github.com/laude-institute/terminal-bench-2.git"
+REPOSITORY_URL="${REPOSITORY_URL:-https://github.com/laude-institute/terminal-bench-2.git}"
 
-temporary_directory="$(mktemp -d)"
-trap 'rm -rf "${temporary_directory}"' EXIT
+if [ -n "${CHECKOUT_DIRECTORY:-}" ]; then
+  checkout_directory="${CHECKOUT_DIRECTORY}"
+else
+  temporary_directory="$(mktemp -d)"
+  trap 'rm -rf "${temporary_directory}"' EXIT
 
-checkout_directory="${temporary_directory}/checkout"
-mkdir -p "${checkout_directory}"
-(
-  cd "${checkout_directory}"
-  git init -q
-  git remote add origin "${REPOSITORY_URL}"
-  git fetch -q --depth 1 origin "${PINNED_COMMIT}"
-  git checkout -q FETCH_HEAD
-)
+  checkout_directory="${temporary_directory}/checkout"
+  mkdir -p "${checkout_directory}"
+  (
+    cd "${checkout_directory}"
+    git init -q
+    git remote add origin "${REPOSITORY_URL}"
+    git fetch -q --depth 1 origin "${PINNED_COMMIT}"
+    git checkout -q FETCH_HEAD
+  )
+fi
 
 find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exec basename {} \; | sort | awk -v commit="${PINNED_COMMIT}" -v checkout="${checkout_directory}" '
   BEGIN {
@@ -63,7 +67,8 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
     dockerfile = task_path "/environment/Dockerfile"
 
     section = ""
-    agent_timeout = 900
+    has_agent_timeout = 0
+    agent_timeout = 0
     verifier_timeout = 900
     docker_image = ""
     cpus = 1
@@ -80,6 +85,7 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
         split(line, parts, "=")
         gsub(/[^0-9.]/, "", parts[2])
         agent_timeout = parts[2] + 0
+        has_agent_timeout = 1
       }
       if (section == "verifier" && line ~ /timeout_sec/) {
         split(line, parts, "=")
@@ -117,9 +123,17 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
     }
     close(dockerfile)
 
-    timeout = int(agent_timeout + verifier_timeout)
+    raw_agent_timeout = has_agent_timeout ? agent_timeout : 900
+    timeout = int(raw_agent_timeout + verifier_timeout)
     if (timeout > 7200) timeout = 7200
     if (timeout <= 0) timeout = 1800
+
+    effective_agent_timeout = 0
+    if (has_agent_timeout) {
+      effective_agent_timeout = int(agent_timeout)
+      if (effective_agent_timeout > 7200) effective_agent_timeout = 7200
+      if (effective_agent_timeout <= 0) has_agent_timeout = 0
+    }
 
     names[count] = task_name
     images[count] = docker_image
@@ -127,6 +141,8 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
     timeouts[count] = timeout
     cpus_list[count] = cpus
     memory_list[count] = memory
+    has_agent_timeouts[count] = has_agent_timeout
+    agent_timeouts[count] = effective_agent_timeout
     count++
   }
   END {
@@ -144,6 +160,23 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
       printf "      \"command\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"oracle\", \"%s\"],\n", names[i], workdirs[i]
       printf "      \"timeoutSeconds\": %d,\n", timeouts[i]
       printf "      \"resources\": [{\"type\": \"sandbox\", \"limits\": {\"cpu\": \"%d\", \"memory\": \"%s\"}}]\n", cpus_list[i], memory_list[i]
+      print "    },"
+      print "    {"
+      printf "      \"id\": \"terminal-bench/%s/agent\",\n", names[i]
+      printf "      \"spec\": \"terminal-bench/%s\",\n", names[i]
+      printf "      \"image\": \"%s\",\n", images[i]
+      printf "      \"command\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"verify\", \"%s\"],\n", names[i], workdirs[i]
+      printf "      \"timeoutSeconds\": %d,\n", timeouts[i]
+      printf "      \"resources\": [{\"type\": \"sandbox\", \"limits\": {\"cpu\": \"%d\", \"memory\": \"%s\"}}],\n", cpus_list[i], memory_list[i]
+      print "      \"agent\": {"
+      printf "        \"prepareCommand\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"prepare\", \"%s\"],\n", names[i], workdirs[i]
+      if (has_agent_timeouts[i]) {
+        printf "        \"instructionPath\": \"/workspace/out/instruction.md\",\n"
+        printf "        \"timeoutSeconds\": %d\n", agent_timeouts[i]
+      } else {
+        printf "        \"instructionPath\": \"/workspace/out/instruction.md\"\n"
+      }
+      print "      }"
       print "    }" comma
     }
     print "  ]"

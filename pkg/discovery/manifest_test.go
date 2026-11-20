@@ -498,6 +498,17 @@ func assertTerminalBenchTask(t *testing.T, task *v1alpha1.ManifestTask, taskName
 	}
 }
 
+func assertTerminalBenchAgentTask(t *testing.T, task *v1alpha1.ManifestTask, taskName string) {
+	t.Helper()
+	expectedID := "terminal-bench/" + taskName + "/agent"
+	if task.ID != expectedID {
+		t.Errorf("task ID = %q, want %q", task.ID, expectedID)
+	}
+	if len(task.Command) != 5 || task.Command[0] != "bash" || task.Command[1] != "examples/terminal-bench/run-task.sh" || task.Command[2] != taskName || task.Command[3] != "verify" || task.Command[4] == "" {
+		t.Errorf("task %s Command = %v, want [bash examples/terminal-bench/run-task.sh %s verify <workdir>]", task.ID, task.Command, taskName)
+	}
+}
+
 func parseAndValidateScriptOutput(t *testing.T, scriptRelativePath string) *v1alpha1.Manifest {
 	t.Helper()
 	scriptPath, err := filepath.Abs(scriptRelativePath)
@@ -526,14 +537,22 @@ func TestTerminalBenchManifest(t *testing.T) {
 	}
 
 	manifest := parseAndValidateScriptOutput(t, "../../examples/terminal-bench/.evals/list")
-	if len(manifest.Tasks) != 89 {
-		t.Fatalf("expected 89 tasks in terminal-bench manifest, got %d", len(manifest.Tasks))
+	if len(manifest.Tasks) != 178 {
+		t.Fatalf("expected 178 tasks in terminal-bench manifest, got %d", len(manifest.Tasks))
 	}
 	var count4G, count8G int
+	var countOracle, countAgent int
 	for _, task := range manifest.Tasks {
-		taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
-		assertTerminalBenchTask(t, &task, taskName)
-		if taskName == "regex-log" {
+		if strings.HasSuffix(task.ID, "/agent") {
+			countAgent++
+			taskName := strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/agent")
+			assertTerminalBenchAgentTask(t, &task, taskName)
+		} else {
+			countOracle++
+			taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
+			assertTerminalBenchTask(t, &task, taskName)
+		}
+		if task.Spec == "terminal-bench/regex-log" {
 			cpuLimit := task.Resources[0].Limits[corev1.ResourceCPU]
 			memoryLimit := task.Resources[0].Limits[corev1.ResourceMemory]
 			if cpuLimit.String() != "1" || memoryLimit.String() != "2G" {
@@ -547,6 +566,12 @@ func TestTerminalBenchManifest(t *testing.T) {
 		if memoryLimitForCheck.String() == "8G" {
 			count8G++
 		}
+	}
+	if countOracle != 89 {
+		t.Errorf("expected 89 oracle tasks, got %d", countOracle)
+	}
+	if countAgent != 89 {
+		t.Errorf("expected 89 agent tasks, got %d", countAgent)
 	}
 	if count4G == 0 {
 		t.Errorf("expected at least one 4G task in terminal-bench manifest, got 0")

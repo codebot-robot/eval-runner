@@ -23,7 +23,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"github.com/gke-labs/eval-runner/pkg/discovery"
 )
 
 type taskFixtureEnvironment struct {
@@ -759,5 +761,86 @@ func TestRunTask_PinnedCommitMissingFails(t *testing.T) {
 	}
 	if !strings.Contains(sample.Message, "PINNED_COMMIT not set: version.sh not found") {
 		t.Errorf("expected message to mention 'PINNED_COMMIT not set: version.sh not found', got %q", sample.Message)
+	}
+}
+
+func TestEvalsList_OffersOracleAndAgentModes(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	checkoutDirectory := filepath.Join(temporaryDirectory, "checkout")
+
+	taskOneDirectory := filepath.Join(checkoutDirectory, "task-one")
+	if err := os.MkdirAll(filepath.Join(taskOneDirectory, "environment"), 0755); err != nil {
+		t.Fatalf("failed to create task-one directory: %v", err)
+	}
+	taskOneToml := "[agent]\ntimeout_sec = 600.0\n[verifier]\ntimeout_sec = 300.0\n[environment]\ndocker_image = \"example/task-one:latest\"\n"
+	if err := os.WriteFile(filepath.Join(taskOneDirectory, "task.toml"), []byte(taskOneToml), 0644); err != nil {
+		t.Fatalf("failed to write task-one task.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskOneDirectory, "environment", "Dockerfile"), []byte("FROM example/task-one:latest\nWORKDIR /workspace\n"), 0644); err != nil {
+		t.Fatalf("failed to write task-one Dockerfile: %v", err)
+	}
+
+	taskTwoDirectory := filepath.Join(checkoutDirectory, "task-two")
+	if err := os.MkdirAll(filepath.Join(taskTwoDirectory, "environment"), 0755); err != nil {
+		t.Fatalf("failed to create task-two directory: %v", err)
+	}
+	taskTwoToml := "[verifier]\ntimeout_sec = 500.0\n[environment]\ndocker_image = \"example/task-two:latest\"\n"
+	if err := os.WriteFile(filepath.Join(taskTwoDirectory, "task.toml"), []byte(taskTwoToml), 0644); err != nil {
+		t.Fatalf("failed to write task-two task.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskTwoDirectory, "environment", "Dockerfile"), []byte("FROM example/task-two:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write task-two Dockerfile: %v", err)
+	}
+
+	listScriptPath, err := filepath.Abs(".evals/list")
+	if err != nil {
+		t.Fatalf("failed to resolve .evals/list path: %v", err)
+	}
+
+	command := exec.Command(listScriptPath)
+	command.Dir = temporaryDirectory
+	command.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"PINNED_COMMIT=mock-commit",
+		"CHECKOUT_DIRECTORY=" + checkoutDirectory,
+	}
+
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf(".evals/list failed: %v\noutput: %s", err, string(output))
+	}
+
+	var manifest v1alpha1.Manifest
+	if err := json.Unmarshal(output, &manifest); err != nil {
+		t.Fatalf("failed to parse .evals/list output: %v\noutput: %s", err, string(output))
+	}
+	if err := discovery.ValidateManifest(&manifest); err != nil {
+		t.Fatalf("ValidateManifest failed: %v", err)
+	}
+	if len(manifest.Tasks) != 4 {
+		t.Fatalf("expected 4 tasks, got %d", len(manifest.Tasks))
+	}
+
+	tasksByID := make(map[string]v1alpha1.ManifestTask)
+	for _, task := range manifest.Tasks {
+		tasksByID[task.ID] = task
+	}
+
+	taskOneOracle := tasksByID["terminal-bench/task-one"]
+	if taskOneOracle.Agent != nil || taskOneOracle.Command[3] != "oracle" {
+		t.Errorf("task-one oracle unexpected agent=%v command=%v", taskOneOracle.Agent, taskOneOracle.Command)
+	}
+
+	taskOneAgent := tasksByID["terminal-bench/task-one/agent"]
+	if taskOneAgent.Command[3] != "verify" {
+		t.Errorf("task-one agent command = %v, want verify", taskOneAgent.Command)
+	}
+	if taskOneAgent.Agent == nil || taskOneAgent.Agent.PrepareCommand[3] != "prepare" || taskOneAgent.Agent.InstructionPath != "/workspace/out/instruction.md" || taskOneAgent.Agent.TimeoutSeconds == nil || *taskOneAgent.Agent.TimeoutSeconds != 600 {
+		t.Errorf("task-one agent unexpected agent block: %+v", taskOneAgent.Agent)
+	}
+
+	taskTwoAgent := tasksByID["terminal-bench/task-two/agent"]
+	if taskTwoAgent.Agent == nil || taskTwoAgent.Agent.TimeoutSeconds != nil {
+		t.Errorf("task-two agent expected nil timeoutSeconds, got %+v", taskTwoAgent.Agent)
 	}
 }

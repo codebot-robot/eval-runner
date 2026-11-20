@@ -530,8 +530,8 @@ spec:
 		if run.Status.Discovery == nil {
 			t.Fatalf("Expected status.discovery to be populated")
 		}
-		if run.Status.Discovery.TaskCount != 91 {
-			t.Fatalf("Expected 91 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+		if run.Status.Discovery.TaskCount != 180 {
+			t.Fatalf("Expected 180 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
 		}
 
 		if len(run.Status.Tasks) != 1 {
