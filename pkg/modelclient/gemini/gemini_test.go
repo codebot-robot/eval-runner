@@ -321,3 +321,28 @@ func TestNew_ModelValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestIsGeminiModel(t *testing.T) {
+	testCases := []struct {
+		modelName string
+		expected  bool
+	}{
+		{modelName: "gemini-2.5-flash", expected: true},
+		{modelName: "google/gemini-2.5-flash", expected: true},
+		{modelName: "models/gemini-2.5-flash", expected: true},
+		{modelName: "google/gemini-3.5-flash-lite", expected: true},
+		{modelName: "mockllm/model", expected: false},
+		{modelName: "openai/gpt-4o", expected: false},
+		{modelName: "", expected: false},
+		{modelName: "   ", expected: false},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.modelName, func(t *testing.T) {
+			actual := IsGeminiModel(testCase.modelName)
+			if actual != testCase.expected {
+				t.Errorf("IsGeminiModel(%q) = %v, want %v", testCase.modelName, actual, testCase.expected)
+			}
+		})
+	}
+}

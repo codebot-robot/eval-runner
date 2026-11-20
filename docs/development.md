@@ -607,6 +607,47 @@ View per-task scores and aggregates once completed:
 kubectl get run docs-comprehension-run -n eval-runner -o yaml
 ```
 
+### Running Agent Tasks with a Real Model (Terminal-Bench)
+
+Agent tasks (such as Terminal-Bench tasks) drive multi-turn shell interactions from outside the sandbox. When an agent task runs against a Gemini model, the agent loop calls Gemini using credentials held exclusively by the controller:
+
+- **Component holding the key**: The controller Deployment (`eval-runner-controller` in namespace `eval-runner`) alone holds `GEMINI_API_KEY`. Task sandboxes and pods NEVER receive or hold model credentials.
+- **Providing the key**: Create a Secret named `model-credentials` in the controller's namespace (`eval-runner`):
+
+  ```bash
+  kubectl -n eval-runner create secret generic model-credentials \
+    --from-literal=GEMINI_API_KEY=<your-api-key>
+  ```
+
+  The controller Deployment reads `GEMINI_API_KEY` from this Secret as an optional reference (`secretKeyRef`) and starts normally when the Secret is absent. If an agent task requests a real model while no key is configured, the controller fails the task immediately with `controller has no model credential` without launching a sandbox or calling external APIs.
+- **Running one Terminal-Bench task in agent mode**: Create a `Run` referencing a task whose `.evals/list` manifest entry declares an `agent` block (such as `terminal-bench/regex-log-agent` in the e2e fixtures or the benchmark's agent tasks) and naming a Gemini model:
+
+  ```bash
+  kubectl apply -f - <<EOF
+  apiVersion: evalrunner.gke-labs.dev/v1alpha1
+  kind: Run
+  metadata:
+    name: terminal-bench-agent-run
+    namespace: eval-runner
+  spec:
+    repo:
+      url: https://github.com/gke-labs/eval-runner.git
+      commit: $(git rev-parse HEAD)
+    model: google/gemini-3.5-flash-lite
+    tasks:
+      - terminal-bench/regex-log-agent
+  EOF
+  ```
+
+  Watch progress and view outcomes:
+
+  ```bash
+  kubectl get run terminal-bench-agent-run -n eval-runner -w
+  kubectl get run terminal-bench-agent-run -n eval-runner -o yaml
+  ```
+
+  To confirm the model was called, verify that the task's token counts are non-zero (`status.tasks[].tokens.total > 0`). Estimated costs from model usage are recorded on `status.tasks[].costUSD` and rolled up into `status.costUSD`.
+
 #### Provider Dependencies and Custom Images
 
 The default sample runner sandbox image (`images/sample-runner`) includes Inspect AI alongside pinned provider dependencies for common model providers out of the box:

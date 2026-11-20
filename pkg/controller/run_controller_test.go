@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,6 +37,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
+	"github.com/gke-labs/eval-runner/pkg/modelclient/gemini"
 	"github.com/gke-labs/eval-runner/pkg/pki"
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -4960,6 +4963,220 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Errorf("expected task-valid-agent Completed, got %s", t1.Phase)
 		}
 	})
+
+	t.Run("TaskAgent_GeminiClient_SuccessWithTokensAndCost", func(t *testing.T) {
+		timeout := 900
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{{
+				ID:        "task-gemini-agent",
+				Spec:      "eval.py@valid",
+				Image:     "task-image:v1",
+				Command:   []string{"verify.sh"},
+				Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+				Agent: &v1alpha1.ManifestTaskAgent{
+					PrepareCommand:  []string{"prepare.sh"},
+					InstructionPath: "/workspace/out/inst.md",
+					TimeoutSeconds:  &timeout,
+				},
+			}},
+		}
+
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-run-gemini-agent", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: "git://repo", Commit: "c1"}, Model: "google/gemini-2.5-flash"},
+			Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseRunning},
+		}
+
+		var geminiCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			geminiCalls++
+			w.WriteHeader(http.StatusOK)
+			if geminiCalls == 1 {
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":{"command":"echo solved"}}}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"Done"}]}}],"usageMetadata":{"promptTokenCount":150,"candidatesTokenCount":30}}`))
+		}))
+		defer server.Close()
+
+		var executedCommands [][]string
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				executedCommands = append(executedCommands, cfg.Command)
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "echo output"}, nil
+			},
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				if path == "/out/results.json" {
+					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true, "score": 1.0}]}`), nil
+				}
+				if path == "/out/inst.md" || path == "out/inst.md" {
+					return []byte("instruction prompt"), nil
+				}
+				return nil, fmt.Errorf("file not found: %s", path)
+			},
+		}
+
+		sink := artifacts.NewInMemorySink()
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).WithStatusSubresource(run).Build()
+		reconciler := &RunReconciler{
+			Client: cl, Scheme: scheme, SandboxNamespace: "eval-runner-sandbox",
+			SandboxClient: fakeClient,
+			ArtifactSink:  sink,
+			NewAgentModel: func(r *v1alpha1.Run) (agent.Model, error) {
+				return gemini.New(gemini.Options{
+					BaseURL:    server.URL,
+					Model:      r.Spec.Model,
+					APIKey:     "test-secret-key",
+					HTTPClient: server.Client(),
+				})
+			},
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+		// Turn 1: create sandbox pod
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		var sbList sandboxv1beta1.SandboxList
+		_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+		if len(sbList.Items) != 1 {
+			t.Fatalf("expected 1 sandbox created, got %d", len(sbList.Items))
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: sbList.Items[0].Name, Namespace: "eval-runner-sandbox"},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				PodIP:      "10.244.0.52",
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			},
+		}
+		if err := cl.Create(t.Context(), pod); err != nil {
+			t.Fatalf("failed to create pod: %v", err)
+		}
+
+		// Turn 2: execute agent task with Gemini client
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		if geminiCalls != 2 {
+			t.Errorf("expected 2 calls to Gemini server, got %d", geminiCalls)
+		}
+
+		if len(executedCommands) != 3 ||
+			!reflect.DeepEqual(executedCommands[0], []string{"prepare.sh"}) ||
+			!reflect.DeepEqual(executedCommands[1], []string{"bash", "-c", "echo solved"}) ||
+			!reflect.DeepEqual(executedCommands[2], []string{"verify.sh"}) {
+			t.Errorf("expected prepareCommand, agent bash command, and verify command to execute, got %v", executedCommands)
+		}
+
+		var updatedRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+		if len(updatedRun.Status.Tasks) != 1 {
+			t.Fatalf("expected 1 task in status, got %d", len(updatedRun.Status.Tasks))
+		}
+		task0 := updatedRun.Status.Tasks[0]
+		if task0.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Fatalf("expected task Completed, got %s (msg: %s)", task0.Phase, task0.Message)
+		}
+		if task0.Tokens == nil {
+			t.Fatal("expected task tokens to be recorded, got nil")
+		}
+		if task0.Tokens.Input != 250 || task0.Tokens.Output != 50 || task0.Tokens.Total != 300 {
+			t.Errorf("expected tokens Input=250, Output=50, Total=300, got %+v", task0.Tokens)
+		}
+		if task0.CostUSD == nil || *task0.CostUSD <= 0 {
+			t.Errorf("expected task CostUSD > 0, got %v", task0.CostUSD)
+		}
+		if updatedRun.Status.CostUSD == nil || *updatedRun.Status.CostUSD != *task0.CostUSD {
+			t.Errorf("expected run CostUSD to match task CostUSD %v, got %v", task0.CostUSD, updatedRun.Status.CostUSD)
+		}
+
+		// Verify artifact metadata has tokens and cost
+		summary, err := artifacts.ReadTaskSummary(t.Context(), sink, task0.LogPath)
+		if err != nil {
+			t.Fatalf("failed to read task summary from sink: %v", err)
+		}
+		if summary.Tokens == nil || summary.Tokens.Total != 300 {
+			t.Errorf("expected summary Tokens.Total=300, got %+v", summary.Tokens)
+		}
+		if summary.CostUSD == nil || *summary.CostUSD <= 0 {
+			t.Errorf("expected summary CostUSD > 0, got %v", summary.CostUSD)
+		}
+	})
+
+	t.Run("TaskAgent_InvalidOrMissingModelCredentials_RejectsFast", func(t *testing.T) {
+		testCases := []struct {
+			name        string
+			model       string
+			apiKey      string
+			expectedMsg string
+		}{
+			{
+				name:        "GeminiMissingKey",
+				model:       "google/gemini-2.5-flash",
+				apiKey:      "",
+				expectedMsg: "controller has no model credential",
+			},
+			{
+				name:        "UnsupportedModel",
+				model:       "openai/gpt-4o",
+				apiKey:      "key-present",
+				expectedMsg: "only Gemini models are supported",
+			},
+		}
+
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				timeout := 900
+				manifest := &v1alpha1.Manifest{
+					Tasks: []v1alpha1.ManifestTask{{
+						ID:        "agent-task",
+						Spec:      "eval.py@valid",
+						Image:     "task-image:v1",
+						Command:   []string{"verify.sh"},
+						Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+						Agent:     &v1alpha1.ManifestTaskAgent{InstructionPath: "/workspace/out/inst.md", TimeoutSeconds: &timeout},
+					}},
+				}
+				run := &v1alpha1.Run{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-run-" + strings.ToLower(testCase.name), Namespace: "eval-runner"},
+					Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: "git://repo", Commit: "c1"}, Model: testCase.model},
+					Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseRunning},
+				}
+				cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).WithStatusSubresource(run).Build()
+				reconciler := &RunReconciler{
+					Client:        cl,
+					Scheme:        scheme,
+					NewAgentModel: DefaultAgentModelConstructor(testCase.apiKey),
+				}
+				reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+				req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+				if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+					t.Fatalf("reconcile error: %v", err)
+				}
+				var sbList sandboxv1beta1.SandboxList
+				_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
+				if len(sbList.Items) != 0 {
+					t.Errorf("expected 0 sandboxes created, got %d", len(sbList.Items))
+				}
+				var updatedRun v1alpha1.Run
+				_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
+				if len(updatedRun.Status.Tasks) != 1 || updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
+					t.Fatalf("expected task Failed, got %+v", updatedRun.Status.Tasks)
+				}
+				if !strings.Contains(updatedRun.Status.Tasks[0].Message, testCase.expectedMsg) {
+					t.Errorf("expected message to contain %q, got %q", testCase.expectedMsg, updatedRun.Status.Tasks[0].Message)
+				}
+			})
+		}
+	})
 }
 
 func TestExecuteAgentPhase(t *testing.T) {
@@ -4977,7 +5194,7 @@ func TestExecuteAgentPhase(t *testing.T) {
 		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
 		badTask := task
 		badTask.Agent = &v1alpha1.ManifestTaskAgent{InstructionPath: "/etc/passwd"}
-		_, failed := reconciler.executeAgentPhase(ctx, run, "task", nil, badTask, "repo", 60, nil, nil)
+		_, _, failed := reconciler.executeAgentPhase(ctx, run, "task", nil, badTask, "repo", 60, nil, nil)
 		if failed == nil || !strings.Contains(failed.message, "must be an absolute path inside /workspace") {
 			t.Errorf("expected failure for instruction outside workspace, got %v", failed)
 		}
@@ -4999,7 +5216,7 @@ func TestExecuteAgentPhase(t *testing.T) {
 			AgentModel: &timingOutModel{},
 		}
 		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
-		loopEndingMessage, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, timedOutTask, "repo", 60, nil, nil)
+		loopEndingMessage, _, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, timedOutTask, "repo", 60, nil, nil)
 		if failed != nil {
 			t.Fatalf("expected timeout to proceed to verify, got failedResult: %v", failed)
 		}
