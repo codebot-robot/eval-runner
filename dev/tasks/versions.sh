@@ -27,6 +27,12 @@ SANDBOXD_COMMIT="0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7"
 SANDBOXD_TAG="0d9e0d2"
 SERVICE_PORTALS_COMMIT="e50614235606f3fbdc233d5fd5ae432d26eb52b3"
 
+# Determine default image tag for eval-runner from git HEAD
+DEFAULT_IMAGE_TAG="$(git -C "${REPO_ROOT:-.}" rev-parse --short HEAD)"
+if [[ -n "$(git -C "${REPO_ROOT:-.}" status --porcelain)" ]]; then
+  DEFAULT_IMAGE_TAG="${DEFAULT_IMAGE_TAG}-dirty"
+fi
+
 # Determine ap version from .ap/ap.yaml; always invoke via go run, never use a PATH binary
 AP_VERSION="$(awk -F': *' '/^[[:space:]]*version:[[:space:]]*/ {gsub(/["'\'' ]/, "", $2); print $2}' "${REPO_ROOT}/.ap/ap.yaml" 2>/dev/null || true)"
 AP_VERSION="${AP_VERSION:-latest}"
