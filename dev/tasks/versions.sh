@@ -25,7 +25,7 @@ AGENT_SANDBOX_VERSION="v1.0.7"
 GATEWAY_API_VERSION="v1.2.0"
 SANDBOXD_COMMIT="0d9e0d2e62d1aff4ce6849b5d0433a672ec82db7"
 SANDBOXD_TAG="0d9e0d2"
-SERVICE_PORTALS_COMMIT="c2220476330822eaf23448c3aafd44e21a1eeefe"
+SERVICE_PORTALS_COMMIT="798fbd5d4e1460860bbc6c56bbe6745227b10ad8"
 
 # Determine ap version from .ap/ap.yaml; always invoke via go run, never use a PATH binary
 AP_VERSION="$(awk -F': *' '/^[[:space:]]*version:[[:space:]]*/ {gsub(/["'\'' ]/, "", $2); print $2}' "${REPO_ROOT}/.ap/ap.yaml" 2>/dev/null || true)"
