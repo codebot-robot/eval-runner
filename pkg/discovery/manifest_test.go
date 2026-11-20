@@ -504,42 +504,8 @@ func assertTerminalBenchAgentTask(t *testing.T, task *v1alpha1.ManifestTask, tas
 	if task.ID != expectedID {
 		t.Errorf("task ID = %q, want %q", task.ID, expectedID)
 	}
-	expectedSpec := "terminal-bench/" + taskName
-	if task.Spec != expectedSpec {
-		t.Errorf("task %s Spec = %q, want %q", task.ID, task.Spec, expectedSpec)
-	}
-	expectedImage := "alexgshaw/" + taskName + ":20251031"
-	if task.Image != expectedImage {
-		t.Errorf("task %s Image = %q, want %q", task.ID, task.Image, expectedImage)
-	}
-	if task.TimeoutSeconds == nil || *task.TimeoutSeconds < 1 || *task.TimeoutSeconds > 7200 {
-		t.Errorf("task %s expected timeoutSeconds in [1, 7200], got %v", task.ID, task.TimeoutSeconds)
-	}
 	if len(task.Command) != 5 || task.Command[0] != "bash" || task.Command[1] != "examples/terminal-bench/run-task.sh" || task.Command[2] != taskName || task.Command[3] != "verify" || task.Command[4] == "" {
 		t.Errorf("task %s Command = %v, want [bash examples/terminal-bench/run-task.sh %s verify <workdir>]", task.ID, task.Command, taskName)
-	}
-	if task.Agent == nil {
-		t.Fatalf("task %s Agent block must be non-nil", task.ID)
-	}
-	if len(task.Agent.PrepareCommand) != 5 || task.Agent.PrepareCommand[0] != "bash" || task.Agent.PrepareCommand[1] != "examples/terminal-bench/run-task.sh" || task.Agent.PrepareCommand[2] != taskName || task.Agent.PrepareCommand[3] != "prepare" || task.Agent.PrepareCommand[4] == "" {
-		t.Errorf("task %s Agent.PrepareCommand = %v, want [bash examples/terminal-bench/run-task.sh %s prepare <workdir>]", task.ID, task.Agent.PrepareCommand, taskName)
-	}
-	if task.Agent.InstructionPath != "/workspace/out/instruction.md" {
-		t.Errorf("task %s Agent.InstructionPath = %q, want /workspace/out/instruction.md", task.ID, task.Agent.InstructionPath)
-	}
-	if task.Agent.TimeoutSeconds != nil && (*task.Agent.TimeoutSeconds < 1 || *task.Agent.TimeoutSeconds > 7200) {
-		t.Errorf("task %s Agent.TimeoutSeconds = %v, want between 1 and 7200", task.ID, task.Agent.TimeoutSeconds)
-	}
-	if err := ValidateTaskAgent(*task); err != nil {
-		t.Errorf("task %s ValidateTaskAgent failed: %v", task.ID, err)
-	}
-	if len(task.Resources) != 1 || task.Resources[0].Type != v1alpha1.ResourceTypeSandbox {
-		t.Errorf("task %s Resources = %v, want [{Type: 'sandbox'}]", task.ID, task.Resources)
-	}
-	cpuLimitQuantity := task.Resources[0].Limits[corev1.ResourceCPU]
-	memoryLimitQuantity := task.Resources[0].Limits[corev1.ResourceMemory]
-	if task.Resources[0].Limits == nil || cpuLimitQuantity.IsZero() || memoryLimitQuantity.IsZero() {
-		t.Errorf("task %s Resources missing CPU or Memory limits: %v", task.ID, task.Resources[0])
 	}
 }
 

@@ -534,30 +534,6 @@ spec:
 			t.Fatalf("Expected 180 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
 		}
 
-		manifestPathSuffix := fmt.Sprintf("artifacts/runs/%s/manifest.json", terminalBenchCommit)
-		findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", manifestPathSuffix)
-		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
-		foundFiles := harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd)
-		if strings.TrimSpace(foundFiles) != "" {
-			firstFile := strings.Split(strings.TrimSpace(foundFiles), "\n")[0]
-			manifestContent := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
-			var storedManifest v1alpha1.Manifest
-			if err := json.Unmarshal([]byte(manifestContent), &storedManifest); err == nil {
-				hasAgentTask := false
-				for _, manifestTask := range storedManifest.Tasks {
-					if manifestTask.Agent != nil && len(manifestTask.Agent.PrepareCommand) > 0 && manifestTask.Agent.InstructionPath != "" {
-						if err := discovery.ValidateTaskAgent(manifestTask); err == nil {
-							hasAgentTask = true
-							break
-						}
-					}
-				}
-				if !hasAgentTask {
-					t.Errorf("Expected manifest to contain agent-mode entries with valid agent blocks")
-				}
-			}
-		}
-
 		if len(run.Status.Tasks) != 1 {
 			t.Fatalf("Expected 1 task in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
 		}

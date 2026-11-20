@@ -132,7 +132,7 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
     if (has_agent_timeout) {
       effective_agent_timeout = int(agent_timeout)
       if (effective_agent_timeout > 7200) effective_agent_timeout = 7200
-      if (effective_agent_timeout <= 0) effective_agent_timeout = 1
+      if (effective_agent_timeout <= 0) has_agent_timeout = 0
     }
 
     names[count] = task_name

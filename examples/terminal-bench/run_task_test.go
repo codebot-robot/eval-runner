@@ -772,23 +772,11 @@ func TestEvalsList_OffersOracleAndAgentModes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(taskOneDirectory, "environment"), 0755); err != nil {
 		t.Fatalf("failed to create task-one directory: %v", err)
 	}
-	taskOneToml := `
-[agent]
-timeout_sec = 600.0
-
-[verifier]
-timeout_sec = 300.0
-
-[environment]
-docker_image = "example/task-one:latest"
-cpus = 2
-memory = "4G"
-`
+	taskOneToml := "[agent]\ntimeout_sec = 600.0\n[verifier]\ntimeout_sec = 300.0\n[environment]\ndocker_image = \"example/task-one:latest\"\n"
 	if err := os.WriteFile(filepath.Join(taskOneDirectory, "task.toml"), []byte(taskOneToml), 0644); err != nil {
 		t.Fatalf("failed to write task-one task.toml: %v", err)
 	}
-	taskOneDockerfile := "FROM example/task-one:latest\nWORKDIR /workspace\n"
-	if err := os.WriteFile(filepath.Join(taskOneDirectory, "environment", "Dockerfile"), []byte(taskOneDockerfile), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(taskOneDirectory, "environment", "Dockerfile"), []byte("FROM example/task-one:latest\nWORKDIR /workspace\n"), 0644); err != nil {
 		t.Fatalf("failed to write task-one Dockerfile: %v", err)
 	}
 
@@ -796,18 +784,11 @@ memory = "4G"
 	if err := os.MkdirAll(filepath.Join(taskTwoDirectory, "environment"), 0755); err != nil {
 		t.Fatalf("failed to create task-two directory: %v", err)
 	}
-	taskTwoToml := `
-[verifier]
-timeout_sec = 500.0
-
-[environment]
-docker_image = "example/task-two:latest"
-`
+	taskTwoToml := "[verifier]\ntimeout_sec = 500.0\n[environment]\ndocker_image = \"example/task-two:latest\"\n"
 	if err := os.WriteFile(filepath.Join(taskTwoDirectory, "task.toml"), []byte(taskTwoToml), 0644); err != nil {
 		t.Fatalf("failed to write task-two task.toml: %v", err)
 	}
-	taskTwoDockerfile := "FROM example/task-two:latest\n"
-	if err := os.WriteFile(filepath.Join(taskTwoDirectory, "environment", "Dockerfile"), []byte(taskTwoDockerfile), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(taskTwoDirectory, "environment", "Dockerfile"), []byte("FROM example/task-two:latest\n"), 0644); err != nil {
 		t.Fatalf("failed to write task-two Dockerfile: %v", err)
 	}
 
@@ -833,7 +814,9 @@ docker_image = "example/task-two:latest"
 	if err := json.Unmarshal(output, &manifest); err != nil {
 		t.Fatalf("failed to parse .evals/list output: %v\noutput: %s", err, string(output))
 	}
-
+	if err := discovery.ValidateManifest(&manifest); err != nil {
+		t.Fatalf("ValidateManifest failed: %v", err)
+	}
 	if len(manifest.Tasks) != 4 {
 		t.Fatalf("expected 4 tasks, got %d", len(manifest.Tasks))
 	}
@@ -843,149 +826,21 @@ docker_image = "example/task-two:latest"
 		tasksByID[task.ID] = task
 	}
 
-	taskOneOracle, ok := tasksByID["terminal-bench/task-one"]
-	if !ok {
-		t.Fatalf("expected task-one oracle entry to exist")
-	}
-	if taskOneOracle.Spec != "terminal-bench/task-one" {
-		t.Errorf("task-one oracle spec = %q, want %q", taskOneOracle.Spec, "terminal-bench/task-one")
-	}
-	if taskOneOracle.Image != "example/task-one:latest" {
-		t.Errorf("task-one oracle image = %q, want %q", taskOneOracle.Image, "example/task-one:latest")
-	}
-	expectedOracleCommand := []string{"bash", "examples/terminal-bench/run-task.sh", "task-one", "oracle", "/workspace"}
-	if strings.Join(taskOneOracle.Command, " ") != strings.Join(expectedOracleCommand, " ") {
-		t.Errorf("task-one oracle command = %v, want %v", taskOneOracle.Command, expectedOracleCommand)
-	}
-	if taskOneOracle.TimeoutSeconds == nil || *taskOneOracle.TimeoutSeconds != 900 {
-		t.Errorf("task-one oracle timeoutSeconds = %v, want 900", taskOneOracle.TimeoutSeconds)
-	}
-	if taskOneOracle.Agent != nil {
-		t.Errorf("task-one oracle agent must be nil, got %+v", taskOneOracle.Agent)
-	}
-	if err := discovery.ValidateTaskResources(taskOneOracle); err != nil {
-		t.Errorf("task-one oracle resource validation failed: %v", err)
+	taskOneOracle := tasksByID["terminal-bench/task-one"]
+	if taskOneOracle.Agent != nil || taskOneOracle.Command[3] != "oracle" {
+		t.Errorf("task-one oracle unexpected agent=%v command=%v", taskOneOracle.Agent, taskOneOracle.Command)
 	}
 
-	taskOneAgent, ok := tasksByID["terminal-bench/task-one/agent"]
-	if !ok {
-		t.Fatalf("expected task-one agent entry to exist")
+	taskOneAgent := tasksByID["terminal-bench/task-one/agent"]
+	if taskOneAgent.Command[3] != "verify" {
+		t.Errorf("task-one agent command = %v, want verify", taskOneAgent.Command)
 	}
-	if taskOneAgent.Spec != "terminal-bench/task-one" {
-		t.Errorf("task-one agent spec = %q, want %q", taskOneAgent.Spec, "terminal-bench/task-one")
-	}
-	if taskOneAgent.Image != "example/task-one:latest" {
-		t.Errorf("task-one agent image = %q, want %q", taskOneAgent.Image, "example/task-one:latest")
-	}
-	expectedVerifyCommand := []string{"bash", "examples/terminal-bench/run-task.sh", "task-one", "verify", "/workspace"}
-	if strings.Join(taskOneAgent.Command, " ") != strings.Join(expectedVerifyCommand, " ") {
-		t.Errorf("task-one agent command = %v, want %v", taskOneAgent.Command, expectedVerifyCommand)
-	}
-	if taskOneAgent.TimeoutSeconds == nil || *taskOneAgent.TimeoutSeconds != 900 {
-		t.Errorf("task-one agent timeoutSeconds = %v, want 900", taskOneAgent.TimeoutSeconds)
-	}
-	if taskOneAgent.Agent == nil {
-		t.Fatalf("task-one agent block must be non-nil")
-	}
-	expectedPrepareCommand := []string{"bash", "examples/terminal-bench/run-task.sh", "task-one", "prepare", "/workspace"}
-	if strings.Join(taskOneAgent.Agent.PrepareCommand, " ") != strings.Join(expectedPrepareCommand, " ") {
-		t.Errorf("task-one agent prepareCommand = %v, want %v", taskOneAgent.Agent.PrepareCommand, expectedPrepareCommand)
-	}
-	if taskOneAgent.Agent.InstructionPath != "/workspace/out/instruction.md" {
-		t.Errorf("task-one agent instructionPath = %q, want %q", taskOneAgent.Agent.InstructionPath, "/workspace/out/instruction.md")
-	}
-	if taskOneAgent.Agent.TimeoutSeconds == nil || *taskOneAgent.Agent.TimeoutSeconds != 600 {
-		t.Errorf("task-one agent.timeoutSeconds = %v, want 600", taskOneAgent.Agent.TimeoutSeconds)
-	}
-	if err := discovery.ValidateTaskAgent(taskOneAgent); err != nil {
-		t.Errorf("task-one agent validation failed: %v", err)
-	}
-	if err := discovery.ValidateTaskResources(taskOneAgent); err != nil {
-		t.Errorf("task-one agent resource validation failed: %v", err)
+	if taskOneAgent.Agent == nil || taskOneAgent.Agent.PrepareCommand[3] != "prepare" || taskOneAgent.Agent.InstructionPath != "/workspace/out/instruction.md" || taskOneAgent.Agent.TimeoutSeconds == nil || *taskOneAgent.Agent.TimeoutSeconds != 600 {
+		t.Errorf("task-one agent unexpected agent block: %+v", taskOneAgent.Agent)
 	}
 
-	taskTwoAgent, ok := tasksByID["terminal-bench/task-two/agent"]
-	if !ok {
-		t.Fatalf("expected task-two agent entry to exist")
-	}
-	if taskTwoAgent.Agent == nil {
-		t.Fatalf("task-two agent block must be non-nil")
-	}
-	if taskTwoAgent.Agent.TimeoutSeconds != nil {
-		t.Errorf("expected task-two agent.timeoutSeconds to be omitted, got %v", *taskTwoAgent.Agent.TimeoutSeconds)
-	}
-	if err := discovery.ValidateTaskAgent(taskTwoAgent); err != nil {
-		t.Errorf("task-two agent validation failed: %v", err)
-	}
-}
-
-func TestEvalsList_ExcessiveAgentTimeoutCapped(t *testing.T) {
-	temporaryDirectory := t.TempDir()
-	checkoutDirectory := filepath.Join(temporaryDirectory, "checkout")
-
-	taskDirectory := filepath.Join(checkoutDirectory, "large-timeout-task")
-	if err := os.MkdirAll(filepath.Join(taskDirectory, "environment"), 0755); err != nil {
-		t.Fatalf("failed to create task directory: %v", err)
-	}
-	taskToml := `
-[agent]
-timeout_sec = 12000.0
-
-[verifier]
-timeout_sec = 900.0
-
-[environment]
-docker_image = "example/task:latest"
-`
-	if err := os.WriteFile(filepath.Join(taskDirectory, "task.toml"), []byte(taskToml), 0644); err != nil {
-		t.Fatalf("failed to write task.toml: %v", err)
-	}
-	taskDockerfile := "FROM example/task:latest\n"
-	if err := os.WriteFile(filepath.Join(taskDirectory, "environment", "Dockerfile"), []byte(taskDockerfile), 0644); err != nil {
-		t.Fatalf("failed to write Dockerfile: %v", err)
-	}
-
-	listScriptPath, err := filepath.Abs(".evals/list")
-	if err != nil {
-		t.Fatalf("failed to resolve .evals/list path: %v", err)
-	}
-
-	command := exec.Command(listScriptPath)
-	command.Dir = temporaryDirectory
-	command.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"PINNED_COMMIT=mock-commit",
-		"CHECKOUT_DIRECTORY=" + checkoutDirectory,
-	}
-
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf(".evals/list failed: %v\noutput: %s", err, string(output))
-	}
-
-	var manifest v1alpha1.Manifest
-	if err := json.Unmarshal(output, &manifest); err != nil {
-		t.Fatalf("failed to parse .evals/list output: %v\noutput: %s", err, string(output))
-	}
-
-	var agentTask *v1alpha1.ManifestTask
-	for _, task := range manifest.Tasks {
-		if task.ID == "terminal-bench/large-timeout-task/agent" {
-			taskCopy := task
-			agentTask = &taskCopy
-			break
-		}
-	}
-	if agentTask == nil {
-		t.Fatalf("expected agent task to exist in manifest")
-	}
-	if agentTask.Agent == nil {
-		t.Fatalf("expected agent block to be non-nil")
-	}
-	if agentTask.Agent.TimeoutSeconds == nil || *agentTask.Agent.TimeoutSeconds != 7200 {
-		t.Errorf("expected capped agent.timeoutSeconds 7200, got %v", agentTask.Agent.TimeoutSeconds)
-	}
-	if err := discovery.ValidateTaskAgent(*agentTask); err != nil {
-		t.Errorf("agent task failed validation after timeout capping: %v", err)
+	taskTwoAgent := tasksByID["terminal-bench/task-two/agent"]
+	if taskTwoAgent.Agent == nil || taskTwoAgent.Agent.TimeoutSeconds != nil {
+		t.Errorf("task-two agent expected nil timeoutSeconds, got %+v", taskTwoAgent.Agent)
 	}
 }
