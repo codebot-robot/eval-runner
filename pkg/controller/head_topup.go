@@ -341,7 +341,7 @@ func (r *HeadTopUpRunner) RunTopUpPass(ctx context.Context) ([]*v1alpha1.Run, er
 
 		model := seedRun.Spec.Model
 		if model == "" {
-			model = cfg.DefaultModel
+			model = cfg.Model.DefaultModel
 		}
 		cohort := seedRun.Spec.Cohort
 		if cohort == "" {

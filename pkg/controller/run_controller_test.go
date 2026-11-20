@@ -8550,8 +8550,10 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			ArtifactSink:     gcsSink,
 			SandboxNamespace: "eval-runner-sandbox",
 			Config: ClusterConfig{
-				ModelPrices: map[string]ModelPrice{
-					"mockllm/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+				Model: ModelConfig{
+					Prices: map[string]ModelPrice{
+						"mockllm/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+					},
 				},
 			},
 		}
@@ -8839,8 +8841,10 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			ArtifactSink:     gcsSink,
 			SandboxNamespace: "eval-runner-sandbox",
 			Config: ClusterConfig{
-				ModelPrices: map[string]ModelPrice{
-					"other/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+				Model: ModelConfig{
+					Prices: map[string]ModelPrice{
+						"other/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+					},
 				},
 			},
 		}

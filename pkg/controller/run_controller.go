@@ -707,16 +707,7 @@ func (r *RunReconciler) minProgressWriteInterval() time.Duration {
 func (r *RunReconciler) lookupModelPrice(model string) (ModelPrice, v1alpha1.CostSource, bool) {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.Config.ModelPricesDisabled {
-		return ModelPrice{}, "", false
-	}
-	prices := r.Config.ModelPrices
-	sources := r.Config.ModelPriceSources
-	if prices == nil {
-		prices = DefaultModelPrices()
-		sources = DefaultModelPriceSources()
-	}
-	return LookupModelPrice(model, prices, sources)
+	return r.Config.Model.LookupPrice(model)
 }
 
 // UpdateConfig updates the configuration on RunReconciler in a thread-safe manner.

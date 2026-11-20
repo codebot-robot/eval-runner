@@ -197,6 +197,66 @@ type ModelPrice struct {
 	OutputPer1M float64 `json:"outputPer1M"`
 }
 
+// ModelConfig holds configuration for model pricing and default model selection.
+type ModelConfig struct {
+	// Prices maps model identifier to token pricing in USD per 1M tokens.
+	Prices map[string]ModelPrice
+
+	// PriceSources maps model or prefix key to pricing provenance ("configmap" or "default").
+	PriceSources map[string]v1alpha1.CostSource
+
+	// PricesDisabled reports whether pricing has been explicitly disabled via ConfigMap sentinel.
+	PricesDisabled bool
+
+	// DefaultModel is the default model identifier for runs.
+	DefaultModel string
+}
+
+// DefaultModelConfig returns a ModelConfig populated with built-in defaults.
+func DefaultModelConfig() ModelConfig {
+	return ModelConfig{
+		Prices:         DefaultModelPrices(),
+		PriceSources:   DefaultModelPriceSources(),
+		PricesDisabled: false,
+		DefaultModel:   "",
+	}
+}
+
+// GitHubConfig holds configuration for GitHub authentication, rate limiting, and PR reporting.
+type GitHubConfig struct {
+	// TokenSecret is the name of a Secret containing a personal access token for GitHub reporting.
+	// Defaults to DefaultGitHubTokenSecret ("github-token").
+	TokenSecret string
+
+	// AppSecret is the name of a Secret containing GitHub App credentials for check run reporting.
+	AppSecret string
+
+	// InconclusivePolicy is the check run inconclusive verdict policy ("neutral" or "failure").
+	// Defaults to DefaultInconclusivePolicy ("neutral").
+	InconclusivePolicy string
+
+	// UIBaseURL is the base URL of the eval-runner UI for links in check runs.
+	UIBaseURL string
+
+	// CommandUsers is the allow-list of GitHub usernames permitted to execute comment commands without checking GitHub permissions.
+	CommandUsers []string
+
+	// RateLimitFloorPercent is the minimum percentage of GitHub rate limit quota remaining before REST API calls are suppressed (default 10).
+	RateLimitFloorPercent int
+}
+
+// DefaultGitHubConfig returns a GitHubConfig populated with built-in defaults.
+func DefaultGitHubConfig() GitHubConfig {
+	return GitHubConfig{
+		TokenSecret:           DefaultGitHubTokenSecret,
+		AppSecret:             "",
+		InconclusivePolicy:    DefaultInconclusivePolicy,
+		UIBaseURL:             "",
+		CommandUsers:          nil,
+		RateLimitFloorPercent: syncer.DefaultRateFloorPercent,
+	}
+}
+
 // ClusterConfig holds the effective cluster-wide settings resolved with precedence:
 // explicit flag > ConfigMap key > built-in default.
 type ClusterConfig struct {
@@ -212,26 +272,15 @@ type ClusterConfig struct {
 	// Defaults to DefaultExecutionDeadline (30m) if <= 0.
 	ExecutionDeadline time.Duration
 
-	// GitHubTokenSecret is the name of a Secret containing a personal access token for GitHub reporting.
-	GitHubTokenSecret string
-
-	// GitHubAppSecret is the name of a Secret containing GitHub App credentials for check run reporting.
-	GitHubAppSecret string
-
-	InconclusivePolicy string
+	// GitHub holds configuration for GitHub authentication, rate limiting, and PR reporting.
+	GitHub GitHubConfig
 
 	// MaxParallelTasks is the maximum number of task sandboxes to run concurrently.
 	// Defaults to DefaultMaxParallelTasks (4) if <= 0.
 	MaxParallelTasks int
 
-	// ModelPrices maps model identifier to token pricing in USD per 1M tokens.
-	ModelPrices map[string]ModelPrice
-
-	// ModelPriceSources maps model or prefix key to pricing provenance ("configmap" or "default").
-	ModelPriceSources map[string]v1alpha1.CostSource
-
-	// ModelPricesDisabled reports whether pricing has been explicitly disabled via ConfigMap sentinel.
-	ModelPricesDisabled bool
+	// Model holds configuration for model pricing and default model selection.
+	Model ModelConfig
 
 	// PollProgressInterval overrides the interval between task progress polling attempts (default: 10s).
 	PollProgressInterval time.Duration
@@ -243,14 +292,10 @@ type ClusterConfig struct {
 	// Defaults to DefaultTaskGracePeriod (30s) if <= 0.
 	TaskGracePeriod time.Duration
 
-	// UIBaseURL is the base URL of the eval-runner UI for links in check runs.
-	UIBaseURL                string
 	ComparisonTTL            time.Duration
-	CommandUsers             []string
 	AffinityMode             string
 	SandboxEgressHosts       []string
 	Repositories             []syncer.RepoConfig
-	DefaultModel             string
 	DefaultCohort            string
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
@@ -263,7 +308,6 @@ type ClusterConfig struct {
 	HeadMaxSamplesPerTask int
 	LsRemoteInterval      time.Duration
 	FullReconcileInterval time.Duration
-	RateLimitFloorPercent int
 
 	// GCPWorkloadIdentityProvider is the GCP Workload Identity Federation provider resource name.
 	GCPWorkloadIdentityProvider string
@@ -314,21 +358,15 @@ func DefaultClusterConfig() ClusterConfig {
 		ArtifactMaxUploadBytes:   gcs.DefaultMaxUploadBytes,
 		DiscoveryDeadline:        DefaultDiscoveryDeadline,
 		ExecutionDeadline:        DefaultExecutionDeadline,
-		GitHubTokenSecret:        DefaultGitHubTokenSecret,
-		GitHubAppSecret:          "",
-		InconclusivePolicy:       DefaultInconclusivePolicy,
+		GitHub:                   DefaultGitHubConfig(),
 		MaxParallelTasks:         DefaultMaxParallelTasks,
-		ModelPrices:              DefaultModelPrices(),
-		ModelPriceSources:        DefaultModelPriceSources(),
+		Model:                    DefaultModelConfig(),
 		PollProgressInterval:     DefaultPollProgressInterval,
 		SandboxdImage:            discovery.SandboxdImage,
 		TaskGracePeriod:          DefaultTaskGracePeriod,
-		UIBaseURL:                "",
 		ComparisonTTL:            0,
-		CommandUsers:             nil,
 		AffinityMode:             configkeys.AffinityModeOrder,
 		SandboxEgressHosts:       discovery.CloneSandboxEgressHosts(discovery.DefaultSandboxEgressHosts),
-		DefaultModel:             "",
 		DefaultCohort:            "default",
 		DefaultBatchSize:         8,
 		DefaultMaxSamplesPerTask: 64,
@@ -337,7 +375,6 @@ func DefaultClusterConfig() ClusterConfig {
 		HeadMaxSamplesPerTask:    64,
 		LsRemoteInterval:         syncer.DefaultLsRemoteInterval,
 		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
-		RateLimitFloorPercent:    syncer.DefaultRateFloorPercent,
 
 		GCPWorkloadIdentityProvider: "",
 		ServicePortal: ServicePortalOptions{
@@ -543,12 +580,12 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
 				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.GitHubTokenSecret = ""
+					cfg.GitHub.TokenSecret = ""
 				} else {
 					if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
 						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubTokenSecret, val, ns, name, strings.Join(errs, ", "))
 					}
-					cfg.GitHubTokenSecret = trimmed
+					cfg.GitHub.TokenSecret = trimmed
 				}
 			}
 		}
@@ -558,12 +595,12 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
 				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.GitHubAppSecret = ""
+					cfg.GitHub.AppSecret = ""
 				} else {
 					if errs := validation.IsDNS1123Subdomain(trimmed); len(errs) > 0 {
 						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyGitHubAppSecret, val, ns, name, strings.Join(errs, ", "))
 					}
-					cfg.GitHubAppSecret = trimmed
+					cfg.GitHub.AppSecret = trimmed
 				}
 			}
 		}
@@ -573,13 +610,13 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
 				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.UIBaseURL = ""
+					cfg.GitHub.UIBaseURL = ""
 				} else {
 					trimmed = strings.TrimRight(trimmed, "/")
 					if !strings.HasPrefix(trimmed, "http://") && !strings.HasPrefix(trimmed, "https://") {
 						return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: must begin with http:// or https://", ConfigMapKeyUIBaseURL, val, ns, name)
 					}
-					cfg.UIBaseURL = trimmed
+					cfg.GitHub.UIBaseURL = trimmed
 				}
 			}
 		}
@@ -606,7 +643,7 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 						ConfigMapKeyInconclusivePolicy, val, ns, name,
 						configkeys.InconclusivePolicyNeutral, configkeys.InconclusivePolicyFailure)
 				}
-				cfg.InconclusivePolicy = lower
+				cfg.GitHub.InconclusivePolicy = lower
 			}
 		}
 
@@ -615,9 +652,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
 				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-					cfg.ModelPrices = nil
-					cfg.ModelPriceSources = nil
-					cfg.ModelPricesDisabled = true
+					cfg.Model.Prices = nil
+					cfg.Model.PriceSources = nil
+					cfg.Model.PricesDisabled = true
 				} else {
 					var prices map[string]ModelPrice
 					dec := json.NewDecoder(strings.NewReader(trimmed))
@@ -633,15 +670,15 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 							return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: prefix for %q cannot be empty", ConfigMapKeyModelPrices, ns, name, model)
 						}
 					}
-					if cfg.ModelPrices == nil {
-						cfg.ModelPrices = DefaultModelPrices()
-						cfg.ModelPriceSources = DefaultModelPriceSources()
+					if cfg.Model.Prices == nil {
+						cfg.Model.Prices = DefaultModelPrices()
+						cfg.Model.PriceSources = DefaultModelPriceSources()
 					}
 					for model, p := range prices {
-						cfg.ModelPrices[model] = p
-						cfg.ModelPriceSources[model] = v1alpha1.CostSourceConfigMap
+						cfg.Model.Prices[model] = p
+						cfg.Model.PriceSources[model] = v1alpha1.CostSourceConfigMap
 					}
-					cfg.ModelPricesDisabled = false
+					cfg.Model.PricesDisabled = false
 				}
 			}
 		}
@@ -667,7 +704,7 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 
 		// 14. commandUsers
 		if val, ok := cm.Data[ConfigMapKeyCommandUsers]; ok {
-			cfg.CommandUsers = ParseUserList(val)
+			cfg.GitHub.CommandUsers = ParseUserList(val)
 		}
 
 		// 15. affinityMode
@@ -712,7 +749,7 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		if val, ok := cm.Data[configkeys.ConfigMapKeyDefaultModel]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
-				cfg.DefaultModel = trimmed
+				cfg.Model.DefaultModel = trimmed
 			}
 		}
 		if val, ok := cm.Data[configkeys.ConfigMapKeyDefaultCohort]; ok {
@@ -769,7 +806,7 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				if err != nil || pct <= 0 {
 					return cfg, fmt.Errorf("invalid %s in ConfigMap %s/%s: must be a positive integer", configkeys.ConfigMapKeyRateLimitFloorPercent, ns, name)
 				}
-				cfg.RateLimitFloorPercent = pct
+				cfg.GitHub.RateLimitFloorPercent = pct
 			}
 		}
 
@@ -899,24 +936,24 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	}
 	if flags.IsExplicit("github-token-secret") {
 		if strings.EqualFold(flags.GitHubTokenSecret, ConfigSentinelDisabled) {
-			cfg.GitHubTokenSecret = ""
+			cfg.GitHub.TokenSecret = ""
 		} else {
-			cfg.GitHubTokenSecret = flags.GitHubTokenSecret
+			cfg.GitHub.TokenSecret = flags.GitHubTokenSecret
 		}
 	}
 	if flags.IsExplicit("github-app-secret") {
 		if strings.EqualFold(flags.GitHubAppSecret, ConfigSentinelDisabled) {
-			cfg.GitHubAppSecret = ""
+			cfg.GitHub.AppSecret = ""
 		} else {
-			cfg.GitHubAppSecret = flags.GitHubAppSecret
+			cfg.GitHub.AppSecret = flags.GitHubAppSecret
 		}
 	}
 	if flags.IsExplicit("ui-base-url") {
 		trimmed := strings.TrimRight(strings.TrimSpace(flags.UIBaseURL), "/")
 		if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
-			cfg.UIBaseURL = ""
+			cfg.GitHub.UIBaseURL = ""
 		} else {
-			cfg.UIBaseURL = trimmed
+			cfg.GitHub.UIBaseURL = trimmed
 		}
 	}
 	if flags.IsExplicit("max-parallel-tasks") {
@@ -943,10 +980,10 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			return cfg, fmt.Errorf("invalid --inconclusive-policy %q: must be %q or %q",
 				flags.InconclusivePolicy, configkeys.InconclusivePolicyNeutral, configkeys.InconclusivePolicyFailure)
 		}
-		cfg.InconclusivePolicy = lower
+		cfg.GitHub.InconclusivePolicy = lower
 	}
 	if flags.IsExplicit("command-users") {
-		cfg.CommandUsers = ParseUserList(flags.CommandUsers)
+		cfg.GitHub.CommandUsers = ParseUserList(flags.CommandUsers)
 	}
 	if flags.IsExplicit("service-portal-controller-address") {
 		cfg.ServicePortal.ControllerAddress = strings.TrimSpace(flags.ServicePortalControllerAddress)
@@ -1065,7 +1102,7 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"comparisonTTL", resolved.ComparisonTTL,
 		"discoveryDeadline", resolved.DiscoveryDeadline,
 		"executionDeadline", resolved.ExecutionDeadline,
-		"githubTokenSecret", resolved.GitHubTokenSecret,
+		"githubTokenSecret", resolved.GitHub.TokenSecret,
 		"maxParallelTasks", resolved.MaxParallelTasks,
 		"pollProgressInterval", resolved.PollProgressInterval,
 		"sandboxdImage", resolved.SandboxdImage,
@@ -1227,7 +1264,7 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 			repoNames = append(repoNames, repo.Name)
 		}
 		r.consumer.UpdateConfig(consumer.Config{
-			DefaultModel:             resolved.DefaultModel,
+			DefaultModel:             resolved.Model.DefaultModel,
 			DefaultCohort:            resolved.DefaultCohort,
 			DefaultBatchSize:         resolved.DefaultBatchSize,
 			DefaultMaxSamplesPerTask: resolved.DefaultMaxSamplesPerTask,
@@ -1236,8 +1273,8 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 			IsMultiRepo:              consumer.IsMultiRepo(repoNames),
 		})
 	}
-	if r.gitHubClient != nil && resolved.RateLimitFloorPercent > 0 {
-		r.gitHubClient.SetRateFloorPercent(resolved.RateLimitFloorPercent)
+	if r.gitHubClient != nil && resolved.GitHub.RateLimitFloorPercent > 0 {
+		r.gitHubClient.SetRateFloorPercent(resolved.GitHub.RateLimitFloorPercent)
 	}
 	if r.syncer != nil {
 		oldRepos := make(map[string]bool)
@@ -1251,7 +1288,7 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 				r.logger.Info("syncing newly added repository", "repo", repo.Ref.String())
 			}
 		}
-		r.syncer.UpdateConfig(resolved.Repositories, resolved.LsRemoteInterval, resolved.FullReconcileInterval, resolved.RateLimitFloorPercent)
+		r.syncer.UpdateConfig(resolved.Repositories, resolved.LsRemoteInterval, resolved.FullReconcileInterval, resolved.GitHub.RateLimitFloorPercent)
 	}
 
 	if r.topUpRunner != nil {
