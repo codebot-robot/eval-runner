@@ -62,6 +62,7 @@ const (
 type ToolCall struct {
 	ID      string `json:"id,omitempty"`
 	Command string `json:"command"`
+	Opaque  string `json:"opaque,omitempty"`
 }
 
 // ToolResult represents the output, exit code, and duration resulting from a tool execution.
