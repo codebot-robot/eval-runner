@@ -3572,7 +3572,11 @@ func (r *RunReconciler) executeAgentPhase(
 	}
 
 	if len(targetTask.Agent.PrepareCommand) > 0 {
-		prepareContext, prepareCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+		prepareTimeout := r.executionStepTimeout()
+		if targetTask.TimeoutSeconds != nil && *targetTask.TimeoutSeconds > 0 {
+			prepareTimeout = time.Duration(*targetTask.TimeoutSeconds) * time.Second
+		}
+		prepareContext, prepareCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, prepareTimeout)
 		prepareResult, prepareError := executeSandboxWithTimeout(prepareContext, sbClient, sandboxclient.ProcessConfig{
 			Command: targetTask.Agent.PrepareCommand,
 			Cwd:     cwd,
