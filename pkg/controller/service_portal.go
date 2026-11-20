@@ -16,8 +16,10 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -60,24 +62,64 @@ var DefaultServicePortalAllowedHTTPHosts = []string{
 	"*.ubuntu.com",
 }
 
-// BuildServicePortalEgressPolicy constructs an EgressPolicy proto for the given allowed HTTPS and cleartext HTTP hosts behind the service portal.
-// The HTTP rule is populated with httpHosts; the HTTPS rule is populated with httpsHosts.
-func BuildServicePortalEgressPolicy(httpsHosts, httpHosts []string) *portalsv1.EgressPolicy {
-	if len(httpsHosts) == 0 && len(httpHosts) == 0 {
+// ServicePortalOptions configures settings for the Service Portal Controller and allowed egress hosts.
+type ServicePortalOptions struct {
+	// ControllerAddress is the host:port address of the Service Portal Controller.
+	ControllerAddress string
+
+	// CAFile is the file path to the CA certificate verifying the controller's TLS certificate.
+	CAFile string
+
+	// TokenFile is the file path to the projected service account token.
+	TokenFile string
+
+	// AllowedHosts is the list of allowed FQDN egress hostnames for the service portal.
+	AllowedHosts []string
+
+	// AllowedHTTPHosts is the list of allowed cleartext HTTP egress hostnames for the service portal.
+	AllowedHTTPHosts []string
+}
+
+// ClientOptions returns the serviceportalclient.Options corresponding to the service portal configuration.
+func (options ServicePortalOptions) ClientOptions() serviceportalclient.Options {
+	return serviceportalclient.Options{
+		ControllerAddr: options.ControllerAddress,
+		CAFile:         options.CAFile,
+		TokenFile:      options.TokenFile,
+	}
+}
+
+// Validate reports an error if the service portal configuration is invalid.
+func (options ServicePortalOptions) Validate() error {
+	if options.ControllerAddress != "" {
+		if options.CAFile == "" {
+			return errors.New("service portal CA file is required when controller address is set")
+		}
+		if options.TokenFile == "" {
+			return errors.New("service portal token file is required when controller address is set")
+		}
+	}
+	return nil
+}
+
+// BuildServicePortalEgressPolicy constructs an EgressPolicy proto for the given service portal options.
+// The HTTP rule is populated with options.AllowedHTTPHosts; the HTTPS rule is populated with options.AllowedHosts.
+func BuildServicePortalEgressPolicy(options ServicePortalOptions) *portalsv1.EgressPolicy {
+	if len(options.AllowedHosts) == 0 && len(options.AllowedHTTPHosts) == 0 {
 		return &portalsv1.EgressPolicy{}
 	}
 	var rules []*portalsv1.EgressRule
-	if len(httpHosts) > 0 {
+	if len(options.AllowedHTTPHosts) > 0 {
 		rules = append(rules, &portalsv1.EgressRule{
 			Http: &portalsv1.HttpRule{
-				Hostnames: append([]string(nil), httpHosts...),
+				Hostnames: append([]string(nil), options.AllowedHTTPHosts...),
 			},
 		})
 	}
-	if len(httpsHosts) > 0 {
+	if len(options.AllowedHosts) > 0 {
 		rules = append(rules, &portalsv1.EgressRule{
 			Https: &portalsv1.HttpsRule{
-				Hostnames: append([]string(nil), httpsHosts...),
+				Hostnames: append([]string(nil), options.AllowedHosts...),
 			},
 		})
 	}
@@ -88,10 +130,9 @@ func BuildServicePortalEgressPolicy(httpsHosts, httpHosts []string) *portalsv1.E
 
 func (r *RunReconciler) servicePortalPolicy() *portalsv1.EgressPolicy {
 	r.cfgMu.RLock()
-	hosts := r.ServicePortalHosts
-	httpHosts := r.ServicePortalHTTPHosts
+	servicePortal := r.Config.ServicePortal
 	r.cfgMu.RUnlock()
-	return BuildServicePortalEgressPolicy(hosts, httpHosts)
+	return BuildServicePortalEgressPolicy(servicePortal)
 }
 
 func (r *RunReconciler) bindServicePortalPolicy(ctx context.Context, podUID string) error {

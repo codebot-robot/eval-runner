@@ -185,17 +185,12 @@ type RunReconciler struct {
 	SandboxNamespace string
 	MaxMessageBytes  int
 
-	// DiscoveryDeadline is the overall deadline duration for discovery to complete.
-	// Defaults to DefaultDiscoveryDeadline (10m) if <= 0.
-	DiscoveryDeadline time.Duration
+	// Config holds the cluster configuration for this reconciler.
+	Config ClusterConfig
 
 	// DiscoveryStepTimeout is the maximum duration for a single discovery Execute call.
 	// Defaults to DefaultDiscoveryStepTimeout (60s) if <= 0.
 	DiscoveryStepTimeout time.Duration
-
-	// ExecutionDeadline is the overall deadline duration for sample execution.
-	// Defaults to DefaultExecutionDeadline (30m) if <= 0.
-	ExecutionDeadline time.Duration
 
 	// ExecutionStepTimeout is the maximum duration for non-inspect execution Execute calls (e.g. git clone, checkout).
 	// Defaults to DefaultExecutionStepTimeout (2m) if <= 0.
@@ -205,22 +200,8 @@ type RunReconciler struct {
 	// Defaults to DefaultWatchdogInterval (5s) if <= 0.
 	WatchdogInterval time.Duration
 
-	// TaskGracePeriod is the grace period before treating absence of a running task's sandbox as a failure.
-	// Defaults to DefaultTaskGracePeriod (30s) if <= 0.
-	TaskGracePeriod time.Duration
-
-	// MaxParallelTasks is the maximum number of task sandboxes to run concurrently.
-	// Defaults to DefaultMaxParallelTasks (4) if <= 0.
-	MaxParallelTasks int
-
-	// PollProgressInterval overrides the interval between task progress polling attempts (default: 10s).
-	PollProgressInterval time.Duration
-
 	// MinProgressWriteInterval overrides the minimum interval between progress status writes (default: 10s).
 	MinProgressWriteInterval time.Duration
-
-	// ModelSecret is the name of a Secret in SandboxNamespace containing model credentials.
-	ModelSecret string
 
 	// SampleRunnerImage is the image used for sample execution sandboxes.
 	SampleRunnerImage string
@@ -257,30 +238,9 @@ type RunReconciler struct {
 	// PKIManager coordinates controller CA and per-sandbox server cert Secrets.
 	PKIManager *pki.Manager
 
-	// SandboxdImage is the container image used for the sandboxd initContainer.
-	SandboxdImage string
-
-	// ModelPrices maps model identifier to token pricing in USD per 1M tokens.
-	ModelPrices map[string]ModelPrice
-
-	// ModelPriceSources maps model or prefix key to pricing provenance ("configmap" or "default").
-	ModelPriceSources map[string]v1alpha1.CostSource
-
-	// ModelPricesDisabled reports whether pricing has been explicitly disabled via ConfigMap sentinel.
-	ModelPricesDisabled bool
-
 	// ControllerVersion is the version or revision of the eval-runner controller.
 	// If empty, falls back to version.String().
 	ControllerVersion string
-
-	// GitHubTokenSecret is the name of a Secret containing a personal access token for GitHub reporting.
-	GitHubTokenSecret string
-
-	// GitHubAppSecret is the name of a Secret containing GitHub App credentials for check run reporting.
-	GitHubAppSecret string
-
-	// UIBaseURL is the base URL of the eval-runner UI for links in check runs.
-	UIBaseURL string
 
 	// GitHubBaseURL is an optional base URL override for the GitHub API (used in tests).
 	GitHubBaseURL string
@@ -291,17 +251,8 @@ type RunReconciler struct {
 	// GitHubClient overrides GitHub client creation (useful for testing).
 	GitHubClient github.Client
 
-	// HeadTopUpInterval is the interval between periodic head top-up Runs.
-	HeadTopUpInterval time.Duration
-
 	// ServicePortalClient binds egress policies to sandbox pods via the Service Portal Controller.
 	ServicePortalClient *serviceportalclient.Client
-
-	// ServicePortalHosts is the list of allowed FQDN egress hostnames for the service portal.
-	ServicePortalHosts []string
-
-	// ServicePortalHTTPHosts is the list of allowed cleartext HTTP egress hostnames for the service portal.
-	ServicePortalHTTPHosts []string
 
 	boundPodsMu            sync.RWMutex
 	boundServicePortalPods map[types.UID]bool
@@ -347,8 +298,8 @@ func (r *RunReconciler) controllerNamespace() string {
 func (r *RunReconciler) sandboxdImage() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.SandboxdImage != "" {
-		return r.SandboxdImage
+	if r.Config.SandboxdImage != "" {
+		return r.Config.SandboxdImage
 	}
 	return discovery.SandboxdImage
 }
@@ -583,8 +534,8 @@ func (r *RunReconciler) now() time.Time {
 func (r *RunReconciler) discoveryDeadline() time.Duration {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.DiscoveryDeadline > 0 {
-		return r.DiscoveryDeadline
+	if r.Config.DiscoveryDeadline > 0 {
+		return r.Config.DiscoveryDeadline
 	}
 	return DefaultDiscoveryDeadline
 }
@@ -601,8 +552,8 @@ func (r *RunReconciler) discoveryStepTimeout() time.Duration {
 func (r *RunReconciler) executionDeadline() time.Duration {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.ExecutionDeadline > 0 {
-		return r.ExecutionDeadline
+	if r.Config.ExecutionDeadline > 0 {
+		return r.Config.ExecutionDeadline
 	}
 	return DefaultExecutionDeadline
 }
@@ -722,8 +673,8 @@ func readFileWithTimeout(ctx context.Context, client sandboxclient.Client, path 
 func (r *RunReconciler) taskGracePeriod() time.Duration {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.TaskGracePeriod > 0 {
-		return r.TaskGracePeriod
+	if r.Config.TaskGracePeriod > 0 {
+		return r.Config.TaskGracePeriod
 	}
 	return DefaultTaskGracePeriod
 }
@@ -731,8 +682,8 @@ func (r *RunReconciler) taskGracePeriod() time.Duration {
 func (r *RunReconciler) maxParallelTasks() int {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.MaxParallelTasks > 0 {
-		return r.MaxParallelTasks
+	if r.Config.MaxParallelTasks > 0 {
+		return r.Config.MaxParallelTasks
 	}
 	return DefaultMaxParallelTasks
 }
@@ -740,8 +691,8 @@ func (r *RunReconciler) maxParallelTasks() int {
 func (r *RunReconciler) pollProgressInterval() time.Duration {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.PollProgressInterval > 0 {
-		return r.PollProgressInterval
+	if r.Config.PollProgressInterval > 0 {
+		return r.Config.PollProgressInterval
 	}
 	return DefaultPollProgressInterval
 }
@@ -756,17 +707,17 @@ func (r *RunReconciler) minProgressWriteInterval() time.Duration {
 func (r *RunReconciler) modelSecret() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.ModelSecret
+	return r.Config.ModelSecret
 }
 
 func (r *RunReconciler) lookupModelPrice(model string) (ModelPrice, v1alpha1.CostSource, bool) {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.ModelPricesDisabled {
+	if r.Config.ModelPricesDisabled {
 		return ModelPrice{}, "", false
 	}
-	prices := r.ModelPrices
-	sources := r.ModelPriceSources
+	prices := r.Config.ModelPrices
+	sources := r.Config.ModelPriceSources
 	if prices == nil {
 		prices = DefaultModelPrices()
 		sources = DefaultModelPriceSources()
@@ -774,26 +725,11 @@ func (r *RunReconciler) lookupModelPrice(model string) (ModelPrice, v1alpha1.Cos
 	return LookupModelPrice(model, prices, sources)
 }
 
-// UpdateConfig updates the reloadable settings on RunReconciler in a thread-safe manner.
+// UpdateConfig updates the configuration on RunReconciler in a thread-safe manner.
 func (r *RunReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.cfgMu.Lock()
 	defer r.cfgMu.Unlock()
-	r.SandboxdImage = cfg.SandboxdImage
-	r.DiscoveryDeadline = cfg.DiscoveryDeadline
-	r.ExecutionDeadline = cfg.ExecutionDeadline
-	r.TaskGracePeriod = cfg.TaskGracePeriod
-	r.MaxParallelTasks = cfg.MaxParallelTasks
-	r.PollProgressInterval = cfg.PollProgressInterval
-	r.ModelSecret = cfg.ModelSecret
-	r.ModelPrices = cfg.ModelPrices
-	r.ModelPriceSources = cfg.ModelPriceSources
-	r.ModelPricesDisabled = cfg.ModelPricesDisabled
-	r.GitHubTokenSecret = cfg.GitHubTokenSecret
-	r.GitHubAppSecret = cfg.GitHubAppSecret
-	r.UIBaseURL = cfg.UIBaseURL
-	r.HeadTopUpInterval = cfg.HeadTopUpInterval
-	r.ServicePortalHosts = cfg.ServicePortalAllowedHosts
-	r.ServicePortalHTTPHosts = cfg.ServicePortalAllowedHTTPHosts
+	r.Config = cfg
 }
 
 func (r *RunReconciler) sampleRunnerImage() string {
