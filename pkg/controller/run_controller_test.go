@@ -5007,6 +5007,41 @@ func TestExecuteAgentPhase(t *testing.T) {
 			t.Errorf("expected timeout loop message, got %q", loopEndingMessage)
 		}
 	})
+
+	t.Run("prepare failure reports prepare failure message and uses task timeout", func(t *testing.T) {
+		taskTimeout := 500
+		prepareTask := task
+		prepareTask.TimeoutSeconds = &taskTimeout
+		prepareTask.Agent = &v1alpha1.ManifestTaskAgent{
+			PrepareCommand:  []string{"prepare.sh"},
+			InstructionPath: "/workspace/inst.md",
+		}
+
+		var observedTimeout time.Duration
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, execContext context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if deadline, ok := execContext.Deadline(); ok {
+					observedTimeout = time.Until(deadline)
+				}
+				return nil, context.DeadlineExceeded
+			},
+		}
+
+		reconciler := &RunReconciler{
+			AgentModel: agent.NewScriptedModel(),
+		}
+		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
+		_, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, prepareTask, "repo", 500, nil, nil)
+		if failed == nil {
+			t.Fatalf("expected prepare timeout to fail the task, got nil")
+		}
+		if !strings.Contains(failed.message, "step agent prepare command failed") {
+			t.Errorf("expected message to report prepare failure, got %q", failed.message)
+		}
+		if observedTimeout < 490*time.Second || observedTimeout > 510*time.Second {
+			t.Errorf("expected prepare timeout around 500s, got %v", observedTimeout)
+		}
+	})
 }
 
 type timingOutModel struct{}
