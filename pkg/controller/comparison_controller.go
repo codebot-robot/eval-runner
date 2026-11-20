@@ -113,21 +113,15 @@ type ComparisonReconciler struct {
 	ArtifactSink           artifacts.ArtifactSink
 	ArtifactSinkTimeout    time.Duration
 	ControllerNamespace    string
-	GitHubTokenSecret      string
-	GitHubAppSecret        string
-	UIBaseURL              string
-	InconclusivePolicy     string
+	GitHub                 GitHubConfig
 	GitHubBaseURL          string
 	GitHubClientFactory    func(creds GitHubCredentials) github.Client
 	ComparisonTTL          time.Duration
 	CommandRetryInterval   time.Duration
 	ReportingRetryInterval time.Duration
-	CommandUsers           []string
 	AffinityMode           string
 	Now                    func() time.Time
-	ModelPrices            map[string]ModelPrice
-	ModelPriceSources      map[string]v1alpha1.CostSource
-	ModelPricesDisabled    bool
+	Model                  ModelConfig
 	ForgeRegistry          *forge.Registry
 	GitHubClient           github.Client
 
@@ -290,26 +284,26 @@ func (r *ComparisonReconciler) controllerNamespace() string {
 func (r *ComparisonReconciler) gitHubTokenSecret() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.GitHubTokenSecret
+	return r.GitHub.TokenSecret
 }
 
 func (r *ComparisonReconciler) gitHubAppSecret() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.GitHubAppSecret
+	return r.GitHub.AppSecret
 }
 
 func (r *ComparisonReconciler) uiBaseURL() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.UIBaseURL
+	return r.GitHub.UIBaseURL
 }
 
 func (r *ComparisonReconciler) inconclusivePolicy() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.InconclusivePolicy != "" {
-		return r.InconclusivePolicy
+	if r.GitHub.InconclusivePolicy != "" {
+		return r.GitHub.InconclusivePolicy
 	}
 	return DefaultInconclusivePolicy
 }
@@ -323,22 +317,13 @@ func (r *ComparisonReconciler) comparisonTTL() time.Duration {
 func (r *ComparisonReconciler) lookupModelPrice(model string) (ModelPrice, v1alpha1.CostSource, bool) {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	if r.ModelPricesDisabled {
-		return ModelPrice{}, "", false
-	}
-	prices := r.ModelPrices
-	sources := r.ModelPriceSources
-	if prices == nil {
-		prices = DefaultModelPrices()
-		sources = DefaultModelPriceSources()
-	}
-	return LookupModelPrice(model, prices, sources)
+	return r.Model.LookupPrice(model)
 }
 
 func (r *ComparisonReconciler) commandUsers() []string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.CommandUsers
+	return r.GitHub.CommandUsers
 }
 
 func (r *ComparisonReconciler) affinityMode() string {
@@ -354,15 +339,9 @@ func (r *ComparisonReconciler) affinityMode() string {
 func (r *ComparisonReconciler) UpdateConfig(cfg ClusterConfig) {
 	r.cfgMu.Lock()
 	defer r.cfgMu.Unlock()
-	r.GitHubTokenSecret = cfg.GitHubTokenSecret
-	r.GitHubAppSecret = cfg.GitHubAppSecret
-	r.UIBaseURL = cfg.UIBaseURL
-	r.InconclusivePolicy = cfg.InconclusivePolicy
+	r.GitHub = cfg.GitHub
+	r.Model = cfg.Model
 	r.ComparisonTTL = cfg.ComparisonTTL
-	r.ModelPrices = cfg.ModelPrices
-	r.ModelPriceSources = cfg.ModelPriceSources
-	r.ModelPricesDisabled = cfg.ModelPricesDisabled
-	r.CommandUsers = cfg.CommandUsers
 	r.AffinityMode = cfg.AffinityMode
 }
 

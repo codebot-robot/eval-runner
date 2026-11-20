@@ -435,8 +435,8 @@ func main() {
 	credCtx, credCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer credCancel()
 
-	if clusterConfig.GitHubAppSecret != "" {
-		sec, err := kubeClient.CoreV1().Secrets(evalRunnerNamespace).Get(credCtx, clusterConfig.GitHubAppSecret, metav1.GetOptions{})
+	if clusterConfig.GitHub.AppSecret != "" {
+		sec, err := kubeClient.CoreV1().Secrets(evalRunnerNamespace).Get(credCtx, clusterConfig.GitHub.AppSecret, metav1.GetOptions{})
 		if err == nil && sec != nil {
 			appIDStr := string(sec.Data["app-id"])
 			instIDStr := string(sec.Data["installation-id"])
@@ -452,7 +452,7 @@ func main() {
 				if err == nil {
 					ghClient = github.NewHTTPClient(github.HTTPClientConfig{
 						AppAuth:               appAuth,
-						RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
+						RateLimitFloorPercent: clusterConfig.GitHub.RateLimitFloorPercent,
 					})
 					hasCreds = true
 					setupLog.Info("resolved GitHub App installation token credentials at startup", "appID", appIDStr, "installationID", instIDStr)
@@ -461,30 +461,30 @@ func main() {
 				}
 			}
 		} else {
-			setupLog.Info("GitHub App secret not found at startup; checking fallback", "secret", clusterConfig.GitHubAppSecret)
+			setupLog.Info("GitHub App secret not found at startup; checking fallback", "secret", clusterConfig.GitHub.AppSecret)
 		}
 	}
 
-	if ghClient == nil && clusterConfig.GitHubTokenSecret != "" {
-		sec, err := kubeClient.CoreV1().Secrets(evalRunnerNamespace).Get(credCtx, clusterConfig.GitHubTokenSecret, metav1.GetOptions{})
+	if ghClient == nil && clusterConfig.GitHub.TokenSecret != "" {
+		sec, err := kubeClient.CoreV1().Secrets(evalRunnerNamespace).Get(credCtx, clusterConfig.GitHub.TokenSecret, metav1.GetOptions{})
 		if err == nil && sec != nil {
 			tok := string(sec.Data["token"])
 			if strings.TrimSpace(tok) != "" {
 				ghClient = github.NewHTTPClient(github.HTTPClientConfig{
 					Token:                 strings.TrimSpace(tok),
-					RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
+					RateLimitFloorPercent: clusterConfig.GitHub.RateLimitFloorPercent,
 				})
 				hasCreds = true
-				setupLog.Info("resolved GitHub plain token credentials at startup", "secret", clusterConfig.GitHubTokenSecret)
+				setupLog.Info("resolved GitHub plain token credentials at startup", "secret", clusterConfig.GitHub.TokenSecret)
 			}
 		} else {
-			setupLog.Info("GitHub token secret not found at startup; checking fallback", "secret", clusterConfig.GitHubTokenSecret)
+			setupLog.Info("GitHub token secret not found at startup; checking fallback", "secret", clusterConfig.GitHub.TokenSecret)
 		}
 	}
 
 	if ghClient == nil {
 		ghClient = github.NewHTTPClient(github.HTTPClientConfig{
-			RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
+			RateLimitFloorPercent: clusterConfig.GitHub.RateLimitFloorPercent,
 		})
 		setupLog.Info("no GitHub credentials configured; operating unauthenticated within 60/h rate limit")
 	}
@@ -517,15 +517,9 @@ func main() {
 		Scheme:              mgr.GetScheme(),
 		ArtifactSink:        reloadableSink,
 		ControllerNamespace: evalRunnerNamespace,
-		GitHubTokenSecret:   clusterConfig.GitHubTokenSecret,
-		GitHubAppSecret:     clusterConfig.GitHubAppSecret,
-		UIBaseURL:           clusterConfig.UIBaseURL,
-		InconclusivePolicy:  clusterConfig.InconclusivePolicy,
+		GitHub:              clusterConfig.GitHub,
+		Model:               clusterConfig.Model,
 		ComparisonTTL:       clusterConfig.ComparisonTTL,
-		ModelPrices:         clusterConfig.ModelPrices,
-		ModelPriceSources:   clusterConfig.ModelPriceSources,
-		ModelPricesDisabled: clusterConfig.ModelPricesDisabled,
-		CommandUsers:        clusterConfig.CommandUsers,
 		AffinityMode:        clusterConfig.AffinityMode,
 		ForgeRegistry:       forgeRegistry,
 		GitHubClient:        ghClient,
@@ -543,7 +537,7 @@ func main() {
 
 	forgeConsumer := consumer.New(mgr.GetClient(), consumer.Config{
 		Namespace:                evalRunnerNamespace,
-		DefaultModel:             clusterConfig.DefaultModel,
+		DefaultModel:             clusterConfig.Model.DefaultModel,
 		DefaultCohort:            clusterConfig.DefaultCohort,
 		DefaultBatchSize:         clusterConfig.DefaultBatchSize,
 		DefaultMaxSamplesPerTask: clusterConfig.DefaultMaxSamplesPerTask,
@@ -561,7 +555,7 @@ func main() {
 		Repositories:          clusterConfig.Repositories,
 		LsRemoteInterval:      clusterConfig.LsRemoteInterval,
 		FullReconcileInterval: clusterConfig.FullReconcileInterval,
-		RateLimitFloorPercent: clusterConfig.RateLimitFloorPercent,
+		RateLimitFloorPercent: clusterConfig.GitHub.RateLimitFloorPercent,
 	})
 
 	if err := mgr.Add(forgeSyncer); err != nil {

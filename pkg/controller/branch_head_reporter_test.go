@@ -131,7 +131,7 @@ func TestBranchHeadReporting_Lifecycle(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 
@@ -291,7 +291,7 @@ func TestBranchHeadReporting_Lifecycle(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 	_, err = freshReconciler.Reconcile(t.Context(), req)
@@ -363,7 +363,7 @@ func TestBranchHeadReporting_FailedSeed(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 
@@ -463,7 +463,7 @@ func TestBranchHeadReporting_GitHubAppSecretConfigured(t *testing.T) {
 		SandboxClient:       &sandboxclient.FakeClient{},
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
-		Config:              ClusterConfig{GitHubAppSecret: "github-app", UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{AppSecret: "github-app", UIBaseURL: "https://dotevals.com"}},
 		GitHubBaseURL:       ghServer.URL(),
 		Now:                 func() time.Time { return now },
 	}
@@ -587,7 +587,7 @@ func TestBranchHeadReporting_InProgressOnSeedStart(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 
@@ -704,7 +704,7 @@ func TestBranchHeadReporting_ImagesOmittedWhenNoUIBaseURL(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: ""}, // Empty UI Base URL
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: ""}}, // Empty UI Base URL
 		Now:                 func() time.Time { return now },
 	}
 
@@ -825,7 +825,7 @@ func TestBranchHeadReporting_Backfill(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 
@@ -944,7 +944,7 @@ func TestBranchHeadReporting_BackfillFailedSeed(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 
@@ -1032,7 +1032,7 @@ func TestBranchHeadReporting_BackfillConcurrentWithReconcile(t *testing.T) {
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 
@@ -1154,7 +1154,7 @@ func TestBranchHeadReporting_StatusConflictDoesNotDuplicateCheckRun(t *testing.T
 		SandboxNamespace:    "eval-runner-sandbox",
 		ControllerNamespace: "eval-runner",
 		GitHubClient:        ghClient,
-		Config:              ClusterConfig{UIBaseURL: "https://dotevals.com"},
+		Config:              ClusterConfig{GitHub: GitHubConfig{UIBaseURL: "https://dotevals.com"}},
 		Now:                 func() time.Time { return now },
 	}
 

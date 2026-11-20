@@ -605,8 +605,8 @@ func TestFlagsFromFlagSet(t *testing.T) {
 func TestResolveConfig_UIBaseURL(t *testing.T) {
 	// 1. Built-in default
 	defCfg := DefaultClusterConfig()
-	if defCfg.UIBaseURL != "" {
-		t.Errorf("expected default UIBaseURL empty, got %q", defCfg.UIBaseURL)
+	if defCfg.GitHub.UIBaseURL != "" {
+		t.Errorf("expected default UIBaseURL empty, got %q", defCfg.GitHub.UIBaseURL)
 	}
 
 	// 2. ConfigMap override with trailing slash normalization
@@ -623,8 +623,8 @@ func TestResolveConfig_UIBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.UIBaseURL != "https://eval.example.com" {
-		t.Errorf("expected UIBaseURL %q, got %q", "https://eval.example.com", cfg.UIBaseURL)
+	if cfg.GitHub.UIBaseURL != "https://eval.example.com" {
+		t.Errorf("expected UIBaseURL %q, got %q", "https://eval.example.com", cfg.GitHub.UIBaseURL)
 	}
 
 	// 3. Flag override takes precedence
@@ -636,8 +636,8 @@ func TestResolveConfig_UIBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfgWithFlag.UIBaseURL != "https://override.example.com" {
-		t.Errorf("expected UIBaseURL %q, got %q", "https://override.example.com", cfgWithFlag.UIBaseURL)
+	if cfgWithFlag.GitHub.UIBaseURL != "https://override.example.com" {
+		t.Errorf("expected UIBaseURL %q, got %q", "https://override.example.com", cfgWithFlag.GitHub.UIBaseURL)
 	}
 
 	// 4. Invalid protocol returns error
@@ -659,8 +659,8 @@ func TestResolveConfig_UIBaseURL(t *testing.T) {
 func TestResolveConfig_InconclusivePolicy(t *testing.T) {
 	// 1. Built-in default is "neutral"
 	defCfg := DefaultClusterConfig()
-	if defCfg.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
-		t.Errorf("expected default InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyNeutral, defCfg.InconclusivePolicy)
+	if defCfg.GitHub.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
+		t.Errorf("expected default InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyNeutral, defCfg.GitHub.InconclusivePolicy)
 	}
 
 	// 2. ConfigMap override with "failure"
@@ -677,8 +677,8 @@ func TestResolveConfig_InconclusivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.InconclusivePolicy != configkeys.InconclusivePolicyFailure {
-		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyFailure, cfg.InconclusivePolicy)
+	if cfg.GitHub.InconclusivePolicy != configkeys.InconclusivePolicyFailure {
+		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyFailure, cfg.GitHub.InconclusivePolicy)
 	}
 
 	// 3. Case insensitivity ("FAILURE")
@@ -695,8 +695,8 @@ func TestResolveConfig_InconclusivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfgUpper.InconclusivePolicy != configkeys.InconclusivePolicyFailure {
-		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyFailure, cfgUpper.InconclusivePolicy)
+	if cfgUpper.GitHub.InconclusivePolicy != configkeys.InconclusivePolicyFailure {
+		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyFailure, cfgUpper.GitHub.InconclusivePolicy)
 	}
 
 	// 4. Explicit flag override takes precedence over ConfigMap
@@ -708,8 +708,8 @@ func TestResolveConfig_InconclusivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfgWithFlag.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
-		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyNeutral, cfgWithFlag.InconclusivePolicy)
+	if cfgWithFlag.GitHub.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
+		t.Errorf("expected InconclusivePolicy %q, got %q", configkeys.InconclusivePolicyNeutral, cfgWithFlag.GitHub.InconclusivePolicy)
 	}
 
 	// 5. Empty or whitespace value in ConfigMap retains default
@@ -726,8 +726,8 @@ func TestResolveConfig_InconclusivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfgEmpty.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
-		t.Errorf("expected default InconclusivePolicy %q for whitespace, got %q", configkeys.InconclusivePolicyNeutral, cfgEmpty.InconclusivePolicy)
+	if cfgEmpty.GitHub.InconclusivePolicy != configkeys.InconclusivePolicyNeutral {
+		t.Errorf("expected default InconclusivePolicy %q for whitespace, got %q", configkeys.InconclusivePolicyNeutral, cfgEmpty.GitHub.InconclusivePolicy)
 	}
 
 	// 6. Unknown value in ConfigMap rejected with clear error
@@ -795,8 +795,8 @@ func TestResolveConfig_GCPWorkloadIdentityProvider(t *testing.T) {
 func TestResolveConfig_GitHubAppSecret(t *testing.T) {
 	// 1. Built-in default
 	defCfg := DefaultClusterConfig()
-	if defCfg.GitHubAppSecret != "" {
-		t.Errorf("expected default GitHubAppSecret empty, got %q", defCfg.GitHubAppSecret)
+	if defCfg.GitHub.AppSecret != "" {
+		t.Errorf("expected default GitHubAppSecret empty, got %q", defCfg.GitHub.AppSecret)
 	}
 
 	// 2. ConfigMap override
@@ -813,8 +813,8 @@ func TestResolveConfig_GitHubAppSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.GitHubAppSecret != "custom-app-secret" {
-		t.Errorf("expected GitHubAppSecret %q, got %q", "custom-app-secret", cfg.GitHubAppSecret)
+	if cfg.GitHub.AppSecret != "custom-app-secret" {
+		t.Errorf("expected GitHubAppSecret %q, got %q", "custom-app-secret", cfg.GitHub.AppSecret)
 	}
 
 	// 3. Explicit flag override takes precedence
@@ -826,16 +826,16 @@ func TestResolveConfig_GitHubAppSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfgWithFlag.GitHubAppSecret != "flag-app-secret" {
-		t.Errorf("expected GitHubAppSecret %q, got %q", "flag-app-secret", cfgWithFlag.GitHubAppSecret)
+	if cfgWithFlag.GitHub.AppSecret != "flag-app-secret" {
+		t.Errorf("expected GitHubAppSecret %q, got %q", "flag-app-secret", cfgWithFlag.GitHub.AppSecret)
 	}
 }
 
 func TestResolveConfig_GitHubTokenSecret(t *testing.T) {
 	// 1. Built-in default
 	defCfg := DefaultClusterConfig()
-	if defCfg.GitHubTokenSecret != DefaultGitHubTokenSecret {
-		t.Errorf("expected default GitHubTokenSecret %q, got %q", DefaultGitHubTokenSecret, defCfg.GitHubTokenSecret)
+	if defCfg.GitHub.TokenSecret != DefaultGitHubTokenSecret {
+		t.Errorf("expected default GitHubTokenSecret %q, got %q", DefaultGitHubTokenSecret, defCfg.GitHub.TokenSecret)
 	}
 
 	// 2. ConfigMap override
@@ -852,8 +852,8 @@ func TestResolveConfig_GitHubTokenSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.GitHubTokenSecret != "custom-token-secret" {
-		t.Errorf("expected GitHubTokenSecret %q, got %q", "custom-token-secret", cfg.GitHubTokenSecret)
+	if cfg.GitHub.TokenSecret != "custom-token-secret" {
+		t.Errorf("expected GitHubTokenSecret %q, got %q", "custom-token-secret", cfg.GitHub.TokenSecret)
 	}
 
 	// 3. Explicit flag override takes precedence over ConfigMap
@@ -865,8 +865,8 @@ func TestResolveConfig_GitHubTokenSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfgWithFlag.GitHubTokenSecret != "flag-token-secret" {
-		t.Errorf("expected GitHubTokenSecret %q, got %q", "flag-token-secret", cfgWithFlag.GitHubTokenSecret)
+	if cfgWithFlag.GitHub.TokenSecret != "flag-token-secret" {
+		t.Errorf("expected GitHubTokenSecret %q, got %q", "flag-token-secret", cfgWithFlag.GitHub.TokenSecret)
 	}
 
 	// 4. Invalid secret name in ConfigMap returns error
@@ -1295,8 +1295,8 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.GitHubTokenSecret != defaults.GitHubTokenSecret {
-			t.Errorf("expected GitHubTokenSecret default %q, got %q", defaults.GitHubTokenSecret, cfg.GitHubTokenSecret)
+		if cfg.GitHub.TokenSecret != defaults.GitHub.TokenSecret {
+			t.Errorf("expected GitHubTokenSecret default %q, got %q", defaults.GitHub.TokenSecret, cfg.GitHub.TokenSecret)
 		}
 		if cfg.DiscoveryDeadline != defaults.DiscoveryDeadline {
 			t.Errorf("expected DiscoveryDeadline default %v, got %v", defaults.DiscoveryDeadline, cfg.DiscoveryDeadline)
@@ -1324,8 +1324,8 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.GitHubTokenSecret != "" {
-			t.Errorf("expected GitHubTokenSecret disabled (empty), got %q", cfg.GitHubTokenSecret)
+		if cfg.GitHub.TokenSecret != "" {
+			t.Errorf("expected GitHubTokenSecret disabled (empty), got %q", cfg.GitHub.TokenSecret)
 		}
 		if cfg.ArtifactBucket != "" {
 			t.Errorf("expected ArtifactBucket disabled (empty), got %q", cfg.ArtifactBucket)
@@ -1333,11 +1333,11 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		if cfg.ArtifactDir != "" {
 			t.Errorf("expected ArtifactDir disabled (empty), got %q", cfg.ArtifactDir)
 		}
-		if cfg.GitHubAppSecret != "" {
-			t.Errorf("expected GitHubAppSecret disabled (empty), got %q", cfg.GitHubAppSecret)
+		if cfg.GitHub.AppSecret != "" {
+			t.Errorf("expected GitHubAppSecret disabled (empty), got %q", cfg.GitHub.AppSecret)
 		}
-		if cfg.UIBaseURL != "" {
-			t.Errorf("expected UIBaseURL disabled (empty), got %q", cfg.UIBaseURL)
+		if cfg.GitHub.UIBaseURL != "" {
+			t.Errorf("expected UIBaseURL disabled (empty), got %q", cfg.GitHub.UIBaseURL)
 		}
 	})
 
@@ -1364,8 +1364,8 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.GitHubTokenSecret != "" {
-			t.Errorf("expected GitHubTokenSecret disabled via flag, got %q", cfg.GitHubTokenSecret)
+		if cfg.GitHub.TokenSecret != "" {
+			t.Errorf("expected GitHubTokenSecret disabled via flag, got %q", cfg.GitHub.TokenSecret)
 		}
 	})
 }
@@ -1708,19 +1708,19 @@ func TestResolveConfig_ModelPrices(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error with nil ConfigMap: %v", err)
 		}
-		if len(cfgNil.ModelPrices) != 4 {
-			t.Fatalf("expected 4 default model prices, got %d", len(cfgNil.ModelPrices))
+		if len(cfgNil.Model.Prices) != 4 {
+			t.Fatalf("expected 4 default model prices, got %d", len(cfgNil.Model.Prices))
 		}
 		defaults := DefaultModelPrices()
 		for m, wantPrice := range defaults {
-			gotPrice, ok := cfgNil.ModelPrices[m]
+			gotPrice, ok := cfgNil.Model.Prices[m]
 			if !ok {
 				t.Errorf("missing default model %q", m)
 			} else if gotPrice != wantPrice {
 				t.Errorf("model %q: got price %+v, want %+v", m, gotPrice, wantPrice)
 			}
-			if cfgNil.ModelPriceSources[m] != v1alpha1.CostSourceDefault {
-				t.Errorf("model %q: got source %q, want %q", m, cfgNil.ModelPriceSources[m], v1alpha1.CostSourceDefault)
+			if cfgNil.Model.PriceSources[m] != v1alpha1.CostSourceDefault {
+				t.Errorf("model %q: got source %q, want %q", m, cfgNil.Model.PriceSources[m], v1alpha1.CostSourceDefault)
 			}
 		}
 
@@ -1733,8 +1733,8 @@ func TestResolveConfig_ModelPrices(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error with empty ConfigMap: %v", err)
 		}
-		if len(cfgEmpty.ModelPrices) != 4 {
-			t.Fatalf("expected 4 default model prices, got %d", len(cfgEmpty.ModelPrices))
+		if len(cfgEmpty.Model.Prices) != 4 {
+			t.Fatalf("expected 4 default model prices, got %d", len(cfgEmpty.Model.Prices))
 		}
 	})
 
@@ -1750,44 +1750,44 @@ func TestResolveConfig_ModelPrices(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		// 4 defaults - 2 overridden + 1 new = 5 total
-		if len(cfg.ModelPrices) != 5 {
-			t.Fatalf("expected 5 model prices after merge, got %d", len(cfg.ModelPrices))
+		if len(cfg.Model.Prices) != 5 {
+			t.Fatalf("expected 5 model prices after merge, got %d", len(cfg.Model.Prices))
 		}
 
 		// Overridden gemini
-		p1, ok := cfg.ModelPrices["google/gemini-3.5-flash-lite"]
+		p1, ok := cfg.Model.Prices["google/gemini-3.5-flash-lite"]
 		if !ok || p1.InputPer1M != 0.20 || p1.OutputPer1M != 0.80 {
 			t.Errorf("unexpected price for overridden gemini: %+v", p1)
 		}
-		if cfg.ModelPriceSources["google/gemini-3.5-flash-lite"] != v1alpha1.CostSourceConfigMap {
-			t.Errorf("expected source configmap for overridden gemini, got %q", cfg.ModelPriceSources["google/gemini-3.5-flash-lite"])
+		if cfg.Model.PriceSources["google/gemini-3.5-flash-lite"] != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected source configmap for overridden gemini, got %q", cfg.Model.PriceSources["google/gemini-3.5-flash-lite"])
 		}
 
 		// Overridden mockllm
-		p2, ok := cfg.ModelPrices["mockllm/model"]
+		p2, ok := cfg.Model.Prices["mockllm/model"]
 		if !ok || p2.InputPer1M != 1.0 || p2.OutputPer1M != 2.0 {
 			t.Errorf("unexpected price for mockllm: %+v", p2)
 		}
-		if cfg.ModelPriceSources["mockllm/model"] != v1alpha1.CostSourceConfigMap {
-			t.Errorf("expected source configmap for overridden mockllm, got %q", cfg.ModelPriceSources["mockllm/model"])
+		if cfg.Model.PriceSources["mockllm/model"] != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected source configmap for overridden mockllm, got %q", cfg.Model.PriceSources["mockllm/model"])
 		}
 
 		// New custom model
-		p3, ok := cfg.ModelPrices["custom/model"]
+		p3, ok := cfg.Model.Prices["custom/model"]
 		if !ok || p3.InputPer1M != 5.0 || p3.OutputPer1M != 10.0 {
 			t.Errorf("unexpected price for custom/model: %+v", p3)
 		}
-		if cfg.ModelPriceSources["custom/model"] != v1alpha1.CostSourceConfigMap {
-			t.Errorf("expected source configmap for custom/model, got %q", cfg.ModelPriceSources["custom/model"])
+		if cfg.Model.PriceSources["custom/model"] != v1alpha1.CostSourceConfigMap {
+			t.Errorf("expected source configmap for custom/model, got %q", cfg.Model.PriceSources["custom/model"])
 		}
 
 		// Non-overridden default retained
-		pFlash, ok := cfg.ModelPrices["google/gemini-2.5-flash"]
+		pFlash, ok := cfg.Model.Prices["google/gemini-2.5-flash"]
 		if !ok || pFlash.InputPer1M != 0.30 || pFlash.OutputPer1M != 2.50 {
 			t.Errorf("unexpected price for non-overridden gemini-2.5-flash: %+v", pFlash)
 		}
-		if cfg.ModelPriceSources["google/gemini-2.5-flash"] != v1alpha1.CostSourceDefault {
-			t.Errorf("expected source default for non-overridden gemini-2.5-flash, got %q", cfg.ModelPriceSources["google/gemini-2.5-flash"])
+		if cfg.Model.PriceSources["google/gemini-2.5-flash"] != v1alpha1.CostSourceDefault {
+			t.Errorf("expected source default for non-overridden gemini-2.5-flash, got %q", cfg.Model.PriceSources["google/gemini-2.5-flash"])
 		}
 	})
 
@@ -1804,31 +1804,31 @@ func TestResolveConfig_ModelPrices(t *testing.T) {
 		}
 
 		// Prefix match overrides defaults for gemini-2.5 models
-		p, src, ok := LookupModelPrice("google/gemini-2.5-flash", cfg.ModelPrices, cfg.ModelPriceSources)
+		p, src, ok := LookupModelPrice("google/gemini-2.5-flash", cfg.Model.Prices, cfg.Model.PriceSources)
 		if !ok || p.InputPer1M != 0.25 || p.OutputPer1M != 1.50 || src != v1alpha1.CostSourceConfigMap {
 			t.Errorf("expected prefix match for gemini-2.5-flash, got price=%+v, src=%q, ok=%v", p, src, ok)
 		}
 
 		// Default exact match for gemini-3.5-flash-lite untouched by gemini-2.5- prefix
-		p35, src35, ok35 := LookupModelPrice("google/gemini-3.5-flash-lite", cfg.ModelPrices, cfg.ModelPriceSources)
+		p35, src35, ok35 := LookupModelPrice("google/gemini-3.5-flash-lite", cfg.Model.Prices, cfg.Model.PriceSources)
 		if !ok35 || p35.InputPer1M != 0.30 || p35.OutputPer1M != 2.50 || src35 != v1alpha1.CostSourceDefault {
 			t.Errorf("expected default price for gemini-3.5-flash-lite, got price=%+v, src=%q, ok=%v", p35, src35, ok35)
 		}
 
 		// Exact match in configmap takes precedence over prefix match in configmap
-		pSpecial, srcSpecial, okSpecial := LookupModelPrice("openrouter/special", cfg.ModelPrices, cfg.ModelPriceSources)
+		pSpecial, srcSpecial, okSpecial := LookupModelPrice("openrouter/special", cfg.Model.Prices, cfg.Model.PriceSources)
 		if !okSpecial || pSpecial.InputPer1M != 1.00 || pSpecial.OutputPer1M != 2.00 || srcSpecial != v1alpha1.CostSourceConfigMap {
 			t.Errorf("expected exact match for openrouter/special, got price=%+v, src=%q, ok=%v", pSpecial, srcSpecial, okSpecial)
 		}
 
 		// Other openrouter models match prefix
-		pOther, srcOther, okOther := LookupModelPrice("openrouter/meta-llama/llama-3", cfg.ModelPrices, cfg.ModelPriceSources)
+		pOther, srcOther, okOther := LookupModelPrice("openrouter/meta-llama/llama-3", cfg.Model.Prices, cfg.Model.PriceSources)
 		if !okOther || pOther.InputPer1M != 2.00 || pOther.OutputPer1M != 4.00 || srcOther != v1alpha1.CostSourceConfigMap {
 			t.Errorf("expected prefix match for openrouter model, got price=%+v, src=%q, ok=%v", pOther, srcOther, okOther)
 		}
 
 		// Unknown model has no price
-		_, _, okUnknown := LookupModelPrice("anthropic/claude-3-opus", cfg.ModelPrices, cfg.ModelPriceSources)
+		_, _, okUnknown := LookupModelPrice("anthropic/claude-3-opus", cfg.Model.Prices, cfg.Model.PriceSources)
 		if okUnknown {
 			t.Errorf("expected false for unknown model price")
 		}
@@ -1897,10 +1897,10 @@ func TestResolveConfig_ModelPrices(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.ModelPrices != nil {
-			t.Errorf("expected nil ModelPrices with sentinel none, got %+v", cfg.ModelPrices)
+		if cfg.Model.Prices != nil {
+			t.Errorf("expected nil ModelPrices with sentinel none, got %+v", cfg.Model.Prices)
 		}
-		if !cfg.ModelPricesDisabled {
+		if !cfg.Model.PricesDisabled {
 			t.Errorf("expected ModelPricesDisabled to be true")
 		}
 	})
@@ -1922,18 +1922,18 @@ func TestResolveConfig_CommandUsers(t *testing.T) {
 		t.Fatalf("unexpected error resolving config: %v", err)
 	}
 	expectedUsers := []string{"alice", "bob", "CHARLIE"}
-	if !reflect.DeepEqual(cfg.CommandUsers, expectedUsers) {
-		t.Errorf("expected CommandUsers %v, got %v", expectedUsers, cfg.CommandUsers)
+	if !reflect.DeepEqual(cfg.GitHub.CommandUsers, expectedUsers) {
+		t.Errorf("expected CommandUsers %v, got %v", expectedUsers, cfg.GitHub.CommandUsers)
 	}
 
 	// Verify case-insensitive check and no wildcard
-	if !IsUserAllowed("Alice", cfg.CommandUsers) {
+	if !IsUserAllowed("Alice", cfg.GitHub.CommandUsers) {
 		t.Errorf("expected Alice to be allowed")
 	}
-	if !IsUserAllowed("charlie", cfg.CommandUsers) {
+	if !IsUserAllowed("charlie", cfg.GitHub.CommandUsers) {
 		t.Errorf("expected charlie to be allowed")
 	}
-	if IsUserAllowed("eve", cfg.CommandUsers) {
+	if IsUserAllowed("eve", cfg.GitHub.CommandUsers) {
 		t.Errorf("expected eve to not be allowed")
 	}
 	if IsUserAllowed("eve", []string{"*"}) {
@@ -1952,8 +1952,8 @@ func TestResolveConfig_CommandUsers(t *testing.T) {
 		t.Fatalf("unexpected error resolving config with flags: %v", err)
 	}
 	expectedFlagUsers := []string{"david", "emily"}
-	if !reflect.DeepEqual(cfgFlags.CommandUsers, expectedFlagUsers) {
-		t.Errorf("expected flag CommandUsers %v, got %v", expectedFlagUsers, cfgFlags.CommandUsers)
+	if !reflect.DeepEqual(cfgFlags.GitHub.CommandUsers, expectedFlagUsers) {
+		t.Errorf("expected flag CommandUsers %v, got %v", expectedFlagUsers, cfgFlags.GitHub.CommandUsers)
 	}
 }
 
@@ -2568,9 +2568,7 @@ func TestConfigReloader_UpdatesModelPrices_LookupAndDisabledFlipsDynamically(t *
 		Config: initialCfg,
 	}
 	compReconciler := &ComparisonReconciler{
-		ModelPrices:         initialCfg.ModelPrices,
-		ModelPriceSources:   initialCfg.ModelPriceSources,
-		ModelPricesDisabled: initialCfg.ModelPricesDisabled,
+		Model: initialCfg.Model,
 	}
 
 	reloader := NewConfigReloader(ConfigReloaderOptions{
@@ -2853,8 +2851,8 @@ func TestResolveConfig_CadenceIntervalsAndRateLimitFloor(t *testing.T) {
 	if defCfg.FullReconcileInterval != syncer.DefaultFullReconcileInterval {
 		t.Errorf("FullReconcileInterval default = %v, want %v", defCfg.FullReconcileInterval, syncer.DefaultFullReconcileInterval)
 	}
-	if defCfg.RateLimitFloorPercent != syncer.DefaultRateFloorPercent {
-		t.Errorf("RateLimitFloorPercent default = %v, want %v", defCfg.RateLimitFloorPercent, syncer.DefaultRateFloorPercent)
+	if defCfg.GitHub.RateLimitFloorPercent != syncer.DefaultRateFloorPercent {
+		t.Errorf("RateLimitFloorPercent default = %v, want %v", defCfg.GitHub.RateLimitFloorPercent, syncer.DefaultRateFloorPercent)
 	}
 
 	// 2. Custom ConfigMap values
@@ -2879,8 +2877,8 @@ func TestResolveConfig_CadenceIntervalsAndRateLimitFloor(t *testing.T) {
 	if cfg.FullReconcileInterval != 2*time.Hour {
 		t.Errorf("FullReconcileInterval = %v, want 2h", cfg.FullReconcileInterval)
 	}
-	if cfg.RateLimitFloorPercent != 20 {
-		t.Errorf("RateLimitFloorPercent = %v, want 20", cfg.RateLimitFloorPercent)
+	if cfg.GitHub.RateLimitFloorPercent != 20 {
+		t.Errorf("RateLimitFloorPercent = %v, want 20", cfg.GitHub.RateLimitFloorPercent)
 	}
 
 	// 3. Invalid values rejected
@@ -3218,4 +3216,53 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 			t.Errorf("expected nil ServicePortal.AllowedHTTPHosts, got %v", cfg.ServicePortal.AllowedHTTPHosts)
 		}
 	})
+}
+
+func TestDefaultModelConfig(t *testing.T) {
+	cfg := DefaultModelConfig()
+	if cfg.Prices == nil {
+		t.Fatal("expected non-nil default Prices")
+	}
+	if cfg.PriceSources == nil {
+		t.Fatal("expected non-nil default PriceSources")
+	}
+	if cfg.PricesDisabled {
+		t.Errorf("expected PricesDisabled to be false by default")
+	}
+	if cfg.DefaultModel != "" {
+		t.Errorf("expected empty DefaultModel by default, got %q", cfg.DefaultModel)
+	}
+
+	price, source, ok := cfg.LookupPrice("google/gemini-2.5-flash")
+	if !ok || source != v1alpha1.CostSourceDefault {
+		t.Errorf("LookupPrice for default model failed: got price=%+v, source=%v, ok=%v", price, source, ok)
+	}
+
+	disabledCfg := ModelConfig{PricesDisabled: true}
+	_, _, okDisabled := disabledCfg.LookupPrice("google/gemini-2.5-flash")
+	if okDisabled {
+		t.Errorf("expected ok=false when PricesDisabled is true")
+	}
+}
+
+func TestDefaultGitHubConfig(t *testing.T) {
+	cfg := DefaultGitHubConfig()
+	if cfg.TokenSecret != DefaultGitHubTokenSecret {
+		t.Errorf("TokenSecret = %q, want %q", cfg.TokenSecret, DefaultGitHubTokenSecret)
+	}
+	if cfg.AppSecret != "" {
+		t.Errorf("AppSecret = %q, want empty", cfg.AppSecret)
+	}
+	if cfg.InconclusivePolicy != DefaultInconclusivePolicy {
+		t.Errorf("InconclusivePolicy = %q, want %q", cfg.InconclusivePolicy, DefaultInconclusivePolicy)
+	}
+	if cfg.UIBaseURL != "" {
+		t.Errorf("UIBaseURL = %q, want empty", cfg.UIBaseURL)
+	}
+	if cfg.CommandUsers != nil {
+		t.Errorf("CommandUsers = %v, want nil", cfg.CommandUsers)
+	}
+	if cfg.RateLimitFloorPercent != syncer.DefaultRateFloorPercent {
+		t.Errorf("RateLimitFloorPercent = %d, want %d", cfg.RateLimitFloorPercent, syncer.DefaultRateFloorPercent)
+	}
 }

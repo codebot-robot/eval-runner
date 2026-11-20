@@ -48,6 +48,20 @@ func DefaultModelPriceSources() map[string]v1alpha1.CostSource {
 	return sources
 }
 
+// LookupPrice resolves pricing for model against the effective prices and source map.
+func (c ModelConfig) LookupPrice(model string) (ModelPrice, v1alpha1.CostSource, bool) {
+	if c.PricesDisabled {
+		return ModelPrice{}, "", false
+	}
+	prices := c.Prices
+	sources := c.PriceSources
+	if prices == nil {
+		prices = DefaultModelPrices()
+		sources = DefaultModelPriceSources()
+	}
+	return LookupModelPrice(model, prices, sources)
+}
+
 // LookupModelPrice resolves pricing for model against the effective prices and source map.
 //
 // Resolution order:

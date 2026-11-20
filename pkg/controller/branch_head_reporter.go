@@ -38,19 +38,19 @@ import (
 func (r *RunReconciler) gitHubAppSecret() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.Config.GitHubAppSecret
+	return r.Config.GitHub.AppSecret
 }
 
 func (r *RunReconciler) gitHubTokenSecret() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.Config.GitHubTokenSecret
+	return r.Config.GitHub.TokenSecret
 }
 
 func (r *RunReconciler) uiBaseURL() string {
 	r.cfgMu.RLock()
 	defer r.cfgMu.RUnlock()
-	return r.Config.UIBaseURL
+	return r.Config.GitHub.UIBaseURL
 }
 
 func (r *RunReconciler) headTopUpInterval() time.Duration {

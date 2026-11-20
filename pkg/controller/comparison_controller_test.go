@@ -1054,7 +1054,7 @@ func TestComparisonReconciler_UnreadableArtifacts_PrefixMismatch_CompletesInconc
 		ComparisonTTL:       ttl,
 		Now:                 func() time.Time { return now },
 		ControllerNamespace: "eval-runner",
-		GitHubTokenSecret:   "github-token",
+		GitHub:              GitHubConfig{TokenSecret: "github-token"},
 		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 			return server.Client(creds.Token)
 		},
@@ -1231,7 +1231,7 @@ func TestComparisonReconciler_UnreadableArtifacts_NotFound_CompletesInconclusive
 		ComparisonTTL:       ttl,
 		Now:                 func() time.Time { return now },
 		ControllerNamespace: "eval-runner",
-		GitHubTokenSecret:   "github-token",
+		GitHub:              GitHubConfig{TokenSecret: "github-token"},
 		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 			return server.Client(creds.Token)
 		},
@@ -1380,7 +1380,7 @@ func TestComparisonReconciler_UnreadableArtifacts_TransientSinkError_Retries(t *
 		ComparisonTTL:       ttl,
 		Now:                 func() time.Time { return now },
 		ControllerNamespace: "eval-runner",
-		GitHubTokenSecret:   "github-token",
+		GitHub:              GitHubConfig{TokenSecret: "github-token"},
 		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 			return server.Client(creds.Token)
 		},
@@ -1689,10 +1689,9 @@ func TestComparisonReconciler_UnreadableArtifacts_InconclusivePolicyFailure(t *t
 		Scheme:              scheme,
 		ArtifactSink:        sink,
 		ComparisonTTL:       ttl,
-		InconclusivePolicy:  configkeys.InconclusivePolicyFailure,
+		GitHub:              GitHubConfig{TokenSecret: "github-token", InconclusivePolicy: configkeys.InconclusivePolicyFailure},
 		Now:                 func() time.Time { return now },
 		ControllerNamespace: "eval-runner",
-		GitHubTokenSecret:   "github-token",
 		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 			return server.Client(creds.Token)
 		},
@@ -1836,7 +1835,7 @@ func TestComparisonReconciler_TerminalComparison_NotFound_PreservesVerdict(t *te
 		ArtifactSink:        sink,
 		ComparisonTTL:       ttl,
 		ControllerNamespace: "eval-runner",
-		GitHubTokenSecret:   "github-token",
+		GitHub:              GitHubConfig{TokenSecret: "github-token"},
 		GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 			return server.Client(creds.Token)
 		},
@@ -2525,7 +2524,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token", // Secret does not exist
+			GitHub:              GitHubConfig{TokenSecret: "github-token"}, // Secret does not exist
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-no-token"}}
@@ -2574,7 +2573,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -2759,7 +2758,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -2829,7 +2828,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -2974,7 +2973,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -3012,7 +3011,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -3061,7 +3060,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -3099,7 +3098,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -3160,7 +3159,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "", // Explicitly disabled
+			GitHub:              GitHubConfig{TokenSecret: ""}, // Explicitly disabled
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-disabled"}}
@@ -3217,7 +3216,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				factoryCalled = true
 				if creds.AppID != "12345" || creds.InstallationID != "67890" || creds.AppAuth == nil {
@@ -3272,8 +3271,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
-			UIBaseURL:           "https://eval-ui.example.com",
+			GitHub:              GitHubConfig{TokenSecret: "github-token", UIBaseURL: "https://eval-ui.example.com"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -3324,8 +3322,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
-			InconclusivePolicy:  "failure",
+			GitHub:              GitHubConfig{TokenSecret: "github-token", InconclusivePolicy: "failure"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -3370,7 +3367,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -3463,7 +3460,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubBaseURL:       server.URL(),
 		}
 
@@ -3569,7 +3566,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubBaseURL:       server.URL(),
 		}
 
@@ -3633,7 +3630,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubBaseURL:       server.URL(),
 			Now:                 func() time.Time { return testNow },
 		}
@@ -3788,7 +3785,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubBaseURL:       server.URL(),
 			Now:                 func() time.Time { return testNow },
 		}
@@ -3924,7 +3921,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -5507,7 +5504,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(credentials GitHubCredentials) github.Client {
 				return server.Client(credentials.Token)
 			},
@@ -9196,8 +9193,10 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices: map[string]ModelPrice{
-				"mockllm/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+			Model: ModelConfig{
+				Prices: map[string]ModelPrice{
+					"mockllm/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+				},
 			},
 		}
 
@@ -9447,8 +9446,10 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices: map[string]ModelPrice{
-				"other/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+			Model: ModelConfig{
+				Prices: map[string]ModelPrice{
+					"other/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+				},
 			},
 		}
 
@@ -11211,7 +11212,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 			ComparisonTTL:       ttl,
 			Now:                 func() time.Time { return now },
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -11602,7 +11603,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 			ArtifactSink:        sink,
 			ComparisonTTL:       ttl,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -11839,7 +11840,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 			ArtifactSink:        sink,
 			ComparisonTTL:       ttl,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -12012,7 +12013,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 			ArtifactSink:        sink,
 			ComparisonTTL:       ttl,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -12498,7 +12499,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 			ArtifactSink:        sink,
 			ComparisonTTL:       ttl,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -12741,7 +12742,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 			ArtifactSink:        sink,
 			ComparisonTTL:       ttl,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -13063,7 +13064,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 			ArtifactSink:        sink,
 			ComparisonTTL:       ttl,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -13269,7 +13270,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 			ArtifactSink:        sink,
 			ComparisonTTL:       ttl,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -13506,7 +13507,7 @@ func TestComparisonReconciler_ExtraSamples_ConditionResetOnServiceableRequest(t 
 				ArtifactSink:        sink,
 				ComparisonTTL:       ttl,
 				ControllerNamespace: "eval-runner",
-				GitHubTokenSecret:   "github-token",
+				GitHub:              GitHubConfig{TokenSecret: "github-token"},
 				GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 					return server.Client(creds.Token)
 				},
@@ -13772,7 +13773,7 @@ func TestComparisonReconciler_CompletedComparisonWithPendingCommands(t *testing.
 		Client:       cl,
 		Scheme:       scheme,
 		ArtifactSink: sink,
-		CommandUsers: []string{"alice"},
+		GitHub:       GitHubConfig{CommandUsers: []string{"alice"}},
 		Now:          func() time.Time { return now },
 	}
 
@@ -13838,7 +13839,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -13901,7 +13902,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"renovate[bot]"},
+			GitHub:              GitHubConfig{CommandUsers: []string{"renovate[bot]"}},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-bot"}}
@@ -13952,7 +13953,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -14014,8 +14015,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"ALICE"},
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token", CommandUsers: []string{"ALICE"}},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -14069,7 +14069,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -14128,7 +14128,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -14272,7 +14272,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -14350,7 +14350,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			Now:                 func() time.Time { return testNow },
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -14419,7 +14419,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubAppSecret:     "github-app",
+			GitHub:              GitHubConfig{AppSecret: "github-app"},
 			Now:                 func() time.Time { return testNow },
 		}
 
@@ -14547,7 +14547,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -14605,7 +14605,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"alice"},
+			GitHub:              GitHubConfig{CommandUsers: []string{"alice"}},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-clamp"}}
@@ -14658,7 +14658,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"alice"},
+			GitHub:              GitHubConfig{CommandUsers: []string{"alice"}},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-bounded"}}
@@ -14709,7 +14709,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
 			},
@@ -14879,7 +14879,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"developer"},
+			GitHub:              GitHubConfig{CommandUsers: []string{"developer"}},
 			Now:                 func() time.Time { return nowTime },
 		}
 
@@ -14984,7 +14984,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"developer"},
+			GitHub:              GitHubConfig{CommandUsers: []string{"developer"}},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-rerun-base"}}
@@ -15081,7 +15081,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"developer"},
+			GitHub:              GitHubConfig{CommandUsers: []string{"developer"}},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-rerun-cand"}}
@@ -15148,7 +15148,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 			Client:              cl,
 			Scheme:              scheme,
 			ControllerNamespace: "eval-runner",
-			CommandUsers:        []string{"developer"},
+			GitHub:              GitHubConfig{CommandUsers: []string{"developer"}},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-rerun-missing"}}
@@ -16394,7 +16394,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 			Scheme:              scheme,
 			ArtifactSink:        sink,
 			ControllerNamespace: "eval-runner",
-			GitHubTokenSecret:   "github-token",
+			GitHub:              GitHubConfig{TokenSecret: "github-token"},
 			AffinityMode:        affinityMode,
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -16704,7 +16704,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 			Scheme:              reconciler.Scheme,
 			ArtifactSink:        reconciler.ArtifactSink,
 			ControllerNamespace: reconciler.ControllerNamespace,
-			GitHubTokenSecret:   reconciler.GitHubTokenSecret,
+			GitHub:              reconciler.GitHub,
 			AffinityMode:        reconciler.AffinityMode,
 			GitHubClientFactory: func(creds GitHubCredentials) github.Client {
 				return server.Client(creds.Token)
@@ -17156,7 +17156,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices:  prices,
+			Model:        ModelConfig{Prices: prices},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-budget"}}
@@ -17315,7 +17315,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices:  prices,
+			Model:        ModelConfig{Prices: prices},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-unpriced"}}
@@ -17418,7 +17418,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices:  prices,
+			Model:        ModelConfig{Prices: prices},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-shrink"}}
@@ -17511,7 +17511,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices:  prices,
+			Model:        ModelConfig{Prices: prices},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-stop"}}
@@ -17613,7 +17613,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices:  prices,
+			Model:        ModelConfig{Prices: prices},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-zero"}}
@@ -17702,7 +17702,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 			Client:       cl,
 			Scheme:       scheme,
 			ArtifactSink: sink,
-			ModelPrices:  prices,
+			Model:        ModelConfig{Prices: prices},
 		}
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "comp-extra"}}
@@ -18346,7 +18346,7 @@ func newHeadMoveFixture(t *testing.T, withGitHub bool, interceptorFuncs ...inter
 			},
 		}
 		builder.WithObjects(appSecret)
-		reconciler.GitHubTokenSecret = "github-token"
+		reconciler.GitHub.TokenSecret = "github-token"
 		reconciler.GitHubClientFactory = func(creds GitHubCredentials) github.Client {
 			return server.Client("app-inst-token")
 		}
