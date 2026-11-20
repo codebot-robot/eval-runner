@@ -22,69 +22,73 @@ import (
 func TestBuildServicePortalEgressPolicy(t *testing.T) {
 	testCases := []struct {
 		name           string
-		httpsHosts     []string
-		httpHosts      []string
-		wantHttpHosts  []string
-		wantHttpsHosts []string
+		options        ServicePortalOptions
+		wantHTTPHosts  []string
+		wantHTTPSHosts []string
 	}{
 		{
 			name:           "empty hosts produces empty policy",
-			httpsHosts:     nil,
-			httpHosts:      nil,
-			wantHttpHosts:  nil,
-			wantHttpsHosts: nil,
+			options:        ServicePortalOptions{},
+			wantHTTPHosts:  nil,
+			wantHTTPSHosts: nil,
 		},
 		{
-			name:           "only https hosts produces https rule only",
-			httpsHosts:     []string{"*.googleapis.com", "github.com"},
-			httpHosts:      nil,
-			wantHttpHosts:  nil,
-			wantHttpsHosts: []string{"*.googleapis.com", "github.com"},
+			name: "only https hosts produces https rule only",
+			options: ServicePortalOptions{
+				AllowedHosts: []string{"*.googleapis.com", "github.com"},
+			},
+			wantHTTPHosts:  nil,
+			wantHTTPSHosts: []string{"*.googleapis.com", "github.com"},
 		},
 		{
-			name:           "only http hosts produces http rule only",
-			httpsHosts:     nil,
-			httpHosts:      []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHttpHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHttpsHosts: nil,
+			name: "only http hosts produces http rule only",
+			options: ServicePortalOptions{
+				AllowedHTTPHosts: []string{"deb.debian.org", "archive.ubuntu.com"},
+			},
+			wantHTTPHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
+			wantHTTPSHosts: nil,
 		},
 		{
-			name:           "both http and https hosts configure their respective rules",
-			httpsHosts:     []string{"*.googleapis.com", "github.com"},
-			httpHosts:      []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHttpHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHttpsHosts: []string{"*.googleapis.com", "github.com"},
+			name: "both http and https hosts configure their respective rules",
+			options: ServicePortalOptions{
+				AllowedHosts:     []string{"*.googleapis.com", "github.com"},
+				AllowedHTTPHosts: []string{"deb.debian.org", "archive.ubuntu.com"},
+			},
+			wantHTTPHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
+			wantHTTPSHosts: []string{"*.googleapis.com", "github.com"},
 		},
 		{
-			name:           "defaults produce package mirrors for http and all default hosts for https",
-			httpsHosts:     DefaultServicePortalAllowedHosts,
-			httpHosts:      DefaultServicePortalAllowedHTTPHosts,
-			wantHttpHosts:  DefaultServicePortalAllowedHTTPHosts,
-			wantHttpsHosts: DefaultServicePortalAllowedHosts,
+			name: "defaults produce package mirrors for http and all default hosts for https",
+			options: ServicePortalOptions{
+				AllowedHosts:     DefaultServicePortalAllowedHosts,
+				AllowedHTTPHosts: DefaultServicePortalAllowedHTTPHosts,
+			},
+			wantHTTPHosts:  DefaultServicePortalAllowedHTTPHosts,
+			wantHTTPSHosts: DefaultServicePortalAllowedHosts,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			policy := BuildServicePortalEgressPolicy(tc.httpsHosts, tc.httpHosts)
+			policy := BuildServicePortalEgressPolicy(tc.options)
 			if err := policy.Validate(); err != nil {
 				t.Fatalf("policy failed validation: %v", err)
 			}
-			var gotHttpHosts []string
-			var gotHttpsHosts []string
+			var gotHTTPHosts []string
+			var gotHTTPSHosts []string
 			for _, rule := range policy.GetRules() {
 				if rule.GetHttp() != nil {
-					gotHttpHosts = rule.GetHttp().GetHostnames()
+					gotHTTPHosts = rule.GetHttp().GetHostnames()
 				}
 				if rule.GetHttps() != nil {
-					gotHttpsHosts = rule.GetHttps().GetHostnames()
+					gotHTTPSHosts = rule.GetHttps().GetHostnames()
 				}
 			}
-			if !reflect.DeepEqual(gotHttpHosts, tc.wantHttpHosts) {
-				t.Errorf("got HTTP hostnames %v, want %v", gotHttpHosts, tc.wantHttpHosts)
+			if !reflect.DeepEqual(gotHTTPHosts, tc.wantHTTPHosts) {
+				t.Errorf("got HTTP hostnames %v, want %v", gotHTTPHosts, tc.wantHTTPHosts)
 			}
-			if !reflect.DeepEqual(gotHttpsHosts, tc.wantHttpsHosts) {
-				t.Errorf("got HTTPS hostnames %v, want %v", gotHttpsHosts, tc.wantHttpsHosts)
+			if !reflect.DeepEqual(gotHTTPSHosts, tc.wantHTTPSHosts) {
+				t.Errorf("got HTTPS hostnames %v, want %v", gotHTTPSHosts, tc.wantHTTPSHosts)
 			}
 		})
 	}

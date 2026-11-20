@@ -2559,12 +2559,14 @@ func TestReconcileDeadlineSurvivesControllerRestart(t *testing.T) {
 		Build()
 
 	reconcilerRestarted := &RunReconciler{
-		Client:            client,
-		Scheme:            scheme,
-		SandboxClient:     &sandboxclient.FakeClient{},
-		SandboxNamespace:  "eval-runner-sandbox",
-		DiscoveryDeadline: 20 * time.Minute,
-		Now:               func() time.Time { return now.Add(2 * time.Minute) },
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    &sandboxclient.FakeClient{},
+		SandboxNamespace: "eval-runner-sandbox",
+		Config: ClusterConfig{
+			DiscoveryDeadline: 20 * time.Minute,
+		},
+		Now: func() time.Time { return now.Add(2 * time.Minute) },
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -2582,12 +2584,14 @@ func TestReconcileDeadlineSurvivesControllerRestart(t *testing.T) {
 	}
 
 	reconcilerPastDeadline := &RunReconciler{
-		Client:            client,
-		Scheme:            scheme,
-		SandboxClient:     &sandboxclient.FakeClient{},
-		SandboxNamespace:  "eval-runner-sandbox",
-		DiscoveryDeadline: 20 * time.Minute,
-		Now:               func() time.Time { return now.Add(11 * time.Minute) },
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    &sandboxclient.FakeClient{},
+		SandboxNamespace: "eval-runner-sandbox",
+		Config: ClusterConfig{
+			DiscoveryDeadline: 20 * time.Minute,
+		},
+		Now: func() time.Time { return now.Add(11 * time.Minute) },
 	}
 	_, err = reconcilerPastDeadline.Reconcile(t.Context(), req)
 	if err != nil {
@@ -2751,12 +2755,14 @@ func TestReconcileCustomDiscoveryDeadlineConfigured(t *testing.T) {
 	customDeadline := 25 * time.Minute
 	fixedNow := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	reconciler := &RunReconciler{
-		Client:            client,
-		Scheme:            scheme,
-		SandboxClient:     &sandboxclient.FakeClient{},
-		SandboxNamespace:  "eval-runner-sandbox",
-		DiscoveryDeadline: customDeadline,
-		Now:               func() time.Time { return fixedNow },
+		Client:           client,
+		Scheme:           scheme,
+		SandboxClient:    &sandboxclient.FakeClient{},
+		SandboxNamespace: "eval-runner-sandbox",
+		Config: ClusterConfig{
+			DiscoveryDeadline: customDeadline,
+		},
+		Now: func() time.Time { return fixedNow },
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
@@ -5557,7 +5563,7 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      DefaultModelSecret,
+		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -5928,7 +5934,7 @@ func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      "gemini-api-key-secret",
+		Config:           ClusterConfig{ModelSecret: "gemini-api-key-secret"},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -5990,7 +5996,7 @@ func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      DefaultModelSecret,
+		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -6073,7 +6079,7 @@ func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      DefaultModelSecret,
+		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -6149,7 +6155,7 @@ func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      DefaultModelSecret,
+		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -6219,7 +6225,7 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      "", // explicitly disabled
+		Config:           ClusterConfig{ModelSecret: ""}, // explicitly disabled
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -6287,7 +6293,7 @@ func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      "", // explicitly disabled
+		Config:           ClusterConfig{ModelSecret: ""}, // explicitly disabled
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -6355,7 +6361,7 @@ func TestReconcileModelSecret_CustomNameAbsentNonMockModel(t *testing.T) {
 		Client:           cl,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		ModelSecret:      "custom-secret",
+		Config:           ClusterConfig{ModelSecret: "custom-secret"},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -9017,8 +9023,10 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			SandboxClient:    executor,
 			ArtifactSink:     gcsSink,
 			SandboxNamespace: "eval-runner-sandbox",
-			ModelPrices: map[string]ModelPrice{
-				"mockllm/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+			Config: ClusterConfig{
+				ModelPrices: map[string]ModelPrice{
+					"mockllm/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+				},
 			},
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
@@ -9182,7 +9190,9 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			SandboxClient:    executor,
 			ArtifactSink:     gcsSink,
 			SandboxNamespace: "eval-runner-sandbox",
-			ModelSecret:      "model-credentials",
+			Config: ClusterConfig{
+				ModelSecret: "model-credentials",
+			},
 			// ModelPrices is nil simulating no ConfigMap configured
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
@@ -9312,8 +9322,10 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			SandboxClient:    executor,
 			ArtifactSink:     gcsSink,
 			SandboxNamespace: "eval-runner-sandbox",
-			ModelPrices: map[string]ModelPrice{
-				"other/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+			Config: ClusterConfig{
+				ModelPrices: map[string]ModelPrice{
+					"other/model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+				},
 			},
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
@@ -10899,7 +10911,7 @@ func TestLiveTaskProgressPolling_SuccessiveSnapshots(t *testing.T) {
 		Client:                   cl,
 		Scheme:                   scheme,
 		Now:                      nowFn,
-		PollProgressInterval:     10 * time.Millisecond,
+		Config:                   ClusterConfig{PollProgressInterval: 10 * time.Millisecond},
 		MinProgressWriteInterval: 10 * time.Second,
 	}
 
@@ -10986,7 +10998,9 @@ func TestLiveTaskProgressPolling_WriteFloorFollowsInterval(t *testing.T) {
 	}
 
 	rConfigured := &RunReconciler{
-		PollProgressInterval: 2 * time.Second,
+		Config: ClusterConfig{
+			PollProgressInterval: 2 * time.Second,
+		},
 	}
 	if rConfigured.pollProgressInterval() != 2*time.Second {
 		t.Errorf("expected pollProgressInterval 2s, got %v", rConfigured.pollProgressInterval())
@@ -10996,7 +11010,9 @@ func TestLiveTaskProgressPolling_WriteFloorFollowsInterval(t *testing.T) {
 	}
 
 	rOverridden := &RunReconciler{
-		PollProgressInterval:     2 * time.Second,
+		Config: ClusterConfig{
+			PollProgressInterval: 2 * time.Second,
+		},
 		MinProgressWriteInterval: 5 * time.Second,
 	}
 	if rOverridden.minProgressWriteInterval() != 5*time.Second {
@@ -11084,10 +11100,12 @@ func TestLiveTaskProgressPolling_WriteFloorFollowsInterval(t *testing.T) {
 	// PollProgressInterval is 2s, MinProgressWriteInterval is 0 (unspecified).
 	// Write floor should follow PollProgressInterval (2s).
 	r := &RunReconciler{
-		Client:               cl,
-		Scheme:               scheme,
-		Now:                  nowFn,
-		PollProgressInterval: 2 * time.Second,
+		Client: cl,
+		Scheme: scheme,
+		Now:    nowFn,
+		Config: ClusterConfig{
+			PollProgressInterval: 2 * time.Second,
+		},
 	}
 
 	stopCh := make(chan struct{})
@@ -11173,10 +11191,12 @@ func TestLiveTaskProgressPolling_FailureModes(t *testing.T) {
 		}
 
 		r := &RunReconciler{
-			Client:               cl,
-			Scheme:               scheme,
-			Now:                  func() time.Time { return startTime.Add(20 * time.Second) },
-			PollProgressInterval: 10 * time.Millisecond,
+			Client: cl,
+			Scheme: scheme,
+			Now:    func() time.Time { return startTime.Add(20 * time.Second) },
+			Config: ClusterConfig{
+				PollProgressInterval: 10 * time.Millisecond,
+			},
 		}
 
 		go func() {
@@ -11212,10 +11232,12 @@ func TestLiveTaskProgressPolling_FailureModes(t *testing.T) {
 		}
 
 		r := &RunReconciler{
-			Client:               cl,
-			Scheme:               scheme,
-			Now:                  func() time.Time { return startTime.Add(20 * time.Second) },
-			PollProgressInterval: 10 * time.Millisecond,
+			Client: cl,
+			Scheme: scheme,
+			Now:    func() time.Time { return startTime.Add(20 * time.Second) },
+			Config: ClusterConfig{
+				PollProgressInterval: 10 * time.Millisecond,
+			},
 		}
 
 		go func() {
@@ -11340,12 +11362,14 @@ func TestReconcileSampleExecution_LiveProgressPollerLifecycle(t *testing.T) {
 	}
 
 	reconciler := &RunReconciler{
-		Client:               cl,
-		Scheme:               scheme,
-		SandboxClient:        executor,
-		SandboxNamespace:     "eval-runner-sandbox",
-		Now:                  nowFn,
-		PollProgressInterval: 10 * time.Millisecond,
+		Client:           cl,
+		Scheme:           scheme,
+		SandboxClient:    executor,
+		SandboxNamespace: "eval-runner-sandbox",
+		Now:              nowFn,
+		Config: ClusterConfig{
+			PollProgressInterval: 10 * time.Millisecond,
+		},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -11646,7 +11670,7 @@ func TestReconcile_HungExecuteStepTimesOutAndFailsRun(t *testing.T) {
 		Scheme:               scheme,
 		SandboxClient:        executor,
 		SandboxNamespace:     "eval-runner-sandbox",
-		DiscoveryDeadline:    50 * time.Millisecond,
+		Config:               ClusterConfig{DiscoveryDeadline: 50 * time.Millisecond},
 		DiscoveryStepTimeout: 50 * time.Millisecond,
 	}
 
@@ -11808,7 +11832,7 @@ func TestReconcile_HungExecuteDoesNotBlockOtherRunsFromReconciling(t *testing.T)
 		Scheme:               scheme,
 		ClientFactory:        factory,
 		SandboxNamespace:     "eval-runner-sandbox",
-		DiscoveryDeadline:    50 * time.Millisecond,
+		Config:               ClusterConfig{DiscoveryDeadline: 50 * time.Millisecond},
 		DiscoveryStepTimeout: 50 * time.Millisecond,
 	}
 
@@ -12317,7 +12341,7 @@ func TestReconcile_HungStoreManifestStepTimesOutAndFailsRun(t *testing.T) {
 		SandboxClient:        executor,
 		SandboxNamespace:     "eval-runner-sandbox",
 		ArtifactSink:         sink,
-		DiscoveryDeadline:    10 * time.Minute,
+		Config:               ClusterConfig{DiscoveryDeadline: 10 * time.Minute},
 		DiscoveryStepTimeout: 50 * time.Millisecond,
 		ArtifactSinkTimeout:  50 * time.Millisecond,
 	}
@@ -12713,7 +12737,7 @@ func TestReconcile_StoreManifestGraceWindowSurfacesSinkError(t *testing.T) {
 		SandboxClient:        executor,
 		SandboxNamespace:     "eval-runner-sandbox",
 		ArtifactSink:         sink,
-		DiscoveryDeadline:    10 * time.Minute,
+		Config:               ClusterConfig{DiscoveryDeadline: 10 * time.Minute},
 		DiscoveryStepTimeout: 30 * time.Millisecond,
 		ArtifactSinkTimeout:  30 * time.Millisecond,
 	}

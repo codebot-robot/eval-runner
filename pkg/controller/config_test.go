@@ -2330,9 +2330,8 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 	defer reloadableSink.Close()
 
 	runReconciler := &RunReconciler{
-		ArtifactSink:      reloadableSink,
-		DiscoveryDeadline: initialCfg.DiscoveryDeadline,
-		MaxParallelTasks:  initialCfg.MaxParallelTasks,
+		ArtifactSink: reloadableSink,
+		Config:       initialCfg,
 	}
 	compReconciler := &ComparisonReconciler{
 		ArtifactSink: reloadableSink,
@@ -2589,9 +2588,7 @@ func TestConfigReloader_UpdatesModelPrices_LookupAndDisabledFlipsDynamically(t *
 	}
 
 	runReconciler := &RunReconciler{
-		ModelPrices:         initialCfg.ModelPrices,
-		ModelPriceSources:   initialCfg.ModelPriceSources,
-		ModelPricesDisabled: initialCfg.ModelPricesDisabled,
+		Config: initialCfg,
 	}
 	compReconciler := &ComparisonReconciler{
 		ModelPrices:         initialCfg.ModelPrices,
@@ -3122,8 +3119,8 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.ServicePortalControllerAddress != "" {
-			t.Errorf("ServicePortalControllerAddress = %q, want empty", cfg.ServicePortalControllerAddress)
+		if cfg.ServicePortal.ControllerAddress != "" {
+			t.Errorf("ServicePortal.ControllerAddress = %q, want empty", cfg.ServicePortal.ControllerAddress)
 		}
 	})
 
@@ -3178,7 +3175,7 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		options := cfg.ServicePortalOptions()
+		options := cfg.ServicePortal.ClientOptions()
 		if options.ControllerAddr != "127.0.0.1:8443" {
 			t.Errorf("ControllerAddr = %q, want 127.0.0.1:8443", options.ControllerAddr)
 		}
@@ -3195,11 +3192,11 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !reflect.DeepEqual(cfg.ServicePortalAllowedHosts, DefaultServicePortalAllowedHosts) {
-			t.Errorf("ServicePortalAllowedHosts = %v, want %v", cfg.ServicePortalAllowedHosts, DefaultServicePortalAllowedHosts)
+		if !reflect.DeepEqual(cfg.ServicePortal.AllowedHosts, DefaultServicePortalAllowedHosts) {
+			t.Errorf("ServicePortal.AllowedHosts = %v, want %v", cfg.ServicePortal.AllowedHosts, DefaultServicePortalAllowedHosts)
 		}
-		if !reflect.DeepEqual(cfg.ServicePortalAllowedHTTPHosts, DefaultServicePortalAllowedHTTPHosts) {
-			t.Errorf("ServicePortalAllowedHTTPHosts = %v, want %v", cfg.ServicePortalAllowedHTTPHosts, DefaultServicePortalAllowedHTTPHosts)
+		if !reflect.DeepEqual(cfg.ServicePortal.AllowedHTTPHosts, DefaultServicePortalAllowedHTTPHosts) {
+			t.Errorf("ServicePortal.AllowedHTTPHosts = %v, want %v", cfg.ServicePortal.AllowedHTTPHosts, DefaultServicePortalAllowedHTTPHosts)
 		}
 	})
 
@@ -3217,11 +3214,11 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 		}
 		wantHosts := []string{"*.googleapis.com", "github.com"}
 		wantHTTPHosts := []string{"deb.debian.org", "archive.ubuntu.com"}
-		if !reflect.DeepEqual(cfg.ServicePortalAllowedHosts, wantHosts) {
-			t.Errorf("ServicePortalAllowedHosts = %v, want %v", cfg.ServicePortalAllowedHosts, wantHosts)
+		if !reflect.DeepEqual(cfg.ServicePortal.AllowedHosts, wantHosts) {
+			t.Errorf("ServicePortal.AllowedHosts = %v, want %v", cfg.ServicePortal.AllowedHosts, wantHosts)
 		}
-		if !reflect.DeepEqual(cfg.ServicePortalAllowedHTTPHosts, wantHTTPHosts) {
-			t.Errorf("ServicePortalAllowedHTTPHosts = %v, want %v", cfg.ServicePortalAllowedHTTPHosts, wantHTTPHosts)
+		if !reflect.DeepEqual(cfg.ServicePortal.AllowedHTTPHosts, wantHTTPHosts) {
+			t.Errorf("ServicePortal.AllowedHTTPHosts = %v, want %v", cfg.ServicePortal.AllowedHTTPHosts, wantHTTPHosts)
 		}
 	})
 
@@ -3237,11 +3234,11 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.ServicePortalAllowedHosts != nil {
-			t.Errorf("expected nil ServicePortalAllowedHosts, got %v", cfg.ServicePortalAllowedHosts)
+		if cfg.ServicePortal.AllowedHosts != nil {
+			t.Errorf("expected nil ServicePortal.AllowedHosts, got %v", cfg.ServicePortal.AllowedHosts)
 		}
-		if cfg.ServicePortalAllowedHTTPHosts != nil {
-			t.Errorf("expected nil ServicePortalAllowedHTTPHosts, got %v", cfg.ServicePortalAllowedHTTPHosts)
+		if cfg.ServicePortal.AllowedHTTPHosts != nil {
+			t.Errorf("expected nil ServicePortal.AllowedHTTPHosts, got %v", cfg.ServicePortal.AllowedHTTPHosts)
 		}
 	})
 }

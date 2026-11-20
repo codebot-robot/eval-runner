@@ -17,7 +17,6 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"reflect"
@@ -36,7 +35,6 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/forge/syncer"
 	"github.com/gke-labs/eval-runner/pkg/github"
-	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -201,23 +199,55 @@ type ModelPrice struct {
 // ClusterConfig holds the effective cluster-wide settings resolved with precedence:
 // explicit flag > ConfigMap key > built-in default.
 type ClusterConfig struct {
-	ArtifactBucket           string
-	ArtifactDir              string
-	ArtifactMaxUploadBytes   int64
-	DiscoveryDeadline        time.Duration
-	ExecutionDeadline        time.Duration
-	GitHubTokenSecret        string
-	GitHubAppSecret          string
-	InconclusivePolicy       string
-	MaxParallelTasks         int
-	ModelSecret              string
-	ModelPrices              map[string]ModelPrice
-	ModelPriceSources        map[string]v1alpha1.CostSource
-	ModelPricesDisabled      bool
-	PollProgressInterval     time.Duration
-	SandboxdImage            string
-	TaskGracePeriod          time.Duration
-	UIBaseURL                string
+	ArtifactBucket         string
+	ArtifactDir            string
+	ArtifactMaxUploadBytes int64
+
+	// DiscoveryDeadline is the overall deadline duration for discovery to complete.
+	// Defaults to DefaultDiscoveryDeadline (10m) if <= 0.
+	DiscoveryDeadline time.Duration
+
+	// ExecutionDeadline is the overall deadline duration for sample execution.
+	// Defaults to DefaultExecutionDeadline (30m) if <= 0.
+	ExecutionDeadline time.Duration
+
+	// GitHubTokenSecret is the name of a Secret containing a personal access token for GitHub reporting.
+	GitHubTokenSecret string
+
+	// GitHubAppSecret is the name of a Secret containing GitHub App credentials for check run reporting.
+	GitHubAppSecret string
+
+	InconclusivePolicy string
+
+	// MaxParallelTasks is the maximum number of task sandboxes to run concurrently.
+	// Defaults to DefaultMaxParallelTasks (4) if <= 0.
+	MaxParallelTasks int
+
+	// ModelSecret is the name of a Secret in SandboxNamespace containing model credentials.
+	ModelSecret string
+
+	// ModelPrices maps model identifier to token pricing in USD per 1M tokens.
+	ModelPrices map[string]ModelPrice
+
+	// ModelPriceSources maps model or prefix key to pricing provenance ("configmap" or "default").
+	ModelPriceSources map[string]v1alpha1.CostSource
+
+	// ModelPricesDisabled reports whether pricing has been explicitly disabled via ConfigMap sentinel.
+	ModelPricesDisabled bool
+
+	// PollProgressInterval overrides the interval between task progress polling attempts (default: 10s).
+	PollProgressInterval time.Duration
+
+	// SandboxdImage is the container image used for the sandboxd initContainer.
+	SandboxdImage string
+
+	// TaskGracePeriod is the grace period before treating absence of a running task's sandbox as a failure.
+	// Defaults to DefaultTaskGracePeriod (30s) if <= 0.
+	TaskGracePeriod time.Duration
+
+	// UIBaseURL is the base URL of the eval-runner UI for links in check runs.
+	UIBaseURL string
+
 	ComparisonTTL            time.Duration
 	CommandUsers             []string
 	AffinityMode             string
@@ -228,22 +258,21 @@ type ClusterConfig struct {
 	DefaultBatchSize         int
 	DefaultMaxSamplesPerTask int
 	DefaultBudgetUSD         *float64
-	HeadTopUpInterval        time.Duration
-	HeadTargetCIHalfWidth    float64
-	HeadMaxSamplesPerTask    int
-	LsRemoteInterval         time.Duration
-	FullReconcileInterval    time.Duration
-	RateLimitFloorPercent    int
+
+	// HeadTopUpInterval is the interval between periodic head top-up Runs.
+	HeadTopUpInterval time.Duration
+
+	HeadTargetCIHalfWidth float64
+	HeadMaxSamplesPerTask int
+	LsRemoteInterval      time.Duration
+	FullReconcileInterval time.Duration
+	RateLimitFloorPercent int
 
 	// GCPWorkloadIdentityProvider is the GCP Workload Identity Federation provider resource name.
 	GCPWorkloadIdentityProvider string
 
-	// Service Portal Controller settings
-	ServicePortalControllerAddress string
-	ServicePortalCAFile            string
-	ServicePortalTokenFile         string
-	ServicePortalAllowedHosts      []string
-	ServicePortalAllowedHTTPHosts  []string
+	// ServicePortal configures settings for the Service Portal Controller and allowed egress hosts.
+	ServicePortal ServicePortalOptions
 }
 
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
@@ -315,21 +344,14 @@ func DefaultClusterConfig() ClusterConfig {
 		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
 		RateLimitFloorPercent:    syncer.DefaultRateFloorPercent,
 
-		GCPWorkloadIdentityProvider:    "",
-		ServicePortalControllerAddress: "",
-		ServicePortalCAFile:            "",
-		ServicePortalTokenFile:         "",
-		ServicePortalAllowedHosts:      append([]string(nil), DefaultServicePortalAllowedHosts...),
-		ServicePortalAllowedHTTPHosts:  append([]string(nil), DefaultServicePortalAllowedHTTPHosts...),
-	}
-}
-
-// ServicePortalOptions returns the service portal client.Options corresponding to the cluster configuration.
-func (cfg ClusterConfig) ServicePortalOptions() serviceportalclient.Options {
-	return serviceportalclient.Options{
-		ControllerAddr: cfg.ServicePortalControllerAddress,
-		CAFile:         cfg.ServicePortalCAFile,
-		TokenFile:      cfg.ServicePortalTokenFile,
+		GCPWorkloadIdentityProvider: "",
+		ServicePortal: ServicePortalOptions{
+			ControllerAddress: "",
+			CAFile:            "",
+			TokenFile:         "",
+			AllowedHosts:      append([]string(nil), DefaultServicePortalAllowedHosts...),
+			AllowedHTTPHosts:  append([]string(nil), DefaultServicePortalAllowedHTTPHosts...),
+		},
 	}
 }
 
@@ -817,21 +839,21 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 
 		// Service Portal Controller settings
 		if val, ok := cm.Data[ConfigMapKeyServicePortalControllerAddress]; ok {
-			cfg.ServicePortalControllerAddress = strings.TrimSpace(val)
+			cfg.ServicePortal.ControllerAddress = strings.TrimSpace(val)
 		}
 		if val, ok := cm.Data[ConfigMapKeyServicePortalControllerCAFile]; ok {
-			cfg.ServicePortalCAFile = strings.TrimSpace(val)
+			cfg.ServicePortal.CAFile = strings.TrimSpace(val)
 		}
 		if val, ok := cm.Data[ConfigMapKeyServicePortalTokenFile]; ok {
-			cfg.ServicePortalTokenFile = strings.TrimSpace(val)
+			cfg.ServicePortal.TokenFile = strings.TrimSpace(val)
 		}
 		if val, ok := cm.Data[ConfigMapKeyServicePortalAllowedHosts]; ok {
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
 				if strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
-					cfg.ServicePortalAllowedHosts = nil
+					cfg.ServicePortal.AllowedHosts = nil
 				} else {
-					cfg.ServicePortalAllowedHosts = discovery.ParseHostList(val)
+					cfg.ServicePortal.AllowedHosts = discovery.ParseHostList(val)
 				}
 			}
 		}
@@ -839,9 +861,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			trimmed := strings.TrimSpace(val)
 			if trimmed != "" {
 				if strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
-					cfg.ServicePortalAllowedHTTPHosts = nil
+					cfg.ServicePortal.AllowedHTTPHosts = nil
 				} else {
-					cfg.ServicePortalAllowedHTTPHosts = discovery.ParseHostList(val)
+					cfg.ServicePortal.AllowedHTTPHosts = discovery.ParseHostList(val)
 				}
 			}
 		}
@@ -953,22 +975,17 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		cfg.CommandUsers = ParseUserList(flags.CommandUsers)
 	}
 	if flags.IsExplicit("service-portal-controller-address") {
-		cfg.ServicePortalControllerAddress = strings.TrimSpace(flags.ServicePortalControllerAddress)
+		cfg.ServicePortal.ControllerAddress = strings.TrimSpace(flags.ServicePortalControllerAddress)
 	}
 	if flags.IsExplicit("service-portal-controller-ca-file") {
-		cfg.ServicePortalCAFile = strings.TrimSpace(flags.ServicePortalCAFile)
+		cfg.ServicePortal.CAFile = strings.TrimSpace(flags.ServicePortalCAFile)
 	}
 	if flags.IsExplicit("service-portal-token-file") {
-		cfg.ServicePortalTokenFile = strings.TrimSpace(flags.ServicePortalTokenFile)
+		cfg.ServicePortal.TokenFile = strings.TrimSpace(flags.ServicePortalTokenFile)
 	}
 
-	if cfg.ServicePortalControllerAddress != "" {
-		if cfg.ServicePortalCAFile == "" {
-			return cfg, errors.New("service portal CA file is required when controller address is set")
-		}
-		if cfg.ServicePortalTokenFile == "" {
-			return cfg, errors.New("service portal token file is required when controller address is set")
-		}
+	if err := cfg.ServicePortal.Validate(); err != nil {
+		return cfg, err
 	}
 
 	return cfg, nil

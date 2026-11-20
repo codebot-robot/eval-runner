@@ -342,10 +342,10 @@ func main() {
 	}
 
 	var servicePortalClient *serviceportalclient.Client
-	if clusterConfig.ServicePortalControllerAddress != "" {
-		setupLog.Info("Service Portal enabled", "controllerAddress", clusterConfig.ServicePortalControllerAddress, "caFile", clusterConfig.ServicePortalCAFile, "tokenFile", clusterConfig.ServicePortalTokenFile)
+	if clusterConfig.ServicePortal.ControllerAddress != "" {
+		setupLog.Info("Service Portal enabled", "controllerAddress", clusterConfig.ServicePortal.ControllerAddress, "caFile", clusterConfig.ServicePortal.CAFile, "tokenFile", clusterConfig.ServicePortal.TokenFile)
 		var servicePortalClientError error
-		servicePortalClient, servicePortalClientError = serviceportalclient.New(clusterConfig.ServicePortalOptions())
+		servicePortalClient, servicePortalClientError = serviceportalclient.New(clusterConfig.ServicePortal.ClientOptions())
 		if servicePortalClientError != nil {
 			setupLog.Error(servicePortalClientError, "unable to create service portal client")
 			os.Exit(1)
@@ -413,35 +413,20 @@ func main() {
 	}()
 
 	reconciler := &controller.RunReconciler{
-		Client:                 mgr.GetClient(),
-		APIReader:              mgr.GetAPIReader(),
-		Scheme:                 mgr.GetScheme(),
-		ClientFactory:          clientFactory,
-		ControllerNamespace:    evalRunnerNamespace,
-		SandboxNamespace:       sandboxNamespace,
-		PKIManager:             pkiManager,
-		SandboxdImage:          clusterConfig.SandboxdImage,
-		DiscoveryDeadline:      clusterConfig.DiscoveryDeadline,
-		ExecutionDeadline:      clusterConfig.ExecutionDeadline,
-		TaskGracePeriod:        clusterConfig.TaskGracePeriod,
-		MaxMessageBytes:        discovery.MaxMessageBytes,
-		MaxDiscoveryAttempts:   maxDiscoveryAttempts,
-		MaxParallelTasks:       clusterConfig.MaxParallelTasks,
-		PollProgressInterval:   clusterConfig.PollProgressInterval,
-		ModelSecret:            clusterConfig.ModelSecret,
-		ModelPrices:            clusterConfig.ModelPrices,
-		ModelPriceSources:      clusterConfig.ModelPriceSources,
-		ModelPricesDisabled:    clusterConfig.ModelPricesDisabled,
-		SampleRunnerImage:      sampleRunnerImage,
-		ArtifactSink:           reloadableSink,
-		ControllerVersion:      version.String(),
-		GitHubTokenSecret:      clusterConfig.GitHubTokenSecret,
-		GitHubAppSecret:        clusterConfig.GitHubAppSecret,
-		UIBaseURL:              clusterConfig.UIBaseURL,
-		HeadTopUpInterval:      clusterConfig.HeadTopUpInterval,
-		ServicePortalHosts:     clusterConfig.ServicePortalAllowedHosts,
-		ServicePortalHTTPHosts: clusterConfig.ServicePortalAllowedHTTPHosts,
-		ServicePortalClient:    servicePortalClient,
+		Client:               mgr.GetClient(),
+		APIReader:            mgr.GetAPIReader(),
+		Scheme:               mgr.GetScheme(),
+		ClientFactory:        clientFactory,
+		ControllerNamespace:  evalRunnerNamespace,
+		SandboxNamespace:     sandboxNamespace,
+		PKIManager:           pkiManager,
+		Config:               clusterConfig,
+		MaxMessageBytes:      discovery.MaxMessageBytes,
+		MaxDiscoveryAttempts: maxDiscoveryAttempts,
+		SampleRunnerImage:    sampleRunnerImage,
+		ArtifactSink:         reloadableSink,
+		ControllerVersion:    version.String(),
+		ServicePortalClient:  servicePortalClient,
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {
