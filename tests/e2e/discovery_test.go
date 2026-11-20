@@ -455,6 +455,21 @@ spec:
 	})
 
 	t.Run("TerminalBenchSandboxTaskCompleted", func(t *testing.T) {
+		modelCredentialsSecret := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: model-credentials
+  namespace: eval-runner-sandbox
+type: Opaque
+stringData:
+  GEMINI_API_KEY: dummy-key
+`
+		harness.KubectlApplyContent(modelCredentialsSecret)
+		t.Cleanup(func() {
+			_ = exec.Command("kubectl", "delete", "secret", "model-credentials", "-n", "eval-runner-sandbox", "--ignore-not-found").Run()
+		})
+
 		terminalBenchCommit := harness.GetGitServerCommit("eval-runner-sandbox", "terminal-bench.git")
 		runName := "terminal-bench-sandbox-run"
 		manifest := fmt.Sprintf(`
@@ -477,16 +492,19 @@ spec:
 		// Assert that the regex-log sandbox pod's task container has limits cpu: 1, memory: 2G
 		sandboxName := discovery.TaskSandboxNameForRun(runName, "terminal-bench/regex-log")
 		var observedCPULimit, observedMemoryLimit string
+		var observedPod *corev1.Pod
 		podObservedDeadline := time.Now().Add(180 * time.Second)
 		for time.Now().Before(podObservedDeadline) {
 			out, err := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "-o", "json").CombinedOutput()
 			if err == nil {
 				var pod corev1.Pod
 				if json.Unmarshal(out, &pod) == nil && len(pod.Spec.Containers) > 0 {
-					for _, c := range pod.Spec.Containers {
-						if c.Name == discovery.TaskContainerName {
-							observedCPULimit = c.Resources.Limits.Cpu().String()
-							observedMemoryLimit = c.Resources.Limits.Memory().String()
+					podCopy := pod
+					observedPod = &podCopy
+					for _, container := range pod.Spec.Containers {
+						if container.Name == discovery.TaskContainerName {
+							observedCPULimit = container.Resources.Limits.Cpu().String()
+							observedMemoryLimit = container.Resources.Limits.Memory().String()
 							break
 						}
 					}
@@ -500,6 +518,11 @@ spec:
 		if observedCPULimit != "1" || observedMemoryLimit != "2G" {
 			t.Errorf("Expected regex-log sandbox pod task container limits cpu: 1, memory: 2G; got cpu: %s, memory: %s", observedCPULimit, observedMemoryLimit)
 		}
+
+		if observedPod == nil {
+			t.Fatalf("Failed to observe sandbox pod %s", sandboxName)
+		}
+		harness.AssertPodHasNoModelSecret(*observedPod, "sandbox task")
 
 		// Wait for Run to complete
 		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 600*time.Second)

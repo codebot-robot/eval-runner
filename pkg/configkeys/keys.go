@@ -47,7 +47,8 @@ const (
 	ConfigMapKeyMaxParallelTasks = "maxParallelTasks"
 	// ConfigMapKeyPollProgressInterval is the ConfigMap key for task progress polling interval.
 	ConfigMapKeyPollProgressInterval = "pollProgressInterval"
-	// ConfigMapKeyModelSecret is the ConfigMap key for default model credentials Secret name.
+	// ConfigMapKeyModelSecret is the legacy ConfigMap key for default model credentials Secret name.
+	// Deprecated: modelSecret is no longer used; the model credential is never attached to pods.
 	ConfigMapKeyModelSecret = "modelSecret"
 	// ConfigMapKeySandboxdImage is the ConfigMap key for sandboxd init container image.
 	ConfigMapKeySandboxdImage = "sandboxdImage"

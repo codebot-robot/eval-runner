@@ -176,14 +176,6 @@ rules:
   - ""
   resources:
   - secrets
-  resourceNames:
-  - model-credentials
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
-  - secrets
   verbs:
   - create
   - delete

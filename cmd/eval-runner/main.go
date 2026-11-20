@@ -111,7 +111,6 @@ func main() {
 	var maxStderrBytes int64
 	var maxDiscoveryAttempts int
 	var maxParallelTasks int
-	var modelSecret string
 	var sampleRunnerImage string
 	var sandboxdImage string
 	var artifactBucket string
@@ -143,7 +142,6 @@ func main() {
 	flag.Int64Var(&maxStderrBytes, "max-stderr-bytes", discovery.MaxStderrBytes, "Maximum stderr bytes buffered from discovery execution")
 	flag.IntVar(&maxDiscoveryAttempts, "max-discovery-attempts", controller.DefaultMaxDiscoveryAttempts, "Maximum number of git clone retry attempts on failure")
 	flag.IntVar(&maxParallelTasks, "max-parallel-tasks", controller.DefaultMaxParallelTasks, "Maximum number of task sandboxes to run concurrently")
-	flag.StringVar(&modelSecret, "model-secret", controller.DefaultModelSecret, "Name of Secret in sandbox namespace containing model credentials")
 	flag.StringVar(&gitHubTokenSecret, "github-token-secret", controller.DefaultGitHubTokenSecret, "Name of Secret in controller namespace containing GitHub token")
 	flag.StringVar(&gitHubAppSecret, "github-app-secret", "", "Name of Secret in controller namespace containing GitHub App credentials")
 	flag.StringVar(&uiBaseURL, "ui-base-url", "", "Base URL for the eval-runner UI (e.g. https://eval-runner.example.com)")
@@ -200,7 +198,6 @@ func main() {
 		flag.CommandLine,
 		artifactBucket,
 		artifactDir,
-		modelSecret,
 		sandboxdImage,
 		gitHubTokenSecret,
 		gitHubAppSecret,
@@ -358,9 +355,6 @@ func main() {
 	} else {
 		setupLog.Info("Service Portal disabled (no controller address configured)")
 	}
-
-	// Operational visibility check for model credentials secret at startup
-	controller.CheckModelSecretAtStartup(context.Background(), kubeClient, sandboxNamespace, clusterConfig.ModelSecret, setupLog)
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")

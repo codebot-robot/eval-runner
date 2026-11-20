@@ -50,9 +50,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	fakek8s "k8s.io/client-go/kubernetes/fake"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
@@ -5545,16 +5543,9 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 		},
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      DefaultModelSecret,
-			Namespace: "eval-runner-sandbox",
-		},
-	}
-
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(run, secret).
+		WithObjects(run).
 		WithStatusSubresource(run).
 		Build()
 
@@ -5563,7 +5554,6 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 		Scheme:           scheme,
 		SandboxClient:    executor,
 		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -5887,18 +5877,27 @@ func TestReconcileExecutionDeadline_TaskCutOffDuringCommandExecution(t *testing.
 	}
 }
 
-func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
+func TestReconcile_TaskPod_NoModelSecretEnv(t *testing.T) {
 	scheme := setupScheme(t)
 
 	manifest := &v1alpha1.Manifest{
 		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-gemini", Spec: "eval.py@gemini"},
+			{
+				ID:   "sample-runner-task",
+				Spec: "eval.py@sample",
+			},
+			{
+				ID: "sandbox-only-task",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+				},
+			},
 		},
 	}
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run",
+			Name:      "test-run-no-model-secret",
 			Namespace: "eval-runner",
 		},
 		Spec: v1alpha1.RunSpec{
@@ -5907,529 +5906,56 @@ func TestReconcileModelSecretPassedToSandbox(t *testing.T) {
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
 			Discovery: &v1alpha1.RunDiscoveryStatus{
-				TaskCount:         1,
-				EligibleTaskCount: 1,
-				TaskIDs:           []string{"task-gemini"},
+				TaskCount:         2,
+				EligibleTaskCount: 2,
+				TaskIDs:           []string{"sample-runner-task", "sandbox-only-task"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
+				{ID: "sample-runner-task", Phase: v1alpha1.TaskPhasePending},
+				{ID: "sandbox-only-task", Phase: v1alpha1.TaskPhasePending},
 			},
 		},
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "gemini-api-key-secret",
-			Namespace: "eval-runner-sandbox",
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(run, secret).
-		WithStatusSubresource(run).
-		Build()
-
-	reconciler := &RunReconciler{
-		Client:           cl,
-		Scheme:           scheme,
-		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: "gemini-api-key-secret"},
-	}
-	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run"}}
-	_, err := reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile error: %v", err)
-	}
-
-	var sbList sandboxv1beta1.SandboxList
-	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
-	if len(sbList.Items) != 1 {
-		t.Fatalf("Expected 1 sandbox created, got %d", len(sbList.Items))
-	}
-
-	c := sbList.Items[0].Spec.PodTemplate.Spec.Containers[0]
-	if len(c.EnvFrom) != 1 || c.EnvFrom[0].SecretRef == nil || c.EnvFrom[0].SecretRef.Name != "gemini-api-key-secret" {
-		t.Errorf("Expected EnvFrom pointing to gemini-api-key-secret, got: %+v", c.EnvFrom)
-	}
-}
-
-func TestReconcileModelSecret_AbsentWithNonMockModel(t *testing.T) {
-	scheme := setupScheme(t)
-
-	manifest := &v1alpha1.Manifest{
-		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-gemini", Spec: "eval.py@gemini"},
-		},
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run-absent-secret",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.RunSpec{
-			Model: "google/gemini-3.5-flash-lite",
-		},
-		Status: v1alpha1.RunStatus{
-			Phase: v1alpha1.RunPhaseRunning,
-			Discovery: &v1alpha1.RunDiscoveryStatus{
-				TaskCount:         1,
-				EligibleTaskCount: 1,
-				TaskIDs:           []string{"task-gemini"},
-			},
-			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().
+	testClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(run).
 		WithStatusSubresource(run).
 		Build()
 
 	reconciler := &RunReconciler{
-		Client:           cl,
+		Client:           testClient,
 		Scheme:           scheme,
 		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
+		Config:           ClusterConfig{MaxParallelTasks: 4},
 	}
 	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-absent-secret"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-no-model-secret"}}
 	_, err := reconciler.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
 
-	// No sandbox should be created
-	var sbList sandboxv1beta1.SandboxList
-	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
-	if len(sbList.Items) != 0 {
-		t.Fatalf("Expected 0 sandboxes created when secret absent for non-mock model, got %d", len(sbList.Items))
+	var sandboxList sandboxv1beta1.SandboxList
+	if err := testClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil {
+		t.Fatalf("List sandboxes error: %v", err)
+	}
+	if len(sandboxList.Items) != 2 {
+		t.Fatalf("Expected 2 sandboxes created, got %d", len(sandboxList.Items))
 	}
 
-	// Task should be marked Failed with clear message
-	var updatedRun v1alpha1.Run
-	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	if len(updatedRun.Status.Tasks) != 1 {
-		t.Fatalf("Expected 1 task, got %d", len(updatedRun.Status.Tasks))
-	}
-	task := updatedRun.Status.Tasks[0]
-	if task.Phase != v1alpha1.TaskPhaseFailed {
-		t.Errorf("Expected task Phase Failed, got %s", task.Phase)
-	}
-	expectedMsg := "no model credentials configured: create Secret eval-runner-sandbox/model-credentials or set --model-secret"
-	if task.Message != expectedMsg {
-		t.Errorf("Expected task Message %q, got %q", expectedMsg, task.Message)
-	}
-
-	// Second reconcile transitions Run phase to Failed
-	_, err = reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Second reconcile error: %v", err)
-	}
-	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
-		t.Errorf("Expected Run Phase Failed when all tasks fail, got %s", updatedRun.Status.Phase)
-	}
-}
-
-func TestReconcileModelSecret_AbsentWithMockModel(t *testing.T) {
-	scheme := setupScheme(t)
-
-	manifest := &v1alpha1.Manifest{
-		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-mock", Spec: "eval.py@mock"},
-		},
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run-mockllm",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.RunSpec{
-			Model: "mockllm/model",
-		},
-		Status: v1alpha1.RunStatus{
-			Phase: v1alpha1.RunPhaseRunning,
-			Discovery: &v1alpha1.RunDiscoveryStatus{
-				TaskCount:         1,
-				EligibleTaskCount: 1,
-				TaskIDs:           []string{"task-mock"},
-			},
-			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(run).
-		WithStatusSubresource(run).
-		Build()
-
-	reconciler := &RunReconciler{
-		Client:           cl,
-		Scheme:           scheme,
-		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
-	}
-	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-mockllm"}}
-	_, err := reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile error: %v", err)
-	}
-
-	// Sandbox should be created without credentials (EnvFrom empty)
-	var sbList sandboxv1beta1.SandboxList
-	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
-	if len(sbList.Items) != 1 {
-		t.Fatalf("Expected 1 sandbox created for mockllm when secret absent, got %d", len(sbList.Items))
-	}
-
-	c := sbList.Items[0].Spec.PodTemplate.Spec.Containers[0]
-	if len(c.EnvFrom) != 0 {
-		t.Errorf("Expected 0 EnvFrom for mockllm without secret, got: %+v", c.EnvFrom)
-	}
-
-	var updatedRun v1alpha1.Run
-	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
-		t.Errorf("Expected task Phase Running for mockllm, got %s", updatedRun.Status.Tasks[0].Phase)
-	}
-}
-
-func TestReconcileModelSecret_PresentWithMockModel(t *testing.T) {
-	scheme := setupScheme(t)
-
-	manifest := &v1alpha1.Manifest{
-		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-mock", Spec: "eval.py@mock"},
-		},
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run-mockllm-secret-present",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.RunSpec{
-			Model: "mockllm/model",
-		},
-		Status: v1alpha1.RunStatus{
-			Phase: v1alpha1.RunPhaseRunning,
-			Discovery: &v1alpha1.RunDiscoveryStatus{
-				TaskCount:         1,
-				EligibleTaskCount: 1,
-				TaskIDs:           []string{"task-mock"},
-			},
-			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
-			},
-		},
-	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "model-credentials",
-			Namespace: "eval-runner-sandbox",
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(run, secret).
-		WithStatusSubresource(run).
-		Build()
-
-	reconciler := &RunReconciler{
-		Client:           cl,
-		Scheme:           scheme,
-		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: DefaultModelSecret},
-	}
-	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-mockllm-secret-present"}}
-	_, err := reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile error: %v", err)
-	}
-
-	var sbList sandboxv1beta1.SandboxList
-	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
-	if len(sbList.Items) != 1 {
-		t.Fatalf("Expected 1 sandbox created, got %d", len(sbList.Items))
-	}
-
-	c := sbList.Items[0].Spec.PodTemplate.Spec.Containers[0]
-	if len(c.EnvFrom) != 1 || c.EnvFrom[0].SecretRef == nil || c.EnvFrom[0].SecretRef.Name != "model-credentials" {
-		t.Errorf("Expected EnvFrom pointing to model-credentials, got: %+v", c.EnvFrom)
-	}
-}
-
-func TestReconcileModelSecret_ExplicitlyDisabledWithNonMockModel(t *testing.T) {
-	scheme := setupScheme(t)
-
-	manifest := &v1alpha1.Manifest{
-		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-gemini", Spec: "eval.py@gemini"},
-		},
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run-disabled-secret",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.RunSpec{
-			Model: "google/gemini-3.5-flash-lite",
-		},
-		Status: v1alpha1.RunStatus{
-			Phase: v1alpha1.RunPhaseRunning,
-			Discovery: &v1alpha1.RunDiscoveryStatus{
-				TaskCount:         1,
-				EligibleTaskCount: 1,
-				TaskIDs:           []string{"task-gemini"},
-			},
-			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
-			},
-		},
-	}
-
-	// Even if Secret exists in namespace, ModelSecret == "" means explicitly disabled
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "model-credentials",
-			Namespace: "eval-runner-sandbox",
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(run, secret).
-		WithStatusSubresource(run).
-		Build()
-
-	reconciler := &RunReconciler{
-		Client:           cl,
-		Scheme:           scheme,
-		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: ""}, // explicitly disabled
-	}
-	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-disabled-secret"}}
-	_, err := reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile error: %v", err)
-	}
-
-	var sbList sandboxv1beta1.SandboxList
-	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
-	if len(sbList.Items) != 0 {
-		t.Fatalf("Expected 0 sandboxes created, got %d", len(sbList.Items))
-	}
-
-	var updatedRun v1alpha1.Run
-	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	task := updatedRun.Status.Tasks[0]
-	if task.Phase != v1alpha1.TaskPhaseFailed {
-		t.Errorf("Expected task Phase Failed, got %s", task.Phase)
-	}
-	expectedMsg := "no model credentials configured: create Secret eval-runner-sandbox/model-credentials or set --model-secret"
-	if task.Message != expectedMsg {
-		t.Errorf("Expected task Message %q, got %q", expectedMsg, task.Message)
-	}
-}
-
-func TestReconcileModelSecret_ExplicitlyDisabledWithMockModel(t *testing.T) {
-	scheme := setupScheme(t)
-
-	manifest := &v1alpha1.Manifest{
-		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-mock", Spec: "eval.py@mock"},
-		},
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run-disabled-mock",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.RunSpec{
-			Model: "mockllm/model",
-		},
-		Status: v1alpha1.RunStatus{
-			Phase: v1alpha1.RunPhaseRunning,
-			Discovery: &v1alpha1.RunDiscoveryStatus{
-				TaskCount:         1,
-				EligibleTaskCount: 1,
-				TaskIDs:           []string{"task-mock"},
-			},
-			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-mock", Phase: v1alpha1.TaskPhasePending},
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(run).
-		WithStatusSubresource(run).
-		Build()
-
-	reconciler := &RunReconciler{
-		Client:           cl,
-		Scheme:           scheme,
-		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: ""}, // explicitly disabled
-	}
-	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-disabled-mock"}}
-	_, err := reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile error: %v", err)
-	}
-
-	var sbList sandboxv1beta1.SandboxList
-	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
-	if len(sbList.Items) != 1 {
-		t.Fatalf("Expected 1 sandbox created, got %d", len(sbList.Items))
-	}
-
-	c := sbList.Items[0].Spec.PodTemplate.Spec.Containers[0]
-	if len(c.EnvFrom) != 0 {
-		t.Errorf("Expected 0 EnvFrom, got: %+v", c.EnvFrom)
-	}
-
-	var updatedRun v1alpha1.Run
-	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
-		t.Errorf("Expected task Phase Running, got %s", updatedRun.Status.Tasks[0].Phase)
-	}
-}
-
-func TestReconcileModelSecret_CustomNameAbsentNonMockModel(t *testing.T) {
-	scheme := setupScheme(t)
-
-	manifest := &v1alpha1.Manifest{
-		Tasks: []v1alpha1.ManifestTask{
-			{ID: "task-gemini", Spec: "eval.py@gemini"},
-		},
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-run-custom-absent",
-			Namespace: "eval-runner",
-		},
-		Spec: v1alpha1.RunSpec{
-			Model: "google/gemini-3.5-flash-lite",
-		},
-		Status: v1alpha1.RunStatus{
-			Phase: v1alpha1.RunPhaseRunning,
-			Discovery: &v1alpha1.RunDiscoveryStatus{
-				TaskCount:         1,
-				EligibleTaskCount: 1,
-				TaskIDs:           []string{"task-gemini"},
-			},
-			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-gemini", Phase: v1alpha1.TaskPhasePending},
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(run).
-		WithStatusSubresource(run).
-		Build()
-
-	reconciler := &RunReconciler{
-		Client:           cl,
-		Scheme:           scheme,
-		SandboxNamespace: "eval-runner-sandbox",
-		Config:           ClusterConfig{ModelSecret: "custom-secret"},
-	}
-	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-custom-absent"}}
-	_, err := reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile error: %v", err)
-	}
-
-	var sbList sandboxv1beta1.SandboxList
-	_ = cl.List(t.Context(), &sbList, client.InNamespace("eval-runner-sandbox"))
-	if len(sbList.Items) != 0 {
-		t.Fatalf("Expected 0 sandboxes created, got %d", len(sbList.Items))
-	}
-
-	var updatedRun v1alpha1.Run
-	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	task := updatedRun.Status.Tasks[0]
-	if task.Phase != v1alpha1.TaskPhaseFailed {
-		t.Errorf("Expected task Phase Failed, got %s", task.Phase)
-	}
-	expectedMsg := "no model credentials configured: create Secret eval-runner-sandbox/custom-secret or set --model-secret"
-	if task.Message != expectedMsg {
-		t.Errorf("Expected task Message %q, got %q", expectedMsg, task.Message)
-	}
-}
-
-func TestCheckModelSecretAtStartup(t *testing.T) {
-	ctx := t.Context()
-	logger := zap.New(zap.UseDevMode(true))
-
-	// Case 1: Secret exists
-	clientWithSecret := fakek8s.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "model-credentials",
-			Namespace: "eval-runner-sandbox",
-		},
-	})
-	CheckModelSecretAtStartup(ctx, clientWithSecret, "eval-runner-sandbox", "model-credentials", logger)
-
-	// Case 2: Secret does not exist
-	clientEmpty := fakek8s.NewSimpleClientset()
-	CheckModelSecretAtStartup(ctx, clientEmpty, "eval-runner-sandbox", "model-credentials", logger)
-
-	// Case 3: Explicitly disabled
-	CheckModelSecretAtStartup(ctx, clientEmpty, "eval-runner-sandbox", "", logger)
-}
-
-func TestIsMockModel(t *testing.T) {
-	tests := []struct {
-		model    string
-		expected bool
-	}{
-		{"mockllm/model", true},
-		{"mockllm", true},
-		{"mockllm/custom-model", true},
-		{"  MOCKLLM/Model  ", true},
-		{"google/gemini-3.5-flash-lite", false},
-		{"openai/gpt-4o", false},
-		{"anthropic/claude-3-5-sonnet", false},
-		{"", false},
-		{"   ", false},
-	}
-
-	for _, tt := range tests {
-		got := IsMockModel(tt.model)
-		if got != tt.expected {
-			t.Errorf("IsMockModel(%q) = %v; expected %v", tt.model, got, tt.expected)
+	for _, taskSandbox := range sandboxList.Items {
+		taskID := taskSandbox.Annotations[discovery.AnnotationTaskID]
+		for _, container := range taskSandbox.Spec.PodTemplate.Spec.Containers {
+			if len(container.EnvFrom) != 0 {
+				t.Errorf("[%s] Expected no EnvFrom in container %q, got: %+v", taskID, container.Name, container.EnvFrom)
+			}
+			for _, envVar := range container.Env {
+				if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+					t.Errorf("[%s] Expected no SecretKeyRef in container %q env %q: %+v", taskID, container.Name, envVar.Name, envVar)
+				}
+			}
 		}
 	}
 }
@@ -9171,16 +8697,9 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			t.Fatalf("Failed to create GCSSink: %v", err)
 		}
 
-		modelSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "model-credentials",
-				Namespace: "eval-runner-sandbox",
-			},
-		}
-
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(run, modelSecret).
+			WithObjects(run).
 			WithStatusSubresource(run).
 			Build()
 
@@ -9190,9 +8709,6 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			SandboxClient:    executor,
 			ArtifactSink:     gcsSink,
 			SandboxNamespace: "eval-runner-sandbox",
-			Config: ClusterConfig{
-				ModelSecret: "model-credentials",
-			},
 			// ModelPrices is nil simulating no ConfigMap configured
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)

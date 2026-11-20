@@ -179,8 +179,7 @@ For generic Kubernetes clusters (kind, kops, EKS, etc.), `./dev/tasks/deploy-to-
 2. Installs `agent-sandbox` at the pinned release (`v1.0.7`, shared with the e2e test harness via `dev/tasks/versions.sh`), waits for the CRD to be established, and waits for the controller deployment rollout.
 3. Builds and makes the pinned fork `sandboxd` image available under `IMAGE_PREFIX` (or reuses an existing image with `--skip-sandboxd-build`). When built on an arm64 host, it produces a `linux/amd64` image by default so x86 cluster nodes can execute it.
 4. Writes the `eval-runner-config` ConfigMap with `sandboxdImage` and any extra settings supplied via `--set KEY=VALUE`.
-5. Verifies whether Secret `eval-runner-sandbox/model-credentials` exists and prints instructions on creating it if absent.
-6. Invokes `./dev/tasks/deploy`, waits for controller, UI, and webhook rollouts, and confirms effective cluster settings took effect.
+5. Invokes `./dev/tasks/deploy`, waits for controller, UI, and webhook rollouts, and confirms effective cluster settings took effect.
 
 Usage:
 
@@ -567,59 +566,46 @@ To manually verify ingress and egress policy enforcement on an enforcing cluster
      - `nc -zvw3 example.com 8080`: times out (default-deny egress on non-whitelisted ports).
      - `nc -zvw3 kubernetes.default.svc.cluster.local 443`: times out if control plane is private (`10.x`); if control plane is a public IP, connection succeeds at L4 but requests without credentials return 401/403 (`automountServiceAccountToken: false`).
 
-### Running Sample Evaluations with a Real Model (e.g. Gemini on GKE)
+### Running Sample Evaluations with a Real Model
 
-To execute real evals against a repository, provide `spec.model` on the `Run`. For cloud models (such as Gemini), provider credentials are provided via a Kubernetes Secret in the sandbox namespace:
+Task sandboxes and pods NEVER receive or hold model credentials. Model credentials belong exclusively to the controller and service portals:
 
-1. **Ensure the Model Secret exists in `eval-runner-sandbox`:**
+- **Sandbox isolation**: Untrusted code running in evaluation sandboxes never has access to model API keys or provider secrets.
+- **Service Portal model interception**: Evals calling a real cloud model from inside the pod do not work until the service portal supplies credentials by intercepting and proxying outbound model traffic outside the pod.
+- **Mock / offline models**: For offline or mock models (e.g. `mockllm/model`), evals run directly in the sandbox without credentials.
 
-   The controller defaults `--model-secret` to `model-credentials` and treats it as optional-by-presence: at startup and on each task launch, the controller checks whether the Secret exists in `eval-runner-sandbox`. If present, sample sandboxes receive it automatically via `envFrom`. If absent, sample sandboxes run without credentials, and tasks requesting a non-mock model record a clear message explaining how to configure credentials.
+To create a Run with a model:
 
-   Our GKE dev cluster uses `eval-runner-sandbox/model-credentials` containing key `GEMINI_API_KEY`. If creating it from scratch:
+```bash
+kubectl apply -f - <<EOF
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: docs-comprehension-run
+  namespace: eval-runner
+spec:
+  repo:
+    url: https://github.com/gke-labs/eval-runner.git
+    commit: $(git rev-parse HEAD)
+  model: mockllm/model
+  tasks:
+    - docs/readme_comprehension
+    - docs/readme_comprehension_blind
+  limit: 10
+EOF
+```
 
-   ```bash
-   kubectl -n eval-runner-sandbox create secret generic model-credentials \
-     --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY}"
-   ```
+Watch the run progress from `Pending` -> `Discovering` -> `Running` -> `Completed`:
 
-   *(Note: This is an interim credential injection mechanism that the model gateway will replace. To use a different secret name, pass `--model-secret=<name>`; to explicitly disable credential injection, pass `--model-secret=""`.)*
+```bash
+kubectl get run docs-comprehension-run -n eval-runner -w
+```
 
-2. **Create the Run:**
+View per-task scores and aggregates once completed:
 
-   Because the controller defaults `--model-secret` to `model-credentials` and checks for its presence automatically, no manual deployment arg patch is required after deploying. Create the Run directly:
-
-   ```bash
-   kubectl apply -f - <<EOF
-   apiVersion: evalrunner.gke-labs.dev/v1alpha1
-   kind: Run
-   metadata:
-     name: docs-comprehension-gemini
-     namespace: eval-runner
-   spec:
-     repo:
-       url: https://github.com/gke-labs/eval-runner.git
-       commit: $(git rev-parse HEAD)
-     model: google/gemini-3.5-flash-lite
-     tasks:
-       - docs/readme_comprehension
-       - docs/readme_comprehension_blind
-     limit: 10
-   EOF
-   ```
-
-3. **Watch and View Results:**
-
-   Watch the run progress from `Pending` -> `Discovering` -> `Running` -> `Completed`:
-
-   ```bash
-   kubectl get run docs-comprehension-gemini -n eval-runner -w
-   ```
-
-   View per-task scores and aggregates once completed:
-
-   ```bash
-   kubectl get run docs-comprehension-gemini -n eval-runner -o yaml
-   ```
+```bash
+kubectl get run docs-comprehension-run -n eval-runner -o yaml
+```
 
 #### Provider Dependencies and Custom Images
 
@@ -777,7 +763,7 @@ Supported ConfigMap keys include:
 - `inconclusivePolicy`: Check-run conclusion policy for INCONCLUSIVE comparisons (`neutral` or `failure`, default `neutral`). When set to `failure`, an INCONCLUSIVE comparison marks the `eval-runner / evals` check run conclusion as `failure` to block PR merging.
 - `maxParallelTasks`: Maximum concurrent task sandboxes (default `4`).
 - `pollProgressInterval`: Interval between task progress polling attempts and per-task write floor (default `10s`, minimum `1s`).
-- `modelSecret`: Name of Secret in sandbox namespace containing model credentials (default `model-credentials`).
+- `modelSecret`: Deprecated and ignored. Model credentials are never injected into task sandboxes. Tolerated for backwards compatibility so existing ConfigMaps do not prevent startup.
 - `sandboxdImage`: Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset).
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
 - `uiBaseURL`: Base URL for the eval-runner UI (e.g. `https://eval-runner.example.com`) to generate absolute links in PR comments.
@@ -789,7 +775,7 @@ Precedence is: explicit CLI flag > ConfigMap key > built-in default. If the Conf
 
 Both the controller and UI watch `eval-runner-config` and dynamically apply configuration changes at runtime without requiring a deployment restart:
 - **Artifact Sink**: When `artifactBucket`, `artifactDir`, `artifactMaxUploadBytes`, or `gcpWorkloadIdentityProvider` is modified (e.g. setting `artifactBucket` after initial cluster deploy), the controller and UI construct the new artifact sink and safely retire the previous one. In-flight uploads and reads are permitted to complete before the old sink is closed. *(Note: Swapping away from the default in-memory sink discards previously stored in-memory artifacts, so Runs or Comparisons in flight at that moment may encounter unreadable artifacts.)*
-- **Reloadable Settings**: Changes to deadlines (`discoveryDeadline`, `executionDeadline`), concurrency limits (`maxParallelTasks`), progress polling intervals (`pollProgressInterval`), sandbox task grace periods (`taskGracePeriod`), sandbox images (`sandboxdImage`), model credentials (`modelSecret`), token pricing (`modelPrices`), command authorizers (`commandUsers`), GitHub credentials (`githubTokenSecret`, `githubAppSecret`), PR reporting (`uiBaseURL`, `inconclusivePolicy`), head top-up loop (`headTopUpInterval`, `headTargetCIHalfWidth`, `headMaxSamplesPerTask`), completed comparison retention expiry, and task affinity (`affinityMode`) take effect immediately for subsequent evaluations.
+- **Reloadable Settings**: Changes to deadlines (`discoveryDeadline`, `executionDeadline`), concurrency limits (`maxParallelTasks`), progress polling intervals (`pollProgressInterval`), sandbox task grace periods (`taskGracePeriod`), sandbox images (`sandboxdImage`), token pricing (`modelPrices`), command authorizers (`commandUsers`), GitHub credentials (`githubTokenSecret`, `githubAppSecret`), PR reporting (`uiBaseURL`, `inconclusivePolicy`), head top-up loop (`headTopUpInterval`, `headTargetCIHalfWidth`, `headMaxSamplesPerTask`), completed comparison retention expiry, and task affinity (`affinityMode`) take effect immediately for subsequent evaluations.
 - **Observability**: When settings reload, the controller logs a single `"effective cluster settings"` line reflecting all active values, and the UI increments its internal `config_generation` value and updates the artifact sink status in page footers (`artifacts: gs://bucket`).
 
 #### Restart-Only Settings
@@ -803,12 +789,10 @@ Settings that bind to host interfaces, define process identity, or configure web
 
 Empty values in the ConfigMap (empty string or whitespace-only) are unified across all keys to mean **"unset, use default"**; they do not disable features or clear defaults.
 
-To explicitly disable a feature or credential that has a non-empty built-in default (such as `modelSecret` or `githubTokenSecret`), specify the sentinel value `none`:
+To explicitly disable a feature or credential that has a non-empty built-in default (such as `githubTokenSecret`), specify the sentinel value `none`:
 
 ```yaml
 data:
-  # Disables injecting model credentials into sample sandboxes
-  modelSecret: "none"
   # Disables posting GitHub comments or check runs
   githubTokenSecret: "none"
 ```

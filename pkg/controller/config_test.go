@@ -115,9 +115,6 @@ func TestResolveConfig_Precedence(t *testing.T) {
 		if cfg.MaxParallelTasks != 8 {
 			t.Errorf("expected MaxParallelTasks 8, got %d", cfg.MaxParallelTasks)
 		}
-		if cfg.ModelSecret != "cluster-secret" {
-			t.Errorf("expected ModelSecret cluster-secret, got %q", cfg.ModelSecret)
-		}
 		if cfg.TaskGracePeriod != time.Minute {
 			t.Errorf("expected TaskGracePeriod 1m, got %v", cfg.TaskGracePeriod)
 		}
@@ -130,18 +127,15 @@ func TestResolveConfig_Precedence(t *testing.T) {
 			Data: map[string]string{
 				"maxParallelTasks":  "8",
 				"discoveryDeadline": "25m",
-				"modelSecret":       "custom-secret",
 			},
 		}
 		// Explicitly pass flags with values identical to built-in defaults:
 		flags := RawFlags{
 			MaxParallelTasks:  DefaultMaxParallelTasks,  // 4
 			DiscoveryDeadline: DefaultDiscoveryDeadline, // 10m
-			ModelSecret:       DefaultModelSecret,       // "model-credentials"
 			Explicit: map[string]bool{
 				"max-parallel-tasks": true,
 				"discovery-deadline": true,
-				"model-secret":       true,
 			},
 		}
 		cfg, err := ResolveConfig(cm, flags)
@@ -154,9 +148,6 @@ func TestResolveConfig_Precedence(t *testing.T) {
 		if cfg.DiscoveryDeadline != DefaultDiscoveryDeadline {
 			t.Errorf("expected DiscoveryDeadline %v from explicit flag, got %v", DefaultDiscoveryDeadline, cfg.DiscoveryDeadline)
 		}
-		if cfg.ModelSecret != DefaultModelSecret {
-			t.Errorf("expected ModelSecret %q from explicit flag, got %q", DefaultModelSecret, cfg.ModelSecret)
-		}
 	})
 
 	// 5. Explicit flags override ConfigMap
@@ -168,7 +159,6 @@ func TestResolveConfig_Precedence(t *testing.T) {
 				"discoveryDeadline": "25m",
 				"executionDeadline": "45m",
 				"maxParallelTasks":  "8",
-				"modelSecret":       "cluster-secret",
 				"taskGracePeriod":   "1m",
 			},
 		}
@@ -177,14 +167,12 @@ func TestResolveConfig_Precedence(t *testing.T) {
 			DiscoveryDeadline: 5 * time.Minute,
 			ExecutionDeadline: 15 * time.Minute,
 			MaxParallelTasks:  2,
-			ModelSecret:       "flag-secret",
 			TaskGracePeriod:   10 * time.Second,
 			Explicit: map[string]bool{
 				"artifact-bucket":    true,
 				"discovery-deadline": true,
 				"execution-deadline": true,
 				"max-parallel-tasks": true,
-				"model-secret":       true,
 				"task-grace-period":  true,
 			},
 		}
@@ -204,9 +192,6 @@ func TestResolveConfig_Precedence(t *testing.T) {
 		if cfg.MaxParallelTasks != 2 {
 			t.Errorf("expected MaxParallelTasks 2, got %d", cfg.MaxParallelTasks)
 		}
-		if cfg.ModelSecret != "flag-secret" {
-			t.Errorf("expected ModelSecret flag-secret, got %q", cfg.ModelSecret)
-		}
 		if cfg.TaskGracePeriod != 10*time.Second {
 			t.Errorf("expected TaskGracePeriod 10s, got %v", cfg.TaskGracePeriod)
 		}
@@ -218,15 +203,12 @@ func TestResolveConfig_Precedence(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
 			Data: map[string]string{
 				"artifactBucket": "gs://cluster-bucket",
-				"modelSecret":    "cluster-secret",
 			},
 		}
 		flags := RawFlags{
 			ArtifactBucket: "",
-			ModelSecret:    "",
 			Explicit: map[string]bool{
 				"artifact-bucket": true,
-				"model-secret":    true,
 			},
 		}
 		cfg, err := ResolveConfig(cm, flags)
@@ -235,9 +217,6 @@ func TestResolveConfig_Precedence(t *testing.T) {
 		}
 		if cfg.ArtifactBucket != "" {
 			t.Errorf("expected empty ArtifactBucket from explicit flag, got %q", cfg.ArtifactBucket)
-		}
-		if cfg.ModelSecret != "" {
-			t.Errorf("expected empty ModelSecret from explicit flag, got %q", cfg.ModelSecret)
 		}
 	})
 
@@ -274,9 +253,6 @@ func TestResolveConfig_Precedence(t *testing.T) {
 		// From defaults:
 		if cfg.ExecutionDeadline != DefaultExecutionDeadline {
 			t.Errorf("expected ExecutionDeadline default %v, got %v", DefaultExecutionDeadline, cfg.ExecutionDeadline)
-		}
-		if cfg.ModelSecret != DefaultModelSecret {
-			t.Errorf("expected ModelSecret default %q, got %q", DefaultModelSecret, cfg.ModelSecret)
 		}
 		if cfg.TaskGracePeriod != DefaultTaskGracePeriod {
 			t.Errorf("expected TaskGracePeriod default %v, got %v", DefaultTaskGracePeriod, cfg.TaskGracePeriod)
@@ -382,18 +358,6 @@ func TestResolveConfig_MalformedValue(t *testing.T) {
 			errContains: "invalid artifactBucket",
 		},
 		{
-			name:        "invalid modelSecret with uppercase",
-			key:         "modelSecret",
-			value:       "INVALID_SECRET_NAME",
-			errContains: "invalid modelSecret",
-		},
-		{
-			name:        "invalid modelSecret with special chars",
-			key:         "modelSecret",
-			value:       "secret/name!",
-			errContains: "invalid modelSecret",
-		},
-		{
 			name:        "invalid taskGracePeriod duration format",
 			key:         "taskGracePeriod",
 			value:       "xyz",
@@ -424,6 +388,34 @@ func TestResolveConfig_MalformedValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveConfig_ModelSecretIgnored(t *testing.T) {
+	// A ConfigMap with modelSecret (even with arbitrary or previously invalid values)
+	// must be tolerated and must not prevent startup, even under strict-config mode.
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "eval-runner",
+			Name:      DefaultConfigMapName,
+		},
+		Data: map[string]string{
+			"modelSecret": "some-secret-name",
+		},
+	}
+
+	t.Run("ignored in standard resolution", func(t *testing.T) {
+		_, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error resolving config with modelSecret: %v", err)
+		}
+	})
+
+	t.Run("tolerated under strict config mode", func(t *testing.T) {
+		_, err := ResolveConfig(cm, RawFlags{StrictConfig: true})
+		if err != nil {
+			t.Fatalf("unexpected error under strict-config with legacy modelSecret: %v", err)
+		}
+	})
 }
 
 func TestLoadAndResolveClusterConfig_MissingConfigMap(t *testing.T) {
@@ -527,7 +519,6 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	discovery := fs.Duration("discovery-deadline", 10*time.Minute, "discovery deadline")
 	execution := fs.Duration("execution-deadline", 30*time.Minute, "execution deadline")
 	parallel := fs.Int("max-parallel-tasks", 4, "max parallel tasks")
-	secret := fs.String("model-secret", "model-credentials", "model secret")
 	sandboxd := fs.String("sandboxd-image", "", "sandboxd image")
 	grace := fs.Duration("task-grace-period", 30*time.Second, "task grace period")
 	githubToken := fs.String("github-token-secret", "github-token", "github token secret")
@@ -551,7 +542,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *secret, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -608,9 +599,6 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	}
 	if rawFlags.IsExplicit("discovery-deadline") {
 		t.Errorf("expected discovery-deadline NOT to be explicit")
-	}
-	if rawFlags.IsExplicit("model-secret") {
-		t.Errorf("expected model-secret NOT to be explicit")
 	}
 }
 
@@ -1307,9 +1295,6 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.ModelSecret != defaults.ModelSecret {
-			t.Errorf("expected ModelSecret default %q, got %q", defaults.ModelSecret, cfg.ModelSecret)
-		}
 		if cfg.GitHubTokenSecret != defaults.GitHubTokenSecret {
 			t.Errorf("expected GitHubTokenSecret default %q, got %q", defaults.GitHubTokenSecret, cfg.GitHubTokenSecret)
 		}
@@ -1338,9 +1323,6 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		cfg, err := ResolveConfig(cm, RawFlags{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.ModelSecret != "" {
-			t.Errorf("expected ModelSecret disabled (empty), got %q", cfg.ModelSecret)
 		}
 		if cfg.GitHubTokenSecret != "" {
 			t.Errorf("expected GitHubTokenSecret disabled (empty), got %q", cfg.GitHubTokenSecret)
@@ -1372,10 +1354,8 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 			},
 		}
 		flags := RawFlags{
-			ModelSecret:       "none",
 			GitHubTokenSecret: "None",
 			Explicit: map[string]bool{
-				"model-secret":        true,
 				"github-token-secret": true,
 			},
 		}
@@ -1383,9 +1363,6 @@ func TestResolveConfig_EmptyValueSemantics(t *testing.T) {
 		cfg, err := ResolveConfig(cm, flags)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.ModelSecret != "" {
-			t.Errorf("expected ModelSecret disabled via flag, got %q", cfg.ModelSecret)
 		}
 		if cfg.GitHubTokenSecret != "" {
 			t.Errorf("expected GitHubTokenSecret disabled via flag, got %q", cfg.GitHubTokenSecret)
