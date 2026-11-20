@@ -586,13 +586,19 @@ func TestTerminalBenchManifest(t *testing.T) {
 		task := &rootManifest.Tasks[i]
 		if strings.HasPrefix(task.ID, "terminal-bench/") {
 			foundTerminalBenchCount++
-			taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
-			assertTerminalBenchTask(t, task, taskName)
+			if strings.HasSuffix(task.ID, "/agent") {
+				taskName := strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/agent")
+				assertTerminalBenchAgentTask(t, task, taskName)
+			} else {
+				taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
+				assertTerminalBenchTask(t, task, taskName)
+			}
+			taskName := strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/agent")
 			if taskName == "regex-log" {
 				cpuLimit := task.Resources[0].Limits[corev1.ResourceCPU]
 				memoryLimit := task.Resources[0].Limits[corev1.ResourceMemory]
 				if cpuLimit.String() != "1" || memoryLimit.String() != "2G" {
-					t.Errorf("root regex-log expected cpu=1, memory=2G; got cpu=%s, memory=%s", cpuLimit.String(), memoryLimit.String())
+					t.Errorf("root %s expected cpu=1, memory=2G; got cpu=%s, memory=%s", task.ID, cpuLimit.String(), memoryLimit.String())
 				}
 			}
 			if len(task.Paths) != 1 || task.Paths[0] != "examples/terminal-bench/**" {
