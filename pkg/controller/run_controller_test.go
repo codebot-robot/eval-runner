@@ -5248,7 +5248,7 @@ func TestExecuteAgentPhase(t *testing.T) {
 			AgentModel: agent.NewScriptedModel(),
 		}
 		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
-		_, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, prepareTask, "repo", 500, nil, nil)
+		_, _, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, prepareTask, "repo", 500, nil, nil)
 		if failed == nil {
 			t.Fatalf("expected prepare timeout to fail the task, got nil")
 		}
