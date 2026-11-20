@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -33,6 +34,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/agent"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/github"
@@ -187,6 +189,9 @@ type RunReconciler struct {
 
 	// Config holds the cluster configuration for this reconciler.
 	Config ClusterConfig
+
+	// AgentModel is the model client used to drive agent loops on tasks with an agent block.
+	AgentModel agent.Model
 
 	// DiscoveryStepTimeout is the maximum duration for a single discovery Execute call.
 	// Defaults to DefaultDiscoveryStepTimeout (60s) if <= 0.
@@ -668,6 +673,25 @@ func readFileWithTimeout(ctx context.Context, client sandboxclient.Client, path 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+type sandboxAgentExecutor struct {
+	client sandboxclient.Client
+	cwd    string
+}
+
+func (executor *sandboxAgentExecutor) Execute(ctx context.Context, command string) (agent.ExecuteResult, error) {
+	result, err := executeSandboxWithTimeout(ctx, executor.client, sandboxclient.ProcessConfig{
+		Command: []string{"bash", "-c", command},
+		Cwd:     executor.cwd,
+	})
+	if err != nil {
+		if result != nil {
+			return agent.ExecuteResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, err
+		}
+		return agent.ExecuteResult{ExitCode: 1}, err
+	}
+	return agent.ExecuteResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, nil
 }
 
 func (r *RunReconciler) taskGracePeriod() time.Duration {
@@ -2357,18 +2381,27 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			for _, taskID := range tasksToStart {
 				taskImage := ""
 				isSandboxTask := false
+				isAgentTask := false
 				var taskLimits corev1.ResourceList
 				if manifest != nil {
 					for _, manifestTask := range manifest.Tasks {
 						if manifestTask.ID == taskID {
 							taskImage = manifestTask.Image
 							isSandboxTask = isSandboxOnlyTask(manifestTask)
+							isAgentTask = manifestTask.Agent != nil
 							if isSandboxTask {
 								taskLimits = discovery.TaskResourceLimits(manifestTask)
 							}
 							break
 						}
 					}
+				}
+
+				if isAgentTask && !isMockModel(run.Spec.Model) {
+					msg := fmt.Sprintf("unsupported model %q for agent task: only mock models are supported", run.Spec.Model)
+					logger.Info("Rejecting agent task launch due to unsupported model", "task", taskID, "model", run.Spec.Model, "message", msg)
+					failedTasks[taskID] = msg
+					continue
 				}
 
 				sandboxName := discovery.TaskSandboxNameForRun(run.Name, taskID)
@@ -3505,6 +3538,99 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 }
 
+func isMockModel(model string) bool {
+	return model == "mockllm" || strings.HasPrefix(model, "mockllm/")
+}
+
+// MaxInstructionBytes is the maximum allowed size of an agent instruction file (64 KiB).
+const MaxInstructionBytes = 64 * 1024
+
+func (r *RunReconciler) executeAgentPhase(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	taskID string,
+	sbClient sandboxclient.Client,
+	targetTask v1alpha1.ManifestTask,
+	cwd string,
+	effectiveTimeoutSeconds int,
+	effectiveResources *v1alpha1.TaskResources,
+	effRange *v1alpha1.SampleRange,
+) (string, *taskExecutionResult) {
+	fail := func(message string) *taskExecutionResult {
+		return &taskExecutionResult{
+			taskID:         taskID,
+			phase:          v1alpha1.TaskPhaseFailed,
+			message:        message,
+			timeoutSeconds: effectiveTimeoutSeconds,
+			resources:      effectiveResources,
+			sampleRange:    effRange,
+		}
+	}
+
+	if r.AgentModel == nil {
+		return "", fail("no agent model configured")
+	}
+
+	if len(targetTask.Agent.PrepareCommand) > 0 {
+		prepareContext, prepareCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+		prepareResult, prepareError := executeSandboxWithTimeout(prepareContext, sbClient, sandboxclient.ProcessConfig{
+			Command: targetTask.Agent.PrepareCommand,
+			Cwd:     cwd,
+		})
+		prepareCancel()
+		if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "agent prepare command", prepareContext, prepareResult, prepareError, taskID, effRange); failed {
+			failedResult.timeoutSeconds = effectiveTimeoutSeconds
+			failedResult.resources = effectiveResources
+			return "", &failedResult
+		}
+	}
+
+	cleanedPath := path.Clean(targetTask.Agent.InstructionPath)
+	if !strings.HasPrefix(cleanedPath, "/workspace/") && cleanedPath != "/workspace" {
+		return "", fail(fmt.Sprintf("instructionPath %q must be an absolute path inside /workspace", targetTask.Agent.InstructionPath))
+	}
+	cleanPath := strings.TrimPrefix(cleanedPath, "/workspace")
+	readInstructionContext, readInstructionCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	instructionBytes, readInstructionError := readFileWithTimeout(readInstructionContext, sbClient, cleanPath)
+	readInstructionCancel()
+	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "agent instruction file", readInstructionContext, readInstructionError, taskID, effRange); failed {
+		failedResult.timeoutSeconds = effectiveTimeoutSeconds
+		failedResult.resources = effectiveResources
+		return "", &failedResult
+	}
+	if len(instructionBytes) > MaxInstructionBytes {
+		return "", fail(fmt.Sprintf("agent instruction file %s exceeds %d bytes (%d bytes)", targetTask.Agent.InstructionPath, MaxInstructionBytes, len(instructionBytes)))
+	}
+
+	agentTimeout := r.executionStepTimeout()
+	if targetTask.Agent.TimeoutSeconds != nil && *targetTask.Agent.TimeoutSeconds > 0 {
+		agentTimeout = time.Duration(*targetTask.Agent.TimeoutSeconds) * time.Second
+	}
+	agentContext, agentCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, agentTimeout)
+	executor := &sandboxAgentExecutor{client: sbClient, cwd: cwd}
+	agentResult, agentError := agent.Run(agentContext, r.AgentModel, executor, agent.Options{
+		Instruction: string(instructionBytes),
+	})
+	agentCancel()
+
+	if agentResult == nil || agentResult.StopReason == agent.StopReasonModelError {
+		errorMessage := "model error"
+		if agentError != nil {
+			errorMessage = agentError.Error()
+		}
+		return "", fail(fmt.Sprintf("agent model error: %s", truncateMessage(errorMessage, r.maxMessageBytes())))
+	}
+
+	loopEndingMessage := ""
+	switch agentResult.StopReason {
+	case agent.StopReasonMaxSteps:
+		loopEndingMessage = "agent loop stopped: step bound reached"
+	case agent.StopReasonContextDone:
+		loopEndingMessage = "agent loop stopped: timeout"
+	}
+	return loopEndingMessage, nil
+}
+
 func (r *RunReconciler) executeSandboxTask(
 	ctx context.Context,
 	run *v1alpha1.Run,
@@ -3513,8 +3639,19 @@ func (r *RunReconciler) executeSandboxTask(
 	targetTask v1alpha1.ManifestTask,
 	effRange *v1alpha1.SampleRange,
 	startTime time.Time,
-) taskExecutionResult {
+) (result taskExecutionResult) {
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
+
+	var loopEndingMessage string
+	defer func() {
+		if loopEndingMessage != "" {
+			if result.message == "" {
+				result.message = loopEndingMessage
+			} else {
+				result.message = fmt.Sprintf("%s; %s", loopEndingMessage, result.message)
+			}
+		}
+	}()
 
 	if err := validateTaskTimeoutSeconds(targetTask); err != nil {
 		logger.Error(err, "Task invalid timeoutSeconds", "task", taskID)
@@ -3561,6 +3698,16 @@ func (r *RunReconciler) executeSandboxTask(
 	if run.Spec.Repo.URL == "" {
 		cwd = "/workspace"
 	}
+
+	if targetTask.Agent != nil {
+		effectiveTimeoutSeconds := r.effectiveTaskCommandTimeoutSeconds(targetTask, run.Status.ExecutionDeadline)
+		var failedResult *taskExecutionResult
+		loopEndingMessage, failedResult = r.executeAgentPhase(ctx, run, taskID, sbClient, targetTask, cwd, effectiveTimeoutSeconds, effectiveResources, effRange)
+		if failedResult != nil {
+			return *failedResult
+		}
+	}
+
 	taskCommandTimeout := r.executionStepTimeout()
 	if targetTask.TimeoutSeconds != nil {
 		taskCommandTimeout = time.Duration(*targetTask.TimeoutSeconds) * time.Second

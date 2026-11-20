@@ -33,7 +33,12 @@ RUN git config --global user.email "test@example.com" && \
 WORKDIR /terminal-bench-work
 COPY examples/terminal-bench/ ./
 COPY examples/terminal-bench/ examples/terminal-bench/
-RUN git config --global user.email "test@example.com" && \
+COPY images/git-server/fixtures/terminal-bench/solve-instruction.md ./
+COPY images/git-server/fixtures/terminal-bench/noop-instruction.md ./
+COPY images/git-server/fixtures/terminal-bench/agent-tasks.json .evals/agent-tasks.json
+COPY images/git-server/fixtures/terminal-bench/list.sh .evals/list
+RUN chmod +x .evals/list && \
+    git config --global user.email "test@example.com" && \
     git config --global user.name "Test" && \
     git init -b main && \
     git add . && \

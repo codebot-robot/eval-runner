@@ -31,6 +31,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/internal/fakes"
+	"github.com/gke-labs/eval-runner/pkg/agent"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/gcs"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
@@ -4862,7 +4863,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 					Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
 					Agent: &v1alpha1.ManifestTaskAgent{
 						PrepareCommand:  []string{"prepare.sh"},
-						InstructionPath: "/out/inst.md",
+						InstructionPath: "/workspace/out/inst.md",
 						TimeoutSeconds:  &timeout,
 					},
 				},
@@ -4888,7 +4889,10 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 				if path == "/out/results.json" {
 					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true, "score": 1.0}]}`), nil
 				}
-				return nil, fmt.Errorf("file not found")
+				if path == "/out/inst.md" || path == "out/inst.md" {
+					return []byte("```scripted-bash\ntrue\n```"), nil
+				}
+				return nil, fmt.Errorf("file not found: %s", path)
 			},
 		}
 
@@ -4896,6 +4900,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		reconciler := &RunReconciler{
 			Client: cl, Scheme: scheme, SandboxNamespace: "eval-runner-sandbox",
 			SandboxClient: fakeClient, ArtifactSink: artifacts.NewInMemorySink(),
+			AgentModel: agent.NewScriptedModel(),
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
@@ -4938,13 +4943,16 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Fatalf("failed to create pod: %v", err)
 		}
 
-		// Turn 2: execute valid task - runs only command, not prepareCommand
+		// Turn 2: execute valid task - runs prepareCommand, agent loop in sandbox, then verify command
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
 
-		if len(executedCommands) != 1 || !reflect.DeepEqual(executedCommands[0], []string{"verify.sh"}) {
-			t.Errorf("expected only command ['verify.sh'] to execute, got %v", executedCommands)
+		if len(executedCommands) != 3 ||
+			!reflect.DeepEqual(executedCommands[0], []string{"prepare.sh"}) ||
+			!reflect.DeepEqual(executedCommands[1], []string{"bash", "-c", "true"}) ||
+			!reflect.DeepEqual(executedCommands[2], []string{"verify.sh"}) {
+			t.Errorf("expected prepareCommand, agent bash command, and verify command to execute, got %v", executedCommands)
 		}
 
 		_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
@@ -4952,6 +4960,60 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Errorf("expected task-valid-agent Completed, got %s", t1.Phase)
 		}
 	})
+}
+
+func TestExecuteAgentPhase(t *testing.T) {
+	ctx := t.Context()
+	task := v1alpha1.ManifestTask{
+		ID:      "test-task",
+		Command: []string{"verify.sh"},
+		Agent: &v1alpha1.ManifestTaskAgent{
+			InstructionPath: "/workspace/inst.md",
+		},
+	}
+
+	t.Run("instruction outside workspace fails", func(t *testing.T) {
+		reconciler := &RunReconciler{AgentModel: agent.NewScriptedModel()}
+		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
+		badTask := task
+		badTask.Agent = &v1alpha1.ManifestTaskAgent{InstructionPath: "/etc/passwd"}
+		_, failed := reconciler.executeAgentPhase(ctx, run, "task", nil, badTask, "repo", 60, nil, nil)
+		if failed == nil || !strings.Contains(failed.message, "must be an absolute path inside /workspace") {
+			t.Errorf("expected failure for instruction outside workspace, got %v", failed)
+		}
+	})
+
+	t.Run("agent timeout proceeds to verify with message", func(t *testing.T) {
+		timeout := 1
+		timedOutTask := task
+		timedOutTask.Agent = &v1alpha1.ManifestTaskAgent{
+			InstructionPath: "/workspace/inst.md",
+			TimeoutSeconds:  &timeout,
+		}
+		fakeClient := &sandboxclient.FakeClient{
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				return []byte("```scripted-bash\nslow\n```"), nil
+			},
+		}
+		reconciler := &RunReconciler{
+			AgentModel: &timingOutModel{},
+		}
+		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
+		loopEndingMessage, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, timedOutTask, "repo", 60, nil, nil)
+		if failed != nil {
+			t.Fatalf("expected timeout to proceed to verify, got failedResult: %v", failed)
+		}
+		if loopEndingMessage != "agent loop stopped: timeout" {
+			t.Errorf("expected timeout loop message, got %q", loopEndingMessage)
+		}
+	})
+}
+
+type timingOutModel struct{}
+
+func (model *timingOutModel) Generate(ctx context.Context, request agent.Request) (*agent.Response, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 func TestRunControllerWritesTaskCohort(t *testing.T) {
