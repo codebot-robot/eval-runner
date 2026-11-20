@@ -43,26 +43,22 @@ func TestRunSampleExecution(t *testing.T) {
 		t.Skip("skipping e2e test: RUN_E2E is not set")
 	}
 
-	clusterName := os.Getenv("KIND_CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "kind"
-	}
-
-	harness := NewHarness(t, clusterName)
-	harness.Setup()
-
-	// Deploy eval-runner controller from k8s manifests
-	harness.DeployEvalRunner()
-
-	// Deploy git server in eval-runner-sandbox namespace
-	harness.DeployGitServer("eval-runner-sandbox")
+	harness := GetSharedHarness(t)
+	t.Cleanup(func() {
+		harness.runCmd("kubectl", "delete", "run", "--all", "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "comparison", "--all", "-n", "eval-runner", "--ignore-not-found")
+		harness.WaitForAllSandboxesDeleted("eval-runner-sandbox", 30*time.Second)
+	})
 
 	commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
 	t.Logf("docs-eval fixture repository commit: %s", commit)
 
-	t.Run("DocsComprehensionCompleted", func(t *testing.T) {
-		runName := "docs-comprehension-sample-run"
-		manifest := fmt.Sprintf(`
+	t.Run("ParallelExecutions", func(t *testing.T) {
+		t.Run("DocsComprehensionCompleted", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+			runName := "docs-comprehension-sample-run"
+			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -76,132 +72,134 @@ spec:
   limit: 8
 `, runName, commit)
 
-		harness.KubectlApplyContent(manifest)
+			harness.KubectlApplyContent(manifest)
 
-		// Poll the Run every 500ms until Completed; check for live samplesDone progress
-		startTime := time.Now()
-		var observedProgress bool
-		var progressObservedAt time.Duration
-		var firstSeenRunning time.Time
-		var run *v1alpha1.Run
-		for {
-			cmd := exec.Command("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "json")
-			out, err := cmd.Output()
-			if err == nil {
-				var r v1alpha1.Run
-				if json.Unmarshal(out, &r) == nil {
-					for _, task := range r.Status.Tasks {
-						if task.Phase == v1alpha1.TaskPhaseRunning {
-							if firstSeenRunning.IsZero() {
-								if task.StartedAt != nil {
-									firstSeenRunning = task.StartedAt.Time
-								} else {
-									firstSeenRunning = time.Now()
+			// Poll the Run every 500ms until Completed; check for live samplesDone progress
+			startTime := time.Now()
+			var observedProgress bool
+			var progressObservedAt time.Duration
+			var firstSeenRunning time.Time
+			var run *v1alpha1.Run
+			for {
+				cmd := exec.Command("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "json")
+				out, err := cmd.Output()
+				if err == nil {
+					var r v1alpha1.Run
+					if json.Unmarshal(out, &r) == nil {
+						for _, task := range r.Status.Tasks {
+							if task.Phase == v1alpha1.TaskPhaseRunning {
+								if firstSeenRunning.IsZero() {
+									if task.StartedAt != nil {
+										firstSeenRunning = task.StartedAt.Time
+									} else {
+										firstSeenRunning = time.Now()
+									}
+								}
+								if task.SamplesDone > 0 && !observedProgress {
+									observedProgress = true
+									progressObservedAt = time.Since(firstSeenRunning)
+									t.Logf("Observed live task progress: task=%s, phase=%s, samplesDone=%d, samplesPlanned=%d, lastProgressAt=%v after %v",
+										task.ID, task.Phase, task.SamplesDone, task.SamplesPlanned, task.LastProgressAt, progressObservedAt)
 								}
 							}
-							if task.SamplesDone > 0 && !observedProgress {
-								observedProgress = true
-								progressObservedAt = time.Since(firstSeenRunning)
-								t.Logf("Observed live task progress: task=%s, phase=%s, samplesDone=%d, samplesPlanned=%d, lastProgressAt=%v after %v",
-									task.ID, task.Phase, task.SamplesDone, task.SamplesPlanned, task.LastProgressAt, progressObservedAt)
-							}
+						}
+						if string(r.Status.Phase) == string(v1alpha1.RunPhaseCompleted) {
+							run = &r
+							break
 						}
 					}
-					if string(r.Status.Phase) == string(v1alpha1.RunPhaseCompleted) {
-						run = &r
-						break
-					}
+				}
+				if time.Since(startTime) > 180*time.Second {
+					t.Fatalf("Timeout waiting for Run %s to complete", runName)
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			totalDuration := time.Since(startTime)
+			var taskRunningDuration time.Duration
+			if !firstSeenRunning.IsZero() {
+				taskRunningDuration = time.Since(firstSeenRunning)
+			}
+
+			t.Logf("Live progress observed: %v (progress observed after %v of task running; task running duration: %v, total run duration: %v)",
+				observedProgress, progressObservedAt, taskRunningDuration, totalDuration)
+
+			if !observedProgress {
+				t.Errorf("expected a poll to observe task with phase: Running and samplesDone > 0 (task running duration %v, total run duration %v)", taskRunningDuration, totalDuration)
+			}
+
+			if run.Status.Discovery == nil {
+				t.Fatalf("Expected status.discovery to be populated")
+			}
+			if run.Status.Discovery.TaskCount != 2 {
+				t.Fatalf("Expected 2 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+			}
+
+			if len(run.Status.Tasks) != 2 {
+				t.Fatalf("Expected 2 tasks in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
+			}
+
+			expectedTasks := map[string]bool{
+				"docs/readme_comprehension":       false,
+				"docs/readme_comprehension_blind": false,
+			}
+
+			for _, task := range run.Status.Tasks {
+				if _, ok := expectedTasks[task.ID]; !ok {
+					t.Errorf("Unexpected task ID in status.tasks: %s", task.ID)
+				} else {
+					expectedTasks[task.ID] = true
+				}
+
+				if task.Phase != v1alpha1.TaskPhaseCompleted {
+					t.Errorf("Expected task %s to be Completed, got %s (message: %s)", task.ID, task.Phase, task.Message)
+				}
+				if task.Samples <= 0 {
+					t.Errorf("Expected task %s to have samples > 0, got %d", task.ID, task.Samples)
+				}
+				if task.SamplesDone != task.Samples {
+					t.Errorf("Expected task %s samplesDone (%d) to equal samples (%d)", task.ID, task.SamplesDone, task.Samples)
 				}
 			}
-			if time.Since(startTime) > 180*time.Second {
-				t.Fatalf("Timeout waiting for Run %s to complete", runName)
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		totalDuration := time.Since(startTime)
-		var taskRunningDuration time.Duration
-		if !firstSeenRunning.IsZero() {
-			taskRunningDuration = time.Since(firstSeenRunning)
-		}
 
-		t.Logf("Live progress observed: %v (progress observed after %v of task running; task running duration: %v, total run duration: %v)",
-			observedProgress, progressObservedAt, taskRunningDuration, totalDuration)
-
-		if !observedProgress {
-			t.Errorf("expected a poll to observe task with phase: Running and samplesDone > 0 (task running duration %v, total run duration %v)", taskRunningDuration, totalDuration)
-		}
-
-		if run.Status.Discovery == nil {
-			t.Fatalf("Expected status.discovery to be populated")
-		}
-		if run.Status.Discovery.TaskCount != 2 {
-			t.Fatalf("Expected 2 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
-		}
-
-		if len(run.Status.Tasks) != 2 {
-			t.Fatalf("Expected 2 tasks in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
-		}
-
-		expectedTasks := map[string]bool{
-			"docs/readme_comprehension":       false,
-			"docs/readme_comprehension_blind": false,
-		}
-
-		for _, task := range run.Status.Tasks {
-			if _, ok := expectedTasks[task.ID]; !ok {
-				t.Errorf("Unexpected task ID in status.tasks: %s", task.ID)
-			} else {
-				expectedTasks[task.ID] = true
+			for taskID, found := range expectedTasks {
+				if !found {
+					t.Errorf("Expected task %q was not found in status.tasks", taskID)
+				}
 			}
 
-			if task.Phase != v1alpha1.TaskPhaseCompleted {
-				t.Errorf("Expected task %s to be Completed, got %s (message: %s)", task.ID, task.Phase, task.Message)
+			// Assert task sandboxes are gone from eval-runner-sandbox
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+
+			// Assert that per-sandbox server cert secrets were deleted
+			for _, task := range run.Status.Tasks {
+				sbName := discovery.TaskSandboxNameForRun(runName, task.ID)
+				secName := "sb-tls-" + sbName
+				tlsSec := harness.runCmd("kubectl", "get", "secret", secName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+				if strings.TrimSpace(tlsSec) != "" {
+					t.Errorf("Expected server cert secret %s to be deleted, but found:\n%s", secName, tlsSec)
+				}
 			}
-			if task.Samples <= 0 {
-				t.Errorf("Expected task %s to have samples > 0, got %d", task.ID, task.Samples)
+
+			// Assert that no model Secret was mounted
+			secretsOut := harness.runCmd("kubectl", "get", "secrets", "-n", "eval-runner-sandbox", "-o", "jsonpath={.items[*].metadata.name}")
+			if strings.Contains(secretsOut, "model") || strings.Contains(secretsOut, "gemini") {
+				t.Errorf("Unexpected model secret found in eval-runner-sandbox: %s", secretsOut)
 			}
-			if task.SamplesDone != task.Samples {
-				t.Errorf("Expected task %s samplesDone (%d) to equal samples (%d)", task.ID, task.SamplesDone, task.Samples)
-			}
-		}
+		})
 
-		for taskID, found := range expectedTasks {
-			if !found {
-				t.Errorf("Expected task %q was not found in status.tasks", taskID)
-			}
-		}
+		t.Run("ComparisonMockLLMExecution", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+			commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
+			baseRunName := "docs-comp-base"
+			candRunName := "docs-comp-cand"
+			compName := "docs-mockllm-comparison"
 
-		// Assert task sandboxes are gone from eval-runner-sandbox
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+			// Clean up any existing resources from prior runs
+			harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
+			harness.runCmd("kubectl", "delete", "run", baseRunName, candRunName, "-n", "eval-runner", "--ignore-not-found")
 
-		// Assert that per-sandbox server cert secrets were deleted
-		for _, task := range run.Status.Tasks {
-			sbName := discovery.TaskSandboxNameForRun(runName, task.ID)
-			secName := "sb-tls-" + sbName
-			tlsSec := harness.runCmd("kubectl", "get", "secret", secName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-			if strings.TrimSpace(tlsSec) != "" {
-				t.Errorf("Expected server cert secret %s to be deleted, but found:\n%s", secName, tlsSec)
-			}
-		}
-
-		// Assert that no model Secret was mounted
-		secretsOut := harness.runCmd("kubectl", "get", "secrets", "-n", "eval-runner-sandbox", "-o", "jsonpath={.items[*].metadata.name}")
-		if strings.Contains(secretsOut, "model") || strings.Contains(secretsOut, "gemini") {
-			t.Errorf("Unexpected model secret found in eval-runner-sandbox: %s", secretsOut)
-		}
-	})
-
-	t.Run("ComparisonMockLLMExecution", func(t *testing.T) {
-		commit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-eval.git")
-		baseRunName := "docs-comp-base"
-		candRunName := "docs-comp-cand"
-		compName := "docs-mockllm-comparison"
-
-		// Clean up any existing resources from prior runs
-		harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
-		harness.runCmd("kubectl", "delete", "run", baseRunName, candRunName, "-n", "eval-runner", "--ignore-not-found")
-
-		baseManifest := fmt.Sprintf(`
+			baseManifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -215,7 +213,7 @@ spec:
   limit: 10
 `, baseRunName, commit)
 
-		candManifest := fmt.Sprintf(`
+			candManifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -229,7 +227,7 @@ spec:
   limit: 10
 `, candRunName, commit)
 
-		compManifest := fmt.Sprintf(`
+			compManifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Comparison
 metadata:
@@ -243,78 +241,80 @@ spec:
   equivalenceMargin: 0.05
 `, compName, baseRunName, candRunName)
 
-		harness.KubectlApplyContent(baseManifest)
-		harness.KubectlApplyContent(candManifest)
-		harness.KubectlApplyContent(compManifest)
+			harness.KubectlApplyContent(baseManifest)
+			harness.KubectlApplyContent(candManifest)
+			harness.KubectlApplyContent(compManifest)
 
-		// Wait for both Runs to reach Completed
-		harness.WaitForRunPhase("eval-runner", baseRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
-		harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+			// Wait for both Runs to reach Completed
+			harness.WaitForRunPhase("eval-runner", baseRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+			harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
 
-		// Wait for Comparison to reach terminal UNCHANGED verdict
-		comp := harness.WaitForComparisonVerdict("eval-runner", compName, string(v1alpha1.ComparisonVerdictUnchanged), 60*time.Second)
+			// Wait for Comparison to reach terminal UNCHANGED verdict
+			comp := harness.WaitForComparisonVerdict("eval-runner", compName, string(v1alpha1.ComparisonVerdictUnchanged), 60*time.Second)
 
-		if comp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
-			t.Errorf("Expected comparison phase Completed, got %s", comp.Status.Phase)
-		}
-		if comp.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
-			t.Errorf("Expected comparison verdict UNCHANGED, got %s", comp.Status.Verdict)
-		}
-		if comp.Status.PImprovement == nil || math.Abs(*comp.Status.PImprovement-0.50) > 1e-4 {
-			t.Errorf("Expected pImprovement 0.50, got %v", comp.Status.PImprovement)
-		}
-		if len(comp.Status.Tasks) != 2 {
-			t.Fatalf("Expected 2 tasks in comparison status, got %d", len(comp.Status.Tasks))
-		}
-		for _, task := range comp.Status.Tasks {
-			if task.Label != v1alpha1.ComparisonTaskLabelUnchanged {
-				t.Errorf("Expected task %s label unchanged, got %s", task.ID, task.Label)
+			if comp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
+				t.Errorf("Expected comparison phase Completed, got %s", comp.Status.Phase)
 			}
-			if task.Pairs != 10 {
-				t.Errorf("Expected task %s pairs 10, got %d", task.ID, task.Pairs)
+			if comp.Status.Verdict != v1alpha1.ComparisonVerdictUnchanged {
+				t.Errorf("Expected comparison verdict UNCHANGED, got %s", comp.Status.Verdict)
 			}
-			if task.Wins != 0 || task.Losses != 0 || task.Ties != 10 {
-				t.Errorf("Expected task %s wins/losses/ties 0/0/10, got %d/%d/%d", task.ID, task.Wins, task.Losses, task.Ties)
+			if comp.Status.PImprovement == nil || math.Abs(*comp.Status.PImprovement-0.50) > 1e-4 {
+				t.Errorf("Expected pImprovement 0.50, got %v", comp.Status.PImprovement)
 			}
-			if task.Delta == nil || math.Abs(*task.Delta) > 1e-4 {
-				t.Errorf("Expected task %s delta 0.0, got %v", task.ID, task.Delta)
+			if len(comp.Status.Tasks) != 2 {
+				t.Fatalf("Expected 2 tasks in comparison status, got %d", len(comp.Status.Tasks))
 			}
-		}
+			for _, task := range comp.Status.Tasks {
+				if task.Label != v1alpha1.ComparisonTaskLabelUnchanged {
+					t.Errorf("Expected task %s label unchanged, got %s", task.ID, task.Label)
+				}
+				if task.Pairs != 10 {
+					t.Errorf("Expected task %s pairs 10, got %d", task.ID, task.Pairs)
+				}
+				if task.Wins != 0 || task.Losses != 0 || task.Ties != 10 {
+					t.Errorf("Expected task %s wins/losses/ties 0/0/10, got %d/%d/%d", task.ID, task.Wins, task.Losses, task.Ties)
+				}
+				if task.Delta == nil || math.Abs(*task.Delta) > 1e-4 {
+					t.Errorf("Expected task %s delta 0.0, got %v", task.ID, task.Delta)
+				}
+			}
 
-		if comp.Status.SummaryPath == "" {
-			t.Errorf("Expected non-empty summaryPath in comparison status")
-		}
+			if comp.Status.SummaryPath == "" {
+				t.Errorf("Expected non-empty summaryPath in comparison status")
+			}
 
-		// Verify evalstats -from-comparison output
-		home, err := os.UserHomeDir()
-		if err != nil {
-			t.Fatalf("Failed to get home dir: %v", err)
-		}
-		kubeconfigPath := filepath.Join(home, ".kube", "config")
-		statsOut := harness.runCmd("go", "run", "github.com/gke-labs/eval-runner/cmd/evalstats", "-kubeconfig", kubeconfigPath, "-from-comparison", compName, "-namespace", "eval-runner")
-		if !strings.Contains(statsOut, "UNCHANGED") {
-			t.Errorf("Expected evalstats output to contain UNCHANGED, got:\n%s", statsOut)
-		}
-		if !strings.Contains(statsOut, "eval") || !strings.Contains(statsOut, "base") || !strings.Contains(statsOut, "this PR") || !strings.Contains(statsOut, "wins/losses/ties") {
-			t.Errorf("Expected evalstats output to contain table header with wins/losses/ties, got:\n%s", statsOut)
-		}
+			// Verify evalstats -from-comparison output
+			home, err := os.UserHomeDir()
+			if err != nil {
+				t.Fatalf("Failed to get home dir: %v", err)
+			}
+			kubeconfigPath := filepath.Join(home, ".kube", "config")
+			statsOut := harness.runCmd("go", "run", "github.com/gke-labs/eval-runner/cmd/evalstats", "-kubeconfig", kubeconfigPath, "-from-comparison", compName, "-namespace", "eval-runner")
+			if !strings.Contains(statsOut, "UNCHANGED") {
+				t.Errorf("Expected evalstats output to contain UNCHANGED, got:\n%s", statsOut)
+			}
+			if !strings.Contains(statsOut, "eval") || !strings.Contains(statsOut, "base") || !strings.Contains(statsOut, "this PR") || !strings.Contains(statsOut, "wins/losses/ties") {
+				t.Errorf("Expected evalstats output to contain table header with wins/losses/ties, got:\n%s", statsOut)
+			}
 
-		// Clean up
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
-	})
+			// Clean up
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
+		})
 
-	t.Run("SampleRangeExecution", func(t *testing.T) {
-		run1Name := "sample-range-run-1"
-		run2Name := "sample-range-run-2"
-		candRunName := "sample-range-run-cand"
-		compName := "sample-range-comparison"
+		t.Run("SampleRangeExecution", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+			run1Name := "sample-range-run-1"
+			run2Name := "sample-range-run-2"
+			candRunName := "sample-range-run-cand"
+			compName := "sample-range-comparison"
 
-		// Clean up any previous runs or comparisons
-		harness.runCmd("kubectl", "delete", "run", run1Name, run2Name, candRunName, "-n", "eval-runner", "--ignore-not-found")
-		harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
+			// Clean up any previous runs or comparisons
+			harness.runCmd("kubectl", "delete", "run", run1Name, run2Name, candRunName, "-n", "eval-runner", "--ignore-not-found")
+			harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
 
-		run1Manifest := fmt.Sprintf(`
+			run1Manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -330,7 +330,7 @@ spec:
     end: 5
 `, run1Name, commit)
 
-		run2Manifest := fmt.Sprintf(`
+			run2Manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -346,7 +346,7 @@ spec:
     end: 10
 `, run2Name, commit)
 
-		runCandManifest := fmt.Sprintf(`
+			runCandManifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -362,7 +362,7 @@ spec:
     end: 5
 `, candRunName, commit)
 
-		compManifest := fmt.Sprintf(`
+			compManifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Comparison
 metadata:
@@ -376,101 +376,249 @@ spec:
   equivalenceMargin: 0.05
 `, compName, run1Name, candRunName)
 
-		harness.KubectlApplyContent(run1Manifest)
-		harness.KubectlApplyContent(run2Manifest)
-		harness.KubectlApplyContent(runCandManifest)
-		harness.KubectlApplyContent(compManifest)
+			harness.KubectlApplyContent(run1Manifest)
+			harness.KubectlApplyContent(run2Manifest)
+			harness.KubectlApplyContent(runCandManifest)
+			harness.KubectlApplyContent(compManifest)
 
-		// Wait for all Runs to reach Completed
-		run1 := harness.WaitForRunPhase("eval-runner", run1Name, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
-		run2 := harness.WaitForRunPhase("eval-runner", run2Name, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
-		harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+			// Wait for all Runs to reach Completed
+			run1 := harness.WaitForRunPhase("eval-runner", run1Name, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+			run2 := harness.WaitForRunPhase("eval-runner", run2Name, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+			harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
 
-		// Assert status.tasks[].samples is 5 each
-		if len(run1.Status.Tasks) == 0 {
-			t.Fatalf("Expected tasks in run1 status.tasks, got 0")
-		}
-		for _, task := range run1.Status.Tasks {
-			if task.Phase != v1alpha1.TaskPhaseCompleted {
-				t.Errorf("Expected run1 task %s to be Completed, got %s", task.ID, task.Phase)
+			// Assert status.tasks[].samples is 5 each
+			if len(run1.Status.Tasks) == 0 {
+				t.Fatalf("Expected tasks in run1 status.tasks, got 0")
 			}
-			if task.Samples != 5 {
-				t.Errorf("Expected run1 task %s to have samples=5, got %d", task.ID, task.Samples)
+			for _, task := range run1.Status.Tasks {
+				if task.Phase != v1alpha1.TaskPhaseCompleted {
+					t.Errorf("Expected run1 task %s to be Completed, got %s", task.ID, task.Phase)
+				}
+				if task.Samples != 5 {
+					t.Errorf("Expected run1 task %s to have samples=5, got %d", task.ID, task.Samples)
+				}
+				if task.SampleRange == nil || task.SampleRange.Start != 1 || task.SampleRange.End != 5 {
+					t.Errorf("Expected run1 task %s to have sampleRange {1, 5}, got %+v", task.ID, task.SampleRange)
+				}
 			}
-			if task.SampleRange == nil || task.SampleRange.Start != 1 || task.SampleRange.End != 5 {
-				t.Errorf("Expected run1 task %s to have sampleRange {1, 5}, got %+v", task.ID, task.SampleRange)
-			}
-		}
 
-		if len(run2.Status.Tasks) == 0 {
-			t.Fatalf("Expected tasks in run2 status.tasks, got 0")
-		}
-		for _, task := range run2.Status.Tasks {
-			if task.Phase != v1alpha1.TaskPhaseCompleted {
-				t.Errorf("Expected run2 task %s to be Completed, got %s", task.ID, task.Phase)
+			if len(run2.Status.Tasks) == 0 {
+				t.Fatalf("Expected tasks in run2 status.tasks, got 0")
 			}
-			if task.Samples != 5 {
-				t.Errorf("Expected run2 task %s to have samples=5, got %d", task.ID, task.Samples)
+			for _, task := range run2.Status.Tasks {
+				if task.Phase != v1alpha1.TaskPhaseCompleted {
+					t.Errorf("Expected run2 task %s to be Completed, got %s", task.ID, task.Phase)
+				}
+				if task.Samples != 5 {
+					t.Errorf("Expected run2 task %s to have samples=5, got %d", task.ID, task.Samples)
+				}
+				if task.SampleRange == nil || task.SampleRange.Start != 6 || task.SampleRange.End != 10 {
+					t.Errorf("Expected run2 task %s to have sampleRange {6, 10}, got %+v", task.ID, task.SampleRange)
+				}
 			}
-			if task.SampleRange == nil || task.SampleRange.Start != 6 || task.SampleRange.End != 10 {
-				t.Errorf("Expected run2 task %s to have sampleRange {6, 10}, got %+v", task.ID, task.SampleRange)
-			}
-		}
 
-		// Read stored Inspect logs for run1 and run2 to assert disjoint sample IDs
-		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
-		loadInspectSampleIDs := func(task v1alpha1.TaskStatus) map[string]bool {
-			logSuffix := strings.TrimPrefix(task.LogPath, "/tmp/")
-			findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", logSuffix)
-			foundFile := strings.TrimSpace(harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd))
-			if foundFile == "" {
-				t.Fatalf("Log file not found on node for %s", task.LogPath)
+			// Read stored Inspect logs for run1 and run2 to assert disjoint sample IDs
+			nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
+			loadInspectSampleIDs := func(task v1alpha1.TaskStatus) map[string]bool {
+				logSuffix := strings.TrimPrefix(task.LogPath, "/tmp/")
+				findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", logSuffix)
+				foundFile := strings.TrimSpace(harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd))
+				if foundFile == "" {
+					t.Fatalf("Log file not found on node for %s", task.LogPath)
+				}
+				firstFile := strings.Split(foundFile, "\n")[0]
+				logContent := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
+				scores, err := artifacts.ParseInspectSampleScores([]byte(logContent))
+				if err != nil {
+					t.Fatalf("Failed to parse sample scores for %s: %v", task.ID, err)
+				}
+				ids := make(map[string]bool)
+				for _, s := range scores {
+					ids[s.ID] = true
+				}
+				return ids
 			}
-			firstFile := strings.Split(foundFile, "\n")[0]
-			logContent := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
-			scores, err := artifacts.ParseInspectSampleScores([]byte(logContent))
+
+			idsRun1 := loadInspectSampleIDs(run1.Status.Tasks[0])
+			idsRun2 := loadInspectSampleIDs(run2.Status.Tasks[0])
+
+			if len(idsRun1) != 5 {
+				t.Errorf("Expected 5 sample IDs in run1, got %d: %+v", len(idsRun1), idsRun1)
+			}
+			if len(idsRun2) != 5 {
+				t.Errorf("Expected 5 sample IDs in run2, got %d: %+v", len(idsRun2), idsRun2)
+			}
+
+			for id := range idsRun1 {
+				if idsRun2[id] {
+					t.Errorf("Expected disjoint sample IDs, but ID %s appears in both run1 and run2", id)
+				}
+			}
+
+			// Wait for Comparison to reach Completed phase
+			comp := harness.WaitForComparisonPhase("eval-runner", compName, string(v1alpha1.ComparisonPhaseCompleted), 60*time.Second)
+			if len(comp.Status.Tasks) == 0 {
+				t.Fatalf("Expected comparison tasks, got 0")
+			}
+			for _, task := range comp.Status.Tasks {
+				if task.Pairs != 5 {
+					t.Errorf("Expected task %s comparison pairs=5, got %d", task.ID, task.Pairs)
+				}
+			}
+
+			// Clean up
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", run1Name, 30*time.Second)
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", run2Name, 30*time.Second)
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
+		})
+
+		t.Run("ForkCandidateComparisonExecution", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			// 1. Verify eval-runner-controller Role permissions via kubectl auth can-i
+			for _, action := range []struct {
+				verb     string
+				resource string
+			}{
+				{"create", "comparisons"},
+				{"update", "comparisons"},
+				{"patch", "comparisons"},
+				{"delete", "comparisons"},
+				{"create", "runs"},
+				{"update", "runs"},
+				{"patch", "runs"},
+				{"delete", "runs"},
+			} {
+				out := harness.runCmd("kubectl", "auth", "can-i", action.verb, action.resource,
+					"--as=system:serviceaccount:eval-runner:eval-runner-controller", "-n", "eval-runner")
+				if strings.TrimSpace(out) != "yes" {
+					t.Errorf("expected eval-runner-controller to have %s %s permission in eval-runner, got %s",
+						action.verb, action.resource, out)
+				}
+			}
+
+			// 2. Fetch base and fork commits from in-cluster git server
+			baseCommit := harness.GetGitServerCommit("eval-runner-sandbox", "gke-labs/eval-runner.git")
+			forkCommit := harness.GetGitServerCommit("eval-runner-sandbox", "codebot-robot/eval-runner.git")
+			if baseCommit == "" || forkCommit == "" {
+				t.Fatalf("failed to retrieve git commits: base=%q, fork=%q", baseCommit, forkCommit)
+			}
+			if baseCommit == forkCommit {
+				t.Fatalf("expected fork commit to differ from base commit, both are %s", baseCommit)
+			}
+
+			// 3. Port-forward to webhook service
+			baseURL, webhookCleanup := harness.PortForwardWebhook(18089)
+			defer webhookCleanup()
+
+			prNum := 9876
+			candRunName := fmt.Sprintf("pr-%d-%s", prNum, forkCommit[:7])
+			baseRunName := fmt.Sprintf("base-%s", baseCommit[:7])
+			compName := fmt.Sprintf("pr-%d", prNum)
+
+			t.Cleanup(func() {
+				harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
+				harness.runCmd("kubectl", "delete", "run", candRunName, baseRunName, "-n", "eval-runner", "--ignore-not-found")
+			})
+
+			// 4. Post signed pull_request event driving the consumer through the webhook path
+			payload := fmt.Sprintf(`{
+			"action": "opened",
+			"number": %d,
+			"pull_request": {
+			"number": %d,
+			"state": "open",
+			"head": {
+			"sha": "%s",
+			"ref": "feature",
+			"repo": {
+			"name": "eval-runner",
+			"full_name": "codebot-robot/eval-runner",
+			"clone_url": "http://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git",
+			"owner": {"login": "codebot-robot"}
+			}
+			},
+			"base": {
+			"sha": "%s",
+			"ref": "main",
+			"repo": {
+			"name": "eval-runner",
+			"full_name": "gke-labs/eval-runner",
+			"clone_url": "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
+			"owner": {"login": "gke-labs"}
+			}
+			}
+			},
+			"repository": {
+			"name": "eval-runner",
+			"full_name": "gke-labs/eval-runner",
+			"clone_url": "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
+			"owner": {"login": "gke-labs"}
+			}
+			}`, prNum, prNum, forkCommit, baseCommit)
+
+			sig := webhook.ComputeSignature([]byte(payload), []byte("e2e-webhook-secret"))
+			req, err := http.NewRequest(http.MethodPost, baseURL+"/webhook", strings.NewReader(payload))
 			if err != nil {
-				t.Fatalf("Failed to parse sample scores for %s: %v", task.ID, err)
+				t.Fatalf("failed to create webhook request: %v", err)
 			}
-			ids := make(map[string]bool)
-			for _, s := range scores {
-				ids[s.ID] = true
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(webhook.HeaderGitHubEvent, webhook.EventPullRequest)
+			req.Header.Set(webhook.HeaderHubSignature256, sig)
+			req.Header.Set(webhook.HeaderGitHubDelivery, "e2e-fork-candidate-delivery")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("failed to POST pull_request event: %v", err)
 			}
-			return ids
-		}
-
-		idsRun1 := loadInspectSampleIDs(run1.Status.Tasks[0])
-		idsRun2 := loadInspectSampleIDs(run2.Status.Tasks[0])
-
-		if len(idsRun1) != 5 {
-			t.Errorf("Expected 5 sample IDs in run1, got %d: %+v", len(idsRun1), idsRun1)
-		}
-		if len(idsRun2) != 5 {
-			t.Errorf("Expected 5 sample IDs in run2, got %d: %+v", len(idsRun2), idsRun2)
-		}
-
-		for id := range idsRun1 {
-			if idsRun2[id] {
-				t.Errorf("Expected disjoint sample IDs, but ID %s appears in both run1 and run2", id)
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("webhook returned HTTP %d: %s", resp.StatusCode, string(respBody))
 			}
-		}
-
-		// Wait for Comparison to reach Completed phase
-		comp := harness.WaitForComparisonPhase("eval-runner", compName, string(v1alpha1.ComparisonPhaseCompleted), 60*time.Second)
-		if len(comp.Status.Tasks) == 0 {
-			t.Fatalf("Expected comparison tasks, got 0")
-		}
-		for _, task := range comp.Status.Tasks {
-			if task.Pairs != 5 {
-				t.Errorf("Expected task %s comparison pairs=5, got %d", task.ID, task.Pairs)
+			if !strings.Contains(string(respBody), "ok: enqueued pull_request") {
+				t.Fatalf("expected webhook to enqueue pull_request, got: %s", string(respBody))
 			}
-		}
 
-		// Clean up
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", run1Name, 30*time.Second)
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", run2Name, 30*time.Second)
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
+			// 5. Assert Candidate Run, Baseline Run, and Comparison are created by the consumer
+			candRun := harness.WaitForRunExists("eval-runner", candRunName, 30*time.Second)
+			if candRun.Spec.Repo.URL != "http://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git" {
+				t.Errorf("expected candidate repo URL to be the fork, got %s", candRun.Spec.Repo.URL)
+			}
+			if candRun.Spec.Repo.Commit != forkCommit {
+				t.Errorf("expected candidate repo commit %s, got %s", forkCommit, candRun.Spec.Repo.Commit)
+			}
+
+			baseRun := harness.WaitForRunExists("eval-runner", baseRunName, 30*time.Second)
+			if baseRun.Spec.Repo.URL != "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git" {
+				t.Errorf("expected baseline repo URL to be the base repo, got %s", baseRun.Spec.Repo.URL)
+			}
+
+			comp := harness.WaitForComparisonExists("eval-runner", compName, 30*time.Second)
+			if comp.Spec.Candidate.Run != candRunName {
+				t.Errorf("expected comparison candidate run %s, got %s", candRunName, comp.Spec.Candidate.Run)
+			}
+			if comp.Spec.Baseline.Run != baseRunName {
+				t.Errorf("expected comparison baseline run %s, got %s", baseRunName, comp.Spec.Baseline.Run)
+			}
+
+			// 6. Wait for candidate Run (cloning from fork bare repo) and baseline Run to reach Completed
+			harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+			harness.WaitForRunPhase("eval-runner", baseRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+			// 7. Wait for Comparison to reach terminal verdict
+			harness.WaitForComparisonVerdict("eval-runner", compName, string(v1alpha1.ComparisonVerdictUnchanged), 60*time.Second)
+
+			// 8. Clean up sandboxes
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+		})
 	})
+
+	harness.runCmd("kubectl", "delete", "run", "--all", "-n", "eval-runner", "--ignore-not-found")
+	harness.runCmd("kubectl", "delete", "comparison", "--all", "-n", "eval-runner", "--ignore-not-found")
+	harness.WaitForAllSandboxesDeleted("eval-runner-sandbox", 30*time.Second)
 
 	t.Run("GCSEmulatorDiscoveryAndExecution", func(t *testing.T) {
 		bucket := "test-eval-bucket"
@@ -1420,146 +1568,6 @@ spec:
 
 		// Wait for Run to complete and clean up sandboxes
 		harness.WaitForRunPhase("eval-runner", baseRunName, "Completed", 3*time.Minute)
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
-	})
-
-	t.Run("ForkCandidateComparisonExecution", func(t *testing.T) {
-		// 1. Verify eval-runner-controller Role permissions via kubectl auth can-i
-		for _, action := range []struct {
-			verb     string
-			resource string
-		}{
-			{"create", "comparisons"},
-			{"update", "comparisons"},
-			{"patch", "comparisons"},
-			{"delete", "comparisons"},
-			{"create", "runs"},
-			{"update", "runs"},
-			{"patch", "runs"},
-			{"delete", "runs"},
-		} {
-			out := harness.runCmd("kubectl", "auth", "can-i", action.verb, action.resource,
-				"--as=system:serviceaccount:eval-runner:eval-runner-controller", "-n", "eval-runner")
-			if strings.TrimSpace(out) != "yes" {
-				t.Errorf("expected eval-runner-controller to have %s %s permission in eval-runner, got %s",
-					action.verb, action.resource, out)
-			}
-		}
-
-		// 2. Fetch base and fork commits from in-cluster git server
-		baseCommit := harness.GetGitServerCommit("eval-runner-sandbox", "gke-labs/eval-runner.git")
-		forkCommit := harness.GetGitServerCommit("eval-runner-sandbox", "codebot-robot/eval-runner.git")
-		if baseCommit == "" || forkCommit == "" {
-			t.Fatalf("failed to retrieve git commits: base=%q, fork=%q", baseCommit, forkCommit)
-		}
-		if baseCommit == forkCommit {
-			t.Fatalf("expected fork commit to differ from base commit, both are %s", baseCommit)
-		}
-
-		// 3. Port-forward to webhook service
-		baseURL, webhookCleanup := harness.PortForwardWebhook(18089)
-		defer webhookCleanup()
-
-		prNum := 9876
-		candRunName := fmt.Sprintf("pr-%d-%s", prNum, forkCommit[:7])
-		baseRunName := fmt.Sprintf("base-%s", baseCommit[:7])
-		compName := fmt.Sprintf("pr-%d", prNum)
-
-		t.Cleanup(func() {
-			harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
-			harness.runCmd("kubectl", "delete", "run", candRunName, baseRunName, "-n", "eval-runner", "--ignore-not-found")
-		})
-
-		// 4. Post signed pull_request event driving the consumer through the webhook path
-		payload := fmt.Sprintf(`{
-  "action": "opened",
-  "number": %d,
-  "pull_request": {
-    "number": %d,
-    "state": "open",
-    "head": {
-      "sha": "%s",
-      "ref": "feature",
-      "repo": {
-        "name": "eval-runner",
-        "full_name": "codebot-robot/eval-runner",
-        "clone_url": "http://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git",
-        "owner": {"login": "codebot-robot"}
-      }
-    },
-    "base": {
-      "sha": "%s",
-      "ref": "main",
-      "repo": {
-        "name": "eval-runner",
-        "full_name": "gke-labs/eval-runner",
-        "clone_url": "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
-        "owner": {"login": "gke-labs"}
-      }
-    }
-  },
-  "repository": {
-    "name": "eval-runner",
-    "full_name": "gke-labs/eval-runner",
-    "clone_url": "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git",
-    "owner": {"login": "gke-labs"}
-  }
-}`, prNum, prNum, forkCommit, baseCommit)
-
-		sig := webhook.ComputeSignature([]byte(payload), []byte("e2e-webhook-secret"))
-		req, err := http.NewRequest(http.MethodPost, baseURL+"/webhook", strings.NewReader(payload))
-		if err != nil {
-			t.Fatalf("failed to create webhook request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(webhook.HeaderGitHubEvent, webhook.EventPullRequest)
-		req.Header.Set(webhook.HeaderHubSignature256, sig)
-		req.Header.Set(webhook.HeaderGitHubDelivery, "e2e-fork-candidate-delivery")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("failed to POST pull_request event: %v", err)
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("webhook returned HTTP %d: %s", resp.StatusCode, string(respBody))
-		}
-		if !strings.Contains(string(respBody), "ok: enqueued pull_request") {
-			t.Fatalf("expected webhook to enqueue pull_request, got: %s", string(respBody))
-		}
-
-		// 5. Assert Candidate Run, Baseline Run, and Comparison are created by the consumer
-		candRun := harness.WaitForRunExists("eval-runner", candRunName, 30*time.Second)
-		if candRun.Spec.Repo.URL != "http://git-server.eval-runner-sandbox.svc/codebot-robot/eval-runner.git" {
-			t.Errorf("expected candidate repo URL to be the fork, got %s", candRun.Spec.Repo.URL)
-		}
-		if candRun.Spec.Repo.Commit != forkCommit {
-			t.Errorf("expected candidate repo commit %s, got %s", forkCommit, candRun.Spec.Repo.Commit)
-		}
-
-		baseRun := harness.WaitForRunExists("eval-runner", baseRunName, 30*time.Second)
-		if baseRun.Spec.Repo.URL != "http://git-server.eval-runner-sandbox.svc/gke-labs/eval-runner.git" {
-			t.Errorf("expected baseline repo URL to be the base repo, got %s", baseRun.Spec.Repo.URL)
-		}
-
-		comp := harness.WaitForComparisonExists("eval-runner", compName, 30*time.Second)
-		if comp.Spec.Candidate.Run != candRunName {
-			t.Errorf("expected comparison candidate run %s, got %s", candRunName, comp.Spec.Candidate.Run)
-		}
-		if comp.Spec.Baseline.Run != baseRunName {
-			t.Errorf("expected comparison baseline run %s, got %s", baseRunName, comp.Spec.Baseline.Run)
-		}
-
-		// 6. Wait for candidate Run (cloning from fork bare repo) and baseline Run to reach Completed
-		harness.WaitForRunPhase("eval-runner", candRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
-		harness.WaitForRunPhase("eval-runner", baseRunName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
-
-		// 7. Wait for Comparison to reach terminal verdict
-		harness.WaitForComparisonVerdict("eval-runner", compName, string(v1alpha1.ComparisonVerdictUnchanged), 60*time.Second)
-
-		// 8. Clean up sandboxes
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 	})
 }

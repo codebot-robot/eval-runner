@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +38,48 @@ import (
 const (
 	AgentSandboxVersion = "v1.0.7"
 )
+
+var (
+	sharedHarness      *Harness
+	sharedHarnessMutex sync.Mutex
+)
+
+// GetSharedHarness returns the package-level Harness, initializing the kind cluster,
+// eval-runner deployment, and fixture git server on first call so that top-level
+// tests share a single cluster lifecycle instead of recreating it per test.
+func GetSharedHarness(t *testing.T) *Harness {
+	sharedHarnessMutex.Lock()
+	defer sharedHarnessMutex.Unlock()
+
+	if sharedHarness == nil {
+		clusterName := os.Getenv("KIND_CLUSTER_NAME")
+		if clusterName == "" {
+			clusterName = "kind"
+		}
+		sharedHarness = NewHarness(t, clusterName)
+		sharedHarness.Setup()
+		sharedHarness.DeployEvalRunner()
+		sharedHarness.DeployGitServer("eval-runner-sandbox")
+	}
+
+	return sharedHarness.WithT(t)
+}
+
+func (h *Harness) WithT(t *testing.T) *Harness {
+	clone := *h
+	clone.t = t
+	return &clone
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+
+	if sharedHarness != nil && os.Getenv("SKIP_CLEANUP") == "" {
+		sharedHarness.Teardown()
+	}
+
+	os.Exit(code)
+}
 
 type Harness struct {
 	t           *testing.T
@@ -85,14 +128,6 @@ func (h *Harness) Setup() {
 
 	if !exists {
 		h.createKindCluster()
-		h.t.Cleanup(func() {
-			if os.Getenv("SKIP_CLEANUP") == "" {
-				h.t.Logf("Deleting kind cluster %s", h.clusterName)
-				h.runCmd("kind", "delete", "cluster", "--name", h.clusterName)
-			} else {
-				h.t.Logf("Skipping deletion of kind cluster %s (SKIP_CLEANUP set)", h.clusterName)
-			}
-		})
 	} else {
 		h.t.Logf("Reusing existing kind cluster %s", h.clusterName)
 		checkCommand := exec.Command("docker", "exec", h.clusterName+"-control-plane", "test", "-S", "/var/run/nri/nri.sock")
@@ -105,6 +140,15 @@ func (h *Harness) Setup() {
 
 	contextName := "kind-" + h.clusterName
 	h.runCmd("kubectl", "config", "use-context", contextName)
+}
+
+func (h *Harness) Teardown() {
+	if os.Getenv("SKIP_CLEANUP") == "" {
+		cmd := exec.Command("kind", "delete", "cluster", "--name", h.clusterName)
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("warning: failed to delete kind cluster %s: %v\n", h.clusterName, err)
+		}
+	}
 }
 
 func (h *Harness) createKindCluster() {
@@ -839,6 +883,24 @@ func (h *Harness) WaitForAllSandboxesDeletedForRun(namespace, runName string, ti
 
 		if time.Since(start) > timeout {
 			h.t.Fatalf("Timeout waiting for sandboxes for run %s to be deleted; current: %s", runName, strings.TrimSpace(string(out)))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// WaitForAllSandboxesDeleted waits until no Sandboxes remain in the namespace.
+func (h *Harness) WaitForAllSandboxesDeleted(namespace string, timeout time.Duration) {
+	h.t.Logf("Waiting for all sandboxes in namespace %s to be deleted (timeout %v)", namespace, timeout)
+	start := time.Now()
+	for {
+		cmd := exec.Command("kubectl", "get", "sandboxes", "-n", namespace, "--no-headers")
+		out, err := cmd.Output()
+		if err == nil && strings.TrimSpace(string(out)) == "" {
+			return
+		}
+
+		if time.Since(start) > timeout {
+			h.t.Fatalf("Timeout waiting for all sandboxes in namespace %s to be deleted; current: %s", namespace, strings.TrimSpace(string(out)))
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
