@@ -5569,7 +5569,7 @@ func TestReconcileAllTasksFailedYieldsRunFailed(t *testing.T) {
 				URL:    "git://git-server/repo.git",
 				Commit: "abc1234",
 			},
-			Model: "google/gemini-3.5-flash-lite",
+			Model: "mockllm/model",
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
@@ -5963,7 +5963,7 @@ func TestReconcile_TaskPod_NoModelSecretEnv(t *testing.T) {
 			Namespace: "eval-runner",
 		},
 		Spec: v1alpha1.RunSpec{
-			Model: "google/gemini-3.5-flash-lite",
+			Model: "mockllm/model",
 		},
 		Status: v1alpha1.RunStatus{
 			Phase: v1alpha1.RunPhaseRunning,
@@ -6019,6 +6019,124 @@ func TestReconcile_TaskPod_NoModelSecretEnv(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestReconcileMixedTasks_RealModel(t *testing.T) {
+	scheme := setupScheme(t)
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{
+				ID:   "task-sandbox",
+				Spec: "eval.py@sandbox",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+				},
+			},
+			{
+				ID:   "task-sample-runner",
+				Spec: "eval.py@sample",
+			},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-mixed-real-model",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         2,
+				EligibleTaskCount: 2,
+				TaskIDs:           []string{"task-sandbox", "task-sample-runner"},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-sandbox", Phase: v1alpha1.TaskPhasePending},
+				{ID: "task-sample-runner", Phase: v1alpha1.TaskPhasePending},
+			},
+		},
+	}
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           testClient,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		Config:           ClusterConfig{MaxParallelTasks: 4},
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "test-run-mixed-real-model"}}
+
+	// Turn 1: Launches sandbox task; rejects sample-runner task
+	_, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Reconcile turn 1 error: %v", err)
+	}
+
+	var sandboxList sandboxv1beta1.SandboxList
+	_ = testClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox"))
+	if len(sandboxList.Items) != 1 {
+		t.Fatalf("Expected exactly 1 sandbox created (for sandbox task), got %d", len(sandboxList.Items))
+	}
+	if sandboxList.Items[0].Annotations[discovery.AnnotationTaskID] != "task-sandbox" {
+		t.Errorf("Expected sandbox for task-sandbox, got %s", sandboxList.Items[0].Annotations[discovery.AnnotationTaskID])
+	}
+
+	var updatedRun v1alpha1.Run
+	_ = testClient.Get(t.Context(), request.NamespacedName, &updatedRun)
+	taskMap := make(map[string]v1alpha1.TaskStatus)
+	for _, task := range updatedRun.Status.Tasks {
+		taskMap[task.ID] = task
+	}
+
+	sampleTask := taskMap["task-sample-runner"]
+	if sampleTask.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected sample-runner task Phase Failed, got %s", sampleTask.Phase)
+	}
+	if sampleTask.Message != SampleRunnerModelCredentialUnavailableMessage {
+		t.Errorf("Expected sample-runner task Message %q, got %q", SampleRunnerModelCredentialUnavailableMessage, sampleTask.Message)
+	}
+
+	sandboxTask := taskMap["task-sandbox"]
+	if sandboxTask.Phase != v1alpha1.TaskPhaseRunning {
+		t.Errorf("Expected sandbox task Phase Running, got %s", sandboxTask.Phase)
+	}
+
+	// Simulate sandbox task completing
+	err = reconciler.updateRunStatus(t.Context(), request.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+		for i := range status.Tasks {
+			if status.Tasks[i].ID == "task-sandbox" {
+				status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
+				status.Tasks[i].Samples = 1
+				status.Tasks[i].Successes = 1
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("updateRunStatus error: %v", err)
+	}
+
+	// Turn 2: All tasks finished, at least one completed -> Run Completed
+	_, err = reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Reconcile turn 2 error: %v", err)
+	}
+
+	_ = testClient.Get(t.Context(), request.NamespacedName, &updatedRun)
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("Expected Run Phase Completed, got %s", updatedRun.Status.Phase)
 	}
 }
 
@@ -8740,6 +8858,14 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			},
 			Status: v1alpha1.RunStatus{
 				Phase: v1alpha1.RunPhaseRunning,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         1,
+					EligibleTaskCount: 1,
+					TaskIDs:           []string{"docs/readme_comprehension"},
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "docs/readme_comprehension", Phase: v1alpha1.TaskPhaseRunning},
+				},
 			},
 		}
 
@@ -8761,9 +8887,25 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 			t.Fatalf("Failed to create GCSSink: %v", err)
 		}
 
+		sbName := discovery.TaskSandboxNameForRun(run.Name, "docs/readme_comprehension")
+		sandbox := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sbName,
+				Namespace: "eval-runner-sandbox",
+				Labels: map[string]string{
+					discovery.LabelRunName:      run.Name,
+					discovery.LabelRunNamespace: run.Namespace,
+					discovery.LabelRole:         discovery.RoleSample,
+				},
+				Annotations: map[string]string{
+					discovery.AnnotationTaskID: "docs/readme_comprehension",
+				},
+			},
+		}
+
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(run).
+			WithObjects(run, sandbox).
 			WithStatusSubresource(run).
 			Build()
 

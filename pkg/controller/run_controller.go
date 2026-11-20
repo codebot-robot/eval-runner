@@ -105,6 +105,10 @@ const (
 	// evalsListNotFoundOrNotExecutableMessage is the failure message reported when .evals/list is absent or not executable.
 	evalsListNotFoundOrNotExecutableMessage = ".evals/list not found or not executable; see docs/concept/functionality.md §2.3"
 
+	// SampleRunnerModelCredentialUnavailableMessage is the failure message set on sample-runner tasks
+	// when a non-mock model is requested but credentials cannot reach the pod.
+	SampleRunnerModelCredentialUnavailableMessage = "model credentials are never attached to pods and the service portal is not supplying them"
+
 	// logMsgRecreatingSandbox is the log message recorded when discovery sandbox is missing and recreated.
 	logMsgRecreatingSandbox = "Discovery sandbox does not exist; recreating sandbox and restarting discovery"
 )
@@ -746,6 +750,14 @@ func (r *RunReconciler) sampleRunnerImage() string {
 		return r.SampleRunnerImage
 	}
 	return discovery.DefaultSampleRunnerImage
+}
+
+// canSupplySampleRunnerModelCredential reports whether the controller has means to get
+// model credentials to a sample-runner pod. Today this is always false because model
+// credentials are never attached to pods and the service portal is not yet supplying
+// them at the gateway. Later service portal credential work can turn this on in one place.
+func (r *RunReconciler) canSupplySampleRunnerModelCredential() bool {
+	return false
 }
 
 func (r *RunReconciler) artifactSink() artifacts.ArtifactSink {
@@ -2401,6 +2413,13 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					msg := fmt.Sprintf("unsupported model %q for agent task: only mock models are supported", run.Spec.Model)
 					logger.Info("Rejecting agent task launch due to unsupported model", "task", taskID, "model", run.Spec.Model, "message", msg)
 					failedTasks[taskID] = msg
+					continue
+				}
+
+				if !isSandboxTask && !isMockModel(run.Spec.Model) && !r.canSupplySampleRunnerModelCredential() {
+					message := SampleRunnerModelCredentialUnavailableMessage
+					logger.Info("Rejecting sample-runner task launch: model credentials cannot reach pod", "task", taskID, "model", run.Spec.Model, "message", message)
+					failedTasks[taskID] = message
 					continue
 				}
 

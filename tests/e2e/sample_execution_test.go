@@ -211,6 +211,43 @@ spec:
 					t.Errorf("Expected server cert secret %s to be deleted, but found:\n%s", secretName, tlsSecret)
 				}
 			}
+
+			// Assert that a sample-runner task with a real model fails at launch with no sandbox created
+			realModelRunName := "docs-comprehension-real-model-fails"
+			harness.KubectlApplyContent(fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: google/gemini-3.5-flash-lite
+  tasks:
+  - docs/readme_comprehension
+`, realModelRunName, commit))
+			t.Cleanup(func() {
+				_ = exec.Command("kubectl", "delete", "run", realModelRunName, "-n", "eval-runner", "--ignore-not-found").Run()
+			})
+
+			failedRun := harness.WaitForRunPhase("eval-runner", realModelRunName, string(v1alpha1.RunPhaseFailed), 60*time.Second)
+			if len(failedRun.Status.Tasks) != 1 {
+				t.Fatalf("Expected 1 task in failed run, got %d", len(failedRun.Status.Tasks))
+			}
+			failedTask := failedRun.Status.Tasks[0]
+			if failedTask.Phase != v1alpha1.TaskPhaseFailed {
+				t.Errorf("Expected task %s Phase Failed, got %s", failedTask.ID, failedTask.Phase)
+			}
+			if failedTask.Message != controller.SampleRunnerModelCredentialUnavailableMessage {
+				t.Errorf("Expected task Message %q, got %q", controller.SampleRunnerModelCredentialUnavailableMessage, failedTask.Message)
+			}
+			failedSandboxName := discovery.TaskSandboxNameForRun(realModelRunName, failedTask.ID)
+			sandboxOut := harness.runCmd("kubectl", "get", "sandbox", failedSandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(sandboxOut) != "" {
+				t.Errorf("Expected no sandbox created for task %s, but found: %s", failedTask.ID, sandboxOut)
+			}
 		})
 
 		t.Run("ComparisonMockLLMExecution", func(t *testing.T) {
