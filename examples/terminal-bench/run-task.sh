@@ -45,6 +45,7 @@ FETCH_CHECKOUT_DIRECTORY="${FETCH_CHECKOUT_DIRECTORY:-/tmp/terminal-bench}"
 REPOSITORY_URL="${REPOSITORY_URL:-https://github.com/laude-institute/terminal-bench-2.git}"
 
 fetch_checkout_directory=""
+task_source_directory=""
 
 write_results_and_exit() {
   local passed="$1"
@@ -167,8 +168,8 @@ fetch_task() {
 }
 
 prepare_task() {
-  mkdir -p "${LOGS_DIRECTORY}/agent" "${LOGS_DIRECTORY}/verifier" "${LOGS_DIRECTORY}/artifacts" "${OUT_DIRECTORY}/logs" "${TESTS_DIRECTORY}"
-  rm -rf "${SOLUTION_DIRECTORY}"
+  mkdir -p "${LOGS_DIRECTORY}/agent" "${LOGS_DIRECTORY}/verifier" "${LOGS_DIRECTORY}/artifacts" "${OUT_DIRECTORY}/logs"
+  rm -rf "${SOLUTION_DIRECTORY}" "${TESTS_DIRECTORY}"
 
   fetch_task
 
@@ -180,17 +181,9 @@ prepare_task() {
   fi
 
   if [ -z "${prepare_error}" ]; then
-    if [ -d "${task_source_directory}/tests" ]; then
-      rm -rf "${TESTS_DIRECTORY:?}"/*
-      cp -a "${task_source_directory}/tests/." "${TESTS_DIRECTORY}/"
-      chmod -R +x "${TESTS_DIRECTORY}" 2>/dev/null || true
-    else
+    if [ ! -d "${task_source_directory}/tests" ]; then
       prepare_error="task tests directory not found: ${task_name}"
-    fi
-  fi
-
-  if [ -z "${prepare_error}" ] && { [ "${mode}" = "prepare" ] || [ "${mode}" = "agent" ]; }; then
-    if [ ! -f "${TESTS_DIRECTORY}/test.sh" ]; then
+    elif [ ! -f "${task_source_directory}/tests/test.sh" ] && { [ "${mode}" = "prepare" ] || [ "${mode}" = "agent" ]; }; then
       prepare_error="task test script not found: ${task_name}"
     fi
   fi
@@ -228,9 +221,25 @@ solve_task() {
 }
 
 verify_task() {
-  if [ "${mode}" = "verify" ] && [ ! -f "${TESTS_DIRECTORY}/test.sh" ]; then
-    echo "prepare has not been run: ${TESTS_DIRECTORY}/test.sh not found" >&2
-    write_results_and_exit false 0.0 "prepare has not been run: ${TESTS_DIRECTORY}/test.sh not found" 1
+  if [ "${mode}" = "verify" ] && [ ! -f "${OUT_DIRECTORY}/instruction.md" ]; then
+    echo "prepare has not been run: ${OUT_DIRECTORY}/instruction.md not found" >&2
+    write_results_and_exit false 0.0 "prepare has not been run: ${OUT_DIRECTORY}/instruction.md not found" 1
+  fi
+
+  rm -rf "${TESTS_DIRECTORY}" 2>/dev/null || { chmod -R u+w "${TESTS_DIRECTORY}" 2>/dev/null || true; rm -rf "${TESTS_DIRECTORY}"; }
+
+  if [ -z "${task_source_directory}" ] || [ ! -d "${task_source_directory}" ]; then
+    fetch_task
+  fi
+
+  mkdir -p "${TESTS_DIRECTORY}"
+  if [ -d "${task_source_directory}/tests" ]; then
+    cp -a "${task_source_directory}/tests/." "${TESTS_DIRECTORY}/"
+    chmod -R +x "${TESTS_DIRECTORY}" 2>/dev/null || true
+  fi
+
+  if [ "${mode}" != "oracle" ] && [ -n "${fetch_checkout_directory}" ]; then
+    rm -rf "${fetch_checkout_directory}"
   fi
 
   mkdir -p "${LOGS_DIRECTORY}/verifier" "${OUT_DIRECTORY}/logs"

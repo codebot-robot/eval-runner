@@ -314,14 +314,13 @@ func TestRunTask_Prepare(t *testing.T) {
 		t.Errorf("instruction.md = %q, want %q", string(instructionBytes), expectedInstruction)
 	}
 
-	// 2. Tests installed to TESTS_DIRECTORY
+	// 2. Tests must NOT be present in TESTS_DIRECTORY
 	installedTestScript := filepath.Join(environment.targetTestsDirectory, "test.sh")
-	testBytes, err := os.ReadFile(installedTestScript)
-	if err != nil {
-		t.Fatalf("expected test.sh in tests directory: %v", err)
+	if _, err := os.Stat(installedTestScript); !os.IsNotExist(err) {
+		t.Errorf("expected test.sh to not exist after prepare, but stat returned: %v", err)
 	}
-	if !strings.Contains(string(testBytes), "reward.txt") {
-		t.Errorf("test.sh content unexpected: %q", string(testBytes))
+	if _, err := os.Stat(environment.targetTestsDirectory); !os.IsNotExist(err) {
+		t.Errorf("expected tests directory to not exist after prepare, but stat returned: %v", err)
 	}
 
 	// 3. Solution directory must NOT be present
@@ -469,21 +468,16 @@ func TestRunTask_PrepareFetchDeletesSolutions(t *testing.T) {
 		t.Errorf("instruction.md = %q, want %q", string(instructionBytes), expectedInstruction)
 	}
 
-	// Verify test script was installed
-	if _, err := os.Stat(filepath.Join(targetTestsDirectory, "test.sh")); err != nil {
-		t.Fatalf("test.sh was not installed: %v", err)
-	}
-
-	// Assert no solution directory or solve.sh exists anywhere within sandboxDirectory
-	err = filepath.WalkDir(sandboxDirectory, func(path string, d fs.DirEntry, walkError error) error {
+	// Assert no solution or tests directory, and no solve.sh or test.sh, exists anywhere within sandboxDirectory
+	err = filepath.WalkDir(sandboxDirectory, func(path string, entry fs.DirEntry, walkError error) error {
 		if walkError != nil {
 			return walkError
 		}
-		if d.IsDir() && d.Name() == "solution" {
-			t.Errorf("found solution directory in sandbox: %s", path)
+		if entry.IsDir() && (entry.Name() == "solution" || entry.Name() == "tests") {
+			t.Errorf("found directory in sandbox: %s", path)
 		}
-		if !d.IsDir() && d.Name() == "solve.sh" {
-			t.Errorf("found solve.sh file in sandbox: %s", path)
+		if !entry.IsDir() && (entry.Name() == "solve.sh" || entry.Name() == "test.sh") {
+			t.Errorf("found file in sandbox: %s", path)
 		}
 		return nil
 	})
@@ -568,6 +562,61 @@ func TestRunTask_VerifyAfterPrepare(t *testing.T) {
 			t.Errorf("expected message to contain 'verification failure details', got %q", sample.Message)
 		}
 	})
+}
+
+func TestRunTask_VerifyRunsPinnedTestsWhenAgentWritesTestScript(t *testing.T) {
+	pinnedTestScript := "#!/bin/bash\n" +
+		"mkdir -p \"${LOGS_DIRECTORY}/verifier\"\n" +
+		"echo 'pinned verifier executed'\n" +
+		"echo 0 > \"${LOGS_DIRECTORY}/verifier/reward.txt\"\n"
+	environment := newTaskFixtureEnvironment(t, "sample-task", pinnedTestScript, "Test instruction")
+
+	prepareOutput, err := environment.run("prepare", "sample-task")
+	if err != nil {
+		t.Fatalf("prepare failed: %v\noutput: %s", err, string(prepareOutput))
+	}
+
+	// Verify no test file exists after prepare
+	installedTestScript := filepath.Join(environment.targetTestsDirectory, "test.sh")
+	if _, err := os.Stat(installedTestScript); !os.IsNotExist(err) {
+		t.Fatalf("expected test.sh to not exist after prepare: %v", err)
+	}
+
+	// Simulate agent writing its own planted test.sh that claims success
+	if err := os.MkdirAll(environment.targetTestsDirectory, 0755); err != nil {
+		t.Fatalf("failed to create agent planted tests directory: %v", err)
+	}
+	agentPlantedScript := "#!/bin/bash\n" +
+		"mkdir -p \"${LOGS_DIRECTORY}/verifier\"\n" +
+		"echo 'agent planted verifier executed'\n" +
+		"echo 1 > \"${LOGS_DIRECTORY}/verifier/reward.txt\"\n"
+	if err := os.WriteFile(installedTestScript, []byte(agentPlantedScript), 0755); err != nil {
+		t.Fatalf("failed to write agent planted test.sh: %v", err)
+	}
+
+	// Verify must discard agent's test.sh and run the pinned test
+	verifyOutput, err := environment.run("verify", "sample-task")
+	if err != nil {
+		t.Fatalf("verify failed: %v\noutput: %s", err, string(verifyOutput))
+	}
+
+	results := environment.readResults(t)
+	if len(results.Samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(results.Samples))
+	}
+	sample := results.Samples[0]
+	if sample.Passed == nil || *sample.Passed {
+		t.Errorf("expected passed: false from pinned verifier, got %v", sample.Passed)
+	}
+	if sample.Score == nil || *sample.Score != 0.0 {
+		t.Errorf("expected score: 0.0, got %v", sample.Score)
+	}
+	if !strings.Contains(sample.Message, "pinned verifier executed") {
+		t.Errorf("expected message to contain 'pinned verifier executed', got %q", sample.Message)
+	}
+	if strings.Contains(sample.Message, "agent planted verifier executed") {
+		t.Errorf("message unexpectedly contains 'agent planted verifier executed': %q", sample.Message)
+	}
 }
 
 func TestRunTask_VerifyStaleRewardIgnored(t *testing.T) {
