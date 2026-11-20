@@ -8,10 +8,19 @@ Note: Terminal-Bench 2.0 container images are prebuilt for `linux/amd64` only. C
 
 ## How the List is Generated
 
-The task manifest in `examples/terminal-bench/.evals/list` is generated dynamically at discovery time. When discovery runs in a sandbox pod with network egress, `.evals/list` shallow-fetches `laude-institute/terminal-bench-2` at the pinned commit into a temporary directory and emits all 89 tasks. For each task directory, it reads:
+The task manifest in `examples/terminal-bench/.evals/list` is generated dynamically at discovery time. When discovery runs in a sandbox pod with network egress, `.evals/list` shallow-fetches `laude-institute/terminal-bench-2` at the pinned commit into a temporary directory and emits all 89 tasks in both oracle and agent modes (178 tasks in total). For each task directory, it reads:
 - `docker_image`, `cpus`, and `memory` from `task.toml`
-- `agent.timeout_sec` and `verifier.timeout_sec` from `task.toml` (`timeoutSeconds` is their sum, capped at the controller maximum of 7200 seconds)
+- `agent.timeout_sec` and `verifier.timeout_sec` from `task.toml` (`timeoutSeconds` is their sum, capped at the controller maximum of 7200 seconds; `agent.timeoutSeconds` is taken from `agent.timeout_sec` where declared, capped at 7200 seconds)
 - The working directory from the last `WORKDIR` directive in `environment/Dockerfile` (defaulting to `/app`)
+
+For each task, two entries are emitted:
+- **Oracle entry (`terminal-bench/<name>`)**: Runs the one-shot `oracle` phase (`run-task.sh <name> oracle <workdir>`), which prepares the environment, runs the reference solution, and verifies.
+- **Agent-mode entry (`terminal-bench/<name>/agent`)**: Configured with an `agent` block:
+  - `agent.prepareCommand`: `["bash", "examples/terminal-bench/run-task.sh", "<name>", "prepare", "<workdir>"]`, which fetches tests and writes the prompt to `/workspace/out/instruction.md`.
+  - `agent.instructionPath`: `"/workspace/out/instruction.md"`.
+  - `agent.timeoutSeconds`: the task's declared `agent.timeout_sec` (capped at 7200 seconds).
+  - `command`: `["bash", "examples/terminal-bench/run-task.sh", "<name>", "verify", "<workdir>"]`, which runs verification after the agent loop ends.
+  - The reference solution is never installed and `/solution` is never present in the sandbox.
 
 The declared `cpus` and `memory` from `task.toml` are emitted in the `sandbox` resource entry (`resources: [{"type": "sandbox", "limits": {"cpu": "<cpus>", "memory": "<memory>"}}]`) and applied as container limits on the sandbox task pod.
 
@@ -54,7 +63,9 @@ Tasks execute under default sandbox container resource limits (500m CPU, 512Mi m
 
 ## Running on a Cluster
 
-To evaluate the `terminal-bench/regex-log` task against this repository on your cluster, specify a valid 7–64 character git commit hash for `spec.repo.commit`:
+### Oracle Mode
+
+To evaluate the `terminal-bench/regex-log` task in oracle mode against this repository on your cluster, specify a valid 7–64 character git commit hash for `spec.repo.commit`:
 
 ```yaml
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
@@ -81,6 +92,39 @@ Inspect progress and outcomes using `kubectl`:
 ```bash
 kubectl get run terminal-bench-regex-log-run -n eval-runner -o yaml
 ```
+
+### Agent Mode
+
+To run a task in agent mode where a model drives the sandbox, select the agent-mode task ID (e.g. `terminal-bench/regex-log/agent`) in `spec.tasks` and specify `spec.model`:
+
+```yaml
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: terminal-bench-regex-log-agent-run
+  namespace: eval-runner
+spec:
+  repo:
+    url: https://github.com/gke-labs/eval-runner.git
+    commit: 0123456789abcdef0123456789abcdef01234567
+  model: mockllm/model
+  tasks:
+  - terminal-bench/regex-log/agent
+```
+
+#### Task Selection
+
+How a Run chooses between oracle and agent mode relies on existing task selection via `spec.tasks`:
+- Listing `terminal-bench/<name>` runs the oracle entry.
+- Listing `terminal-bench/<name>/agent` runs the agent-mode entry.
+- If `spec.tasks` is omitted, the Run executes all discovered tasks (both oracle and agent).
+
+Running only one kind across the suite requires listing the desired task IDs explicitly in `spec.tasks`. A filtering switch (such as a glob pattern like `terminal-bench/*/agent` or an execution mode selector on the Run) does not exist today.
+
+#### Real Models vs Mock Model
+
+- **Mock model**: In testing environments without a real model configured, the controller runs a deterministic mock/scripted model. Because real task instructions contain no scripted test commands, an agent driven by the mock model issues no commands and completes the loop cleanly; then the task's verifier runs and fails verification (score 0.0). Nothing pretends to be a model.
+- **Real model**: To produce real evaluation results where an LLM solves the task, the controller must have a real model client configured (such as Gemini, Anthropic, or OpenAI via service portals and credentials). Real model client configuration is handled in the controller and is separate work.
 
 ## E2E Testing Notes
 
