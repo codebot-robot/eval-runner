@@ -2394,6 +2394,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 					LogPath: filepath.Join(baseDir, "runs", "othercommit12345", "inspect.json"),
 				},
 				{
+					ID:      "task/stored-elsewhere",
+					Phase:   v1alpha1.TaskPhaseCompleted,
+					LogPath: "gs://other-eval-bucket/runs/" + commit + "/triage/runbook_lookup/inspect.json",
+				},
+				{
 					ID:      "task/file-not-found",
 					Phase:   v1alpha1.TaskPhaseCompleted,
 					LogPath: filepath.Join(baseDir, "runs", commit, "missing", "inspect.json"),
@@ -2624,6 +2629,29 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 
 		if w.Code != http.StatusForbidden {
 			t.Errorf("expected 403 Forbidden for prefix mismatch, got %d: %s", w.Code, w.Body.String())
+		}
+		if strings.TrimSpace(w.Body.String()) != "forbidden: log path does not match run commit prefix" {
+			t.Errorf("expected exact 'forbidden: log path does not match run commit prefix' message, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("Negative_StoredElsewhere_404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/task%2Fstored-elsewhere/samples", nil)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for stored elsewhere, got %d: %s", w.Code, w.Body.String())
+		}
+		expectedMessage := "artifacts for run sample-run were stored elsewhere and are not available here"
+		if strings.TrimSpace(w.Body.String()) != expectedMessage {
+			t.Errorf("expected exact message %q, got %q", expectedMessage, w.Body.String())
+		}
+		if strings.Contains(strings.ToLower(w.Body.String()), "forbidden") {
+			t.Errorf("expected message not to contain 'forbidden', got %q", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "other-eval-bucket") || strings.Contains(w.Body.String(), "eval-runner") {
+			t.Errorf("expected no leaked storage path or deployment details in body, got %q", w.Body.String())
 		}
 	})
 

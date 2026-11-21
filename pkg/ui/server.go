@@ -4069,7 +4069,12 @@ func (s *Server) renderRunTasks(w http.ResponseWriter, r *http.Request, run *v1a
 	commit := run.Spec.Repo.Commit
 	expectedPrefix := s.reloadableSink.ArtifactPrefix(commit)
 	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
-		httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
+		storeRoot := strings.TrimSuffix(expectedPrefix, "runs/"+commit+"/")
+		if storeRoot != "" && strings.HasPrefix(matchedTask.LogPath, storeRoot) {
+			httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
+			return
+		}
+		httpError(w, http.StatusNotFound, fmt.Sprintf("artifacts for run %s were stored elsewhere and are not available here", name), "", nil)
 		return
 	}
 
