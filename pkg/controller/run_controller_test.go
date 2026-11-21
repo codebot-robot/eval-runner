@@ -5108,6 +5108,35 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		if summary.CostUSD == nil || *summary.CostUSD <= 0 {
 			t.Errorf("expected summary CostUSD > 0, got %v", summary.CostUSD)
 		}
+
+		// Verify agent loop record artifact is stored next to results.json
+		agentURI := strings.Replace(task0.LogPath, "results.json", "agent.json", 1)
+		agentBytes, err := sink.Load(t.Context(), agentURI)
+		if err != nil {
+			t.Fatalf("failed to load agent artifact from sink at %s: %v", agentURI, err)
+		}
+		var agentRecord agent.Result
+		if err := json.Unmarshal(agentBytes, &agentRecord); err != nil {
+			t.Fatalf("failed to unmarshal agent artifact: %v", err)
+		}
+		if agentRecord.StopReason != agent.StopReasonCompleted {
+			t.Errorf("expected agent StopReason Completed, got %s", agentRecord.StopReason)
+		}
+		if agentRecord.InputTokens != 250 || agentRecord.OutputTokens != 50 {
+			t.Errorf("expected agent tokens 250 in / 50 out, got %d in / %d out", agentRecord.InputTokens, agentRecord.OutputTokens)
+		}
+		if len(agentRecord.Steps) != 2 {
+			t.Fatalf("expected 2 agent steps, got %d", len(agentRecord.Steps))
+		}
+		if len(agentRecord.Steps[0].ToolCalls) != 1 || agentRecord.Steps[0].ToolCalls[0].Command != "echo solved" {
+			t.Errorf("expected step 0 tool call 'echo solved', got %+v", agentRecord.Steps[0].ToolCalls)
+		}
+		if len(agentRecord.Steps[0].ToolResults) != 1 || agentRecord.Steps[0].ToolResults[0].Output != "echo output" {
+			t.Errorf("expected step 0 tool result 'echo output', got %+v", agentRecord.Steps[0].ToolResults)
+		}
+		if agentRecord.Steps[1].Text != "Done" {
+			t.Errorf("expected step 1 text 'Done', got %q", agentRecord.Steps[1].Text)
+		}
 	})
 
 	t.Run("TaskAgent_InvalidOrMissingModelCredentials_RejectsFast", func(t *testing.T) {

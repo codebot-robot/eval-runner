@@ -44,6 +44,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	"github.com/gke-labs/eval-runner/pkg/version"
 	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
+	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -3717,6 +3718,33 @@ func (r *RunReconciler) executeAgentPhase(
 	return loopEndingMessage, agentResult, nil
 }
 
+func (r *RunReconciler) storeAgentArtifact(
+	ctx context.Context,
+	logger logr.Logger,
+	run *v1alpha1.Run,
+	taskID string,
+	agentResult *agent.Result,
+) {
+	data, err := json.Marshal(agentResult)
+	if err != nil {
+		logger.Error(err, "failed to marshal agent record")
+		return
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName:      run.Name,
+		RunNamespace: run.Namespace,
+		TaskID:       taskID,
+		Commit:       run.Spec.Repo.Commit,
+	}
+
+	sinkContext, sinkCancel := context.WithTimeout(context.WithoutCancel(ctx), r.artifactSinkTimeout())
+	defer sinkCancel()
+	if _, storeErr := artifacts.StoreTaskFileWithTimeout(sinkContext, r.artifactSink(), meta, "agent.json", data); storeErr != nil {
+		logger.Error(storeErr, "failed to store agent artifact in sink")
+	}
+}
+
 func (r *RunReconciler) executeSandboxTask(
 	ctx context.Context,
 	run *v1alpha1.Run,
@@ -3730,6 +3758,7 @@ func (r *RunReconciler) executeSandboxTask(
 
 	var loopEndingMessage string
 	var agentResult *agent.Result
+	var tokensAndCost *taskTokensAndCost
 	defer func() {
 		if loopEndingMessage != "" {
 			if result.message == "" {
@@ -3790,13 +3819,15 @@ func (r *RunReconciler) executeSandboxTask(
 		effectiveTimeoutSeconds := r.effectiveTaskCommandTimeoutSeconds(targetTask, run.Status.ExecutionDeadline)
 		var failedResult *taskExecutionResult
 		loopEndingMessage, agentResult, failedResult = r.executeAgentPhase(ctx, run, taskID, sbClient, targetTask, cwd, effectiveTimeoutSeconds, effectiveResources, effRange)
+		if agentResult != nil {
+			r.storeAgentArtifact(ctx, logger, run, taskID, agentResult)
+		}
+		tokensAndCost = r.computeAgentTokensAndCost(run.Spec.Model, agentResult)
 		if failedResult != nil {
-			applyTokensAndCost(failedResult, r.computeAgentTokensAndCost(run.Spec.Model, agentResult))
+			applyTokensAndCost(failedResult, tokensAndCost)
 			return *failedResult
 		}
 	}
-
-	tokensAndCost := r.computeAgentTokensAndCost(run.Spec.Model, agentResult)
 
 	taskCommandTimeout := r.executionStepTimeout()
 	if targetTask.TimeoutSeconds != nil {

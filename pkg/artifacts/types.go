@@ -264,3 +264,8 @@ type ArtifactSink interface {
 type AccessChecker interface {
 	CheckAccess(ctx context.Context) error
 }
+
+// TaskFileStorer is implemented by sinks that support storing task files next to task artifacts without modifying summary.json.
+type TaskFileStorer interface {
+	StoreTaskFile(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error)
+}

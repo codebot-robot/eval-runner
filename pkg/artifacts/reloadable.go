@@ -17,6 +17,7 @@ package artifacts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -155,6 +156,28 @@ func (s *ReloadableSink) StoreArtifact(ctx context.Context, meta RunMetadata, fi
 	defer ts.wg.Done()
 
 	return ts.sink.StoreArtifact(ctx, meta, filename, data)
+}
+
+// StoreTaskFile implements TaskFileStorer for ReloadableSink.
+func (s *ReloadableSink) StoreTaskFile(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return "", ErrSinkClosed
+	}
+	ts := s.currentTracked
+	if ts == nil || ts.sink == nil {
+		s.mu.RUnlock()
+		return "", ErrNoSinkConfigured
+	}
+	ts.wg.Add(1)
+	s.mu.RUnlock()
+	defer ts.wg.Done()
+
+	if storer, ok := ts.sink.(TaskFileStorer); ok {
+		return storer.StoreTaskFile(ctx, meta, filename, data)
+	}
+	return "", fmt.Errorf("artifact sink %T does not support storing task files", ts.sink)
 }
 
 // StoreComparison persists comparison summary data using the current active sink.

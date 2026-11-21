@@ -53,6 +53,11 @@ func (s *UnavailableSink) StoreArtifact(ctx context.Context, meta RunMetadata, f
 	return "", fmt.Errorf("artifactBucket is set but artifact storage is unavailable: %w", s.err)
 }
 
+// StoreTaskFile implements TaskFileStorer, failing immediately with the unavailability error.
+func (s *UnavailableSink) StoreTaskFile(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+	return "", fmt.Errorf("artifactBucket is set but artifact storage is unavailable: %w", s.err)
+}
+
 // StoreComparison implements ArtifactSink, failing immediately with the unavailability error.
 func (s *UnavailableSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
 	return "", fmt.Errorf("artifactBucket is set but artifact storage is unavailable: %w", s.err)

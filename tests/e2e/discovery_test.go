@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/agent"
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/forge"
 	"github.com/gke-labs/eval-runner/pkg/forge/gitremote"
@@ -635,6 +636,59 @@ spec:
 		}
 		if noopTask.MeanScore == nil || *noopTask.MeanScore != 0.0 {
 			t.Errorf("Expected meanScore 0.0 for failing verify with noop model, got %v", noopTask.MeanScore)
+		}
+
+		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
+		loadAgentRecord := func(task v1alpha1.TaskStatus) agent.Result {
+			if task.LogPath == "" {
+				t.Fatalf("task %s has empty logPath", task.ID)
+			}
+			agentPathSuffix := strings.TrimPrefix(strings.Replace(task.LogPath, "results.json", "agent.json", 1), "/tmp/")
+			findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", agentPathSuffix)
+			foundFile := strings.TrimSpace(harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd))
+			if foundFile == "" {
+				t.Fatalf("agent.json not found on node for task %s at %s", task.ID, agentPathSuffix)
+			}
+			firstFile := strings.Split(foundFile, "\n")[0]
+			content := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
+			var record agent.Result
+			if err := json.Unmarshal([]byte(content), &record); err != nil {
+				t.Fatalf("failed to unmarshal agent.json for task %s: %v", task.ID, err)
+			}
+			return record
+		}
+
+		solveRecord := loadAgentRecord(solveTask)
+		if solveRecord.StopReason != agent.StopReasonCompleted {
+			t.Errorf("Expected solve task stopReason Completed, got %s", solveRecord.StopReason)
+		}
+		if len(solveRecord.Steps) == 0 {
+			t.Errorf("Expected solve task steps > 0, got %d", len(solveRecord.Steps))
+		}
+		hasToolCall := false
+		for _, step := range solveRecord.Steps {
+			if len(step.ToolCalls) > 0 {
+				hasToolCall = true
+				if len(step.ToolResults) != len(step.ToolCalls) {
+					t.Errorf("Expected step tool results count %d to match tool calls count %d", len(step.ToolResults), len(step.ToolCalls))
+				}
+				for _, toolResult := range step.ToolResults {
+					if toolResult.ExitCode != 0 {
+						t.Errorf("Expected tool result exit code 0 for solve task, got %d", toolResult.ExitCode)
+					}
+				}
+			}
+		}
+		if !hasToolCall {
+			t.Errorf("Expected solve task to have at least one tool call in steps")
+		}
+
+		noopRecord := loadAgentRecord(noopTask)
+		if noopRecord.StopReason != agent.StopReasonCompleted {
+			t.Errorf("Expected noop task stopReason Completed, got %s", noopRecord.StopReason)
+		}
+		if len(noopRecord.Steps) == 0 {
+			t.Errorf("Expected noop task steps > 0, got %d", len(noopRecord.Steps))
 		}
 
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)

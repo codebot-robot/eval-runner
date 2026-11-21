@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -271,6 +272,30 @@ func TestLocalDirSink_StoreManifest(t *testing.T) {
 	}
 }
 
+func TestLocalDirSink_StoreTaskFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "artifacts-task-file-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	sink := &artifacts.LocalDirSink{BaseDir: tempDir}
+	meta := artifacts.RunMetadata{Commit: "c123456", TaskID: "bench/task-1"}
+	payload := []byte(`{"steps":[]}`)
+	path, err := sink.StoreTaskFile(t.Context(), meta, "agent.json", payload)
+	if err != nil {
+		t.Fatalf("StoreTaskFile failed: %v", err)
+	}
+	if loaded, err := os.ReadFile(path); err != nil || string(loaded) != string(payload) {
+		t.Fatalf("unexpected content: %s (err: %v)", loaded, err)
+	}
+	// Verify summary.json was NOT created
+	summaryPath := filepath.Join(filepath.Dir(path), "summary.json")
+	if _, err := os.Stat(summaryPath); !os.IsNotExist(err) {
+		t.Errorf("expected summary.json not to exist, got stat err: %v", err)
+	}
+}
+
 func TestInMemorySink(t *testing.T) {
 	sink := artifacts.NewInMemorySink()
 	if sink.IsDurable() {
@@ -358,6 +383,24 @@ func TestInMemorySink(t *testing.T) {
 	if string(compLoaded) != "comp data" {
 		t.Errorf("Expected 'comp data', got %s", compLoaded)
 	}
+}
+
+func TestInMemorySink_ConcurrentStore(t *testing.T) {
+	sink := artifacts.NewInMemorySink()
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			meta := artifacts.RunMetadata{
+				Commit: "c1",
+				TaskID: fmt.Sprintf("task-%d", id),
+			}
+			_, _ = sink.StoreArtifact(t.Context(), meta, "results.json", []byte(`{}`))
+			_, _ = sink.StoreTaskFile(t.Context(), meta, "agent.json", []byte(`{}`))
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestIsNotFound_ErrorsIsOnly(t *testing.T) {
