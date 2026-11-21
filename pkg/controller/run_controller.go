@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -264,6 +265,9 @@ type RunReconciler struct {
 	// ServicePortalClient binds egress policies to sandbox pods via the Service Portal Controller.
 	ServicePortalClient *serviceportalclient.Client
 
+	// InstanceID uniquely identifies this controller process/instance.
+	InstanceID string
+
 	boundPodsMu            sync.RWMutex
 	boundServicePortalPods map[types.UID]bool
 
@@ -289,6 +293,26 @@ type RunReconciler struct {
 	tokens map[string]string // key: namespace/sandboxName -> bearer token
 
 	cfgMu sync.RWMutex
+}
+
+// NewProcessInstanceID generates a unique identifier for the current controller process instance.
+func NewProcessInstanceID() string {
+	randomBytes := make([]byte, 8)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return fmt.Sprintf("instance-%d", time.Now().UnixNano())
+	}
+	podName := os.Getenv("POD_NAME")
+	if podName != "" {
+		return fmt.Sprintf("%s-%s", podName, hex.EncodeToString(randomBytes))
+	}
+	return hex.EncodeToString(randomBytes)
+}
+
+func (r *RunReconciler) processInstanceID() string {
+	if r.InstanceID != "" {
+		return r.InstanceID
+	}
+	return "test-instance"
 }
 
 func (r *RunReconciler) controllerVersion() string {
@@ -2371,11 +2395,38 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 	// Start pending tasks up to MaxParallelTasks
 	availableSlots := r.maxParallelTasks() - runningCount
+	waitingForOldSandbox := false
 	if availableSlots > 0 {
 		var tasksToStart []string
-		for _, t := range run.Status.Tasks {
-			if t.Phase == v1alpha1.TaskPhasePending && availableSlots > 0 {
-				tasksToStart = append(tasksToStart, t.ID)
+		for _, task := range run.Status.Tasks {
+			if task.Phase == v1alpha1.TaskPhasePending && availableSlots > 0 {
+				if existingSandbox, exists := sandboxesByTask[task.ID]; exists {
+					if existingSandbox.Annotations[discovery.AnnotationControllerInstance] != r.processInstanceID() {
+						// Sandbox from an earlier controller instance: delete it and wait for it and its pod to terminate.
+						sandboxKey := types.NamespacedName{Namespace: existingSandbox.Namespace, Name: existingSandbox.Name}
+						if err := r.Delete(ctx, &existingSandbox); err != nil && !apierrors.IsNotFound(err) {
+							logger.Error(err, "failed to delete old task sandbox for pending task", "task", task.ID)
+						}
+						r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, task.ID, sandboxKey)
+						delete(sandboxesByTask, task.ID)
+						waitingForOldSandbox = true
+						continue
+					}
+					// Sandbox belongs to this process instance (e.g. status write after Create failed on previous reconcile).
+					// Allow tasksToStart to proceed; Create will tolerate AlreadyExists and status write will record Running.
+				} else {
+					// Check if a terminating pod with the same name still exists from an earlier attempt
+					sandboxName := discovery.TaskSandboxNameForRun(run.Name, task.ID)
+					podKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
+					var existingPod corev1.Pod
+					if err := r.Get(ctx, podKey, &existingPod); err == nil {
+						waitingForOldSandbox = true
+						continue
+					} else if !apierrors.IsNotFound(err) {
+						return ctrl.Result{}, err
+					}
+				}
+				tasksToStart = append(tasksToStart, task.ID)
 				availableSlots--
 			}
 		}
@@ -2429,6 +2480,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
 					Namespace:              r.sandboxNamespace(),
+					ControllerInstance:     r.processInstanceID(),
 					SampleRunnerImage:      r.sampleRunnerImage(),
 					Image:                  taskImage,
 					AuthTokenDigest:        discovery.AuthTokenDigest(token),
@@ -2528,12 +2580,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 	var readyTasks []readyTaskItem
 	terminalFailures := make(map[string]string)
-	type rescuedTaskInfo struct {
-		agg     *artifacts.TaskAggregates
-		summary *artifacts.TaskSummary
-		logPath string
-	}
 	rescuedTasks := make(map[string]rescuedTaskInfo)
+	restartedTasks := make(map[string]struct{})
 	waitingInGracePeriod := false
 	var minGraceRemaining time.Duration
 
@@ -2545,14 +2593,14 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		sb, hasSB := sandboxesByTask[t.ID]
 		if !hasSB {
 			// Prefer reading back the created object with the API reader (uncached)
-			sbName := discovery.TaskSandboxNameForRun(run.Name, t.ID)
-			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
+			sandboxName := discovery.TaskSandboxNameForRun(run.Name, t.ID)
+			sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
 			reader := client.Reader(r.Client)
 			if r.APIReader != nil {
 				reader = r.APIReader
 			}
 			var directSB sandboxv1beta1.Sandbox
-			if err := reader.Get(ctx, sbKey, &directSB); err != nil {
+			if err := reader.Get(ctx, sandboxKey, &directSB); err != nil {
 				if !apierrors.IsNotFound(err) {
 					return ctrl.Result{}, err
 				}
@@ -2563,6 +2611,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			}
 		}
 
+		var isDirtySandbox bool
 		if !hasSB {
 			var startedAt time.Time
 			if t.StartedAt != nil {
@@ -2599,71 +2648,32 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					continue
 				}
 			}
+		} else if sb.Annotations[discovery.AnnotationControllerInstance] != r.processInstanceID() {
+			isDirtySandbox = true
+		}
 
-			requestedWindow := taskRequestedWindowSize(run.Spec, t)
-			rescued := false
-			var rescuedAgg *artifacts.TaskAggregates
-			var rescuedSummary *artifacts.TaskSummary
-			var rescuedLogPath string
-
-			if t.Samples > 0 && (requestedWindow <= 0 || t.Samples >= requestedWindow) {
-				rescued = true
-			} else if t.LogPath != "" {
-				loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
-				data, loadErr := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), t.LogPath)
-				loadCancel()
-				if loadErr == nil && len(data) > 0 {
-					if agg, parseErr := artifacts.ParseInspectLog(data); parseErr == nil && agg.Samples > 0 {
-						if requestedWindow <= 0 || agg.Samples >= requestedWindow || (t.PossibleSamples > 0 && agg.Samples >= t.PossibleSamples) {
-							rescued = true
-							rescuedAgg = agg
-							rescuedLogPath = t.LogPath
-						}
-					}
-				}
-			} else if run.Spec.Repo.Commit != "" {
-				summaryPath := artifacts.ArtifactTarget(r.artifactSink(), run.Spec.Repo.Commit, t.ID, "summary.json")
-				loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
-				data, loadErr := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), summaryPath)
-				loadCancel()
-				if loadErr != nil {
-					if !artifacts.IsNotFound(loadErr) {
-						logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "error", "error", loadErr)
-						return ctrl.Result{}, fmt.Errorf("probe artifact sink for task %s summary: %w", t.ID, loadErr)
-					}
-					logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "not_found")
-				} else if len(data) > 0 {
-					var sum artifacts.TaskSummary
-					if parseErr := json.Unmarshal(data, &sum); parseErr != nil {
-						logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "unparseable", "error", parseErr)
-					} else if requestedWindow <= 0 || sum.SampleCount >= requestedWindow || (sum.PossibleSamples > 0 && sum.SampleCount >= sum.PossibleSamples) {
-						if sum.SampleCount > 0 {
-							logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "complete", "samples", sum.SampleCount)
-							rescued = true
-							rescuedSummary = &sum
-							if sum.LogFilename != "" {
-								rescuedLogPath = artifacts.ArtifactTarget(r.artifactSink(), run.Spec.Repo.Commit, t.ID, sum.LogFilename)
-							}
-						} else {
-							logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "empty", "samples", 0)
-						}
-					} else {
-						logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "partial", "samples", sum.SampleCount, "requested", requestedWindow)
-					}
-				}
+		if !hasSB || isDirtySandbox {
+			rescuedInfo, probeErr := r.probeTaskRescue(ctx, run, t)
+			if probeErr != nil {
+				return ctrl.Result{}, probeErr
 			}
-
-			if rescued {
+			if rescuedInfo != nil {
 				sampleCount := t.Samples
 				if sampleCount == 0 {
-					if rescuedSummary != nil {
-						sampleCount = rescuedSummary.SampleCount
-					} else if rescuedAgg != nil {
-						sampleCount = rescuedAgg.Samples
+					if rescuedInfo.summary != nil {
+						sampleCount = rescuedInfo.summary.SampleCount
+					} else if rescuedInfo.agg != nil {
+						sampleCount = rescuedInfo.agg.Samples
 					}
 				}
 				logger.Info("restart rescue", "task", t.ID, "run", run.Name, "samples", sampleCount)
-				rescuedTasks[t.ID] = rescuedTaskInfo{agg: rescuedAgg, summary: rescuedSummary, logPath: rescuedLogPath}
+				rescuedTasks[t.ID] = *rescuedInfo
+				continue
+			}
+
+			if isDirtySandbox {
+				logger.Info("restarting interrupted in-flight task in fresh sandbox", "task", t.ID, "run", run.Name, "oldSandbox", sb.Name)
+				restartedTasks[t.ID] = struct{}{}
 				continue
 			}
 
@@ -2681,6 +2691,22 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			if apierrors.IsNotFound(err) {
 				logger.V(1).Info("Task pod not yet created", "task", t.ID)
 			}
+			continue
+		}
+
+		// Only execute in a pod that is controlled by the current Sandbox and is not terminating.
+		if pod.DeletionTimestamp != nil {
+			logger.V(1).Info("Task pod is terminating", "task", t.ID)
+			continue
+		}
+		controllerRef := metav1.GetControllerOf(&pod)
+		if sb.UID != "" {
+			if controllerRef == nil || controllerRef.UID != sb.UID {
+				logger.V(1).Info("Task pod is not controlled by current sandbox", "task", t.ID, "sandboxUID", sb.UID)
+				continue
+			}
+		} else if controllerRef != nil {
+			logger.V(1).Info("Task pod is not controlled by current sandbox", "task", t.ID, "sandboxUID", sb.UID)
 			continue
 		}
 
@@ -2730,15 +2756,17 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 	}
 
-	if len(terminalFailures) > 0 || len(rescuedTasks) > 0 {
+	if len(terminalFailures) > 0 || len(rescuedTasks) > 0 || len(restartedTasks) > 0 {
 		now := metav1.NewTime(r.now())
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
 			for i := range status.Tasks {
 				tid := status.Tasks[i].ID
 				if msg, failed := terminalFailures[tid]; failed {
-					status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
-					status.Tasks[i].Message = msg
-					status.Tasks[i].FinishedAt = &now
+					if status.Tasks[i].Phase == v1alpha1.TaskPhaseRunning {
+						status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
+						status.Tasks[i].Message = msg
+						status.Tasks[i].FinishedAt = &now
+					}
 				} else if info, ok := rescuedTasks[tid]; ok {
 					status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
 					if info.summary != nil && info.summary.FinishedAt != nil {
@@ -2800,6 +2828,14 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					if status.Tasks[i].SamplesDone < status.Tasks[i].Samples {
 						status.Tasks[i].SamplesDone = status.Tasks[i].Samples
 					}
+				} else if _, ok := restartedTasks[tid]; ok {
+					if status.Tasks[i].Phase == v1alpha1.TaskPhaseRunning {
+						status.Tasks[i].Phase = v1alpha1.TaskPhasePending
+						status.Tasks[i].Restarts++
+						status.Tasks[i].StartedAt = nil
+						status.Tasks[i].SamplesDone = 0
+						status.Tasks[i].LastProgressAt = nil
+					}
 				}
 			}
 			status.Summary = ComputeRunSummary(status.Tasks)
@@ -2811,9 +2847,11 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		for i := range run.Status.Tasks {
 			tid := run.Status.Tasks[i].ID
 			if msg, failed := terminalFailures[tid]; failed {
-				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
-				run.Status.Tasks[i].Message = msg
-				run.Status.Tasks[i].FinishedAt = &now
+				if run.Status.Tasks[i].Phase == v1alpha1.TaskPhaseRunning {
+					run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
+					run.Status.Tasks[i].Message = msg
+					run.Status.Tasks[i].FinishedAt = &now
+				}
 			} else if info, ok := rescuedTasks[tid]; ok {
 				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
 				if info.summary != nil && info.summary.FinishedAt != nil {
@@ -2826,34 +2864,56 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				if run.Status.Tasks[i].LogPath == "" && info.logPath != "" {
 					run.Status.Tasks[i].LogPath = info.logPath
 				}
+			} else if _, ok := restartedTasks[tid]; ok {
+				if run.Status.Tasks[i].Phase == v1alpha1.TaskPhaseRunning {
+					run.Status.Tasks[i].Phase = v1alpha1.TaskPhasePending
+					run.Status.Tasks[i].Restarts++
+					run.Status.Tasks[i].StartedAt = nil
+					run.Status.Tasks[i].SamplesDone = 0
+					run.Status.Tasks[i].LastProgressAt = nil
+				}
 			}
 		}
 
+		// Delete task sandboxes and clean up auth tokens only after status update succeeds
 		for tid := range terminalFailures {
-			sbName := discovery.TaskSandboxNameForRun(run.Name, tid)
-			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
+			sandboxName := discovery.TaskSandboxNameForRun(run.Name, tid)
+			sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
 			if sb, ok := sandboxesByTask[tid]; ok {
 				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
 					logger.Error(err, "failed to delete task sandbox on terminal failure", "task", tid)
 				}
 			}
-			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sandboxKey)
 		}
 		for tid := range rescuedTasks {
-			sbName := discovery.TaskSandboxNameForRun(run.Name, tid)
-			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
+			sandboxName := discovery.TaskSandboxNameForRun(run.Name, tid)
+			sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
 			if sb, ok := sandboxesByTask[tid]; ok {
 				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
 					logger.Error(err, "failed to delete task sandbox on restart rescue", "task", tid)
 				}
 			}
-			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sandboxKey)
+		}
+		for tid := range restartedTasks {
+			sandboxName := discovery.TaskSandboxNameForRun(run.Name, tid)
+			sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
+			if sb, ok := sandboxesByTask[tid]; ok {
+				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
+					logger.Error(err, "failed to delete task sandbox on restart", "task", tid)
+				}
+			}
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sandboxKey)
 		}
 	}
 
 	if len(readyTasks) == 0 {
-		if len(terminalFailures) > 0 || len(rescuedTasks) > 0 {
+		if len(terminalFailures) > 0 || len(rescuedTasks) > 0 || len(restartedTasks) > 0 {
 			return ctrl.Result{Requeue: true}, nil
+		}
+		if waitingForOldSandbox {
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 		}
 		requeueAfter := 1 * time.Second
 		if waitingInGracePeriod && minGraceRemaining > 0 && minGraceRemaining < requeueAfter {
@@ -2971,15 +3031,71 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	// Delete task sandboxes and clean up auth tokens only after status update succeeds
 	for taskID := range taskResults {
 		if sb, ok := sandboxesByTask[taskID]; ok {
-			sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+			sandboxKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
 			if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
 				logger.Error(err, "failed to delete task sandbox after execution", "task", taskID)
 			}
-			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, taskID, sbKey)
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, taskID, sandboxKey)
 		}
 	}
 
 	return ctrl.Result{Requeue: true}, nil
+}
+
+type rescuedTaskInfo struct {
+	agg     *artifacts.TaskAggregates
+	summary *artifacts.TaskSummary
+	logPath string
+}
+
+func (r *RunReconciler) probeTaskRescue(ctx context.Context, run *v1alpha1.Run, task v1alpha1.TaskStatus) (*rescuedTaskInfo, error) {
+	logger := log.FromContext(ctx)
+	requestedWindow := taskRequestedWindowSize(run.Spec, task)
+	var rescuedLogPath string
+
+	if task.Samples > 0 && (requestedWindow <= 0 || task.Samples >= requestedWindow) {
+		return &rescuedTaskInfo{}, nil
+	} else if task.LogPath != "" {
+		loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
+		data, loadErr := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), task.LogPath)
+		loadCancel()
+		if loadErr == nil && len(data) > 0 {
+			if agg, parseErr := artifacts.ParseInspectLog(data); parseErr == nil && agg.Samples > 0 {
+				if requestedWindow <= 0 || agg.Samples >= requestedWindow || (task.PossibleSamples > 0 && agg.Samples >= task.PossibleSamples) {
+					return &rescuedTaskInfo{agg: agg, logPath: task.LogPath}, nil
+				}
+			}
+		}
+	} else if run.Spec.Repo.Commit != "" {
+		summaryPath := artifacts.ArtifactTarget(r.artifactSink(), run.Spec.Repo.Commit, task.ID, "summary.json")
+		loadCtx, loadCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
+		data, loadErr := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), summaryPath)
+		loadCancel()
+		if loadErr != nil {
+			if !artifacts.IsNotFound(loadErr) {
+				logger.V(1).Info("probed artifact sink for restart rescue", "task", task.ID, "path", summaryPath, "outcome", "error", "error", loadErr)
+				return nil, fmt.Errorf("probe artifact sink for task %s summary: %w", task.ID, loadErr)
+			}
+			logger.V(1).Info("probed artifact sink for restart rescue", "task", task.ID, "path", summaryPath, "outcome", "not_found")
+		} else if len(data) > 0 {
+			var sum artifacts.TaskSummary
+			if parseErr := json.Unmarshal(data, &sum); parseErr != nil {
+				logger.V(1).Info("probed artifact sink for restart rescue", "task", task.ID, "path", summaryPath, "outcome", "unparseable", "error", parseErr)
+			} else if requestedWindow <= 0 || sum.SampleCount >= requestedWindow || (sum.PossibleSamples > 0 && sum.SampleCount >= sum.PossibleSamples) {
+				if sum.SampleCount > 0 {
+					logger.V(1).Info("probed artifact sink for restart rescue", "task", task.ID, "path", summaryPath, "outcome", "complete", "samples", sum.SampleCount)
+					if sum.LogFilename != "" {
+						rescuedLogPath = artifacts.ArtifactTarget(r.artifactSink(), run.Spec.Repo.Commit, task.ID, sum.LogFilename)
+					}
+					return &rescuedTaskInfo{summary: &sum, logPath: rescuedLogPath}, nil
+				}
+				logger.V(1).Info("probed artifact sink for restart rescue", "task", task.ID, "path", summaryPath, "outcome", "empty", "samples", 0)
+			} else {
+				logger.V(1).Info("probed artifact sink for restart rescue", "task", task.ID, "path", summaryPath, "outcome", "partial", "samples", sum.SampleCount, "requested", requestedWindow)
+			}
+		}
+	}
+	return nil, nil
 }
 
 func (r *RunReconciler) isExecutionDeadlineExceeded(deadline *metav1.Time) bool {

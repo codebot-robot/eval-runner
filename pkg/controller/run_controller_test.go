@@ -11649,7 +11649,8 @@ func TestFailedTaskPreservesSamplesDone(t *testing.T) {
 				discovery.LabelRole:         discovery.RoleSample,
 			},
 			Annotations: map[string]string{
-				discovery.AnnotationTaskID: "task-fail",
+				discovery.AnnotationTaskID:             "task-fail",
+				discovery.AnnotationControllerInstance: reconciler.processInstanceID(),
 			},
 		},
 	}

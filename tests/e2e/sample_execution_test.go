@@ -37,6 +37,7 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"github.com/gke-labs/eval-runner/pkg/webhook"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestRunSampleExecution(t *testing.T) {
@@ -1545,6 +1546,149 @@ spec:
 
 		// Clean up sandboxes
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
+	})
+
+	t.Run("ControllerRestartInFlightTaskRunsInFreshSandbox", func(t *testing.T) {
+		gitDir := "/git/docs-eval.git"
+		branchName := fmt.Sprintf("inflight-test-%d", time.Now().UnixNano()%1000000)
+		harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+			"sh", "-c", fmt.Sprintf(`
+				rm -rf /tmp/work &&
+				git clone %s /tmp/work &&
+				cd /tmp/work &&
+				sed -i '/def readme_comprehension_blind/a \    import time; time.sleep(60)' evals/docs_comprehension.py &&
+				git -c user.name=eval-runner-e2e -c user.email=e2e@example.com commit -am "slow blind task for in-flight restart" &&
+				git push origin HEAD:%s &&
+				rm -rf /tmp/work
+			`, gitDir, branchName))
+
+		commit := strings.TrimSpace(harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+			"git", "--git-dir="+gitDir, "rev-parse", "refs/heads/"+branchName))
+		runName := fmt.Sprintf("restart-inflight-%s", commit[:7])
+
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  tasks:
+  - docs/readme_comprehension
+  - docs/readme_comprehension_blind
+`, runName, commit)
+		harness.KubectlApplyContent(manifest)
+
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+			harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+				"git", "--git-dir="+gitDir, "branch", "-D", branchName)
+		})
+
+		// Wait until task 1 (docs/readme_comprehension) is Completed and task 2 (docs/readme_comprehension_blind) is Running
+		t.Logf("Waiting for task 2 to enter Running in Run %s...", runName)
+		startWait := time.Now()
+		var task1FinishedAt *metav1.Time
+		var task2InFlight bool
+		slowSandboxName := discovery.TaskSandboxNameForRun(runName, "docs/readme_comprehension_blind")
+		var podUIDBefore string
+
+		for time.Since(startWait) < 60*time.Second {
+			out, err := exec.Command("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "json").Output()
+			if err == nil {
+				var runObj v1alpha1.Run
+				if json.Unmarshal(out, &runObj) == nil && runObj.Status.Phase == v1alpha1.RunPhaseRunning {
+					var task2Running bool
+					for _, task := range runObj.Status.Tasks {
+						if task.ID == "docs/readme_comprehension" && task.Phase == v1alpha1.TaskPhaseCompleted {
+							task1FinishedAt = task.FinishedAt
+						}
+						if task.ID == "docs/readme_comprehension_blind" && task.Phase == v1alpha1.TaskPhaseRunning {
+							task2Running = true
+						}
+					}
+					if task2Running {
+						podUIDOut, err := exec.Command("kubectl", "get", "pod", slowSandboxName, "-n", "eval-runner-sandbox", "-o", "jsonpath={.metadata.uid}").Output()
+						if err == nil && len(strings.TrimSpace(string(podUIDOut))) > 0 {
+							podUIDBefore = strings.TrimSpace(string(podUIDOut))
+							task2InFlight = true
+							break
+						}
+					}
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !task2InFlight {
+			t.Fatalf("timed out waiting for task 2 to be in-flight in Run %s", runName)
+		}
+		if task1FinishedAt == nil {
+			t.Fatalf("expected task 1 finishedAt to be set before restart, but was nil")
+		}
+
+		// Restart the controller deployment while task 2 is in-flight
+		t.Logf("Restarting eval-runner-controller deployment while task 2 is in-flight in pod %s...", podUIDBefore)
+		harness.runCmd("kubectl", "rollout", "restart", "deployment/eval-runner-controller", "-n", "eval-runner")
+		harness.runCmd("kubectl", "rollout", "status", "deployment/eval-runner-controller", "-n", "eval-runner", "--timeout=120s")
+
+		// Assert task 2 executes in a fresh sandbox (different pod UID)
+		var podUIDAfter string
+		waitNewPod := time.Now()
+		for time.Since(waitNewPod) < 60*time.Second {
+			podUIDOut, err := exec.Command("kubectl", "get", "pod", slowSandboxName, "-n", "eval-runner-sandbox", "-o", "jsonpath={.metadata.uid}").Output()
+			uid := strings.TrimSpace(string(podUIDOut))
+			if err == nil && uid != "" && uid != podUIDBefore {
+				podUIDAfter = uid
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if podUIDAfter == "" {
+			t.Fatalf("expected task 2 to run in a fresh pod with different UID, but pod UID never changed from %s", podUIDBefore)
+		}
+
+		// Wait for the Run to reach Completed
+		runObj := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		var task1, task2 *v1alpha1.TaskStatus
+		for i := range runObj.Status.Tasks {
+			if runObj.Status.Tasks[i].ID == "docs/readme_comprehension" {
+				task1 = &runObj.Status.Tasks[i]
+			}
+			if runObj.Status.Tasks[i].ID == "docs/readme_comprehension_blind" {
+				task2 = &runObj.Status.Tasks[i]
+			}
+		}
+		if task1 == nil || task2 == nil {
+			t.Fatalf("expected both tasks in status.tasks: %+v", runObj.Status.Tasks)
+		}
+
+		// Assert finished task 1 was not re-run
+		if task1.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("task 1 expected Completed, got %s", task1.Phase)
+		}
+		if task1.Restarts != 0 {
+			t.Errorf("task 1 expected 0 restarts, got %d", task1.Restarts)
+		}
+		if task1.FinishedAt == nil || !task1.FinishedAt.Equal(task1FinishedAt) {
+			t.Errorf("task 1 was re-run: finishedAt was %v, now %v", task1FinishedAt, task1.FinishedAt)
+		}
+
+		// Assert in-flight task 2 finished in clean sandbox with incremented restarts and valid samples
+		if task2.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("task 2 expected Completed, got %s (message: %s)", task2.Phase, task2.Message)
+		}
+		if task2.Restarts != 1 {
+			t.Errorf("task 2 expected 1 restart, got %d", task2.Restarts)
+		}
+		if task2.Samples == 0 || task2.SamplesDone != task2.Samples {
+			t.Errorf("task 2 expected samples > 0 and samplesDone == samples, got samples=%d, samplesDone=%d", task2.Samples, task2.SamplesDone)
+		}
 	})
 
 	t.Run("PollingWithoutWebhook_NewBranchCreatesRun", func(t *testing.T) {
