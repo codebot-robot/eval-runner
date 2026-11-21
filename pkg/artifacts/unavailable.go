@@ -16,9 +16,38 @@ package artifacts
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+
+	"google.golang.org/api/googleapi"
 )
+
+// UnavailableReason returns a descriptive explanation of why the artifact bucket is unavailable.
+// If the error indicates a 403 Forbidden with storage.buckets.get, it reports "authenticated; bucket metadata not readable".
+// If the error indicates any other 403 Forbidden, it reports "authenticated; bucket access is forbidden".
+// Otherwise, it reports "credentials are unavailable".
+func UnavailableReason(err error) string {
+	if err == nil {
+		return "credentials are unavailable"
+	}
+	var googleAPIError *googleapi.Error
+	if errors.As(err, &googleAPIError) && googleAPIError.Code == http.StatusForbidden {
+		if strings.Contains(googleAPIError.Message, "storage.buckets.get") || strings.Contains(googleAPIError.Body, "storage.buckets.get") || strings.Contains(err.Error(), "storage.buckets.get") {
+			return "authenticated; bucket metadata not readable"
+		}
+		return "authenticated; bucket access is forbidden"
+	}
+	message := err.Error()
+	if strings.Contains(message, "403") {
+		if strings.Contains(message, "storage.buckets.get") {
+			return "authenticated; bucket metadata not readable"
+		}
+		return "authenticated; bucket access is forbidden"
+	}
+	return "credentials are unavailable"
+}
 
 // UnavailableSink represents an ArtifactSink that is configured but currently unavailable
 // (e.g. because credentials cannot be resolved or access probing failed).
@@ -50,22 +79,22 @@ func (s *UnavailableSink) CheckAccess(ctx context.Context) error {
 
 // StoreArtifact implements ArtifactSink, failing immediately with the unavailability error.
 func (s *UnavailableSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
-	return "", fmt.Errorf("artifactBucket is set but credentials are unavailable: %w", s.err)
+	return "", fmt.Errorf("artifactBucket is set but %s: %w", UnavailableReason(s.err), s.err)
 }
 
 // StoreComparison implements ArtifactSink, failing immediately with the unavailability error.
 func (s *UnavailableSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
-	return "", fmt.Errorf("artifactBucket is set but credentials are unavailable: %w", s.err)
+	return "", fmt.Errorf("artifactBucket is set but %s: %w", UnavailableReason(s.err), s.err)
 }
 
 // StoreManifest implements ArtifactSink, failing immediately with the unavailability error.
 func (s *UnavailableSink) StoreManifest(ctx context.Context, meta RunMetadata, data []byte) (string, error) {
-	return "", fmt.Errorf("artifactBucket is set but credentials are unavailable: %w", s.err)
+	return "", fmt.Errorf("artifactBucket is set but %s: %w", UnavailableReason(s.err), s.err)
 }
 
 // Load implements ArtifactSink, failing immediately with the unavailability error.
 func (s *UnavailableSink) Load(ctx context.Context, path string) ([]byte, error) {
-	return nil, fmt.Errorf("artifactBucket is set but credentials are unavailable: %w", s.err)
+	return nil, fmt.Errorf("artifactBucket is set but %s: %w", UnavailableReason(s.err), s.err)
 }
 
 // ArtifactPrefix implements ArtifactSink.

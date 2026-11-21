@@ -124,3 +124,69 @@ func TestIsUnavailable(t *testing.T) {
 		t.Errorf("expected nil sink to not be unavailable")
 	}
 }
+
+func TestUnavailableReason(t *testing.T) {
+	testCases := []struct {
+		name           string
+		inputError     error
+		expectedReason string
+	}{
+		{
+			name:           "connection refused credential failure",
+			inputError:     errors.New("dial tcp 169.254.169.254:80: connect: connection refused"),
+			expectedReason: "credentials are unavailable",
+		},
+		{
+			name:           "token exchange failure",
+			inputError:     errors.New("failed to retrieve token: 401 Unauthorized"),
+			expectedReason: "credentials are unavailable",
+		},
+		{
+			name:           "403 bucket metadata unreadable",
+			inputError:     errors.New("googleapi: Error 403: Caller does not have storage.buckets.get access to the Google Cloud Storage bucket., forbidden"),
+			expectedReason: "authenticated; bucket metadata not readable",
+		},
+		{
+			name:           "403 object access forbidden",
+			inputError:     errors.New("googleapi: Error 403: Caller does not have storage.objects.list access to the Google Cloud Storage bucket., forbidden"),
+			expectedReason: "authenticated; bucket access is forbidden",
+		},
+		{
+			name:           "nil error fallback",
+			inputError:     nil,
+			expectedReason: "credentials are unavailable",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			reason := artifacts.UnavailableReason(testCase.inputError)
+			if reason != testCase.expectedReason {
+				t.Errorf("expected %q, got %q", testCase.expectedReason, reason)
+			}
+		})
+	}
+}
+
+func TestUnavailableSink_BucketMetadataForbidden(t *testing.T) {
+	ctx := t.Context()
+	metadataError := errors.New("googleapi: Error 403: Caller does not have storage.buckets.get access to the Google Cloud Storage bucket.")
+	sink := artifacts.NewUnavailableSink("my-bucket", metadataError)
+
+	meta := artifacts.RunMetadata{
+		RunName: "test-run",
+		Commit:  "commit-123",
+		TaskID:  "task-1",
+	}
+
+	_, err := sink.StoreManifest(ctx, meta, []byte("{}"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "artifactBucket is set but authenticated; bucket metadata not readable") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if strings.Contains(err.Error(), "credentials are unavailable") {
+		t.Errorf("expected error not to report credentials unavailable, got: %v", err)
+	}
+}

@@ -12375,6 +12375,64 @@ func TestReconcile_UnavailableArtifactSinkFailsFast(t *testing.T) {
 	}
 }
 
+func TestReconcile_FailsFastOnBucketMetadataForbidden(t *testing.T) {
+	scheme := setupScheme(t)
+
+	runName := "fast-fail-metadata-forbidden-run"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      runName,
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://git-server/repo.git",
+				Commit: "abc1234",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhasePending,
+		},
+	}
+
+	metadataError := errors.New("googleapi: Error 403: Caller does not have storage.buckets.get access to the Google Cloud Storage bucket.")
+	sink := artifacts.NewUnavailableSink("eval-bucket", metadataError)
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		ArtifactSink:     sink,
+	}
+
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+	_, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := client.Get(t.Context(), request.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("Failed to get run: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+	}
+	expectedMessage := "artifactBucket is set but authenticated; bucket metadata not readable: googleapi: Error 403: Caller does not have storage.buckets.get access to the Google Cloud Storage bucket."
+	if !strings.Contains(updatedRun.Status.Message, expectedMessage) {
+		t.Errorf("Expected message to contain %q, got: %s", expectedMessage, updatedRun.Status.Message)
+	}
+	if strings.Contains(updatedRun.Status.Message, "credentials are unavailable") {
+		t.Errorf("Expected message not to report credentials unavailable, got: %s", updatedRun.Status.Message)
+	}
+}
+
 func TestReconcile_HungStoreArtifactStepTimesOut(t *testing.T) {
 	scheme := setupScheme(t)
 

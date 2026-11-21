@@ -387,7 +387,7 @@ func main() {
 	if clusterConfig.ArtifactBucket != "" && sink != nil {
 		probeCtx, probeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if probeErr := sinkconfig.ProbeArtifactSink(probeCtx, sink); probeErr != nil {
-			setupLog.Info(fmt.Sprintf("WARN: artifactBucket is set but credentials are unavailable: %v; ensure workload identity or pod credentials are configured, or set artifactBucket: %q in eval-runner-config to disable", probeErr, configkeys.ConfigSentinelDisabled))
+			setupLog.Info(fmt.Sprintf("WARN: artifactBucket is set but %s: %v; ensure workload identity or pod credentials are configured, or set artifactBucket: %q in eval-runner-config to disable", artifacts.UnavailableReason(probeErr), probeErr, configkeys.ConfigSentinelDisabled))
 			if closeErr := sink.Close(); closeErr != nil {
 				setupLog.Error(closeErr, "closing replaced artifact sink")
 			}

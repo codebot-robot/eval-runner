@@ -18,14 +18,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/internal/fakes"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
+	"google.golang.org/api/option"
 )
 
 var _ StorageClient = (*fakes.FakeStorageClient)(nil)
@@ -728,6 +732,84 @@ func TestCheckAccess(t *testing.T) {
 	if err := sink.CheckAccess(ctx); !errors.Is(err, probeErr) {
 		t.Errorf("expected CheckAccess to return probeErr, got %v", err)
 	}
+}
+
+func TestRealStorageClient_CheckAccess(t *testing.T) {
+	ctx := t.Context()
+
+	var requestedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestedPath = request.URL.Path
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/b/empty-bucket/o"):
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"kind": "storage#objects"}`))
+		case strings.HasSuffix(request.URL.Path, "/b/objects-bucket/o"):
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"kind": "storage#objects", "items": [{"name": "runs/test"}]}`))
+		case strings.HasSuffix(request.URL.Path, "/b/forbidden-bucket/o"):
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = writer.Write([]byte(`{"error": {"code": 403, "message": "Caller does not have storage.objects.list access to the Google Cloud Storage bucket."}}`))
+		case strings.HasSuffix(request.URL.Path, "/b/not-found-bucket/o"):
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusNotFound)
+			_, _ = writer.Write([]byte(`{"error": {"code": 404, "message": "The specified bucket does not exist."}}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	gcsClient, err := storage.NewClient(ctx, option.WithEndpoint(server.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create storage client: %v", err)
+	}
+	defer func() {
+		if closeErr := gcsClient.Close(); closeErr != nil {
+			t.Errorf("error closing gcsClient: %v", closeErr)
+		}
+	}()
+
+	client := &realStorageClient{client: gcsClient}
+
+	t.Run("empty bucket succeeds and queries objects", func(t *testing.T) {
+		if err := client.CheckAccess(ctx, "empty-bucket"); err != nil {
+			t.Errorf("expected CheckAccess to succeed for empty bucket, got %v", err)
+		}
+		if !strings.Contains(requestedPath, "/b/empty-bucket/o") {
+			t.Errorf("expected object listing endpoint /b/empty-bucket/o, got: %s", requestedPath)
+		}
+		if requestedPath == "/storage/v1/b/empty-bucket" {
+			t.Errorf("expected object-level probe, not bucket metadata endpoint: %s", requestedPath)
+		}
+	})
+
+	t.Run("bucket with objects succeeds", func(t *testing.T) {
+		if err := client.CheckAccess(ctx, "objects-bucket"); err != nil {
+			t.Errorf("expected CheckAccess to succeed for bucket with objects, got %v", err)
+		}
+	})
+
+	t.Run("forbidden bucket returns error", func(t *testing.T) {
+		err := client.CheckAccess(ctx, "forbidden-bucket")
+		if err == nil {
+			t.Fatal("expected 403 error, got nil")
+		}
+		if !strings.Contains(err.Error(), "403") {
+			t.Errorf("expected 403 in error, got: %v", err)
+		}
+	})
+
+	t.Run("not found bucket returns error", func(t *testing.T) {
+		err := client.CheckAccess(ctx, "not-found-bucket")
+		if err == nil {
+			t.Fatal("expected 404 error, got nil")
+		}
+		if !strings.Contains(err.Error(), "404") {
+			t.Errorf("expected 404 in error, got: %v", err)
+		}
+	})
 }
 
 func TestStoreManifest_ErrorNamesSinkOperation(t *testing.T) {
