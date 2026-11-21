@@ -149,6 +149,10 @@ type TaskStatus struct {
 	// +optional
 	LogPath string `json:"logPath,omitempty"`
 
+	// LogHash is the sha256 checksum (in sha256:<hex> format) of the stored task artifact's content as produced.
+	// +optional
+	LogHash string `json:"logHash,omitempty"`
+
 	// SampleRange is the sample window evaluated for this task.
 	// +optional
 	SampleRange *SampleRange `json:"sampleRange,omitempty"`
