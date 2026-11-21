@@ -32,10 +32,16 @@ The declared `cpus` and `memory` from `task.toml` are emitted in the `sandbox` r
 examples/terminal-bench/run-task.sh <task-name> [oracle|prepare|verify|agent] [workdir]
 ```
 
-- **`prepare`**: Fetches the task repository at the pinned commit, installs `tests/` into `${TESTS_DIRECTORY}` (default `/tests`), creates log directories, and writes the task's prompt to `${OUT_DIRECTORY}/instruction.md` (default `/out/instruction.md`). The reference solution is not installed and `/solution` is never present in the sandbox. Exits 0 on success; on failure writes a failing `/out/results.json` and exits non-zero. Safe to run once per sandbox during startup for model-driven evaluation.
-- **`verify`**: Executes the test harness at `${TESTS_DIRECTORY}/test.sh`, reads the reward (`reward.json` or `reward.txt`), and writes `/out/results.json`. Does not fetch the repository again and fails clearly if `prepare` has not been run.
+- **`prepare`**: Fetches the task repository at the pinned commit, creates log directories, and writes the task's prompt to `${OUT_DIRECTORY}/instruction.md` (default `/out/instruction.md`). Neither the reference solution nor the verifier tests are installed in the sandbox during prepare, ensuring `/solution` and `/tests` are not present while the agent is running. Exits 0 on success; on failure writes a failing `/out/results.json` and exits non-zero. Safe to run once per sandbox during startup for model-driven evaluation.
+- **`verify`**: Obtains the verifier tests at the pinned commit immediately before running them, discarding anything the agent may have created under `${TESTS_DIRECTORY}` beforehand so planted verifiers cannot succeed. Executes `${TESTS_DIRECTORY}/test.sh`, reads the reward (`reward.json` or `reward.txt`), and writes `/out/results.json`. Fails clearly if `prepare` has not been run.
 - **`oracle`**: The default phase. Runs the full one-shot evaluation pipeline (`prepare`, installs and runs the reference solution at `${SOLUTION_DIRECTORY}/solve.sh`, then `verify`).
 - **`agent`**: Kept as an alias for `prepare` followed immediately by `verify` without installing or running the solution.
+
+### Verifier Isolation Guarantee and Limits
+
+During agent execution (between `prepare` and `verify`), neither the task's reference solution nor its verifier tests are present anywhere in the sandbox, ensuring an agent cannot inspect tests or expected answers beforehand, nor plant a fake verifier. When verification begins, `verify` discards whatever the agent created under `${TESTS_DIRECTORY}` and obtains the genuine tests at the pinned commit.
+
+Note the limit of this guarantee: the sandbox container currently has network egress, so a determined agent could fetch the public benchmark repository directly. Closing network egress is egress-policy work, not handled here.
 
 ## Pinned Commit and How to Bump It
 
