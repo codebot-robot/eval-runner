@@ -9413,7 +9413,7 @@ func TestReconcileArtifactSink_CostAndLatencyAccountingWithFixture(t *testing.T)
 	})
 }
 
-func TestReconcileArtifactSink_UploadCapRecordedInSummary(t *testing.T) {
+func TestReconcileArtifactSink_UploadCapRefused(t *testing.T) {
 	scheme := setupScheme(t)
 
 	manifest := &v1alpha1.Manifest{
@@ -9545,37 +9545,137 @@ func TestReconcileArtifactSink_UploadCapRecordedInSummary(t *testing.T) {
 		t.Fatalf("Failed to get updated run: %v", err)
 	}
 
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+		t.Errorf("Expected Run phase Failed, got %s", updatedRun.Status.Phase)
+	}
+
+	if len(updatedRun.Status.Tasks) != 1 {
+		t.Fatalf("Expected 1 task in Run status, got %d", len(updatedRun.Status.Tasks))
+	}
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task phase Failed, got %s", task.Phase)
+	}
+	expectedSize := fmt.Sprintf("%d", len(inspectLog))
+	expectedLimit := fmt.Sprintf("%d", capLimit)
+	if !strings.Contains(task.Message, "artifact was too large") ||
+		!strings.Contains(task.Message, "docs/readme_comprehension") ||
+		!strings.Contains(task.Message, "2026-10-17_readme_eval.json") ||
+		!strings.Contains(task.Message, expectedSize) ||
+		!strings.Contains(task.Message, expectedLimit) {
+		t.Errorf("Expected task message to describe refusal with task, file, size %s, and limit %s, got: %s", expectedSize, expectedLimit, task.Message)
+	}
+}
+
+func TestRunController_AgentExecution_OversizedAgentRecordUnaffected(t *testing.T) {
+	scheme := setupScheme(t)
+	timeout := 900
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{{
+			ID:        "task-agent-oversized",
+			Spec:      "eval.py@valid",
+			Image:     "task-image:v1",
+			Command:   []string{"verify.sh"},
+			Resources: []v1alpha1.ManifestResource{{Type: "sandbox"}},
+			Agent: &v1alpha1.ManifestTaskAgent{
+				InstructionPath: "/workspace/out/inst.md",
+				TimeoutSeconds:  &timeout,
+			},
+		}},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-run-agent-oversized", Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "abcdef123456"}, Model: "mockllm/model"},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseRunning},
+	}
+
+	fakeClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "echo output"}, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			if path == "/out/results.json" {
+				return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true, "score": 1.0}]}`), nil
+			}
+			if path == "/out/inst.md" || path == "out/inst.md" {
+				return []byte("```scripted-bash\necho 'long step output text to generate a large agent record in agent.json with lots of steps'\n```"), nil
+			}
+			return nil, fmt.Errorf("file not found: %s", path)
+		},
+	}
+
+	fakeGCSClient := fakes.NewFakeStorageClient()
+	// Cap limit of 80 bytes: results.json (74 bytes) fits, but agent.json (>300 bytes) will exceed it
+	capLimit := int64(80)
+	gcsSink, err := gcs.New(t.Context(), "gs://my-bucket",
+		gcs.WithStorageClient(fakeGCSClient),
+		gcs.WithMaxUploadBytes(capLimit),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	scriptedModel := agent.NewScriptedModel()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).WithStatusSubresource(run).Build()
+	reconciler := &RunReconciler{
+		Client: cl, Scheme: scheme, SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient: fakeClient,
+		ArtifactSink:  gcsSink,
+		AgentModel:    scriptedModel,
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+	// Turn 1: create sandbox pod
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("turn 1 error: %v", err)
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discovery.TaskSandboxNameForRun(run.Name, "task-agent-oversized"),
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "10.244.0.52",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	if err := cl.Create(t.Context(), pod); err != nil {
+		t.Fatalf("failed to create pod: %v", err)
+	}
+
+	// Turn 2: executes agent loop (oversized agent.json refused) then verify command, writes results.json
+	res, err := reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("turn 2 error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("Expected Requeue to check completion")
+	}
+
+	// Turn 3: Run marked Completed
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("turn 3 error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("failed to get updated run: %v", err)
+	}
+
+	// Task result is unaffected by agent record refusal: phase must be Completed
 	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
-		t.Errorf("Expected Run phase Completed, got %s", updatedRun.Status.Phase)
+		t.Errorf("expected Run phase Completed, got %s", updatedRun.Status.Phase)
 	}
-
-	// Verify log object exists and is truncated to capLimit
-	logObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json")
-	if !exists {
-		t.Fatalf("Log object was not uploaded to GCS")
+	if len(updatedRun.Status.Tasks) != 1 {
+		t.Fatalf("expected 1 task in Run status, got %d", len(updatedRun.Status.Tasks))
 	}
-	if int64(len(logObj.Data)) != capLimit {
-		t.Errorf("Expected uploaded log data capped to %d bytes, got %d", capLimit, len(logObj.Data))
-	}
-	if string(logObj.Data) != inspectLog[:capLimit] {
-		t.Errorf("Expected uploaded log to match prefix of inspectLog")
-	}
-
-	// Verify summary.json has Capped=true and CapBytes=capLimit
-	summaryObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/summary.json")
-	if !exists {
-		t.Fatalf("summary.json was not uploaded to GCS")
-	}
-
-	var summary artifacts.TaskSummary
-	if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
-		t.Fatalf("Failed to parse summary.json: %v", err)
-	}
-	if !summary.Capped {
-		t.Errorf("Expected summary.Capped to be true when upload exceeds capLimit")
-	}
-	if summary.CapBytes != capLimit {
-		t.Errorf("Expected summary.CapBytes=%d, got %d", capLimit, summary.CapBytes)
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Errorf("expected task Phase Completed despite agent record refusal, got %s (message: %s)", task.Phase, task.Message)
 	}
 }
 

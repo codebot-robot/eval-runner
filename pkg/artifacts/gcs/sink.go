@@ -32,7 +32,6 @@ import (
 	"golang.org/x/oauth2/google/externalaccount"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -314,18 +313,17 @@ func (s *GCSSink) StoreComparison(ctx context.Context, comparisonName string, da
 		return "", fmt.Errorf("bucket name is empty")
 	}
 
-	capLimit := s.maxUploadBytes
-	if capLimit <= 0 {
-		capLimit = DefaultMaxUploadBytes
-	}
-
-	uploadData := data
-	if int64(len(data)) > capLimit {
-		uploadData = data[:capLimit]
-	}
-
 	compObject := fmt.Sprintf("comparisons/%s.json", comparisonName)
-	if err := s.client.WriteObject(ctx, s.bucket, compObject, "application/json", uploadData); err != nil {
+	capLimit := s.effectiveCapBytes()
+	if int64(len(data)) > capLimit {
+		return "", &artifacts.ArtifactTooLargeError{
+			File:  compObject,
+			Size:  int64(len(data)),
+			Limit: capLimit,
+		}
+	}
+
+	if err := s.client.WriteObject(ctx, s.bucket, compObject, "application/json", data); err != nil {
 		return "", fmt.Errorf("store comparison to gs://%s/%s: %w", s.bucket, compObject, err)
 	}
 
@@ -388,42 +386,43 @@ func (s *GCSSink) effectiveCapBytes() int64 {
 	return s.maxUploadBytes
 }
 
-func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, bool, error) {
+func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
 	if err := artifacts.ValidateArtifact(meta, filename); err != nil {
-		return "", false, err
+		return "", err
 	}
 	if meta.Commit == "" {
-		return "", false, fmt.Errorf("commit must not be empty")
+		return "", fmt.Errorf("commit must not be empty")
 	}
 	if s.bucket == "" {
-		return "", false, fmt.Errorf("bucket name is empty")
+		return "", fmt.Errorf("bucket name is empty")
 	}
 
 	capLimit := s.effectiveCapBytes()
-	uploadData := data
-	capped := int64(len(data)) > capLimit
-	if capped {
-		log.FromContext(ctx).Info("truncating artifact upload at size cap", "task", meta.TaskID, "file", filename, "size", len(data), "cap", capLimit)
-		uploadData = data[:capLimit]
+	if int64(len(data)) > capLimit {
+		return "", &artifacts.ArtifactTooLargeError{
+			Task:  meta.TaskID,
+			File:  filename,
+			Size:  int64(len(data)),
+			Limit: capLimit,
+		}
 	}
 
 	logObject := fmt.Sprintf("runs/%s/%s/%s", meta.Commit, meta.TaskID, filename)
-	if err := s.client.WriteObject(ctx, s.bucket, logObject, "application/json", uploadData); err != nil {
-		return "", false, fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
+	if err := s.client.WriteObject(ctx, s.bucket, logObject, "application/json", data); err != nil {
+		return "", fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
 	}
 
-	return fmt.Sprintf("gs://%s/%s", s.bucket, logObject), capped, nil
+	return fmt.Sprintf("gs://%s/%s", s.bucket, logObject), nil
 }
 
 // StoreTaskFile implements artifacts.TaskFileStorer for GCSSink, writing filename next to task artifacts without modifying summary.json.
 func (s *GCSSink) StoreTaskFile(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	uri, _, err := s.storeObject(ctx, meta, filename, data)
-	return uri, err
+	return s.storeObject(ctx, meta, filename, data)
 }
 
 // StoreArtifact writes the inspect log and summary.json to GCS and returns the gs:// URI.
 func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	logURI, capped, err := s.storeObject(ctx, meta, filename, data)
+	logURI, err := s.storeObject(ctx, meta, filename, data)
 	if err != nil {
 		return "", err
 	}
@@ -456,16 +455,12 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 		SuccessRateSD:     meta.SuccessRateSD,
 		StartedAt:         meta.StartedAt,
 		FinishedAt:        meta.FinishedAt,
-		Capped:            capped,
 		SampleRange:       meta.SampleRange,
 		Tokens:            meta.Tokens,
 		Latency:           meta.Latency,
 		CostUSD:           meta.CostUSD,
 		CostSource:        meta.CostSource,
 		PossibleSamples:   meta.PossibleSamples,
-	}
-	if capped {
-		summary.CapBytes = s.effectiveCapBytes()
 	}
 
 	summaryBytes, err := json.MarshalIndent(summary, "", "  ")

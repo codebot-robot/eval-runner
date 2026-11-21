@@ -309,8 +309,6 @@ Artifact sinks store evaluation logs and metadata according to the [functionalit
 | `successRateSD` | `number` | Sample standard deviation for continuous scorers (omitted for binary scorers). |
 | `startedAt` | `string` | RFC 3339 timestamp when task execution started (omitted if empty). |
 | `finishedAt` | `string` | RFC 3339 timestamp when task execution finished (omitted if empty). |
-| `capped` | `boolean` | True if the raw Inspect log exceeded storage size limits and was capped. |
-| `capBytes` | `integer` | Size limit in bytes when `capped` is true (omitted if uncapped). |
 | `sampleRange` | `object` | 1-based inclusive sample range executed if configured on the Run (omitted if whole dataset). |
 | `sampleRange.start` | `integer` | First sample index in range. |
 | `sampleRange.end` | `integer` | Last sample index in range. |
@@ -359,7 +357,7 @@ Limits on exec streams and sandbox file reads are owned exclusively by `pkg/sand
 | Artifact bucket | `--artifact-bucket` / ConfigMap `artifactBucket` | `""` (in-memory sink) | GCS bucket URI (`gs://<bucket>`) or name where manifests, Inspect logs, and `summary.json` are stored. |
 | GCP Workload Identity provider | ConfigMap `gcpWorkloadIdentityProvider` | `""` (ADC) | Full GCP Workload Identity Federation provider resource name (`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`) for non-GKE clusters. |
 | Artifact directory | `--artifact-dir` | `""` (in-memory sink) | Local filesystem directory for storing manifests, evaluation logs, and comparison artifacts when GCS is not configured. |
-| Artifact upload size | `--artifact-max-upload-bytes` / ConfigMap `artifactMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded artifact (default 10 MiB, equal to sandbox ReadFile limit); manifests error above cap; task logs are capped and recorded with `capped` in `summary.json`. |
+| Artifact upload size | `--artifact-max-upload-bytes` / ConfigMap `artifactMaxUploadBytes` | `10485760` (10 MiB) | Maximum size of an uploaded artifact (default 10 MiB, equal to sandbox ReadFile limit); files exceeding the limit are refused and not written to storage. |
 | Artifact load size | `DefaultMaxLoadBytes` | `10485760` (10 MiB) | Maximum size of an artifact loaded from the sink. |
 | Task path patterns | `MaxTaskPaths` | `100` | Maximum number of path glob patterns allowed per task in a discovered manifest. |
 | Task path pattern length | `MaxPathLength` | `1024` | Maximum character length of a single path glob pattern. |
