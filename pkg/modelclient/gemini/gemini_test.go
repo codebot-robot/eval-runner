@@ -346,3 +346,187 @@ func TestIsGeminiModel(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerate_Retry(t *testing.T) {
+	newTestClient := func(server *httptest.Server) *Client {
+		client, err := New(Options{
+			BaseURL:        server.URL,
+			Model:          "gemini-2.5-flash",
+			APIKey:         "test-secret-key",
+			HTTPClient:     server.Client(),
+			InitialBackoff: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		return client
+	}
+
+	t.Run("retry transient 503 error succeeds", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			attempts++
+			if attempts == 1 {
+				responseWriter.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = responseWriter.Write([]byte(`{"error":{"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."}}`))
+				return
+			}
+			responseWriter.WriteHeader(http.StatusOK)
+			_, _ = responseWriter.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"Success after retry"}]}}]}`))
+		}))
+		defer server.Close()
+
+		response, err := newTestClient(server).Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err != nil {
+			t.Fatalf("Generate() failed: %v", err)
+		}
+		if attempts != 2 || response.Text != "Success after retry" {
+			t.Errorf("unexpected attempts=%d or text=%q", attempts, response.Text)
+		}
+	})
+
+	t.Run("retry dropped connection succeeds", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			attempts++
+			if attempts == 1 {
+				hijacker, ok := responseWriter.(http.Hijacker)
+				if !ok {
+					t.Errorf("responseWriter does not support http.Hijacker")
+					return
+				}
+				connection, _, hijackErr := hijacker.Hijack()
+				if hijackErr != nil {
+					t.Errorf("hijack connection: %v", hijackErr)
+					return
+				}
+				_ = connection.Close()
+				return
+			}
+			responseWriter.WriteHeader(http.StatusOK)
+			_, _ = responseWriter.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"Recovered from dropped connection"}]}}]}`))
+		}))
+		defer server.Close()
+
+		response, err := newTestClient(server).Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err != nil {
+			t.Fatalf("Generate() failed: %v", err)
+		}
+		if attempts != 2 || response.Text != "Recovered from dropped connection" {
+			t.Errorf("unexpected attempts=%d or text=%q", attempts, response.Text)
+		}
+	})
+
+	t.Run("exhaust retries on 503 reports attempt count and last error", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			attempts++
+			responseWriter.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = responseWriter.Write([]byte(`{"error":{"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."}}`))
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(server).Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if attempts != 4 {
+			t.Errorf("expected 4 attempts, got %d", attempts)
+		}
+		errorMessage := err.Error()
+		if !strings.HasPrefix(errorMessage, "after 4 attempts:") || !strings.Contains(errorMessage, "gemini API error (503 Service Unavailable)") || !strings.Contains(errorMessage, "This model is currently experiencing high demand") {
+			t.Errorf("unexpected error message: %q", errorMessage)
+		}
+	})
+
+	t.Run("wait exceeding context deadline returns attempts error promptly", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			attempts++
+			responseWriter.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = responseWriter.Write([]byte(`{"error":{"message":"This model is currently experiencing high demand."}}`))
+		}))
+		defer server.Close()
+
+		client, err := New(Options{
+			BaseURL:        server.URL,
+			Model:          "gemini-2.5-flash",
+			APIKey:         "test-secret-key",
+			HTTPClient:     server.Client(),
+			InitialBackoff: time.Hour,
+		})
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+
+		_, err = client.Generate(ctx, agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if attempts != 1 {
+			t.Errorf("expected 1 attempt before deadline exhaustion, got %d", attempts)
+		}
+		errorMessage := err.Error()
+		if !strings.HasPrefix(errorMessage, "after 1 attempt (stopped because no time left to retry):") || !strings.Contains(errorMessage, "gemini API error (503 Service Unavailable)") {
+			t.Errorf("expected 'after 1 attempt (stopped because no time left to retry):' error, got %q", errorMessage)
+		}
+	})
+
+	t.Run("permanent 401 or 403 fails at once without attempts message", func(t *testing.T) {
+		for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+			var attempts int
+			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				attempts++
+				responseWriter.WriteHeader(statusCode)
+				_, _ = responseWriter.Write([]byte(`{"error":{"message":"API key not valid"}}`))
+			}))
+
+			_, err := newTestClient(server).Generate(t.Context(), agent.Request{
+				Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+			})
+			server.Close()
+
+			if err == nil {
+				t.Fatalf("expected error for status %d, got nil", statusCode)
+			}
+			if attempts != 1 || strings.Contains(err.Error(), "attempts") {
+				t.Errorf("status %d: expected 1 attempt and no 'attempts' in error, got attempts=%d, err=%v", statusCode, attempts, err)
+			}
+		}
+	})
+
+	t.Run("transport error redacts api key", func(t *testing.T) {
+		secretKey := "super-secret-key-12345678"
+		client, err := New(Options{
+			BaseURL:        "http://127.0.0.1:1",
+			Model:          "gemini-2.5-flash",
+			APIKey:         secretKey,
+			HTTPClient:     &http.Client{Timeout: 10 * time.Millisecond},
+			InitialBackoff: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+
+		_, err = client.Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if strings.Contains(err.Error(), secretKey) {
+			t.Fatalf("error exposed secret key: %v", err)
+		}
+	})
+}
