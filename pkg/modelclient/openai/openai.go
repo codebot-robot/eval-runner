@@ -23,18 +23,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gke-labs/eval-runner/pkg/modelclient"
 )
 
 const (
-	defaultHTTPTimeout    = 2 * time.Minute
-	defaultInitialBackoff = 1 * time.Second
-	maxRetryAfter         = 60 * time.Second
-	maxRetries            = 3
-	bashToolName          = "bash"
+	defaultHTTPTimeout = 2 * time.Minute
+	bashToolName       = "bash"
 )
 
 var bashTool = []map[string]any{{"type": "function", "function": map[string]any{
@@ -130,7 +128,7 @@ func New(options Options) (*Client, error) {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	if initialBackoff <= 0 {
-		initialBackoff = defaultInitialBackoff
+		initialBackoff = modelclient.DefaultInitialBackoff
 	}
 	return &Client{
 		baseURL: strings.TrimRight(options.BaseURL, "/"), model: options.Model, token: options.Token,
@@ -199,57 +197,31 @@ func (client *Client) Generate(ctx context.Context, request Request) (*Response,
 	if marshalErr != nil {
 		return nil, fmt.Errorf("marshal request: %w", marshalErr)
 	}
-	endpointURL, backoffDuration := client.baseURL+"/chat/completions", client.initialBackoff
 
-	for attempt := 0; ; attempt++ {
-		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(encodedBody))
-		if err != nil {
-			return nil, fmt.Errorf("create request: %w", err)
-		}
-		httpRequest.Header.Set("Content-Type", "application/json")
-		if client.token != "" {
-			httpRequest.Header.Set("Authorization", "Bearer "+client.token)
-		}
-
-		httpResponse, err := client.httpClient.Do(httpRequest)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, errors.New(client.redactToken(fmt.Sprintf("execute request: %v", err)))
-		}
-
-		if httpResponse.StatusCode >= 200 && httpResponse.StatusCode < 300 {
-			response, parseErr := client.parseResponse(io.LimitReader(httpResponse.Body, 16*1024*1024))
-			if closeErr := httpResponse.Body.Close(); closeErr != nil && parseErr == nil {
-				return nil, fmt.Errorf("close response: %w", closeErr)
-			}
-			return response, parseErr
-		}
-
-		responseBytes, readErr := io.ReadAll(io.LimitReader(httpResponse.Body, 64*1024))
-		if closeErr := httpResponse.Body.Close(); closeErr != nil && readErr == nil {
-			return nil, fmt.Errorf("close response: %w", closeErr)
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("read response: %w", readErr)
-		}
-
-		if (httpResponse.StatusCode == http.StatusTooManyRequests || (httpResponse.StatusCode >= 500 && httpResponse.StatusCode <= 599)) && attempt < maxRetries {
-			waitDuration := backoffDuration
-			backoffDuration *= 2
-			if retryAfter, ok := parseRetryAfter(httpResponse.Header.Get("Retry-After")); ok {
-				waitDuration = retryAfter
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(waitDuration):
-			}
-			continue
-		}
-		return nil, client.formatAPIError(httpResponse.Status, responseBytes)
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+	if client.token != "" {
+		header.Set("Authorization", "Bearer "+client.token)
 	}
+
+	httpResponse, err := modelclient.PostWithRetry(ctx, modelclient.PostOptions{
+		HTTPClient:     client.httpClient,
+		EndpointURL:    client.baseURL + "/chat/completions",
+		Header:         header,
+		Body:           encodedBody,
+		InitialBackoff: client.initialBackoff,
+		FormatError:    client.formatAPIError,
+		Redact:         client.redactToken,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	response, parseErr := client.parseResponse(io.LimitReader(httpResponse.Body, 16*1024*1024))
+	if closeErr := httpResponse.Body.Close(); closeErr != nil && parseErr == nil {
+		return nil, fmt.Errorf("close response: %w", closeErr)
+	}
+	return response, parseErr
 }
 
 func (client *Client) parseResponse(bodyReader io.Reader) (*Response, error) {
@@ -323,20 +295,6 @@ func extractCommand(name string, argumentsRaw json.RawMessage) string {
 		return "echo 'invalid tool call: missing command field' >&2; exit 2"
 	}
 	return *payload.Command
-}
-
-func parseRetryAfter(header string) (time.Duration, bool) {
-	if header == "" {
-		return 0, false
-	}
-	if seconds, parseErr := strconv.ParseFloat(header, 64); parseErr == nil && seconds >= 0 {
-		return min(time.Duration(seconds*float64(time.Second)), maxRetryAfter), true
-	}
-	parsedTime, parseTimeErr := http.ParseTime(header)
-	if parseTimeErr != nil {
-		return 0, false
-	}
-	return min(max(time.Until(parsedTime), 0), maxRetryAfter), true
 }
 
 func (client *Client) formatAPIError(statusText string, responseBytes []byte) error {
