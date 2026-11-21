@@ -123,16 +123,13 @@ func New(options Options) (*Client, error) {
 	if options.Model == "" {
 		return nil, errors.New("model is required")
 	}
-	httpClient, initialBackoff := options.HTTPClient, options.InitialBackoff
+	httpClient := options.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
-	if initialBackoff <= 0 {
-		initialBackoff = modelclient.DefaultInitialBackoff
-	}
 	return &Client{
 		baseURL: strings.TrimRight(options.BaseURL, "/"), model: options.Model, token: options.Token,
-		httpClient: httpClient, initialBackoff: initialBackoff, rawToolCalls: make(map[string]json.RawMessage),
+		httpClient: httpClient, initialBackoff: options.InitialBackoff, rawToolCalls: make(map[string]json.RawMessage),
 	}, nil
 }
 

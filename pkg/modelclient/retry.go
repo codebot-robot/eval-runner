@@ -23,13 +23,11 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
 const (
-	// DefaultInitialBackoff is the default initial delay before retrying a failed request.
-	DefaultInitialBackoff = 1 * time.Second
+	defaultInitialBackoff = 1 * time.Second
 	maxRetryAfter         = 60 * time.Second
 	maxRetries            = 3
 	maxErrorResponseBytes = 64 * 1024
@@ -48,17 +46,13 @@ type PostOptions struct {
 
 // PostWithRetry executes an HTTP POST request with exponential backoff and retry for rate-limit and server errors.
 func PostWithRetry(ctx context.Context, options PostOptions) (*http.Response, error) {
-	httpClient := options.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	endpointURL, backoffDuration := options.EndpointURL, options.InitialBackoff
+	backoffDuration := options.InitialBackoff
 	if backoffDuration <= 0 {
-		backoffDuration = DefaultInitialBackoff
+		backoffDuration = defaultInitialBackoff
 	}
 
 	for attempt := 0; ; attempt++ {
-		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(options.Body))
+		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, options.EndpointURL, bytes.NewReader(options.Body))
 		if err != nil {
 			return nil, fmt.Errorf("create request: %w", err)
 		}
@@ -66,7 +60,7 @@ func PostWithRetry(ctx context.Context, options PostOptions) (*http.Response, er
 			httpRequest.Header = options.Header.Clone()
 		}
 
-		httpResponse, err := httpClient.Do(httpRequest)
+		httpResponse, err := options.HTTPClient.Do(httpRequest)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -102,10 +96,7 @@ func PostWithRetry(ctx context.Context, options PostOptions) (*http.Response, er
 			}
 			continue
 		}
-		if options.FormatError != nil {
-			return nil, options.FormatError(httpResponse.Status, responseBytes)
-		}
-		return nil, fmt.Errorf("API error (%s): %s", httpResponse.Status, strings.TrimSpace(string(responseBytes)))
+		return nil, options.FormatError(httpResponse.Status, responseBytes)
 	}
 }
 
