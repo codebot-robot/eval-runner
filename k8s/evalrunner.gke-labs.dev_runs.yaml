@@ -374,6 +374,10 @@ spec:
                             seconds.
                           type: number
                       type: object
+                    logHash:
+                      description: LogHash is the sha256 checksum (in sha256:<hex>
+                        format) of the stored task artifact's content as produced.
+                      type: string
                     logPath:
                       description: LogPath is the path or URI where the Inspect log
                         was stored by the artifact sink.

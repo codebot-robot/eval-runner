@@ -102,9 +102,9 @@ func (s *InMemorySink) StoreManifest(ctx context.Context, meta RunMetadata, data
 	return uri, nil
 }
 
-func (s *InMemorySink) storeTaskFileLocked(meta RunMetadata, filename string, data []byte) (string, error) {
+func (s *InMemorySink) storeTaskFileLocked(meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
 	if err := ValidateArtifact(meta, filename); err != nil {
-		return "", err
+		return StoredArtifact{}, err
 	}
 
 	var objKey string
@@ -118,24 +118,30 @@ func (s *InMemorySink) storeTaskFileLocked(meta RunMetadata, filename string, da
 	copy(copied, data)
 	s.objects[objKey] = copied
 
-	return fmt.Sprintf("mem://%s", objKey), nil
+	hash := ArtifactHash(data)
+	s.metadata[objKey] = map[string]string{
+		"sha256": hash,
+	}
+
+	return StoredArtifact{Location: fmt.Sprintf("mem://%s", objKey), Hash: hash}, nil
 }
 
 // StoreTaskFile implements TaskFileStorer for InMemorySink, writing filename next to task artifacts without modifying summary.json.
 func (s *InMemorySink) StoreTaskFile(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.storeTaskFileLocked(meta, filename, data)
+	stored, err := s.storeTaskFileLocked(meta, filename, data)
+	return stored.Location, err
 }
 
 // StoreArtifact persists the raw log bytes for a task.
-func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	uri, err := s.storeTaskFileLocked(meta, filename, data)
+	stored, err := s.storeTaskFileLocked(meta, filename, data)
 	if err != nil {
-		return "", err
+		return StoredArtifact{}, err
 	}
 
 	sampleList := meta.Samples
@@ -152,6 +158,7 @@ func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 		Model:             meta.Model,
 		Commit:            meta.Commit,
 		LogFilename:       filename,
+		LogHash:           stored.Hash,
 		RunName:           meta.RunName,
 		RunNamespace:      meta.RunNamespace,
 		ControllerVersion: meta.ControllerVersion,
@@ -175,7 +182,7 @@ func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 	}
 	summaryBytes, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal summary.json: %w", err)
+		return StoredArtifact{}, fmt.Errorf("failed to marshal summary.json: %w", err)
 	}
 	summaryBytes = append(summaryBytes, '\n')
 	var summaryKey string
@@ -186,7 +193,7 @@ func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 	}
 	s.objects[summaryKey] = summaryBytes
 
-	return uri, nil
+	return stored, nil
 }
 
 // StoreComparison persists comparison summary data as comparisons/<comparisonName>.json.

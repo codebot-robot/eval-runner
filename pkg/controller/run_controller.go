@@ -2532,6 +2532,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		agg     *artifacts.TaskAggregates
 		summary *artifacts.TaskSummary
 		logPath string
+		logHash string
 	}
 	rescuedTasks := make(map[string]rescuedTaskInfo)
 	waitingInGracePeriod := false
@@ -2605,6 +2606,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			var rescuedAgg *artifacts.TaskAggregates
 			var rescuedSummary *artifacts.TaskSummary
 			var rescuedLogPath string
+			var rescuedLogHash string
 
 			if t.Samples > 0 && (requestedWindow <= 0 || t.Samples >= requestedWindow) {
 				rescued = true
@@ -2643,6 +2645,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 							rescuedSummary = &sum
 							if sum.LogFilename != "" {
 								rescuedLogPath = artifacts.ArtifactTarget(r.artifactSink(), run.Spec.Repo.Commit, t.ID, sum.LogFilename)
+								rescuedLogHash = sum.LogHash
 							}
 						} else {
 							logger.V(1).Info("probed artifact sink for restart rescue", "task", t.ID, "path", summaryPath, "outcome", "empty", "samples", 0)
@@ -2663,7 +2666,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					}
 				}
 				logger.Info("restart rescue", "task", t.ID, "run", run.Name, "samples", sampleCount)
-				rescuedTasks[t.ID] = rescuedTaskInfo{agg: rescuedAgg, summary: rescuedSummary, logPath: rescuedLogPath}
+				rescuedTasks[t.ID] = rescuedTaskInfo{agg: rescuedAgg, summary: rescuedSummary, logPath: rescuedLogPath, logHash: rescuedLogHash}
 				continue
 			}
 
@@ -2753,6 +2756,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					if status.Tasks[i].LogPath == "" && info.logPath != "" {
 						status.Tasks[i].LogPath = info.logPath
 					}
+					if status.Tasks[i].LogHash == "" && info.logHash != "" {
+						status.Tasks[i].LogHash = info.logHash
+					}
 					if info.summary != nil {
 						status.Tasks[i].Samples = info.summary.SampleCount
 						status.Tasks[i].Successes = info.summary.Successes
@@ -2825,6 +2831,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				}
 				if run.Status.Tasks[i].LogPath == "" && info.logPath != "" {
 					run.Status.Tasks[i].LogPath = info.logPath
+				}
+				if run.Status.Tasks[i].LogHash == "" && info.logHash != "" {
+					run.Status.Tasks[i].LogHash = info.logHash
 				}
 			}
 		}
@@ -2903,6 +2912,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				status.Tasks[i].SuccessRateSD = res.successRateSD
 				status.Tasks[i].Message = res.message
 				status.Tasks[i].LogPath = res.logPath
+				status.Tasks[i].LogHash = res.logHash
 				status.Tasks[i].Tokens = res.tokens
 				status.Tasks[i].Latency = res.latency
 				status.Tasks[i].CostUSD = res.costUSD
@@ -3071,6 +3081,7 @@ type taskExecutionResult struct {
 	samplesPlanned  int
 	message         string
 	logPath         string
+	logHash         string
 	sampleRange     *v1alpha1.SampleRange
 	timeoutSeconds  int
 	resources       *v1alpha1.TaskResources
@@ -3472,7 +3483,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		PossibleSamples:   datasetSamples,
 	}
 	sinkCtx, sinkCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
-	logPath, storeErr := artifacts.StoreArtifactWithTimeout(sinkCtx, r.artifactSink(), meta, logFilename, logBytes)
+	storedArtifact, storeErr := artifacts.StoreArtifactWithTimeout(sinkCtx, r.artifactSink(), meta, logFilename, logBytes)
 	sinkCancel()
 	if storeErr != nil {
 		logger.Error(storeErr, "Failed to store artifact", "task", taskID)
@@ -3488,6 +3499,8 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			possibleSamples: datasetSamples,
 		}
 	}
+	logPath := storedArtifact.Location
+	logHash := storedArtifact.Hash
 
 	if agg.Samples == 0 {
 		msg := "no scored samples"
@@ -3497,6 +3510,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			phase:           v1alpha1.TaskPhaseFailed,
 			message:         msg,
 			logPath:         logPath,
+			logHash:         logHash,
 			sampleRange:     effRange,
 			possibleSamples: datasetSamples,
 		}
@@ -3541,6 +3555,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		samplesDone:     agg.Samples,
 		samplesPlanned:  planned,
 		logPath:         logPath,
+		logHash:         logHash,
 		sampleRange:     effRange,
 	}
 }
@@ -3936,7 +3951,7 @@ func (r *RunReconciler) executeSandboxTask(
 		PossibleSamples:   aggregates.Samples,
 	}
 	sinkContext, sinkCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
-	logPath, storeErr := artifacts.StoreArtifactWithTimeout(sinkContext, r.artifactSink(), meta, "results.json", resultsBytes)
+	storedArtifact, storeErr := artifacts.StoreArtifactWithTimeout(sinkContext, r.artifactSink(), meta, "results.json", resultsBytes)
 	sinkCancel()
 	if storeErr != nil {
 		message := fmt.Sprintf("failed to store artifact: %v", storeErr)
@@ -3952,6 +3967,8 @@ func (r *RunReconciler) executeSandboxTask(
 		applyTokensAndCost(&failedResult, tokensAndCost)
 		return failedResult
 	}
+	logPath := storedArtifact.Location
+	logHash := storedArtifact.Hash
 
 	completedResult := taskExecutionResult{
 		taskID:          taskID,
@@ -3968,6 +3985,7 @@ func (r *RunReconciler) executeSandboxTask(
 		samplesDone:     aggregates.Samples,
 		samplesPlanned:  planned,
 		logPath:         logPath,
+		logHash:         logHash,
 		sampleRange:     effRange,
 	}
 	applyTokensAndCost(&completedResult, tokensAndCost)

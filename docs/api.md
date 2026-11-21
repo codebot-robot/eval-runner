@@ -75,6 +75,7 @@ status:
         confidence: 0.95
         method: wilson
       logPath: ""
+      logHash: ""
     - id: docs/readme_comprehension_blind
       phase: Completed
       samples: 20
@@ -87,6 +88,7 @@ status:
         confidence: 0.95
         method: wilson
       logPath: ""
+      logHash: ""
   summary:
     tasks: "2/2"
     tasksCompleted: 2
@@ -157,6 +159,7 @@ status:
 | `successRateSD` | `*float64` | Sample standard deviation of scores (for non-binary scorers via `stats.Mean`). |
 | `message` | `string` | Failure detail or bounded error information if the task failed. |
 | `logPath` | `string` | Storage path or URI where the raw Inspect log was stored by the artifact sink. |
+| `logHash` | `string` | SHA-256 checksum (in `sha256:<hex>` format) of the stored task artifact's content as produced. |
 | `sampleRange` | `*SampleRange` | Sample window evaluated for this task (`{start, end}`). |
 | `tokens` | `*TaskTokens` | Token usage breakdown consumed for this task when present in Inspect logs. |
 | `latency` | `*TaskLatency` | Sample latency percentiles (`p50`, `p95` in seconds) aggregated across evaluated samples. |

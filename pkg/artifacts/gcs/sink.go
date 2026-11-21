@@ -386,20 +386,20 @@ func (s *GCSSink) effectiveCapBytes() int64 {
 	return s.maxUploadBytes
 }
 
-func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
 	if err := artifacts.ValidateArtifact(meta, filename); err != nil {
-		return "", err
+		return artifacts.StoredArtifact{}, err
 	}
 	if meta.Commit == "" {
-		return "", fmt.Errorf("commit must not be empty")
+		return artifacts.StoredArtifact{}, fmt.Errorf("commit must not be empty")
 	}
 	if s.bucket == "" {
-		return "", fmt.Errorf("bucket name is empty")
+		return artifacts.StoredArtifact{}, fmt.Errorf("bucket name is empty")
 	}
 
 	capLimit := s.effectiveCapBytes()
 	if int64(len(data)) > capLimit {
-		return "", &artifacts.ArtifactTooLargeError{
+		return artifacts.StoredArtifact{}, &artifacts.ArtifactTooLargeError{
 			Task:  meta.TaskID,
 			File:  filename,
 			Size:  int64(len(data)),
@@ -407,24 +407,33 @@ func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, f
 		}
 	}
 
-	logObject := fmt.Sprintf("runs/%s/%s/%s", meta.Commit, meta.TaskID, filename)
-	if err := s.client.WriteObject(ctx, s.bucket, logObject, "application/json", data); err != nil {
-		return "", fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
+	hash := artifacts.ArtifactHash(data)
+	metaMap := map[string]string{
+		"sha256": hash,
 	}
 
-	return fmt.Sprintf("gs://%s/%s", s.bucket, logObject), nil
+	logObject := fmt.Sprintf("runs/%s/%s/%s", meta.Commit, meta.TaskID, filename)
+	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, logObject, "application/json", metaMap, data); err != nil {
+		return artifacts.StoredArtifact{}, fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
+	}
+
+	return artifacts.StoredArtifact{
+		Location: fmt.Sprintf("gs://%s/%s", s.bucket, logObject),
+		Hash:     hash,
+	}, nil
 }
 
 // StoreTaskFile implements artifacts.TaskFileStorer for GCSSink, writing filename next to task artifacts without modifying summary.json.
 func (s *GCSSink) StoreTaskFile(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	return s.storeObject(ctx, meta, filename, data)
+	stored, err := s.storeObject(ctx, meta, filename, data)
+	return stored.Location, err
 }
 
-// StoreArtifact writes the inspect log and summary.json to GCS and returns the gs:// URI.
-func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	logURI, err := s.storeObject(ctx, meta, filename, data)
+// StoreArtifact writes the inspect log and summary.json to GCS and returns the stored location and content hash.
+func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
+	stored, err := s.storeObject(ctx, meta, filename, data)
 	if err != nil {
-		return "", err
+		return artifacts.StoredArtifact{}, err
 	}
 
 	sampleList := meta.Samples
@@ -441,6 +450,7 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 		Model:             meta.Model,
 		Commit:            meta.Commit,
 		LogFilename:       filename,
+		LogHash:           stored.Hash,
 		RunName:           meta.RunName,
 		RunNamespace:      meta.RunNamespace,
 		ControllerVersion: meta.ControllerVersion,
@@ -465,16 +475,16 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 
 	summaryBytes, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal summary.json: %w", err)
+		return artifacts.StoredArtifact{}, fmt.Errorf("failed to marshal summary.json: %w", err)
 	}
 	summaryBytes = append(summaryBytes, '\n')
 
 	summaryObject := fmt.Sprintf("runs/%s/%s/summary.json", meta.Commit, meta.TaskID)
 	if err := s.client.WriteObject(ctx, s.bucket, summaryObject, "application/json", summaryBytes); err != nil {
-		return "", fmt.Errorf("store summary to gs://%s/%s: %w", s.bucket, summaryObject, err)
+		return artifacts.StoredArtifact{}, fmt.Errorf("store summary to gs://%s/%s: %w", s.bucket, summaryObject, err)
 	}
 
-	return logURI, nil
+	return stored, nil
 }
 
 // ValidateBucket checks whether raw is a well-formed GCS bucket name or gs:// URI.

@@ -140,16 +140,16 @@ func (s *ReloadableSink) swapInternal(newSink ArtifactSink, wait bool) error {
 }
 
 // StoreArtifact persists the raw log bytes for a task using the current active sink.
-func (s *ReloadableSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+func (s *ReloadableSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return "", ErrSinkClosed
+		return StoredArtifact{}, ErrSinkClosed
 	}
 	ts := s.currentTracked
 	if ts == nil || ts.sink == nil {
 		s.mu.RUnlock()
-		return "", ErrNoSinkConfigured
+		return StoredArtifact{}, ErrNoSinkConfigured
 	}
 	ts.wg.Add(1)
 	s.mu.RUnlock()

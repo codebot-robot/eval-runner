@@ -37,12 +37,15 @@ func TestNoopSink(t *testing.T) {
 		TaskID:       "docs/readme_comprehension",
 	}
 
-	path, err := sink.StoreArtifact(t.Context(), meta, "eval.json", []byte("data"))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "eval.json", []byte("data"))
 	if err != nil {
 		t.Fatalf("NoopSink returned error: %v", err)
 	}
-	if path != "" {
-		t.Errorf("Expected empty path from NoopSink, got %q", path)
+	if stored.Location != "" {
+		t.Errorf("Expected empty location from NoopSink, got %q", stored.Location)
+	}
+	if stored.Hash != "" {
+		t.Errorf("Expected empty hash from NoopSink, got %q", stored.Hash)
 	}
 }
 
@@ -65,17 +68,22 @@ func TestLocalDirSink(t *testing.T) {
 	}
 
 	payload := []byte(`{"version": 2}`)
-	savedPath, err := sink.StoreArtifact(t.Context(), meta, "result.json", payload)
+	saved, err := sink.StoreArtifact(t.Context(), meta, "result.json", payload)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
 
-	expectedPath := filepath.Join(tempDir, "runs", "abc1234", "docs%2Freadme_comprehension", "result.json")
-	if savedPath != expectedPath {
-		t.Errorf("Expected path %q, got %q", expectedPath, savedPath)
+	expectedHash := artifacts.ArtifactHash(payload)
+	if saved.Hash != expectedHash {
+		t.Errorf("Expected hash %q, got %q", expectedHash, saved.Hash)
 	}
 
-	readBytes, err := os.ReadFile(savedPath)
+	expectedPath := filepath.Join(tempDir, "runs", "abc1234", "docs%2Freadme_comprehension", "result.json")
+	if saved.Location != expectedPath {
+		t.Errorf("Expected path %q, got %q", expectedPath, saved.Location)
+	}
+
+	readBytes, err := os.ReadFile(saved.Location)
 	if err != nil {
 		t.Fatalf("Failed to read saved file: %v", err)
 	}
@@ -83,7 +91,12 @@ func TestLocalDirSink(t *testing.T) {
 		t.Errorf("Expected content %s, got %s", payload, readBytes)
 	}
 
-	// Verify summary.json was written with SampleRange
+	// Verify known test vector pinning the sha256:<hex> literal format for empty input
+	if emptyHash := artifacts.ArtifactHash([]byte("")); emptyHash != "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Errorf("ArtifactHash of empty input = %q, want sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", emptyHash)
+	}
+
+	// Verify summary.json was written with SampleRange and LogHash
 	summaryPath := filepath.Join(tempDir, "runs", "abc1234", "docs%2Freadme_comprehension", "summary.json")
 	summaryBytes, err := os.ReadFile(summaryPath)
 	if err != nil {
@@ -92,6 +105,12 @@ func TestLocalDirSink(t *testing.T) {
 	var summary artifacts.TaskSummary
 	if err := json.Unmarshal(summaryBytes, &summary); err != nil {
 		t.Fatalf("Failed to unmarshal summary.json: %v", err)
+	}
+	if summary.LogFilename != "result.json" {
+		t.Errorf("Expected summary.LogFilename 'result.json', got %q", summary.LogFilename)
+	}
+	if summary.LogHash != expectedHash {
+		t.Errorf("Expected summary.LogHash %q, got %q", expectedHash, summary.LogHash)
 	}
 	if summary.SampleRange == nil || summary.SampleRange.Start != 5 || summary.SampleRange.End != 15 {
 		t.Errorf("Expected summary.SampleRange {5, 15}, got %+v", summary.SampleRange)
@@ -359,16 +378,25 @@ func TestInMemorySink(t *testing.T) {
 	}
 
 	// Store and load task artifact
-	artURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte("log data"))
+	artifactData := []byte("log data")
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", artifactData)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
-	artLoaded, err := sink.Load(t.Context(), artURI)
+	expectedArtifactHash := artifacts.ArtifactHash(artifactData)
+	if stored.Hash != expectedArtifactHash {
+		t.Errorf("Expected hash %q, got %q", expectedArtifactHash, stored.Hash)
+	}
+	loadedArtifact, err := sink.Load(t.Context(), stored.Location)
 	if err != nil {
 		t.Fatalf("Load artifact failed: %v", err)
 	}
-	if string(artLoaded) != "log data" {
-		t.Errorf("Expected 'log data', got %s", artLoaded)
+	if string(loadedArtifact) != "log data" {
+		t.Errorf("Expected 'log data', got %s", loadedArtifact)
+	}
+	artifactMetadata, ok := sink.GetMetadata(stored.Location)
+	if !ok || artifactMetadata["sha256"] != expectedArtifactHash {
+		t.Errorf("Expected metadata sha256=%q, got %+v", expectedArtifactHash, artifactMetadata)
 	}
 
 	// Store and load comparison
@@ -509,13 +537,13 @@ func TestLocalDirSink_SummaryJSON_RoundTripAndTruncation(t *testing.T) {
 		Successes:         1,
 	}
 
-	savedPath, err := sink.StoreArtifact(t.Context(), meta, "result.json", []byte(`{}`))
+	saved, err := sink.StoreArtifact(t.Context(), meta, "result.json", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
 
 	// Verify using ReadTaskSummary
-	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, savedPath)
+	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, saved.Location)
 	if err != nil {
 		t.Fatalf("ReadTaskSummary failed: %v", err)
 	}
@@ -573,11 +601,11 @@ func TestLocalDirSink_SummaryJSON_RoundTripAndTruncation(t *testing.T) {
 	}
 	meta.Samples = largeSamples
 	meta.SampleCount = len(largeSamples)
-	savedLargePath, err := sink.StoreArtifact(t.Context(), meta, "result-large.json", []byte(`{}`))
+	savedLarge, err := sink.StoreArtifact(t.Context(), meta, "result-large.json", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
-	largeSummary, err := artifacts.ReadTaskSummary(t.Context(), sink, savedLargePath)
+	largeSummary, err := artifacts.ReadTaskSummary(t.Context(), sink, savedLarge.Location)
 	if err != nil {
 		t.Fatalf("ReadTaskSummary failed: %v", err)
 	}
@@ -623,12 +651,12 @@ func TestInMemorySink_SummaryJSON_RoundTripAndTruncation(t *testing.T) {
 		Samples:           samples,
 	}
 
-	uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
 
-	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, uri)
+	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, stored.Location)
 	if err != nil {
 		t.Fatalf("ReadTaskSummary failed: %v", err)
 	}

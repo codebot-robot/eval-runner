@@ -43,15 +43,15 @@ func (b *blockingSink) StoreManifest(ctx context.Context, meta artifacts.RunMeta
 	return "gs://bucket/manifest.json", nil
 }
 
-func (b *blockingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+func (b *blockingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
 	if b.blockStoreArtifact != nil {
 		select {
 		case <-b.blockStoreArtifact:
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return artifacts.StoredArtifact{}, ctx.Err()
 		}
 	}
-	return "gs://bucket/artifact.json", nil
+	return artifacts.StoredArtifact{Location: "gs://bucket/artifact.json", Hash: "sha256:blocking"}, nil
 }
 
 func (b *blockingSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
@@ -90,10 +90,10 @@ func (u *unyieldingSink) StoreManifest(ctx context.Context, meta artifacts.RunMe
 	return "", nil
 }
 
-func (u *unyieldingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+func (u *unyieldingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
 	ch := make(chan struct{})
 	<-ch
-	return "", nil
+	return artifacts.StoredArtifact{}, nil
 }
 
 func (u *unyieldingSink) StoreComparison(ctx context.Context, compName string, data []byte) (string, error) {
@@ -131,10 +131,10 @@ func (g *graceWindowSink) StoreManifest(ctx context.Context, meta artifacts.RunM
 	return "", g.errToReturn
 }
 
-func (g *graceWindowSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+func (g *graceWindowSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
 	<-ctx.Done()
 	time.Sleep(10 * time.Millisecond)
-	return "", g.errToReturn
+	return artifacts.StoredArtifact{}, g.errToReturn
 }
 
 func (g *graceWindowSink) StoreComparison(ctx context.Context, compName string, data []byte) (string, error) {

@@ -31,14 +31,14 @@ type mockSink struct {
 	storeCount     atomic.Int32
 }
 
-func (m *mockSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+func (m *mockSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
 	m.inFlightActive.Add(1)
 	defer m.inFlightActive.Add(-1)
 	m.storeCount.Add(1)
 	if m.inFlightBlock != nil {
 		<-m.inFlightBlock
 	}
-	return "stored-path", nil
+	return StoredArtifact{Location: "stored-path", Hash: "sha256:mock"}, nil
 }
 
 func (m *mockSink) Load(ctx context.Context, path string) ([]byte, error) {

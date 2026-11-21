@@ -2232,14 +2232,14 @@ func (s *trackingTestSink) Bucket() string {
 	return s.bucket
 }
 
-func (s *trackingTestSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+func (s *trackingTestSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
 	if s.uploadStarted != nil {
 		close(s.uploadStarted)
 	}
 	if s.blockUpload != nil {
 		<-s.blockUpload
 	}
-	return "stored", nil
+	return artifacts.StoredArtifact{Location: "stored", Hash: "sha256:mock"}, nil
 }
 
 func (s *trackingTestSink) Load(ctx context.Context, path string) ([]byte, error) {

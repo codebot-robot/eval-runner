@@ -67,66 +67,49 @@ func comparisonTarget(sink ArtifactSink, compName string) string {
 	return fmt.Sprintf("comparisons/%s.json", compName)
 }
 
+func storeWithTimeout[T any](ctx context.Context, op, target string, fn func() (T, error)) (T, error) {
+	type result struct {
+		val T
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		val, err := fn()
+		ch <- result{val: val, err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.val, r.err
+	case <-ctx.Done():
+		select {
+		case r := <-ch:
+			return r.val, r.err
+		case <-time.After(defaultGraceWindow):
+			var zero T
+			return zero, fmt.Errorf("%s for %s: sink did not report completion within deadline: %w", op, target, ctx.Err())
+		}
+	}
+}
+
 // StoreManifestWithTimeout executes sink.StoreManifest concurrently, returning immediately if ctx expires.
 func StoreManifestWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMetadata, data []byte) (string, error) {
 	if sink == nil {
 		return "", ErrNoSinkConfigured
 	}
-	type result struct {
-		uri string
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		uri, err := sink.StoreManifest(ctx, meta, data)
-		ch <- result{uri: uri, err: err}
-	}()
-
-	select {
-	case r := <-ch:
-		return r.uri, r.err
-	case <-ctx.Done():
-		select {
-		case r := <-ch:
-			return r.uri, r.err
-		case <-time.After(defaultGraceWindow):
-			target := manifestTarget(sink, meta.Commit)
-			return "", fmt.Errorf("store manifest for %s: sink did not report completion within deadline: %w", target, ctx.Err())
-		}
-	}
-}
-
-func storeWithTimeout(ctx context.Context, op, target string, fn func() (string, error)) (string, error) {
-	type result struct {
-		path string
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		path, err := fn()
-		ch <- result{path: path, err: err}
-	}()
-
-	select {
-	case r := <-ch:
-		return r.path, r.err
-	case <-ctx.Done():
-		select {
-		case r := <-ch:
-			return r.path, r.err
-		case <-time.After(defaultGraceWindow):
-			return "", fmt.Errorf("%s for %s: sink did not report completion within deadline: %w", op, target, ctx.Err())
-		}
-	}
+	target := manifestTarget(sink, meta.Commit)
+	return storeWithTimeout(ctx, "store manifest", target, func() (string, error) {
+		return sink.StoreManifest(ctx, meta, data)
+	})
 }
 
 // StoreArtifactWithTimeout executes sink.StoreArtifact concurrently, returning immediately if ctx expires.
-func StoreArtifactWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMetadata, filename string, data []byte) (string, error) {
+func StoreArtifactWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
 	if sink == nil {
-		return "", ErrNoSinkConfigured
+		return StoredArtifact{}, ErrNoSinkConfigured
 	}
 	target := ArtifactTarget(sink, meta.Commit, meta.TaskID, filename)
-	return storeWithTimeout(ctx, "store artifact", target, func() (string, error) {
+	return storeWithTimeout(ctx, "store artifact", target, func() (StoredArtifact, error) {
 		return sink.StoreArtifact(ctx, meta, filename, data)
 	})
 }
@@ -151,28 +134,10 @@ func StoreComparisonWithTimeout(ctx context.Context, sink ArtifactSink, compName
 	if sink == nil {
 		return "", ErrNoSinkConfigured
 	}
-	type result struct {
-		path string
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		path, err := sink.StoreComparison(ctx, compName, data)
-		ch <- result{path: path, err: err}
-	}()
-
-	select {
-	case r := <-ch:
-		return r.path, r.err
-	case <-ctx.Done():
-		select {
-		case r := <-ch:
-			return r.path, r.err
-		case <-time.After(defaultGraceWindow):
-			target := comparisonTarget(sink, compName)
-			return "", fmt.Errorf("store comparison for %s: sink did not report completion within deadline: %w", target, ctx.Err())
-		}
-	}
+	target := comparisonTarget(sink, compName)
+	return storeWithTimeout(ctx, "store comparison", target, func() (string, error) {
+		return sink.StoreComparison(ctx, compName, data)
+	})
 }
 
 // LoadWithTimeout executes sink.Load concurrently, returning immediately if ctx expires.

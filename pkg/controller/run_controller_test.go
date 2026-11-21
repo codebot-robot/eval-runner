@@ -7011,10 +7011,11 @@ func TestReconcileRunningTask_RestartRescueFromReadableLog(t *testing.T) {
 			TaskID:       "task-log-rescue",
 			Commit:       "c0ffee1",
 		}
-		logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(inspectLog))
+		stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(inspectLog))
 		if err != nil {
 			t.Fatalf("Failed to store artifact: %v", err)
 		}
+		logURI := stored.Location
 
 		limit := 2
 		run := &v1alpha1.Run{
@@ -7167,8 +7168,8 @@ type transientErrorSink struct {
 	err error
 }
 
-func (s *transientErrorSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	return "", s.err
+func (s *transientErrorSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
+	return artifacts.StoredArtifact{}, s.err
 }
 
 func (s *transientErrorSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
@@ -7233,10 +7234,12 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 			SampleRange:     &artifacts.SampleRange{Start: 1, End: 2},
 		}
 		logFilename := "2026-10-31T15-27-47-00-00_task-probe-rescue_ByhDsNK8zVf5BWpRqxd9Y9.json"
-		expectedLogPath, err := sink.StoreArtifact(t.Context(), meta, logFilename, []byte(completeInspectLog))
+		stored, err := sink.StoreArtifact(t.Context(), meta, logFilename, []byte(completeInspectLog))
 		if err != nil {
 			t.Fatalf("Failed to store artifact: %v", err)
 		}
+		expectedLogPath := stored.Location
+		expectedLogHash := stored.Hash
 
 		limit := 2
 		run := &v1alpha1.Run{
@@ -7317,6 +7320,9 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 		if task.LogPath != expectedLogPath {
 			t.Errorf("Expected task LogPath to be %q, got %q", expectedLogPath, task.LogPath)
 		}
+		if task.LogHash != expectedLogHash {
+			t.Errorf("Expected task LogHash to be %q, got %q", expectedLogHash, task.LogHash)
+		}
 		if task.PossibleSamples != 2 {
 			t.Errorf("Expected task PossibleSamples to be 2, got %d", task.PossibleSamples)
 		}
@@ -7341,10 +7347,12 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 			PossibleSamples: 2,
 		}
 		logFilename := "2026-10-31T15-27-47-00-00_readme-comprehension_ByhDsNK8zVf5BWpRqxd9Y9.json"
-		expectedLogPath, err := localSink.StoreArtifact(t.Context(), meta, logFilename, []byte(completeInspectLog))
+		stored, err := localSink.StoreArtifact(t.Context(), meta, logFilename, []byte(completeInspectLog))
 		if err != nil {
 			t.Fatalf("Failed to store artifact in LocalDirSink: %v", err)
 		}
+		expectedLogPath := stored.Location
+		expectedLogHash := stored.Hash
 
 		limit := 2
 		run := &v1alpha1.Run{
@@ -7418,6 +7426,9 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 		}
 		if task.LogPath != expectedLogPath {
 			t.Errorf("Expected task LogPath to be %q, got %q", expectedLogPath, task.LogPath)
+		}
+		if task.LogHash != expectedLogHash {
+			t.Errorf("Expected task LogHash to be %q, got %q", expectedLogHash, task.LogHash)
 		}
 	})
 
@@ -8362,6 +8373,10 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 	if t1.LogPath != expectedLogPath {
 		t.Errorf("Expected task logPath %q, got %q", expectedLogPath, t1.LogPath)
 	}
+	expectedLogHash := artifacts.ArtifactHash([]byte(inspectLog))
+	if t1.LogHash != expectedLogHash {
+		t.Errorf("Expected task logHash %q, got %q", expectedLogHash, t1.LogHash)
+	}
 
 	// Verify log object exists in fake GCS
 	logObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json")
@@ -8370,6 +8385,9 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 	}
 	if string(logObj.Data) != inspectLog {
 		t.Errorf("Log content mismatch")
+	}
+	if logObj.Metadata == nil || logObj.Metadata["sha256"] != expectedLogHash {
+		t.Errorf("Expected log object metadata sha256=%q, got %+v", expectedLogHash, logObj.Metadata)
 	}
 
 	// Verify summary.json exists in fake GCS
@@ -8381,6 +8399,9 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 	var summary artifacts.TaskSummary
 	if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
 		t.Fatalf("Failed to parse summary.json: %v", err)
+	}
+	if summary.LogHash != expectedLogHash {
+		t.Errorf("Expected summary LogHash %q, got %q", expectedLogHash, summary.LogHash)
 	}
 	if summary.SchemaVersion != 1 {
 		t.Errorf("Expected SchemaVersion 1, got %d", summary.SchemaVersion)
@@ -12350,7 +12371,7 @@ func TestReconcile_HungExecuteInTaskExecutionTimesOut(t *testing.T) {
 
 type fakeBlockingOrFailingSink struct {
 	storeManifestFn func(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error)
-	storeArtifactFn func(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error)
+	storeArtifactFn func(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error)
 }
 
 func (s *fakeBlockingOrFailingSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata, data []byte) (string, error) {
@@ -12360,11 +12381,11 @@ func (s *fakeBlockingOrFailingSink) StoreManifest(ctx context.Context, meta arti
 	return "gs://bucket/manifest.json", nil
 }
 
-func (s *fakeBlockingOrFailingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+func (s *fakeBlockingOrFailingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
 	if s.storeArtifactFn != nil {
 		return s.storeArtifactFn(ctx, meta, filename, data)
 	}
-	return "gs://bucket/artifact.json", nil
+	return artifacts.StoredArtifact{Location: "gs://bucket/artifact.json", Hash: "sha256:fake"}, nil
 }
 
 func (s *fakeBlockingOrFailingSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
@@ -12694,9 +12715,9 @@ func TestReconcile_HungStoreArtifactStepTimesOut(t *testing.T) {
 	hungCh := make(chan struct{})
 	defer close(hungCh)
 	sink := &fakeBlockingOrFailingSink{
-		storeArtifactFn: func(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+		storeArtifactFn: func(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
 			<-hungCh
-			return "gs://bucket/artifact.json", nil
+			return artifacts.StoredArtifact{Location: "gs://bucket/artifact.json", Hash: "sha256:fake"}, nil
 		},
 	}
 

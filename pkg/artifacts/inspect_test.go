@@ -1015,12 +1015,12 @@ func TestParseInspectLog_RealTestDataFixtures_SampleCountAndSuccessRate(t *testi
 				Successes:   agg.Successes,
 				MeanScore:   agg.MeanScore,
 			}
-			uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", data)
+			stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", data)
 			if err != nil {
 				t.Fatalf("StoreArtifact failed: %v", err)
 			}
 
-			summary, err := ReadTaskSummary(t.Context(), sink, uri)
+			summary, err := ReadTaskSummary(t.Context(), sink, stored.Location)
 			if err != nil {
 				t.Fatalf("ReadTaskSummary failed: %v", err)
 			}

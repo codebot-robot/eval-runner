@@ -72,14 +72,19 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 	logFilename := "2026-10-17_readme_eval.json"
 	logContent := []byte(`{"results": {"score": 0.85}}`)
 
-	logURI, err := sink.StoreArtifact(t.Context(), meta, logFilename, logContent)
+	stored, err := sink.StoreArtifact(t.Context(), meta, logFilename, logContent)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
 
+	expectedHash := artifacts.ArtifactHash(logContent)
+	if stored.Hash != expectedHash {
+		t.Errorf("Expected logHash %q, got %q", expectedHash, stored.Hash)
+	}
+
 	expectedLogURI := "gs://my-eval-bucket/runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json"
-	if logURI != expectedLogURI {
-		t.Errorf("Expected log URI %q, got %q", expectedLogURI, logURI)
+	if stored.Location != expectedLogURI {
+		t.Errorf("Expected log URI %q, got %q", expectedLogURI, stored.Location)
 	}
 
 	expectedPrefix := "gs://my-eval-bucket/runs/abcdef123456/"
@@ -98,6 +103,9 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 	if logObj.ContentType != "application/json" {
 		t.Errorf("Expected content type %q, got %q", "application/json", logObj.ContentType)
 	}
+	if logObj.Metadata == nil || logObj.Metadata["sha256"] != expectedHash {
+		t.Errorf("Expected log object metadata sha256=%q, got %+v", expectedHash, logObj.Metadata)
+	}
 
 	// Verify summary.json in fake client
 	summaryObj, exists := fakeClient.GetObject("my-eval-bucket", "runs/abcdef123456/docs/readme_comprehension/summary.json")
@@ -111,6 +119,13 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 	var summary artifacts.TaskSummary
 	if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
 		t.Fatalf("Failed to parse summary.json: %v", err)
+	}
+
+	if summary.LogFilename != logFilename {
+		t.Errorf("Expected LogFilename %q, got %q", logFilename, summary.LogFilename)
+	}
+	if summary.LogHash != expectedHash {
+		t.Errorf("Expected LogHash %q, got %q", expectedHash, summary.LogHash)
 	}
 
 	if summary.TaskID != "docs/readme_comprehension" {
@@ -578,13 +593,13 @@ func TestGCSSink_FirstWriteAgainstEmptyBucket_AllObjectKinds(t *testing.T) {
 
 	// 2. Artifact first write against empty bucket succeeds
 	logData := []byte(`{"results":{"score":1.0}}`)
-	logURI, err := sink.StoreArtifact(t.Context(), meta, "eval.json", logData)
+	stored, err := sink.StoreArtifact(t.Context(), meta, "eval.json", logData)
 	if err != nil {
 		t.Fatalf("First write of StoreArtifact against empty bucket failed: %v", err)
 	}
 	expectedLogURI := "gs://empty-bucket/runs/commit123/task-1/eval.json"
-	if logURI != expectedLogURI {
-		t.Errorf("Expected log URI %q, got %q", expectedLogURI, logURI)
+	if stored.Location != expectedLogURI {
+		t.Errorf("Expected log URI %q, got %q", expectedLogURI, stored.Location)
 	}
 
 	// 3. Comparison first write against empty bucket succeeds
@@ -684,12 +699,12 @@ func TestGCSSink_SummaryJSON_NewFieldsAndTruncation(t *testing.T) {
 		Successes:         1,
 	}
 
-	uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
 
-	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, uri)
+	summary, err := artifacts.ReadTaskSummary(t.Context(), sink, stored.Location)
 	if err != nil {
 		t.Fatalf("ReadTaskSummary failed: %v", err)
 	}
@@ -741,11 +756,11 @@ func TestGCSSink_SummaryJSON_NewFieldsAndTruncation(t *testing.T) {
 	}
 	meta.Samples = largeSamples
 	meta.SampleCount = len(largeSamples)
-	uriLarge, err := sink.StoreArtifact(t.Context(), meta, "inspect-large.json", []byte(`{}`))
+	storedLarge, err := sink.StoreArtifact(t.Context(), meta, "inspect-large.json", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
-	summaryLarge, err := artifacts.ReadTaskSummary(t.Context(), sink, uriLarge)
+	summaryLarge, err := artifacts.ReadTaskSummary(t.Context(), sink, storedLarge.Location)
 	if err != nil {
 		t.Fatalf("ReadTaskSummary failed: %v", err)
 	}
@@ -938,4 +953,57 @@ func TestBuildClientOptions(t *testing.T) {
 			t.Errorf("Close failed: %v", closeErr)
 		}
 	}()
+}
+
+func TestStoreTaskFile_SetsMetadataSHA256(t *testing.T) {
+	fakeClient := fakes.NewFakeStorageClient()
+	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	meta := artifacts.RunMetadata{
+		RunName: "test-run",
+		TaskID:  "task-agent",
+		Commit:  "c123456",
+	}
+	agentData := []byte(`{"steps":[{"duration":123}]}`)
+	uri, err := sink.StoreTaskFile(t.Context(), meta, "agent.json", agentData)
+	if err != nil {
+		t.Fatalf("StoreTaskFile failed: %v", err)
+	}
+	expectedURI := "gs://eval-bucket/runs/c123456/task-agent/agent.json"
+	if uri != expectedURI {
+		t.Errorf("Expected URI %q, got %q", expectedURI, uri)
+	}
+
+	agentObj, ok := fakeClient.GetObject("eval-bucket", "runs/c123456/task-agent/agent.json")
+	if !ok {
+		t.Fatalf("Expected agent.json object in fake storage")
+	}
+	expectedHash := artifacts.ArtifactHash(agentData)
+	if agentObj.Metadata == nil || agentObj.Metadata["sha256"] != expectedHash {
+		t.Errorf("Expected metadata sha256=%q, got %+v", expectedHash, agentObj.Metadata)
+	}
+}
+
+func TestTaskSummary_LegacyWithoutHashLoads(t *testing.T) {
+	legacyJSON := []byte(`{
+		"schemaVersion": 1,
+		"taskId": "task-legacy",
+		"model": "model-1",
+		"commit": "c1",
+		"logFilename": "eval.json",
+		"sampleCount": 5
+	}`)
+	var summary artifacts.TaskSummary
+	if err := json.Unmarshal(legacyJSON, &summary); err != nil {
+		t.Fatalf("Failed to unmarshal legacy summary: %v", err)
+	}
+	if summary.LogFilename != "eval.json" {
+		t.Errorf("Expected LogFilename eval.json, got %q", summary.LogFilename)
+	}
+	if summary.LogHash != "" {
+		t.Errorf("Expected LogHash to be empty for legacy summary, got %q", summary.LogHash)
+	}
 }
