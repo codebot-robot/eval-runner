@@ -620,7 +620,7 @@ Agent tasks (such as Terminal-Bench tasks) drive multi-turn shell interactions f
   ```
 
   The controller Deployment reads `GEMINI_API_KEY` from this Secret as an optional reference (`secretKeyRef`) and starts normally when the Secret is absent. If an agent task requests a real model while no key is configured, the controller fails the task immediately with `controller has no model credential` without launching a sandbox or calling external APIs.
-- **Running one Terminal-Bench task in agent mode**: Create a `Run` referencing a task whose `.evals/list` manifest entry declares an `agent` block (such as `terminal-bench/regex-log-agent` in the e2e fixtures or the benchmark's agent tasks) and naming a Gemini model:
+- **Running one Terminal-Bench task in agent mode**: Create a `Run` referencing a task whose `.evals/list` manifest entry declares an `agent` block (such as `terminal-bench/regex-log/agent`) and naming a Gemini model:
 
   ```bash
   kubectl apply -f - <<EOF
@@ -635,7 +635,7 @@ Agent tasks (such as Terminal-Bench tasks) drive multi-turn shell interactions f
       commit: $(git rev-parse HEAD)
     model: google/gemini-3.5-flash-lite
     tasks:
-      - terminal-bench/regex-log-agent
+      - terminal-bench/regex-log/agent
   EOF
   ```
 
