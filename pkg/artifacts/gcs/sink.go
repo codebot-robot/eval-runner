@@ -32,6 +32,7 @@ import (
 	"golang.org/x/oauth2/google/externalaccount"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -380,33 +381,51 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 	return data, nil
 }
 
-// StoreArtifact writes the inspect log and summary.json to GCS and returns the gs:// URI.
-func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+func (s *GCSSink) effectiveCapBytes() int64 {
+	if s.maxUploadBytes <= 0 {
+		return DefaultMaxUploadBytes
+	}
+	return s.maxUploadBytes
+}
+
+func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, bool, error) {
 	if err := artifacts.ValidateArtifact(meta, filename); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if meta.Commit == "" {
-		return "", fmt.Errorf("commit must not be empty")
+		return "", false, fmt.Errorf("commit must not be empty")
 	}
 	if s.bucket == "" {
-		return "", fmt.Errorf("bucket name is empty")
+		return "", false, fmt.Errorf("bucket name is empty")
 	}
 
-	capLimit := s.maxUploadBytes
-	if capLimit <= 0 {
-		capLimit = DefaultMaxUploadBytes
-	}
-
-	capped := false
+	capLimit := s.effectiveCapBytes()
 	uploadData := data
-	if int64(len(data)) > capLimit {
-		capped = true
+	capped := int64(len(data)) > capLimit
+	if capped {
+		log.FromContext(ctx).Info("truncating artifact upload at size cap", "task", meta.TaskID, "file", filename, "size", len(data), "cap", capLimit)
 		uploadData = data[:capLimit]
 	}
 
 	logObject := fmt.Sprintf("runs/%s/%s/%s", meta.Commit, meta.TaskID, filename)
 	if err := s.client.WriteObject(ctx, s.bucket, logObject, "application/json", uploadData); err != nil {
-		return "", fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
+		return "", false, fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
+	}
+
+	return fmt.Sprintf("gs://%s/%s", s.bucket, logObject), capped, nil
+}
+
+// StoreTaskFile implements artifacts.TaskFileStorer for GCSSink, writing filename next to task artifacts without modifying summary.json.
+func (s *GCSSink) StoreTaskFile(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+	uri, _, err := s.storeObject(ctx, meta, filename, data)
+	return uri, err
+}
+
+// StoreArtifact writes the inspect log and summary.json to GCS and returns the gs:// URI.
+func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
+	logURI, capped, err := s.storeObject(ctx, meta, filename, data)
+	if err != nil {
+		return "", err
 	}
 
 	sampleList := meta.Samples
@@ -446,7 +465,7 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 		PossibleSamples:   meta.PossibleSamples,
 	}
 	if capped {
-		summary.CapBytes = capLimit
+		summary.CapBytes = s.effectiveCapBytes()
 	}
 
 	summaryBytes, err := json.MarshalIndent(summary, "", "  ")
@@ -460,7 +479,7 @@ func (s *GCSSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata,
 		return "", fmt.Errorf("store summary to gs://%s/%s: %w", s.bucket, summaryObject, err)
 	}
 
-	return fmt.Sprintf("gs://%s/%s", s.bucket, logObject), nil
+	return logURI, nil
 }
 
 // ValidateBucket checks whether raw is a well-formed GCS bucket name or gs:// URI.

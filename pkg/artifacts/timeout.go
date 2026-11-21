@@ -96,18 +96,14 @@ func StoreManifestWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMe
 	}
 }
 
-// StoreArtifactWithTimeout executes sink.StoreArtifact concurrently, returning immediately if ctx expires.
-func StoreArtifactWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMetadata, filename string, data []byte) (string, error) {
-	if sink == nil {
-		return "", ErrNoSinkConfigured
-	}
+func storeWithTimeout(ctx context.Context, op, target string, fn func() (string, error)) (string, error) {
 	type result struct {
 		path string
 		err  error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		path, err := sink.StoreArtifact(ctx, meta, filename, data)
+		path, err := fn()
 		ch <- result{path: path, err: err}
 	}()
 
@@ -119,10 +115,35 @@ func StoreArtifactWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMe
 		case r := <-ch:
 			return r.path, r.err
 		case <-time.After(defaultGraceWindow):
-			target := ArtifactTarget(sink, meta.Commit, meta.TaskID, filename)
-			return "", fmt.Errorf("store artifact for %s: sink did not report completion within deadline: %w", target, ctx.Err())
+			return "", fmt.Errorf("%s for %s: sink did not report completion within deadline: %w", op, target, ctx.Err())
 		}
 	}
+}
+
+// StoreArtifactWithTimeout executes sink.StoreArtifact concurrently, returning immediately if ctx expires.
+func StoreArtifactWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMetadata, filename string, data []byte) (string, error) {
+	if sink == nil {
+		return "", ErrNoSinkConfigured
+	}
+	target := ArtifactTarget(sink, meta.Commit, meta.TaskID, filename)
+	return storeWithTimeout(ctx, "store artifact", target, func() (string, error) {
+		return sink.StoreArtifact(ctx, meta, filename, data)
+	})
+}
+
+// StoreTaskFileWithTimeout executes StoreTaskFile concurrently if supported by sink, returning immediately if ctx expires.
+func StoreTaskFileWithTimeout(ctx context.Context, sink ArtifactSink, meta RunMetadata, filename string, data []byte) (string, error) {
+	if sink == nil {
+		return "", ErrNoSinkConfigured
+	}
+	storer, ok := sink.(TaskFileStorer)
+	if !ok {
+		return "", fmt.Errorf("artifact sink %T does not support storing task files", sink)
+	}
+	target := ArtifactTarget(sink, meta.Commit, meta.TaskID, filename)
+	return storeWithTimeout(ctx, "store task file "+filename, target, func() (string, error) {
+		return storer.StoreTaskFile(ctx, meta, filename, data)
+	})
 }
 
 // StoreComparisonWithTimeout executes sink.StoreComparison concurrently, returning immediately if ctx expires.

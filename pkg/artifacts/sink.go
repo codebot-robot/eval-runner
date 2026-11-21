@@ -41,6 +41,11 @@ func (s *NoopSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename
 	return "", nil
 }
 
+// StoreTaskFile implements TaskFileStorer for NoopSink.
+func (s *NoopSink) StoreTaskFile(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+	return "", nil
+}
+
 // StoreComparison implements ArtifactSink for NoopSink.
 func (s *NoopSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
 	return "", nil
@@ -230,8 +235,8 @@ func (s *LocalDirSink) Close() error {
 	return nil
 }
 
-// StoreArtifact implements ArtifactSink for LocalDirSink.
-func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+// StoreTaskFile implements TaskFileStorer for LocalDirSink, writing filename next to task artifacts without modifying summary.json.
+func (s *LocalDirSink) StoreTaskFile(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
 	if strings.TrimSpace(s.BaseDir) == "" {
 		return "", fmt.Errorf("base directory must not be empty")
 	}
@@ -263,6 +268,18 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 	if err := os.WriteFile(targetPath, data, 0644); err != nil {
 		return "", err
 	}
+
+	return targetPath, nil
+}
+
+// StoreArtifact implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+	targetPath, err := s.StoreTaskFile(ctx, meta, filename, data)
+	if err != nil {
+		return "", err
+	}
+
+	targetDir := filepath.Dir(targetPath)
 
 	sampleList := meta.Samples
 	samplesTruncated := meta.SamplesTruncated

@@ -102,8 +102,7 @@ func (s *InMemorySink) StoreManifest(ctx context.Context, meta RunMetadata, data
 	return uri, nil
 }
 
-// StoreArtifact persists the raw log bytes for a task.
-func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+func (s *InMemorySink) storeTaskFileLocked(meta RunMetadata, filename string, data []byte) (string, error) {
 	if err := ValidateArtifact(meta, filename); err != nil {
 		return "", err
 	}
@@ -114,14 +113,30 @@ func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 	} else {
 		objKey = fmt.Sprintf("runs/%s/%s/%s/%s", meta.RunNamespace, meta.RunName, meta.TaskID, filename)
 	}
-	uri := fmt.Sprintf("mem://%s", objKey)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	copied := make([]byte, len(data))
 	copy(copied, data)
 	s.objects[objKey] = copied
+
+	return fmt.Sprintf("mem://%s", objKey), nil
+}
+
+// StoreTaskFile implements TaskFileStorer for InMemorySink, writing filename next to task artifacts without modifying summary.json.
+func (s *InMemorySink) StoreTaskFile(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.storeTaskFileLocked(meta, filename, data)
+}
+
+// StoreArtifact persists the raw log bytes for a task.
+func (s *InMemorySink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	uri, err := s.storeTaskFileLocked(meta, filename, data)
+	if err != nil {
+		return "", err
+	}
 
 	sampleList := meta.Samples
 	samplesTruncated := meta.SamplesTruncated
