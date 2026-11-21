@@ -28,6 +28,9 @@ spec:
     metadata:
       annotations:
         cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        # Declares the sample-runner image dependency so ap deploy builds and pushes it.
+        # The controller derives this image at runtime (see controller.DeriveSampleRunnerImage).
+        evalrunner.gke-labs.dev/sample-runner-image: "${IMAGE_PREFIX}/sample-runner:${IMAGE_TAG}"
       labels:
         app: eval-runner-controller
     spec:

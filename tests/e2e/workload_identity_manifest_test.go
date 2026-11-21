@@ -233,3 +233,25 @@ func TestDeploymentManifests_GCPWorkloadIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestDeploymentManifests_SampleRunnerImageAnnotation verifies that runner-deployment.yaml
+// declares the sample-runner image dependency via a pod template annotation so ap deploy
+// builds and pushes it alongside the controller image.
+func TestDeploymentManifests_SampleRunnerImageAnnotation(t *testing.T) {
+	root := findRepoRoot(t)
+	manifestPath := filepath.Join(root, "k8s", "runner-deployment.yaml")
+	deployments := loadDeploymentsFromManifest(t, manifestPath)
+	if len(deployments) != 1 {
+		t.Fatalf("expected 1 Deployment in %s, got %d", manifestPath, len(deployments))
+	}
+	deploy := deployments[0]
+	annotations := deploy.Spec.Template.Annotations
+	if annotations == nil {
+		t.Fatalf("expected template annotations in %s, got nil", manifestPath)
+	}
+	const wantKey = "evalrunner.gke-labs.dev/sample-runner-image"
+	const wantVal = "${IMAGE_PREFIX}/sample-runner:${IMAGE_TAG}"
+	if got := annotations[wantKey]; got != wantVal {
+		t.Errorf("template annotation %q = %q, want %q", wantKey, got, wantVal)
+	}
+}
