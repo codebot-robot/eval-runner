@@ -313,16 +313,16 @@ func (s *GCSSink) StoreComparison(ctx context.Context, comparisonName string, da
 		return "", fmt.Errorf("bucket name is empty")
 	}
 
+	compObject := fmt.Sprintf("comparisons/%s.json", comparisonName)
 	capLimit := s.effectiveCapBytes()
 	if int64(len(data)) > capLimit {
 		return "", &artifacts.ArtifactTooLargeError{
-			File:  fmt.Sprintf("comparisons/%s.json", comparisonName),
+			File:  compObject,
 			Size:  int64(len(data)),
 			Limit: capLimit,
 		}
 	}
 
-	compObject := fmt.Sprintf("comparisons/%s.json", comparisonName)
 	if err := s.client.WriteObject(ctx, s.bucket, compObject, "application/json", data); err != nil {
 		return "", fmt.Errorf("store comparison to gs://%s/%s: %w", s.bucket, compObject, err)
 	}

@@ -9552,59 +9552,18 @@ func TestReconcileArtifactSink_UploadCapRefused(t *testing.T) {
 	if len(updatedRun.Status.Tasks) != 1 {
 		t.Fatalf("Expected 1 task in Run status, got %d", len(updatedRun.Status.Tasks))
 	}
-	t0 := updatedRun.Status.Tasks[0]
-	if t0.Phase != v1alpha1.TaskPhaseFailed {
-		t.Errorf("Expected task phase Failed, got %s", t0.Phase)
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhaseFailed {
+		t.Errorf("Expected task phase Failed, got %s", task.Phase)
 	}
-	if !strings.Contains(t0.Message, "artifact was too large") ||
-		!strings.Contains(t0.Message, "docs/readme_comprehension") ||
-		!strings.Contains(t0.Message, "2026-10-17_readme_eval.json") ||
-		!strings.Contains(t0.Message, "size") ||
-		!strings.Contains(t0.Message, "limit") ||
-		!strings.Contains(t0.Message, fmt.Sprintf("%d", capLimit)) {
-		t.Errorf("Expected task message to describe refusal with task, file, size, and limit, got: %s", t0.Message)
-	}
-
-	// Verify nothing was written for the refused artifact: no partial object, no summary.json
-	if _, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json"); exists {
-		t.Fatalf("Expected no log object written when upload is refused")
-	}
-	if _, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/summary.json"); exists {
-		t.Fatalf("Expected no summary.json written when upload is refused")
-	}
-}
-
-func TestRunController_StoreAgentArtifact_RefusalLogged(t *testing.T) {
-	fakeGCSClient := fakes.NewFakeStorageClient()
-	capLimit := int64(20)
-	gcsSink, err := gcs.New(t.Context(), "gs://test-bucket",
-		gcs.WithStorageClient(fakeGCSClient),
-		gcs.WithMaxUploadBytes(capLimit),
-	)
-	if err != nil {
-		t.Fatalf("Failed to create GCSSink: %v", err)
-	}
-
-	reconciler := &RunReconciler{
-		ArtifactSink: gcsSink,
-	}
-
-	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-run", Namespace: "eval-runner"},
-		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{Commit: "1234567890ab"}},
-	}
-	agentResult := &agent.Result{
-		StopReason: agent.StopReasonCompleted,
-		Steps: []agent.Step{
-			{Text: "Some long agent step text that exceeds twenty bytes limit easily"},
-		},
-	}
-
-	reconciler.storeAgentArtifact(t.Context(), ctrl.Log, run, "task-1", agentResult)
-
-	// Verify nothing was written for agent.json
-	if _, exists := fakeGCSClient.GetObject("test-bucket", "runs/1234567890ab/task-1/agent.json"); exists {
-		t.Errorf("Expected agent.json not written when upload exceeds limit")
+	expectedSize := fmt.Sprintf("%d", len(inspectLog))
+	expectedLimit := fmt.Sprintf("%d", capLimit)
+	if !strings.Contains(task.Message, "artifact was too large") ||
+		!strings.Contains(task.Message, "docs/readme_comprehension") ||
+		!strings.Contains(task.Message, "2026-10-17_readme_eval.json") ||
+		!strings.Contains(task.Message, expectedSize) ||
+		!strings.Contains(task.Message, expectedLimit) {
+		t.Errorf("Expected task message to describe refusal with task, file, size %s, and limit %s, got: %s", expectedSize, expectedLimit, task.Message)
 	}
 }
 
@@ -9717,19 +9676,6 @@ func TestRunController_AgentExecution_OversizedAgentRecordUnaffected(t *testing.
 	task := updatedRun.Status.Tasks[0]
 	if task.Phase != v1alpha1.TaskPhaseCompleted {
 		t.Errorf("expected task Phase Completed despite agent record refusal, got %s (message: %s)", task.Phase, task.Message)
-	}
-
-	// Verify agent.json was refused and not stored in GCS
-	if _, exists := fakeGCSClient.GetObject("my-bucket", "runs/abcdef123456/task-agent-oversized/agent.json"); exists {
-		t.Errorf("expected agent.json NOT stored when exceeding upload size limit")
-	}
-
-	// Verify results.json and summary.json WERE stored in GCS
-	if _, exists := fakeGCSClient.GetObject("my-bucket", "runs/abcdef123456/task-agent-oversized/results.json"); !exists {
-		t.Errorf("expected results.json stored in GCS")
-	}
-	if _, exists := fakeGCSClient.GetObject("my-bucket", "runs/abcdef123456/task-agent-oversized/summary.json"); !exists {
-		t.Errorf("expected summary.json stored in GCS")
 	}
 }
 

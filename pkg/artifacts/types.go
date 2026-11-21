@@ -37,9 +37,6 @@ func IsNotFound(err error) bool {
 	return errors.Is(err, ErrNotFound)
 }
 
-// ErrArtifactTooLarge indicates that an artifact exceeds the upload size limit and was refused.
-var ErrArtifactTooLarge = errors.New("artifact too large")
-
 // ArtifactTooLargeError records details of an artifact that exceeded the upload size limit and was refused.
 type ArtifactTooLargeError struct {
 	Task  string
@@ -53,16 +50,6 @@ func (e *ArtifactTooLargeError) Error() string {
 		return fmt.Sprintf("artifact was too large: task %s, file %s, size %d, limit %d", e.Task, e.File, e.Size, e.Limit)
 	}
 	return fmt.Sprintf("artifact was too large: file %s, size %d, limit %d", e.File, e.Size, e.Limit)
-}
-
-func (e *ArtifactTooLargeError) Is(target error) bool {
-	return target == ErrArtifactTooLarge
-}
-
-// IsArtifactTooLarge returns true if err is or wraps an ArtifactTooLargeError or ErrArtifactTooLarge.
-func IsArtifactTooLarge(err error) bool {
-	var e *ArtifactTooLargeError
-	return errors.As(err, &e) || errors.Is(err, ErrArtifactTooLarge)
 }
 
 // TaskSampleTokens records token usage for an individual evaluated sample in summary.json.
