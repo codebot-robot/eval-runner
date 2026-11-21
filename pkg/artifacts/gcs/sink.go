@@ -15,7 +15,9 @@
 package gcs
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,7 +50,7 @@ const (
 // StorageClient defines the interface for interacting with GCS.
 type StorageClient interface {
 	WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error
-	WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, metadata map[string]string, data []byte) error
+	WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType, contentEncoding string, metadata map[string]string, data []byte) error
 	ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error)
 	CheckAccess(ctx context.Context, bucket string) error
 	Close() error
@@ -71,13 +73,16 @@ func (c *realStorageClient) CheckAccess(ctx context.Context, bucket string) erro
 }
 
 func (c *realStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
-	return c.WriteObjectWithMetadata(ctx, bucket, object, contentType, nil, data)
+	return c.WriteObjectWithMetadata(ctx, bucket, object, contentType, "", nil, data)
 }
 
-func (c *realStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, metadata map[string]string, data []byte) error {
+func (c *realStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType, contentEncoding string, metadata map[string]string, data []byte) error {
 	w := c.client.Bucket(bucket).Object(object).NewWriter(ctx)
 	if contentType != "" {
 		w.ContentType = contentType
+	}
+	if contentEncoding != "" {
+		w.ContentEncoding = contentEncoding
 	}
 	if len(metadata) > 0 {
 		w.Metadata = metadata
@@ -89,7 +94,7 @@ func (c *realStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket,
 }
 
 func (c *realStorageClient) ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error) {
-	rc, err := c.client.Bucket(bucket).Object(object).NewReader(ctx)
+	rc, err := c.client.Bucket(bucket).Object(object).ReadCompressed(true).NewReader(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +302,7 @@ func (s *GCSSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadata,
 		"task-count": strconv.Itoa(meta.TaskCount),
 	}
 
-	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, manifestObject, "application/json", metaMap, data); err != nil {
+	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, manifestObject, "application/json", "", metaMap, data); err != nil {
 		return "", fmt.Errorf("store manifest to gs://%s/%s: %w", s.bucket, manifestObject, err)
 	}
 
@@ -376,7 +381,12 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("load artifact from gs://%s/%s: %w", bucket, object, err)
 	}
 
-	return data, nil
+	decompressed, err := decompressBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("decompress artifact gs://%s/%s: %w", bucket, object, err)
+	}
+
+	return decompressed, nil
 }
 
 func (s *GCSSink) effectiveCapBytes() int64 {
@@ -412,8 +422,13 @@ func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, f
 		"sha256": hash,
 	}
 
+	compressedData, err := compressBytes(data)
+	if err != nil {
+		return artifacts.StoredArtifact{}, fmt.Errorf("compress artifact %s: %w", filename, err)
+	}
+
 	logObject := fmt.Sprintf("runs/%s/%s/%s", meta.Commit, meta.TaskID, filename)
-	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, logObject, "application/json", metaMap, data); err != nil {
+	if err := s.client.WriteObjectWithMetadata(ctx, s.bucket, logObject, "application/json", "gzip", metaMap, compressedData); err != nil {
 		return artifacts.StoredArtifact{}, fmt.Errorf("store artifact to gs://%s/%s: %w", s.bucket, logObject, err)
 	}
 
@@ -421,6 +436,85 @@ func (s *GCSSink) storeObject(ctx context.Context, meta artifacts.RunMetadata, f
 		Location: fmt.Sprintf("gs://%s/%s", s.bucket, logObject),
 		Hash:     hash,
 	}, nil
+}
+
+// newCompressingWriter returns a gzip.Writer writing to destination.
+func newCompressingWriter(destination io.Writer) *gzip.Writer {
+	return gzip.NewWriter(destination)
+}
+
+func compressBytes(data []byte) ([]byte, error) {
+	var buffer bytes.Buffer
+	gzipWriter := newCompressingWriter(&buffer)
+	if _, err := gzipWriter.Write(data); err != nil {
+		return nil, err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+type decompressingReadCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (d *decompressingReadCloser) Close() error {
+	var closeErr error
+	for _, closer := range d.closers {
+		if closer != nil {
+			if err := closer.Close(); err != nil {
+				closeErr = errors.Join(closeErr, err)
+			}
+		}
+	}
+	return closeErr
+}
+
+// newDecompressingReader peeks at the source to detect gzip magic bytes (0x1f, 0x8b).
+// If gzip is detected, it returns a gzip.Reader wrapping the source.
+// Otherwise, it returns the source uncompressed without decompression.
+func newDecompressingReader(source io.Reader) (io.ReadCloser, error) {
+	bufferedReader := bufio.NewReader(source)
+	magic, err := bufferedReader.Peek(2)
+	if err == nil && len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		gzipReader, err := gzip.NewReader(bufferedReader)
+		if err != nil {
+			return nil, err
+		}
+		closers := []io.Closer{gzipReader}
+		if closer, ok := source.(io.Closer); ok {
+			closers = append(closers, closer)
+		}
+		return &decompressingReadCloser{
+			Reader:  gzipReader,
+			closers: closers,
+		}, nil
+	}
+	if closer, ok := source.(io.Closer); ok {
+		return &decompressingReadCloser{
+			Reader:  bufferedReader,
+			closers: []io.Closer{closer},
+		}, nil
+	}
+	return io.NopCloser(bufferedReader), nil
+}
+
+func decompressBytes(data []byte) ([]byte, error) {
+	reader, err := newDecompressingReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	decompressed, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return decompressed, nil
 }
 
 // StoreTaskFile implements artifacts.TaskFileStorer for GCSSink, writing filename next to task artifacts without modifying summary.json.

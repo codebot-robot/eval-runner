@@ -719,6 +719,20 @@ spec:
 			}
 		}
 
+		var objectListing struct {
+			Items []struct {
+				Name            string `json:"name"`
+				ContentEncoding string `json:"contentEncoding"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal([]byte(objectsJSON), &objectListing); err != nil {
+			t.Fatalf("failed to parse GCS objects listing: %v", err)
+		}
+		encodingByName := make(map[string]string)
+		for _, item := range objectListing.Items {
+			encodingByName[item.Name] = item.ContentEncoding
+		}
+
 		// Verify trajectory viewer pages via UI port-forward
 		runUISmoke(t, harness, runName, true)
 
@@ -727,6 +741,9 @@ spec:
 
 		for _, task := range run.Status.Tasks {
 			objectPath := strings.TrimPrefix(task.LogPath, fmt.Sprintf("gs://%s/", bucket))
+			if encoding := encodingByName[objectPath]; encoding != "gzip" {
+				t.Errorf("expected GCS object %s contentEncoding to be %q, got %q", objectPath, "gzip", encoding)
+			}
 			rawLog := harness.GetGCSObject("eval-runner", bucket, objectPath)
 			expectedScores, err := artifacts.ParseInspectSampleScores(rawLog)
 			if err != nil {
