@@ -15614,7 +15614,7 @@ func TestComparisonReconciler_BaselineReuse_SkipsMismatchedSinkPrefix(t *testing
 	for i := 1; i <= 4; i++ {
 		b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.8})
 	}
-	candB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	candB1, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       candCommit,
 		RunName:      "cand-b1",
 		RunNamespace: "eval-runner",
@@ -15623,7 +15623,8 @@ func TestComparisonReconciler_BaselineReuse_SkipsMismatchedSinkPrefix(t *testing
 	if err != nil {
 		t.Fatalf("Failed to store candidate b1 log: %v", err)
 	}
-	baseB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	candB1Path := candB1.Location
+	baseB1, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       baseCommit,
 		RunName:      "base-b1",
 		RunNamespace: "eval-runner",
@@ -15632,6 +15633,7 @@ func TestComparisonReconciler_BaselineReuse_SkipsMismatchedSinkPrefix(t *testing
 	if err != nil {
 		t.Fatalf("Failed to store baseline b1 log: %v", err)
 	}
+	baseB1Path := baseB1.Location
 
 	candRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
@@ -15768,7 +15770,7 @@ func TestComparisonReconciler_ReferencedBatchRun_PrefixMismatchTerminatesInconcl
 	for i := 1; i <= 4; i++ {
 		b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.8})
 	}
-	candB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	candB1, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       candCommit,
 		RunName:      "cand-b1",
 		RunNamespace: "eval-runner",
@@ -15777,7 +15779,8 @@ func TestComparisonReconciler_ReferencedBatchRun_PrefixMismatchTerminatesInconcl
 	if err != nil {
 		t.Fatalf("Failed to store candidate b1 log: %v", err)
 	}
-	baseB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	candB1Path := candB1.Location
+	baseB1, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       baseCommit,
 		RunName:      "base-b1",
 		RunNamespace: "eval-runner",
@@ -15786,8 +15789,9 @@ func TestComparisonReconciler_ReferencedBatchRun_PrefixMismatchTerminatesInconcl
 	if err != nil {
 		t.Fatalf("Failed to store baseline b1 log: %v", err)
 	}
+	baseB1Path := baseB1.Location
 
-	candB2Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	candB2Artifact, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       candCommit,
 		RunName:      "cand-b2",
 		RunNamespace: "eval-runner",
@@ -15796,6 +15800,7 @@ func TestComparisonReconciler_ReferencedBatchRun_PrefixMismatchTerminatesInconcl
 	if err != nil {
 		t.Fatalf("Failed to store candidate b2 log: %v", err)
 	}
+	candB2Path := candB2Artifact.Location
 
 	candRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
@@ -16115,7 +16120,7 @@ func TestComparisonReconciler_BaselineReuse_FailedTaskInOtherSlot_Reconcile(t *t
 	for i := 1; i <= 4; i++ {
 		b1Scores = append(b1Scores, stats.SampleScore{ID: fmt.Sprint(i), Score: 0.8})
 	}
-	candB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	candB1, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       candCommit,
 		RunName:      "cand-b1",
 		RunNamespace: "eval-runner",
@@ -16124,7 +16129,8 @@ func TestComparisonReconciler_BaselineReuse_FailedTaskInOtherSlot_Reconcile(t *t
 	if err != nil {
 		t.Fatalf("Failed to store candidate b1 log: %v", err)
 	}
-	baseB1Path, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	candB1Path := candB1.Location
+	baseB1, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       baseCommit,
 		RunName:      "base-b1",
 		RunNamespace: "eval-runner",
@@ -16133,8 +16139,9 @@ func TestComparisonReconciler_BaselineReuse_FailedTaskInOtherSlot_Reconcile(t *t
 	if err != nil {
 		t.Fatalf("Failed to store baseline b1 log: %v", err)
 	}
+	baseB1Path := baseB1.Location
 
-	baseB2TaskAPath, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
+	baseB2TaskA, err := sink.StoreArtifact(t.Context(), artifacts.RunMetadata{
 		Commit:       baseCommit,
 		RunName:      "reused-base-run",
 		RunNamespace: "eval-runner",
@@ -16143,6 +16150,7 @@ func TestComparisonReconciler_BaselineReuse_FailedTaskInOtherSlot_Reconcile(t *t
 	if err != nil {
 		t.Fatalf("Failed to store baseline b2 taskA log: %v", err)
 	}
+	baseB2TaskAPath := baseB2TaskA.Location
 
 	candRun := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "cand-b1", Namespace: "eval-runner"},
@@ -18178,8 +18186,8 @@ type blockingSinkComparison struct {
 	loadFn func(ctx context.Context, path string) ([]byte, error)
 }
 
-func (b *blockingSinkComparison) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	return "", nil
+func (b *blockingSinkComparison) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
+	return artifacts.StoredArtifact{}, nil
 }
 
 func (b *blockingSinkComparison) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {

@@ -558,8 +558,8 @@ type failingSink struct {
 	commitPrefix string
 }
 
-func (f *failingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	return "", f.err
+func (f *failingSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
+	return artifacts.StoredArtifact{}, f.err
 }
 
 func (f *failingSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {

@@ -128,6 +128,7 @@ type TaskSummary struct {
 	Model             string                       `json:"model"`
 	Commit            string                       `json:"commit"`
 	LogFilename       string                       `json:"logFilename,omitempty"`
+	LogHash           string                       `json:"logHash,omitempty"`
 	RunName           string                       `json:"runName,omitempty"`
 	RunNamespace      string                       `json:"runNamespace,omitempty"`
 	ControllerVersion string                       `json:"controllerVersion,omitempty"`
@@ -249,10 +250,16 @@ type ComparisonArtifact struct {
 	Budget                *v1alpha1.ComparisonBudgetStatus   `json:"budget,omitempty"`
 }
 
+// StoredArtifact contains the storage location and content hash of a stored task artifact.
+type StoredArtifact struct {
+	Location string
+	Hash     string
+}
+
 // ArtifactSink defines the interface for storing Inspect evaluation logs and artifacts.
 type ArtifactSink interface {
-	// StoreArtifact persists the raw log bytes for a task and returns the storage path or URI.
-	StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error)
+	// StoreArtifact persists the raw log bytes for a task and returns the stored location and content hash.
+	StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (StoredArtifact, error)
 
 	// StoreComparison persists comparison summary data as comparisons/<comparisonName>.json and returns the storage path or URI.
 	StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error)

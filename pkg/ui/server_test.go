@@ -2283,8 +2283,8 @@ type errorSink struct {
 	err error
 }
 
-func (s *errorSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (string, error) {
-	return "", nil
+func (s *errorSink) StoreArtifact(ctx context.Context, meta artifacts.RunMetadata, filename string, data []byte) (artifacts.StoredArtifact, error) {
+	return artifacts.StoredArtifact{}, nil
 }
 func (s *errorSink) StoreComparison(ctx context.Context, comparisonName string, data []byte) (string, error) {
 	return "", nil
@@ -2331,10 +2331,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		FinishedAt:  &now,
 	}
 
-	logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", fixtureData)
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", fixtureData)
 	if err != nil {
 		t.Fatalf("failed to store artifact: %v", err)
 	}
+	logURI := stored.Location
 
 	sandboxTaskID := "sandbox/eval"
 	sandboxResults := []byte(`{
@@ -2354,10 +2355,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		StartedAt:   &now,
 		FinishedAt:  &now,
 	}
-	sandboxLogURI, err := sink.StoreArtifact(t.Context(), sandboxMeta, "results.json", sandboxResults)
+	sandboxStored, err := sink.StoreArtifact(t.Context(), sandboxMeta, "results.json", sandboxResults)
 	if err != nil {
 		t.Fatalf("failed to store sandbox artifact: %v", err)
 	}
+	sandboxLogURI := sandboxStored.Location
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2748,10 +2750,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 			StartedAt:   &now,
 			FinishedAt:  &now,
 		}
-		truncURI, err := sink.StoreArtifact(t.Context(), metaTrunc, "inspect.json", []byte(`{"version": 2, "samples": [{"id": 1, "input": "incomp`))
+		storedTrunc, err := sink.StoreArtifact(t.Context(), metaTrunc, "inspect.json", []byte(`{"version": 2, "samples": [{"id": 1, "input": "incomp`))
 		if err != nil {
 			t.Fatalf("failed to store truncated artifact: %v", err)
 		}
+		truncURI := storedTrunc.Location
 
 		runTrunc := &v1alpha1.Run{
 			ObjectMeta: metav1.ObjectMeta{
@@ -2842,10 +2845,11 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 			StartedAt:   &now,
 			FinishedAt:  &now,
 		}
-		hostileURI, err := sink.StoreArtifact(t.Context(), metaHostile, "inspect.json", []byte(hostileJSON))
+		storedHostile, err := sink.StoreArtifact(t.Context(), metaHostile, "inspect.json", []byte(hostileJSON))
 		if err != nil {
 			t.Fatalf("failed to store hostile artifact: %v", err)
 		}
+		hostileURI := storedHostile.Location
 
 		runHostile := &v1alpha1.Run{
 			ObjectMeta: metav1.ObjectMeta{
@@ -2961,10 +2965,11 @@ func TestServerTaskSamples_InMemorySink_Drilldown(t *testing.T) {
 		FinishedAt:  &now,
 	}
 
-	uri, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(logJSON))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(logJSON))
 	if err != nil {
 		t.Fatalf("failed to store artifact: %v", err)
 	}
+	uri := stored.Location
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3135,10 +3140,11 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_CorruptLog(t *testing.T) {
 	// Full log is unparsable corrupt JSON: slow path cannot satisfy the request
 	invalidLog := []byte(`{"version": 2, "corrupt_data": true`)
 
-	logPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", invalidLog)
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", invalidLog)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
+	logPath := stored.Location
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3217,10 +3223,11 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_CorruptLog(t *testing.T) {
 	metaTrunc := meta
 	metaTrunc.TaskID = "task/truncated"
 	metaTrunc.SamplesTruncated = true
-	truncLogPath, err := sink.StoreArtifact(t.Context(), metaTrunc, "inspect.json", invalidLog)
+	storedTrunc, err := sink.StoreArtifact(t.Context(), metaTrunc, "inspect.json", invalidLog)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
+	truncLogPath := storedTrunc.Location
 	runTrunc := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "corrupt-run-trunc",
@@ -3296,10 +3303,11 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *
 	// Oversized log exceeding DefaultMaxLoadBytes (10 MiB)
 	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
 
-	logPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
+	logPath := stored.Location
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3416,10 +3424,11 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_GCSConsoleLink(t *testing.T) 
 	}
 
 	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
-	rawPath, err := inMem.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	stored, err := inMem.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
+	rawPath := stored.Location
 
 	gcsSink := &mockGCSTaskSink{
 		ArtifactSink: inMem,
@@ -3509,10 +3518,11 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_MissingLog(t *testing.T) {
 	}
 
 	// Store summary.json by storing an inspect log first
-	storedLogPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
+	storedLogPath := stored.Location
 
 	// Deliberately point to a non-existent inspect log, while summary.json remains where StoreArtifact wrote it
 	missingLogPath := strings.Replace(storedLogPath, "inspect.json", "missing_inspect.json", 1)
@@ -3627,10 +3637,11 @@ func TestServer_TaskSamplesPrimaryPath_PreviewsPopulatedWhenLogValid(t *testing.
 		]
 	}`
 
-	logPath, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(validLogJSON))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(validLogJSON))
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
+	logPath := stored.Location
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3897,10 +3908,11 @@ func TestServerSampleTranscript_Truncation(t *testing.T) {
 		]
 	}`, explanation100k, target100k)
 
-	logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(rawJSON))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(rawJSON))
 	if err != nil {
 		t.Fatalf("failed to store artifact in InMemorySink: %v", err)
 	}
+	logURI := stored.Location
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
@@ -4031,10 +4043,11 @@ func TestServerTaskSamplesList_Truncation(t *testing.T) {
 		]
 	}`, explanation100k, target100k)
 
-	logURI, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(rawJSON))
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", []byte(rawJSON))
 	if err != nil {
 		t.Fatalf("failed to store artifact in InMemorySink: %v", err)
 	}
+	logURI := stored.Location
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{

@@ -49,8 +49,8 @@ func (s *UnavailableSink) CheckAccess(ctx context.Context) error {
 }
 
 // StoreArtifact implements ArtifactSink, failing immediately with the unavailability error.
-func (s *UnavailableSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
-	return "", fmt.Errorf("artifactBucket is set but artifact storage is unavailable: %w", s.err)
+func (s *UnavailableSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
+	return StoredArtifact{}, fmt.Errorf("artifactBucket is set but artifact storage is unavailable: %w", s.err)
 }
 
 // StoreTaskFile implements TaskFileStorer, failing immediately with the unavailability error.

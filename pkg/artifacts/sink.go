@@ -16,6 +16,8 @@ package artifacts
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +27,12 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// ArtifactHash returns the sha256 checksum (in sha256:<hex> format) of artifact content.
+func ArtifactHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(h[:])
+}
 
 const (
 	// DefaultMaxLoadBytes is the default cap on loaded artifact size (10 MiB).
@@ -37,8 +45,8 @@ type NoopSink struct{}
 var _ ArtifactSink = (*NoopSink)(nil)
 
 // StoreArtifact implements ArtifactSink for NoopSink.
-func (s *NoopSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
-	return "", nil
+func (s *NoopSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
+	return StoredArtifact{}, nil
 }
 
 // StoreTaskFile implements TaskFileStorer for NoopSink.
@@ -273,12 +281,13 @@ func (s *LocalDirSink) StoreTaskFile(ctx context.Context, meta RunMetadata, file
 }
 
 // StoreArtifact implements ArtifactSink for LocalDirSink.
-func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (string, error) {
+func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, filename string, data []byte) (StoredArtifact, error) {
 	targetPath, err := s.StoreTaskFile(ctx, meta, filename, data)
 	if err != nil {
-		return "", err
+		return StoredArtifact{}, err
 	}
 
+	hash := ArtifactHash(data)
 	targetDir := filepath.Dir(targetPath)
 
 	sampleList := meta.Samples
@@ -295,6 +304,7 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 		Model:             meta.Model,
 		Commit:            meta.Commit,
 		LogFilename:       filename,
+		LogHash:           hash,
 		RunName:           meta.RunName,
 		RunNamespace:      meta.RunNamespace,
 		ControllerVersion: meta.ControllerVersion,
@@ -318,12 +328,12 @@ func (s *LocalDirSink) StoreArtifact(ctx context.Context, meta RunMetadata, file
 	}
 	summaryBytes, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal summary.json: %w", err)
+		return StoredArtifact{}, fmt.Errorf("failed to marshal summary.json: %w", err)
 	}
 	summaryBytes = append(summaryBytes, '\n')
 	if err := os.WriteFile(filepath.Join(targetDir, "summary.json"), summaryBytes, 0644); err != nil {
-		return "", fmt.Errorf("failed to write summary.json: %w", err)
+		return StoredArtifact{}, fmt.Errorf("failed to write summary.json: %w", err)
 	}
 
-	return targetPath, nil
+	return StoredArtifact{Location: targetPath, Hash: hash}, nil
 }
