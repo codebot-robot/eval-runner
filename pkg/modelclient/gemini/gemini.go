@@ -16,7 +16,6 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +26,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/agent"
+	"github.com/gke-labs/eval-runner/pkg/modelclient"
 )
 
 const (
@@ -38,18 +38,20 @@ const (
 
 // Options configures a Client.
 type Options struct {
-	BaseURL    string
-	Model      string
-	APIKey     string
-	HTTPClient *http.Client
+	BaseURL        string
+	Model          string
+	APIKey         string
+	HTTPClient     *http.Client
+	InitialBackoff time.Duration
 }
 
 // Client calls the Gemini generate-content endpoint.
 type Client struct {
-	baseURL    string
-	model      string
-	apiKey     string
-	httpClient *http.Client
+	baseURL        string
+	model          string
+	apiKey         string
+	httpClient     *http.Client
+	initialBackoff time.Duration
 }
 
 var _ agent.Model = (*Client)(nil)
@@ -156,10 +158,11 @@ func New(options Options) (*Client, error) {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{
-		baseURL:    baseURL,
-		model:      modelName,
-		apiKey:     options.APIKey,
-		httpClient: httpClient,
+		baseURL:        baseURL,
+		model:          modelName,
+		apiKey:         options.APIKey,
+		httpClient:     httpClient,
+		initialBackoff: options.InitialBackoff,
 	}, nil
 }
 
@@ -244,19 +247,21 @@ func (client *Client) Generate(ctx context.Context, request agent.Request) (*age
 	}
 
 	endpointURL := fmt.Sprintf("%s/v1beta/models/%s:generateContent", client.baseURL, client.model)
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(encodedBody))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set(apiKeyHeaderName, client.apiKey)
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+	header.Set(apiKeyHeaderName, client.apiKey)
 
-	httpResponse, err := client.httpClient.Do(httpRequest)
+	httpResponse, err := modelclient.PostWithRetry(ctx, modelclient.PostOptions{
+		HTTPClient:     client.httpClient,
+		EndpointURL:    endpointURL,
+		Header:         header,
+		Body:           encodedBody,
+		InitialBackoff: client.initialBackoff,
+		FormatError:    client.formatAPIError,
+		Redact:         client.redactAPIKey,
+	})
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("execute request: %w", err)
+		return nil, err
 	}
 
 	responseBytes, readErr := io.ReadAll(io.LimitReader(httpResponse.Body, 16*1024*1024))
@@ -265,14 +270,6 @@ func (client *Client) Generate(ctx context.Context, request agent.Request) (*age
 	}
 	if readErr != nil {
 		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		return nil, client.formatAPIError(httpResponse.Status, responseBytes)
 	}
 
 	return client.parseResponse(responseBytes)
@@ -345,8 +342,13 @@ func (client *Client) formatAPIError(statusText string, responseBytes []byte) er
 	} else if len(responseBytes) > 0 {
 		errorMessage = strings.TrimSpace(string(responseBytes))
 	}
-	if client.apiKey != "" {
-		errorMessage = strings.ReplaceAll(errorMessage, client.apiKey, "[REDACTED]")
-	}
+	errorMessage = client.redactAPIKey(errorMessage)
 	return fmt.Errorf("gemini API error (%s): %s", statusText, errorMessage)
+}
+
+func (client *Client) redactAPIKey(text string) string {
+	if client.apiKey != "" {
+		text = strings.ReplaceAll(text, client.apiKey, "[REDACTED]")
+	}
+	return text
 }

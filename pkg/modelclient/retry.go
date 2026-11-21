@@ -21,8 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -60,44 +62,68 @@ func PostWithRetry(ctx context.Context, options PostOptions) (*http.Response, er
 			httpRequest.Header = options.Header.Clone()
 		}
 
+		var lastError error
+		waitDuration := backoffDuration
+
 		httpResponse, err := options.HTTPClient.Do(httpRequest)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			lastError = fmt.Errorf("execute request: %w", err)
 			if options.Redact != nil {
-				return nil, errors.New(options.Redact(fmt.Sprintf("execute request: %v", err)))
+				lastError = errors.New(options.Redact(lastError.Error()))
 			}
-			return nil, fmt.Errorf("execute request: %w", err)
-		}
-
-		if httpResponse.StatusCode >= 200 && httpResponse.StatusCode < 300 {
+			if !isRetryableNetworkError(err) {
+				return nil, lastError
+			}
+		} else if httpResponse.StatusCode >= 200 && httpResponse.StatusCode < 300 {
 			return httpResponse, nil
-		}
-
-		responseBytes, readErr := io.ReadAll(io.LimitReader(httpResponse.Body, maxErrorResponseBytes))
-		if closeErr := httpResponse.Body.Close(); closeErr != nil && readErr == nil {
-			return nil, fmt.Errorf("close response: %w", closeErr)
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("read response: %w", readErr)
-		}
-
-		if (httpResponse.StatusCode == http.StatusTooManyRequests || (httpResponse.StatusCode >= 500 && httpResponse.StatusCode <= 599)) && attempt < maxRetries {
-			waitDuration := backoffDuration
-			backoffDuration *= 2
+		} else {
+			responseBytes, readErr := io.ReadAll(io.LimitReader(httpResponse.Body, maxErrorResponseBytes))
+			if closeErr := httpResponse.Body.Close(); closeErr != nil && readErr == nil {
+				return nil, fmt.Errorf("close response: %w", closeErr)
+			}
+			if readErr != nil {
+				return nil, fmt.Errorf("read response: %w", readErr)
+			}
+			lastError = options.FormatError(httpResponse.Status, responseBytes)
+			if httpResponse.StatusCode != http.StatusTooManyRequests && (httpResponse.StatusCode < 500 || httpResponse.StatusCode > 599) {
+				return nil, lastError
+			}
 			if retryAfter, ok := parseRetryAfter(httpResponse.Header.Get("Retry-After")); ok {
 				waitDuration = retryAfter
 			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(waitDuration):
-			}
-			continue
 		}
-		return nil, options.FormatError(httpResponse.Status, responseBytes)
+
+		if attempt >= maxRetries {
+			return nil, fmt.Errorf("after %s: %w", formatAttempts(attempt+1), lastError)
+		}
+		if deadline, hasDeadline := ctx.Deadline(); hasDeadline && time.Until(deadline) < waitDuration {
+			return nil, fmt.Errorf("after %s (stopped because no time left to retry): %w", formatAttempts(attempt+1), lastError)
+		}
+		backoffDuration *= 2
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(waitDuration):
+		}
 	}
+}
+
+func isRetryableNetworkError(err error) bool {
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	var netError net.Error
+	return errors.As(err, &netError) && netError.Timeout()
+}
+
+func formatAttempts(attempts int) string {
+	if attempts == 1 {
+		return "1 attempt"
+	}
+	return fmt.Sprintf("%d attempts", attempts)
 }
 
 func parseRetryAfter(header string) (time.Duration, bool) {
