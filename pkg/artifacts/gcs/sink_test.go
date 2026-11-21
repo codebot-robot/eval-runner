@@ -143,12 +143,6 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 	if summary.FinishedAt == nil || !summary.FinishedAt.Equal(finishTime) {
 		t.Errorf("Expected FinishedAt %v, got %v", finishTime, summary.FinishedAt)
 	}
-	if summary.Capped {
-		t.Errorf("Expected Capped=false when under cap limit")
-	}
-	if summary.CapBytes != 0 {
-		t.Errorf("Expected CapBytes=0 when under cap limit, got %d", summary.CapBytes)
-	}
 }
 
 func TestGCSSink_CapBehavior(t *testing.T) {
@@ -172,40 +166,91 @@ func TestGCSSink_CapBehavior(t *testing.T) {
 
 	largeLog := []byte(strings.Repeat("A", 100)) // 100 bytes > 30 byte cap
 
-	logURI, err := sink.StoreArtifact(t.Context(), meta, "large.json", largeLog)
-	if err != nil {
-		t.Fatalf("StoreArtifact failed: %v", err)
+	// 1. StoreArtifact over limit is refused: error names task, file, size, and limit
+	_, err = sink.StoreArtifact(t.Context(), meta, "large.json", largeLog)
+	if err == nil {
+		t.Fatalf("Expected StoreArtifact to fail when file exceeds cap limit, got nil")
 	}
 
-	if logURI != "gs://my-eval-bucket/runs/1234567890ab/docs/readme_comprehension/large.json" {
-		t.Errorf("Unexpected log URI: %s", logURI)
+	var tooLargeErr *artifacts.ArtifactTooLargeError
+	if !errors.As(err, &tooLargeErr) {
+		t.Fatalf("Expected error of type *artifacts.ArtifactTooLargeError, got %T: %v", err, err)
+	}
+	if tooLargeErr.Task != "docs/readme_comprehension" {
+		t.Errorf("Expected task %q, got %q", "docs/readme_comprehension", tooLargeErr.Task)
+	}
+	if tooLargeErr.File != "large.json" {
+		t.Errorf("Expected file %q, got %q", "large.json", tooLargeErr.File)
+	}
+	if tooLargeErr.Size != 100 {
+		t.Errorf("Expected size 100, got %d", tooLargeErr.Size)
+	}
+	if tooLargeErr.Limit != capLimit {
+		t.Errorf("Expected limit %d, got %d", capLimit, tooLargeErr.Limit)
 	}
 
-	logObj, exists := fakeClient.GetObject("my-eval-bucket", "runs/1234567890ab/docs/readme_comprehension/large.json")
-	if !exists {
-		t.Fatalf("Log object missing")
-	}
-	if int64(len(logObj.Data)) != capLimit {
-		t.Errorf("Expected uploaded log to be capped at %d bytes, got %d bytes", capLimit, len(logObj.Data))
-	}
-	if string(logObj.Data) != strings.Repeat("A", int(capLimit)) {
-		t.Errorf("Expected uploaded log data to match truncated prefix")
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "docs/readme_comprehension") ||
+		!strings.Contains(errMsg, "large.json") ||
+		!strings.Contains(errMsg, "100") ||
+		!strings.Contains(errMsg, "30") {
+		t.Errorf("Error message must name task, file, size, and limit, got: %s", errMsg)
 	}
 
-	summaryObj, exists := fakeClient.GetObject("my-eval-bucket", "runs/1234567890ab/docs/readme_comprehension/summary.json")
-	if !exists {
-		t.Fatalf("summary.json missing")
+	// Verify nothing was written for it: no partial object, no summary.json
+	if _, exists := fakeClient.GetObject("my-eval-bucket", "runs/1234567890ab/docs/readme_comprehension/large.json"); exists {
+		t.Fatalf("Expected no log object written when cap is exceeded")
+	}
+	if _, exists := fakeClient.GetObject("my-eval-bucket", "runs/1234567890ab/docs/readme_comprehension/summary.json"); exists {
+		t.Fatalf("Expected no summary.json written when cap is exceeded")
 	}
 
-	var summary artifacts.TaskSummary
-	if err := json.Unmarshal(summaryObj.Data, &summary); err != nil {
-		t.Fatalf("Failed to parse summary.json: %v", err)
+	// 2. StoreTaskFile over limit is refused
+	_, err = sink.StoreTaskFile(t.Context(), meta, "agent.json", largeLog)
+	if err == nil {
+		t.Fatalf("Expected StoreTaskFile to fail when file exceeds cap limit, got nil")
 	}
-	if !summary.Capped {
-		t.Errorf("Expected summary.Capped=true when cap is exceeded")
+	var taskFileErr *artifacts.ArtifactTooLargeError
+	if !errors.As(err, &taskFileErr) {
+		t.Fatalf("Expected *artifacts.ArtifactTooLargeError from StoreTaskFile, got %T: %v", err, err)
 	}
-	if summary.CapBytes != capLimit {
-		t.Errorf("Expected summary.CapBytes=%d, got %d", capLimit, summary.CapBytes)
+	if taskFileErr.File != "agent.json" || taskFileErr.Task != "docs/readme_comprehension" {
+		t.Errorf("Expected file agent.json and task docs/readme_comprehension, got %+v", taskFileErr)
+	}
+	if _, exists := fakeClient.GetObject("my-eval-bucket", "runs/1234567890ab/docs/readme_comprehension/agent.json"); exists {
+		t.Fatalf("Expected no agent.json written when cap is exceeded")
+	}
+
+	// 3. StoreComparison over limit is refused
+	_, err = sink.StoreComparison(t.Context(), "comp-1", largeLog)
+	if err == nil {
+		t.Fatalf("Expected StoreComparison to fail when comparison exceeds cap limit, got nil")
+	}
+	var compErr *artifacts.ArtifactTooLargeError
+	if !errors.As(err, &compErr) {
+		t.Fatalf("Expected *artifacts.ArtifactTooLargeError from StoreComparison, got %T: %v", err, err)
+	}
+	if _, exists := fakeClient.GetObject("my-eval-bucket", "comparisons/comp-1.json"); exists {
+		t.Fatalf("Expected no comparison object written when cap is exceeded")
+	}
+
+	// 4. Old summary.json carrying capped and capBytes still loads
+	oldSummaryJSON := []byte(`{
+		"schemaVersion": 1,
+		"taskId": "docs/readme_comprehension",
+		"model": "test-model",
+		"commit": "1234567890ab",
+		"sampleCount": 5,
+		"successes": 5,
+		"capped": true,
+		"capBytes": 30
+	}`)
+	var oldSummary artifacts.TaskSummary
+	if err := json.Unmarshal(oldSummaryJSON, &oldSummary); err != nil {
+		t.Fatalf("Expected old summary.json with capped field to load successfully: %v", err)
+	}
+	if oldSummary.TaskID != "docs/readme_comprehension" {
+		t.Errorf("Expected TaskID %q, got %q", "docs/readme_comprehension", oldSummary.TaskID)
 	}
 }
 

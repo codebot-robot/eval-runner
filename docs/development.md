@@ -786,7 +786,7 @@ Supported ConfigMap keys include:
 - `allowedCloneHosts`: Comma-separated allow-list of clone URL hosts for webhook-received pull requests and pushes (default `github.com`; an empty list defaults to `github.com`; wildcards are not supported).
 - `artifactBucket`: GCS bucket URI (`gs://<bucket>`) or name where Inspect logs and `summary.json` are stored.
 - `artifactDir`: Local filesystem directory for storing evaluation artifacts.
-- `artifactMaxUploadBytes`: Maximum size in bytes of an uploaded Inspect log before truncation (default `10485760`, 10 MiB).
+- `artifactMaxUploadBytes`: Maximum size in bytes of an uploaded artifact before it is refused (default `10485760`, 10 MiB).
 - `commandUsers`: Comma-separated allow-list of specific GitHub usernames permitted to execute comment commands (e.g. `/eval more <n>`) without checking the GitHub collaborator permission API (exact case-insensitive match; wildcards are not supported).
 - `defaultBatchSize`: Default batch size for paired adaptive sampling in webhook-created Comparisons and initial sample window on seed Runs (default `8`).
 - `defaultLimit`: Deprecated: previously set sample limit for webhook-created Runs; seed Runs now evaluate paired sample windows (`defaultBatchSize`).
@@ -990,12 +990,11 @@ The `summary.json` contains:
   "successes": 8,
   "meanScore": 0.8,
   "startedAt": "2026-10-17T14:52:45Z",
-  "finishedAt": "2026-10-17T14:52:47Z",
-  "capped": false
+  "finishedAt": "2026-10-17T14:52:47Z"
 }
 ```
 
-Upload sizes are bounded to 10 MiB; if a log exceeds this limit, the log is uploaded in full up to the cap, and `"capped": true` along with `"capBytes"` are recorded in `summary.json`.
+Upload sizes are bounded to 10 MiB; if an artifact exceeds this limit, it is refused and nothing is written to storage.
 
 On the `Run` custom resource, `status.artifacts` records the run-level prefix (e.g. `gs://<bucket>/runs/<commit>/`), and `status.tasks[].logPath` points directly to the `gs://` URI of each task's log.
 
