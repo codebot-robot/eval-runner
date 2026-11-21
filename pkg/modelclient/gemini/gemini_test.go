@@ -346,3 +346,117 @@ func TestIsGeminiModel(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerate_Retry(t *testing.T) {
+	newTestClient := func(server *httptest.Server) *Client {
+		c, err := New(Options{
+			BaseURL:        server.URL,
+			Model:          "gemini-2.5-flash",
+			APIKey:         "test-key",
+			HTTPClient:     server.Client(),
+			InitialBackoff: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		return c
+	}
+
+	t.Run("retry 503 transient error succeeds", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			if attempts == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":{"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."}}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"Success after retry"}]}}]}`))
+		}))
+		defer server.Close()
+
+		resp, err := newTestClient(server).Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err != nil {
+			t.Fatalf("Generate() failed: %v", err)
+		}
+		if attempts != 2 || resp.Text != "Success after retry" {
+			t.Errorf("unexpected attempts=%d or text=%q", attempts, resp.Text)
+		}
+	})
+
+	t.Run("retry dropped connection succeeds", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			if attempts == 1 {
+				hj, ok := w.(http.Hijacker)
+				if !ok {
+					t.Fatalf("hijacking unsupported")
+				}
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"Recovered from dropped connection"}]}}]}`))
+		}))
+		defer server.Close()
+
+		resp, err := newTestClient(server).Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err != nil {
+			t.Fatalf("Generate() failed: %v", err)
+		}
+		if attempts != 2 || resp.Text != "Recovered from dropped connection" {
+			t.Errorf("unexpected attempts=%d or text=%q", attempts, resp.Text)
+		}
+	})
+
+	t.Run("exhaust retries on 503 reports attempt count and last error", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."}}`))
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(server).Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if attempts != 4 {
+			t.Errorf("expected 4 attempts, got %d", attempts)
+		}
+		errMsg := err.Error()
+		if !strings.HasPrefix(errMsg, "after 4 attempts:") || !strings.Contains(errMsg, "gemini API error (503 Service Unavailable)") || !strings.Contains(errMsg, "This model is currently experiencing high demand") {
+			t.Errorf("unexpected error message: %q", errMsg)
+		}
+	})
+
+	t.Run("permanent 404 fails at once without attempts message", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"message":"models/gemini-2.5-flash not found"}}`))
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(server).Generate(t.Context(), agent.Request{
+			Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if attempts != 1 || strings.Contains(err.Error(), "attempts") {
+			t.Errorf("expected 1 attempt and no 'attempts' in error, got attempts=%d, err=%v", attempts, err)
+		}
+	})
+}

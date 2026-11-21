@@ -16,40 +16,41 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gke-labs/eval-runner/pkg/agent"
+	"github.com/gke-labs/eval-runner/pkg/modelclient"
 )
 
 const (
 	defaultBaseURL     = "https://generativelanguage.googleapis.com"
-	defaultHTTPTimeout = 2 * time.Minute
+	defaultHTTPTimeout = modelclient.DefaultHTTPTimeout
 	bashToolName       = "bash"
 	apiKeyHeaderName   = "x-goog-api-key"
 )
 
 // Options configures a Client.
 type Options struct {
-	BaseURL    string
-	Model      string
-	APIKey     string
-	HTTPClient *http.Client
+	BaseURL        string
+	Model          string
+	APIKey         string
+	HTTPClient     *http.Client
+	InitialBackoff time.Duration
 }
 
 // Client calls the Gemini generate-content endpoint.
 type Client struct {
-	baseURL    string
-	model      string
-	apiKey     string
-	httpClient *http.Client
+	baseURL     string
+	model       string
+	apiKey      string
+	httpClient  *http.Client
+	retryClient *modelclient.RetryClient
 }
 
 var _ agent.Model = (*Client)(nil)
@@ -155,11 +156,21 @@ func New(options Options) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	redact := modelclient.Redact(options.APIKey)
+	retryClient := &modelclient.RetryClient{
+		HTTPClient:     httpClient,
+		InitialBackoff: options.InitialBackoff,
+		Redact:         redact,
+		FormatError: func(statusText string, responseBytes []byte) error {
+			return modelclient.FormatAPIError("gemini", statusText, responseBytes, redact)
+		},
+	}
 	return &Client{
-		baseURL:    baseURL,
-		model:      modelName,
-		apiKey:     options.APIKey,
-		httpClient: httpClient,
+		baseURL:     baseURL,
+		model:       modelName,
+		apiKey:      options.APIKey,
+		httpClient:  httpClient,
+		retryClient: retryClient,
 	}, nil
 }
 
@@ -244,35 +255,13 @@ func (client *Client) Generate(ctx context.Context, request agent.Request) (*age
 	}
 
 	endpointURL := fmt.Sprintf("%s/v1beta/models/%s:generateContent", client.baseURL, client.model)
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(encodedBody))
+	headers := http.Header{
+		"Content-Type":   {"application/json"},
+		apiKeyHeaderName: {client.apiKey},
+	}
+	responseBytes, err := client.retryClient.PostJSON(ctx, endpointURL, headers, encodedBody)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set(apiKeyHeaderName, client.apiKey)
-
-	httpResponse, err := client.httpClient.Do(httpRequest)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("execute request: %w", err)
-	}
-
-	responseBytes, readErr := io.ReadAll(io.LimitReader(httpResponse.Body, 16*1024*1024))
-	if closeErr := httpResponse.Body.Close(); closeErr != nil && readErr == nil {
-		return nil, fmt.Errorf("close response: %w", closeErr)
-	}
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		return nil, client.formatAPIError(httpResponse.Status, responseBytes)
+		return nil, err
 	}
 
 	return client.parseResponse(responseBytes)
@@ -331,22 +320,4 @@ func (client *Client) parseResponse(responseBytes []byte) (*agent.Response, erro
 		return nil, fmt.Errorf("gemini candidate stopped with no content (finishReason: %s)", finishReason)
 	}
 	return result, nil
-}
-
-func (client *Client) formatAPIError(statusText string, responseBytes []byte) error {
-	errorMessage := statusText
-	var envelope struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(responseBytes, &envelope); err == nil && envelope.Error.Message != "" {
-		errorMessage = envelope.Error.Message
-	} else if len(responseBytes) > 0 {
-		errorMessage = strings.TrimSpace(string(responseBytes))
-	}
-	if client.apiKey != "" {
-		errorMessage = strings.ReplaceAll(errorMessage, client.apiKey, "[REDACTED]")
-	}
-	return fmt.Errorf("gemini API error (%s): %s", statusText, errorMessage)
 }

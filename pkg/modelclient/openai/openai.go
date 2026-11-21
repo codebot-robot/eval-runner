@@ -23,17 +23,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gke-labs/eval-runner/pkg/modelclient"
 )
 
 const (
-	defaultHTTPTimeout    = 2 * time.Minute
-	defaultInitialBackoff = 1 * time.Second
-	maxRetryAfter         = 60 * time.Second
-	maxRetries            = 3
+	defaultHTTPTimeout    = modelclient.DefaultHTTPTimeout
+	defaultInitialBackoff = modelclient.DefaultInitialBackoff
 	bashToolName          = "bash"
 )
 
@@ -57,6 +56,7 @@ type Client struct {
 	baseURL, model, token string
 	httpClient            *http.Client
 	initialBackoff        time.Duration
+	retryClient           *modelclient.RetryClient
 	mutex                 sync.Mutex
 	rawToolCalls          map[string]json.RawMessage
 }
@@ -132,9 +132,19 @@ func New(options Options) (*Client, error) {
 	if initialBackoff <= 0 {
 		initialBackoff = defaultInitialBackoff
 	}
+	redact := modelclient.Redact(options.Token)
+	retryClient := &modelclient.RetryClient{
+		HTTPClient:     httpClient,
+		InitialBackoff: initialBackoff,
+		Redact:         redact,
+		FormatError: func(statusText string, responseBytes []byte) error {
+			return modelclient.FormatAPIError("openai", statusText, responseBytes, redact)
+		},
+	}
 	return &Client{
 		baseURL: strings.TrimRight(options.BaseURL, "/"), model: options.Model, token: options.Token,
 		httpClient: httpClient, initialBackoff: initialBackoff, rawToolCalls: make(map[string]json.RawMessage),
+		retryClient: retryClient,
 	}, nil
 }
 
@@ -199,57 +209,16 @@ func (client *Client) Generate(ctx context.Context, request Request) (*Response,
 	if marshalErr != nil {
 		return nil, fmt.Errorf("marshal request: %w", marshalErr)
 	}
-	endpointURL, backoffDuration := client.baseURL+"/chat/completions", client.initialBackoff
-
-	for attempt := 0; ; attempt++ {
-		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(encodedBody))
-		if err != nil {
-			return nil, fmt.Errorf("create request: %w", err)
-		}
-		httpRequest.Header.Set("Content-Type", "application/json")
-		if client.token != "" {
-			httpRequest.Header.Set("Authorization", "Bearer "+client.token)
-		}
-
-		httpResponse, err := client.httpClient.Do(httpRequest)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, errors.New(client.redactToken(fmt.Sprintf("execute request: %v", err)))
-		}
-
-		if httpResponse.StatusCode >= 200 && httpResponse.StatusCode < 300 {
-			response, parseErr := client.parseResponse(io.LimitReader(httpResponse.Body, 16*1024*1024))
-			if closeErr := httpResponse.Body.Close(); closeErr != nil && parseErr == nil {
-				return nil, fmt.Errorf("close response: %w", closeErr)
-			}
-			return response, parseErr
-		}
-
-		responseBytes, readErr := io.ReadAll(io.LimitReader(httpResponse.Body, 64*1024))
-		if closeErr := httpResponse.Body.Close(); closeErr != nil && readErr == nil {
-			return nil, fmt.Errorf("close response: %w", closeErr)
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("read response: %w", readErr)
-		}
-
-		if (httpResponse.StatusCode == http.StatusTooManyRequests || (httpResponse.StatusCode >= 500 && httpResponse.StatusCode <= 599)) && attempt < maxRetries {
-			waitDuration := backoffDuration
-			backoffDuration *= 2
-			if retryAfter, ok := parseRetryAfter(httpResponse.Header.Get("Retry-After")); ok {
-				waitDuration = retryAfter
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(waitDuration):
-			}
-			continue
-		}
-		return nil, client.formatAPIError(httpResponse.Status, responseBytes)
+	endpointURL := client.baseURL + "/chat/completions"
+	headers := http.Header{"Content-Type": {"application/json"}}
+	if client.token != "" {
+		headers.Set("Authorization", "Bearer "+client.token)
 	}
+	responseBytes, err := client.retryClient.PostJSON(ctx, endpointURL, headers, encodedBody)
+	if err != nil {
+		return nil, err
+	}
+	return client.parseResponse(bytes.NewReader(responseBytes))
 }
 
 func (client *Client) parseResponse(bodyReader io.Reader) (*Response, error) {
@@ -325,39 +294,6 @@ func extractCommand(name string, argumentsRaw json.RawMessage) string {
 	return *payload.Command
 }
 
-func parseRetryAfter(header string) (time.Duration, bool) {
-	if header == "" {
-		return 0, false
-	}
-	if seconds, parseErr := strconv.ParseFloat(header, 64); parseErr == nil && seconds >= 0 {
-		return min(time.Duration(seconds*float64(time.Second)), maxRetryAfter), true
-	}
-	parsedTime, parseTimeErr := http.ParseTime(header)
-	if parseTimeErr != nil {
-		return 0, false
-	}
-	return min(max(time.Until(parsedTime), 0), maxRetryAfter), true
-}
-
-func (client *Client) formatAPIError(statusText string, responseBytes []byte) error {
-	errorMessage := statusText
-	var envelope struct{ Error struct{ Message string } }
-	if parseErr := json.Unmarshal(responseBytes, &envelope); parseErr != nil {
-		if len(responseBytes) > 0 {
-			errorMessage = strings.TrimSpace(string(responseBytes))
-		}
-	} else if envelope.Error.Message != "" {
-		errorMessage = envelope.Error.Message
-	}
-	return errors.New(client.redactToken(fmt.Sprintf("openai API error (%s): %s", statusText, errorMessage)))
-}
-
 func (client *Client) redactToken(text string) string {
-	if client.token != "" {
-		text = strings.ReplaceAll(text, "Bearer "+client.token, "Bearer [REDACTED]")
-		if len(client.token) >= 8 {
-			text = strings.ReplaceAll(text, client.token, "[REDACTED]")
-		}
-	}
-	return text
+	return modelclient.Redact(client.token)(text)
 }

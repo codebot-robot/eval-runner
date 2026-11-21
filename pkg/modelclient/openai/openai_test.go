@@ -169,3 +169,55 @@ func TestErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestRetry(t *testing.T) {
+	newTestClient := func(server *httptest.Server) *Client {
+		c, err := New(Options{BaseURL: server.URL, Model: "m", Token: "tok", HTTPClient: server.Client(), InitialBackoff: time.Millisecond})
+		if err != nil {
+			t.Fatalf("New failed: %v", err)
+		}
+		return c
+	}
+
+	t.Run("exhaust retries on 500 reports attempt count", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"message":"service overloaded"}}`))
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(server).Generate(t.Context(), Request{Messages: []Message{{Role: "user", Text: "hi"}}})
+		if err == nil || attempts != 4 {
+			t.Fatalf("expected error and 4 attempts, got attempts=%d, err=%v", attempts, err)
+		}
+		if !strings.HasPrefix(err.Error(), "after 4 attempts:") || !strings.Contains(err.Error(), "openai API error (500 Internal Server Error)") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("retry dropped connection succeeds", func(t *testing.T) {
+		var attempts int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			if attempts == 1 {
+				hj, ok := w.(http.Hijacker)
+				if !ok {
+					t.Fatalf("hijacking unsupported")
+				}
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Recovered."}}]}`))
+		}))
+		defer server.Close()
+
+		resp, err := newTestClient(server).Generate(t.Context(), Request{Messages: []Message{{Role: "user", Text: "hi"}}})
+		if err != nil || attempts != 2 || resp.Text != "Recovered." {
+			t.Fatalf("unexpected result: attempts=%d, resp=%v, err=%v", attempts, resp, err)
+		}
+	})
+}
