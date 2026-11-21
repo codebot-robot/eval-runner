@@ -4069,7 +4069,11 @@ func (s *Server) renderRunTasks(w http.ResponseWriter, r *http.Request, run *v1a
 	commit := run.Spec.Repo.Commit
 	expectedPrefix := s.reloadableSink.ArtifactPrefix(commit)
 	if expectedPrefix != "" && !strings.HasPrefix(matchedTask.LogPath, expectedPrefix) {
-		httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
+		if s.isCurrentStorePath(matchedTask.LogPath, expectedPrefix, commit) {
+			httpError(w, http.StatusForbidden, "forbidden: log path does not match run commit prefix", "", nil)
+			return
+		}
+		httpError(w, http.StatusNotFound, fmt.Sprintf("artifacts for run %s were stored elsewhere and are not available here", name), "", nil)
 		return
 	}
 
@@ -4125,6 +4129,49 @@ func (s *Server) renderRunTasks(w http.ResponseWriter, r *http.Request, run *v1a
 		return
 	}
 	s.renderSampleTranscript(w, r, ns, ref, name, taskID, sampleID, matchedTask.LogPath)
+}
+
+// isCurrentStorePath reports whether logPath belongs to the current active artifact store,
+// even if it does not match the commit prefix.
+func (s *Server) isCurrentStorePath(logPath, expectedPrefix, commit string) bool {
+	if strings.HasPrefix(expectedPrefix, "gs://") {
+		bucket := s.reloadableSink.Bucket()
+		if bucket == "" {
+			trimmedPrefix := strings.TrimPrefix(expectedPrefix, "gs://")
+			if slashIndex := strings.Index(trimmedPrefix, "/"); slashIndex != -1 {
+				bucket = trimmedPrefix[:slashIndex]
+			}
+		}
+		if bucket != "" {
+			bucketPrefix := fmt.Sprintf("gs://%s/", strings.TrimPrefix(strings.TrimSuffix(bucket, "/"), "gs://"))
+			return strings.HasPrefix(logPath, bucketPrefix)
+		}
+		return strings.HasPrefix(logPath, "gs://")
+	}
+	if strings.HasPrefix(expectedPrefix, "inmemory://") {
+		return strings.HasPrefix(logPath, "inmemory://")
+	}
+	baseDirectory := s.reloadableSink.BaseDir()
+	if baseDirectory == "" {
+		runsCommitSuffix := filepath.Join("runs", commit) + "/"
+		if strings.HasSuffix(expectedPrefix, runsCommitSuffix) {
+			baseDirectory = strings.TrimSuffix(expectedPrefix, runsCommitSuffix)
+		} else if strings.HasSuffix(expectedPrefix, "runs/"+commit+"/") {
+			baseDirectory = strings.TrimSuffix(expectedPrefix, "runs/"+commit+"/")
+		}
+	}
+	if baseDirectory != "" {
+		cleanedBaseDirectory := filepath.Clean(baseDirectory)
+		cleanedLogPath := logPath
+		if !strings.Contains(logPath, "://") {
+			cleanedLogPath = filepath.Clean(logPath)
+		}
+		if cleanedBaseDirectory == "/" {
+			return strings.HasPrefix(cleanedLogPath, "/")
+		}
+		return strings.HasPrefix(cleanedLogPath, cleanedBaseDirectory+"/")
+	}
+	return false
 }
 
 // Task samples list size guards.
