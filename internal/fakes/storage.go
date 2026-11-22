@@ -34,11 +34,12 @@ type FakeStorageClient struct {
 
 // FakeObject represents a stored object in FakeStorageClient.
 type FakeObject struct {
-	Bucket      string
-	Object      string
-	ContentType string
-	Metadata    map[string]string
-	Data        []byte
+	Bucket          string
+	Object          string
+	ContentType     string
+	ContentEncoding string
+	Metadata        map[string]string
+	Data            []byte
 }
 
 // NewFakeStorageClient creates a new FakeStorageClient.
@@ -51,11 +52,11 @@ func NewFakeStorageClient() *FakeStorageClient {
 
 // WriteObject records the object write in memory without metadata.
 func (f *FakeStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
-	return f.WriteObjectWithMetadata(ctx, bucket, object, contentType, nil, data)
+	return f.WriteObjectWithMetadata(ctx, bucket, object, contentType, "", nil, data)
 }
 
-// WriteObjectWithMetadata records the object write with custom metadata in memory.
-func (f *FakeStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType string, metadata map[string]string, data []byte) error {
+// WriteObjectWithMetadata records the object write with custom metadata and content encoding in memory.
+func (f *FakeStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType, contentEncoding string, metadata map[string]string, data []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -80,11 +81,12 @@ func (f *FakeStorageClient) WriteObjectWithMetadata(ctx context.Context, bucket,
 	}
 
 	obj := FakeObject{
-		Bucket:      bucket,
-		Object:      object,
-		ContentType: contentType,
-		Metadata:    metaCopy,
-		Data:        dataCopy,
+		Bucket:          bucket,
+		Object:          object,
+		ContentType:     contentType,
+		ContentEncoding: contentEncoding,
+		Metadata:        metaCopy,
+		Data:            dataCopy,
 	}
 	f.Objects[key] = obj
 	f.WriteCalls = append(f.WriteCalls, obj)

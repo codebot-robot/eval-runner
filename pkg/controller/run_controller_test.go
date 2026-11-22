@@ -8378,16 +8378,26 @@ func TestReconcileArtifactSink_GCSArtifactsAndLogPathRecorded(t *testing.T) {
 		t.Errorf("Expected task logHash %q, got %q", expectedLogHash, t1.LogHash)
 	}
 
-	// Verify log object exists in fake GCS
+	// Verify log object exists in fake GCS, stored compressed with gzip
 	logObj, exists := fakeGCSClient.GetObject("justinbs-knotai-dev-eval-runner", "runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json")
 	if !exists {
 		t.Fatalf("Log object was not uploaded to GCS")
 	}
-	if string(logObj.Data) != inspectLog {
-		t.Errorf("Log content mismatch")
+	if len(logObj.Data) < 2 || logObj.Data[0] != 0x1f || logObj.Data[1] != 0x8b {
+		t.Errorf("Expected log object to be stored compressed with gzip magic bytes 0x1f, 0x8b")
+	}
+	if logObj.ContentEncoding != "gzip" {
+		t.Errorf("Expected log object ContentEncoding %q, got %q", "gzip", logObj.ContentEncoding)
 	}
 	if logObj.Metadata == nil || logObj.Metadata["sha256"] != expectedLogHash {
 		t.Errorf("Expected log object metadata sha256=%q, got %+v", expectedLogHash, logObj.Metadata)
+	}
+	loadedLog, err := gcsSink.Load(t.Context(), t1.LogPath)
+	if err != nil {
+		t.Fatalf("Failed to load log via gcsSink.Load: %v", err)
+	}
+	if string(loadedLog) != inspectLog {
+		t.Errorf("gcsSink.Load content mismatch")
 	}
 
 	// Verify summary.json exists in fake GCS

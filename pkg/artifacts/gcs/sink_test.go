@@ -92,28 +92,50 @@ func TestGCSSink_ObjectNamingAndSummary(t *testing.T) {
 		t.Errorf("Expected artifact prefix %q, got %q", expectedPrefix, prefix)
 	}
 
-	// Verify log object in fake client
+	// Verify log object in fake client is compressed with gzip
 	logObj, exists := fakeClient.GetObject("my-eval-bucket", "runs/abcdef123456/docs/readme_comprehension/2026-10-17_readme_eval.json")
 	if !exists {
 		t.Fatalf("Log object was not written to storage")
 	}
-	if string(logObj.Data) != string(logContent) {
-		t.Errorf("Log object data mismatch: expected %s, got %s", logContent, logObj.Data)
+	if len(logObj.Data) < 2 || logObj.Data[0] != 0x1f || logObj.Data[1] != 0x8b {
+		t.Errorf("Expected log object data to be gzip compressed with magic bytes 0x1f, 0x8b")
+	}
+	decompressedLog, err := decompressBytes(logObj.Data)
+	if err != nil {
+		t.Fatalf("Failed to decompress log object data: %v", err)
+	}
+	if string(decompressedLog) != string(logContent) {
+		t.Errorf("Log object data mismatch: expected %s, got %s", logContent, decompressedLog)
 	}
 	if logObj.ContentType != "application/json" {
 		t.Errorf("Expected content type %q, got %q", "application/json", logObj.ContentType)
+	}
+	if logObj.ContentEncoding != "gzip" {
+		t.Errorf("Expected content encoding %q, got %q", "gzip", logObj.ContentEncoding)
 	}
 	if logObj.Metadata == nil || logObj.Metadata["sha256"] != expectedHash {
 		t.Errorf("Expected log object metadata sha256=%q, got %+v", expectedHash, logObj.Metadata)
 	}
 
-	// Verify summary.json in fake client
+	// Verify loading via sink.Load returns decompressed content
+	loadedLog, err := sink.Load(t.Context(), stored.Location)
+	if err != nil {
+		t.Fatalf("Failed to load stored artifact via sink.Load: %v", err)
+	}
+	if string(loadedLog) != string(logContent) {
+		t.Errorf("sink.Load mismatch: expected %s, got %s", logContent, loadedLog)
+	}
+
+	// Verify summary.json in fake client is uncompressed
 	summaryObj, exists := fakeClient.GetObject("my-eval-bucket", "runs/abcdef123456/docs/readme_comprehension/summary.json")
 	if !exists {
 		t.Fatalf("summary.json was not written to storage")
 	}
 	if summaryObj.ContentType != "application/json" {
 		t.Errorf("Expected summary content type %q, got %q", "application/json", summaryObj.ContentType)
+	}
+	if summaryObj.ContentEncoding != "" {
+		t.Errorf("Expected summary content encoding empty, got %q", summaryObj.ContentEncoding)
 	}
 
 	var summary artifacts.TaskSummary
@@ -1005,5 +1027,56 @@ func TestTaskSummary_LegacyWithoutHashLoads(t *testing.T) {
 	}
 	if summary.LogHash != "" {
 		t.Errorf("Expected LogHash to be empty for legacy summary, got %q", summary.LogHash)
+	}
+}
+
+func TestGCSSink_LoadLegacyUncompressed(t *testing.T) {
+	fakeClient := fakes.NewFakeStorageClient()
+	sink, err := New(t.Context(), "eval-bucket", WithStorageClient(fakeClient))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	legacyContent := []byte(`{"results": {"score": 1.0}}`)
+	fakeClient.Objects["eval-bucket/runs/legacy1/task1/log.json"] = fakes.FakeObject{
+		Bucket:      "eval-bucket",
+		Object:      "runs/legacy1/task1/log.json",
+		ContentType: "application/json",
+		Data:        legacyContent,
+	}
+
+	loaded, err := sink.Load(t.Context(), "gs://eval-bucket/runs/legacy1/task1/log.json")
+	if err != nil {
+		t.Fatalf("Failed to load legacy uncompressed object: %v", err)
+	}
+	if string(loaded) != string(legacyContent) {
+		t.Errorf("Expected %s, got %s", legacyContent, loaded)
+	}
+}
+
+func TestStreamCompressionAndDecompression(t *testing.T) {
+	raw := []byte(`{"message": "hello world", "repeat": "aaaaaaaaaaaaaaaa"}`)
+	compressed, err := compressBytes(raw)
+	if err != nil {
+		t.Fatalf("compressBytes failed: %v", err)
+	}
+	if len(compressed) < 2 || compressed[0] != 0x1f || compressed[1] != 0x8b {
+		t.Fatalf("expected gzip magic bytes")
+	}
+
+	decompressed, err := decompressBytes(compressed)
+	if err != nil {
+		t.Fatalf("decompressBytes failed: %v", err)
+	}
+	if string(decompressed) != string(raw) {
+		t.Errorf("decompressed mismatch: expected %s, got %s", raw, decompressed)
+	}
+
+	decompressedPlain, err := decompressBytes(raw)
+	if err != nil {
+		t.Fatalf("decompressBytes on plain data failed: %v", err)
+	}
+	if string(decompressedPlain) != string(raw) {
+		t.Errorf("plain data should return unchanged: expected %s, got %s", raw, decompressedPlain)
 	}
 }

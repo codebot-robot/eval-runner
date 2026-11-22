@@ -996,6 +996,8 @@ The `summary.json` contains:
 
 Upload sizes are bounded to 10 MiB; if an artifact exceeds this limit, it is refused and nothing is written to storage.
 
+Task artifacts in GCS are stored compressed with gzip content encoding (`Content-Encoding: gzip`). Standard tools such as `gcloud storage cat` and web browsers transparently decompress and display readable JSON without special tooling.
+
 On the `Run` custom resource, `status.artifacts` records the run-level prefix (e.g. `gs://<bucket>/runs/<commit>/`), and `status.tasks[].logPath` points directly to the `gs://` URI of each task's log.
 
 ## GitHub Webhook Automation
