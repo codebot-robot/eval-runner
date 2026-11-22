@@ -140,10 +140,8 @@ This task is also invoked automatically whenever `ap generate` is executed.
 
 ## Building Container Images (`ap build`)
 
-`eval-runner` builds three primary Go container images:
-- `images/eval-runner/Dockerfile` (the controller)
-- `images/eval-runner-ui/Dockerfile` (the web UI)
-- `images/eval-runner-webhook/Dockerfile` (the GitHub webhook server)
+`eval-runner` builds the primary Go container image:
+- `images/eval-runner/Dockerfile` (packaging the controller, web UI, and GitHub webhook server)
 
 ### Full Git Source Tree Builds and VCS Stamping
 
