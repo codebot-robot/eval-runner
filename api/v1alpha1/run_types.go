@@ -202,6 +202,10 @@ type TaskStatus struct {
 	// Only set for sandbox tasks.
 	// +optional
 	Resources *TaskResources `json:"resources,omitempty"`
+
+	// Restarts records the number of times the task was restarted after being interrupted.
+	// +optional
+	Restarts int `json:"restarts,omitempty"`
 }
 
 // TaskResources describes compute resource requirements and limits for a task container.

@@ -7673,6 +7673,115 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 			t.Errorf("Expected task to remain Running on transient probe error, got phase %s", task.Phase)
 		}
 	})
+
+	t.Run("Running task with summary from another Run at same commit is not rescued and restarts if dirty", func(t *testing.T) {
+		sink := artifacts.NewInMemorySink()
+		rate := 1.0
+		// summary written by earlier run "earlier-run"
+		meta := artifacts.RunMetadata{
+			RunName:         "earlier-run",
+			RunNamespace:    "eval-runner",
+			TaskID:          "task-probe-rescue",
+			Commit:          "c0ffee1",
+			SampleCount:     2,
+			Successes:       2,
+			MeanScore:       &rate,
+			SuccessRate:     &rate,
+			PossibleSamples: 2,
+		}
+		logFilename := "2026-10-31T15-27-47-00-00_task-probe-rescue_ByhDsNK8zVf5BWpRqxd9Y9.json"
+		if _, err := sink.StoreArtifact(t.Context(), meta, logFilename, []byte(completeInspectLog)); err != nil {
+			t.Fatalf("Failed to store artifact: %v", err)
+		}
+
+		limit := 2
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "second-run",
+				Namespace: "eval-runner",
+			},
+			Spec: v1alpha1.RunSpec{
+				Model: "mockllm/model",
+				Limit: &limit,
+				Repo: v1alpha1.RepoSpec{
+					Commit: "c0ffee1",
+				},
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Discovery: &v1alpha1.RunDiscoveryStatus{
+					TaskCount:         1,
+					EligibleTaskCount: 1,
+					TaskIDs:           []string{"task-probe-rescue"},
+				},
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:             "task-probe-rescue",
+						Phase:          v1alpha1.TaskPhaseRunning,
+						Samples:        0,
+						SamplesPlanned: 2,
+						LogPath:        "",
+					},
+				},
+			},
+		}
+
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "task-probe-rescue", Spec: "eval.py@rescue"},
+			},
+		}
+
+		dirtySB := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      discovery.TaskSandboxNameForRun("second-run", "task-probe-rescue"),
+				Namespace: "eval-runner-sandbox",
+				Labels: map[string]string{
+					discovery.LabelRunName:      "second-run",
+					discovery.LabelRunNamespace: "eval-runner",
+					discovery.LabelRole:         discovery.RoleSample,
+				},
+				Annotations: map[string]string{
+					discovery.AnnotationTaskID:             "task-probe-rescue",
+					discovery.AnnotationControllerInstance: "instance-old",
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run, dirtySB).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:           cl,
+			Scheme:           scheme,
+			ArtifactSink:     sink,
+			SandboxNamespace: "eval-runner-sandbox",
+			InstanceID:       "instance-new",
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: "second-run"}}
+		_, err := reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get updated run: %v", err)
+		}
+
+		task := updatedRun.Status.Tasks[0]
+		if task.Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("Expected task to be reset to Pending, got phase %s (msg: %s)", task.Phase, task.Message)
+		}
+		if task.Restarts != 1 {
+			t.Errorf("Expected task restarts to be 1, got %d", task.Restarts)
+		}
+	})
 }
 
 func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {

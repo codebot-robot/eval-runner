@@ -419,6 +419,10 @@ spec:
                             resources allowed.
                           type: object
                       type: object
+                    restarts:
+                      description: Restarts records the number of times the task was
+                        restarted after being interrupted.
+                      type: integer
                     sampleRange:
                       description: SampleRange is the sample window evaluated for
                         this task.

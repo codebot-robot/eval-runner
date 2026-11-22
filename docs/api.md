@@ -172,6 +172,7 @@ status:
 | `cohort` | `string` | Cohort identifier of the task (defaults to `"default"`). Written with the task execution result so that the UI can group tasks by cohort directly from Run status without reloading the stored manifest. |
 | `timeoutSeconds` | `int` | Effective execution timeout applied to the task command in seconds (sandbox tasks). |
 | `resources` | `*TaskResources` | Compute resource limits applied to the task sandbox container (`limits.cpu`, `limits.memory`). |
+| `restarts` | `int` | Number of times the task was restarted after being interrupted (e.g. by a controller restart). |
 
 ### TaskLatency
 
