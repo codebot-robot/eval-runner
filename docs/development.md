@@ -996,7 +996,17 @@ The `summary.json` contains:
 
 Upload sizes are bounded to 10 MiB; if an artifact exceeds this limit, it is refused and nothing is written to storage.
 
-Task artifacts in GCS are stored compressed with gzip content encoding (`Content-Encoding: gzip`). Standard tools such as `gcloud storage cat` and web browsers transparently decompress and display readable JSON without special tooling.
+Task artifacts in GCS are stored compressed with gzip content encoding (`Content-Encoding: gzip`). While web browsers and `gcloud storage cp` transparently decompress them on download, `gcloud storage cat` does not decompress and outputs raw compressed bytes. To read a stored artifact by hand:
+
+```bash
+# Stream and decompress to stdout:
+gcloud storage cat gs://<bucket>/runs/<commit>/<task-id>/<log-filename>.json | gunzip
+
+# Or copy locally (gcloud storage cp decompresses transparently):
+gcloud storage cp gs://<bucket>/runs/<commit>/<task-id>/<log-filename>.json ./<log-filename>.json
+```
+
+`summary.json`, the manifest and comparison objects are stored uncompressed, and the recorded `sha256` is of the uncompressed content, so it is checked after decompression.
 
 On the `Run` custom resource, `status.artifacts` records the run-level prefix (e.g. `gs://<bucket>/runs/<commit>/`), and `status.tasks[].logPath` points directly to the `gs://` URI of each task's log.
 
