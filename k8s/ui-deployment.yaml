@@ -36,7 +36,9 @@ spec:
           type: RuntimeDefault
       containers:
       - name: ui
-        image: eval-runner-ui
+        image: eval-runner
+        command:
+        - /eval-runner-ui
         args:
         - --namespace=eval-runner
         - --listen-addr=:8080

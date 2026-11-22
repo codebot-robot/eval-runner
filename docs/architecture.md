@@ -581,9 +581,7 @@ IMAGE_PREFIX=<registry> ap deploy
 ```
 
 - **Images under `images/`**:
-  - `images/eval-runner/Dockerfile`: Multi-stage build producing a minimal distroless image (`gcr.io/distroless/static:nonroot`, user `65532:65532`).
-  - `images/eval-runner-ui/Dockerfile`: Web dashboard UI serving runs and comparisons.
-  - `images/eval-runner-webhook/Dockerfile`: GitHub webhook receiver creating Runs and Comparisons on pull_request/push.
+  - `images/eval-runner/Dockerfile`: Multi-stage build producing a minimal distroless image (`gcr.io/distroless/static:nonroot`, user `65532:65532`) containing the eval-runner binaries (`eval-runner`, `eval-runner-ui`, and `eval-runner-webhook`).
   - `images/git-server/Dockerfile`: Fixture Git server image based on Alpine 3.21 running `git daemon`, serving the `examples/support-agent` repository for local and E2E testing.
 - **Manifests under `k8s/`**:
   - `00-namespaces.yaml`: Declares `eval-runner` (PSA `restricted`) and `eval-runner-sandbox` (PSA `baseline`) namespaces.

@@ -25,11 +25,12 @@ COPY . .
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o eval-runner ./cmd/eval-runner
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -o /workspace/bin/ ./cmd/eval-runner ./cmd/eval-runner-ui ./cmd/eval-runner-webhook
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/eval-runner .
+COPY --from=builder /workspace/bin/* /
 USER 65532:65532
 
 ENTRYPOINT ["/eval-runner"]
