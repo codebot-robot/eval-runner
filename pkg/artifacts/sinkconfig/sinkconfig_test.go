@@ -51,7 +51,7 @@ func TestNewArtifactSink(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("empty bucket and dir returns nil without error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "", "", "", 0)
+		sink, err := NewArtifactSink(ctx, Config{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestNewArtifactSink(t *testing.T) {
 	})
 
 	t.Run("disabled sentinel returns nil without error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "none", "none", "", 0)
+		sink, err := NewArtifactSink(ctx, Config{ArtifactBucket: "none", ArtifactDir: "none"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -72,7 +72,7 @@ func TestNewArtifactSink(t *testing.T) {
 
 	t.Run("local directory sink", func(t *testing.T) {
 		dir := t.TempDir()
-		sink, err := NewArtifactSink(ctx, "", dir, "", 0)
+		sink, err := NewArtifactSink(ctx, Config{ArtifactDir: dir})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -88,7 +88,11 @@ func TestNewArtifactSink(t *testing.T) {
 	t.Run("gcs bucket sink", func(t *testing.T) {
 		// Point the storage client at an emulator so no ADC lookup happens; nothing is dialed at construction time.
 		t.Setenv("STORAGE_EMULATOR_HOST", "127.0.0.1:1")
-		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", "", 1024*1024)
+		sink, err := NewArtifactSink(ctx, Config{
+			ArtifactBucket:         "my-eval-bucket",
+			ArtifactCacheDirectory: "/tmp/test-cache",
+			ArtifactMaxUploadBytes: 1024 * 1024,
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -102,11 +106,17 @@ func TestNewArtifactSink(t *testing.T) {
 		if maxUpload := gcsSink.MaxUploadBytes(); maxUpload != 1024*1024 {
 			t.Errorf("expected max upload bytes 1048576, got %d", maxUpload)
 		}
+		if cacheDirectory := gcsSink.CacheDirectory(); cacheDirectory != "/tmp/test-cache" {
+			t.Errorf("expected cache directory /tmp/test-cache, got %q", cacheDirectory)
+		}
 	})
 
 	t.Run("gcs bucket sink with workload identity provider", func(t *testing.T) {
 		const provider = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr"
-		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", provider, 0)
+		sink, err := NewArtifactSink(ctx, Config{
+			ArtifactBucket:              "my-eval-bucket",
+			GCPWorkloadIdentityProvider: provider,
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -120,7 +130,7 @@ func TestNewArtifactSink(t *testing.T) {
 	})
 
 	t.Run("invalid gcs bucket returns error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "invalid bucket name with spaces", "", "", 0)
+		sink, err := NewArtifactSink(ctx, Config{ArtifactBucket: "invalid bucket name with spaces"})
 		if err == nil {
 			t.Fatalf("expected error for invalid bucket, got sink: %v", sink)
 		}
@@ -133,7 +143,7 @@ func TestConfig_NewArtifactSink(t *testing.T) {
 		cfg := Config{
 			ArtifactDir: t.TempDir(),
 		}
-		sink, err := cfg.NewArtifactSink(ctx, 0)
+		sink, err := cfg.NewArtifactSink(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -148,7 +158,7 @@ func TestConfig_NewArtifactSink(t *testing.T) {
 			ArtifactBucket:              "my-eval-bucket",
 			GCPWorkloadIdentityProvider: provider,
 		}
-		sink, err := cfg.NewArtifactSink(ctx, 0)
+		sink, err := cfg.NewArtifactSink(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

@@ -48,18 +48,59 @@ const (
 )
 
 // SinkFactory is a constructor function for ArtifactSink instances.
-type SinkFactory func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error)
+type SinkFactory func(ctx context.Context, config Config) (artifacts.ArtifactSink, error)
 
 // Config holds the artifact storage settings extracted from the cluster ConfigMap.
 type Config struct {
 	ArtifactBucket              string
 	ArtifactDir                 string
+	ArtifactCacheDirectory      string
 	GCPWorkloadIdentityProvider string
+	ArtifactMaxUploadBytes      int64
 }
 
 // NewArtifactSink constructs an ArtifactSink using the settings in c.
-func (c Config) NewArtifactSink(ctx context.Context, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
-	return NewArtifactSink(ctx, c.ArtifactBucket, c.ArtifactDir, c.GCPWorkloadIdentityProvider, maxUploadBytes)
+func (c Config) NewArtifactSink(ctx context.Context) (artifacts.ArtifactSink, error) {
+	return NewArtifactSink(ctx, c)
+}
+
+// ResolveConfig resolves artifact storage configuration from a ConfigMap and flag values.
+// Precedence: explicit flag > ConfigMap > built-in default.
+func ResolveConfig(cm *corev1.ConfigMap, flags Config) Config {
+	cacheDirectory := strings.TrimSpace(flags.ArtifactCacheDirectory)
+	if cacheDirectory == "" {
+		cacheDirectory = configkeys.DefaultArtifactCacheDirectory
+	}
+	cfg := Config{
+		ArtifactCacheDirectory: cacheDirectory,
+		ArtifactMaxUploadBytes: flags.ArtifactMaxUploadBytes,
+	}
+	if cm != nil && cm.Data != nil {
+		if b := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactBucket]); b != "" && !strings.EqualFold(b, configkeys.ConfigSentinelDisabled) {
+			cfg.ArtifactBucket = b
+		}
+		if d := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactDir]); d != "" && !strings.EqualFold(d, configkeys.ConfigSentinelDisabled) {
+			cfg.ArtifactDir = d
+		}
+		if p := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider]); p != "" {
+			cfg.GCPWorkloadIdentityProvider = p
+		}
+	}
+	if bucket := strings.TrimSpace(flags.ArtifactBucket); bucket != "" {
+		if strings.EqualFold(bucket, configkeys.ConfigSentinelDisabled) {
+			cfg.ArtifactBucket = ""
+		} else {
+			cfg.ArtifactBucket = bucket
+		}
+	}
+	if dir := strings.TrimSpace(flags.ArtifactDir); dir != "" {
+		if strings.EqualFold(dir, configkeys.ConfigSentinelDisabled) {
+			cfg.ArtifactDir = ""
+		} else {
+			cfg.ArtifactDir = dir
+		}
+	}
+	return cfg
 }
 
 // LoadConfigMap retrieves the cluster ConfigMap using reader.
@@ -113,28 +154,31 @@ func LoadArtifactConfig(ctx context.Context, reader client.Reader, namespace, na
 	return cfg, nil
 }
 
-// NewArtifactSink constructs an ArtifactSink based on the provided bucket, local directory, and optional workload identity provider.
-// If bucket is non-empty, a GCSSink is returned (with optional maxUploadBytes cap and workload identity provider).
+// NewArtifactSink constructs an ArtifactSink based on the provided configuration.
+// If bucket is non-empty, a GCSSink is returned (with optional maxUploadBytes cap, cache directory, and workload identity provider).
 // If dir is non-empty, a LocalDirSink is returned.
 // If neither is configured, nil is returned without error.
-func NewArtifactSink(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
-	bucket = strings.TrimSpace(bucket)
+func NewArtifactSink(ctx context.Context, config Config) (artifacts.ArtifactSink, error) {
+	bucket := strings.TrimSpace(config.ArtifactBucket)
 	if strings.EqualFold(bucket, configkeys.ConfigSentinelDisabled) {
 		bucket = ""
 	}
-	dir = strings.TrimSpace(dir)
+	dir := strings.TrimSpace(config.ArtifactDir)
 	if strings.EqualFold(dir, configkeys.ConfigSentinelDisabled) {
 		dir = ""
 	}
 	if bucket != "" {
-		var gcsOpts []gcs.Option
-		if maxUploadBytes > 0 {
-			gcsOpts = append(gcsOpts, gcs.WithMaxUploadBytes(maxUploadBytes))
+		var gcsOptions []gcs.Option
+		if config.ArtifactMaxUploadBytes > 0 {
+			gcsOptions = append(gcsOptions, gcs.WithMaxUploadBytes(config.ArtifactMaxUploadBytes))
 		}
-		if provider := strings.TrimSpace(workloadIdentityProvider); provider != "" {
-			gcsOpts = append(gcsOpts, gcs.WithWorkloadIdentityProvider(provider))
+		if provider := strings.TrimSpace(config.GCPWorkloadIdentityProvider); provider != "" {
+			gcsOptions = append(gcsOptions, gcs.WithWorkloadIdentityProvider(provider))
 		}
-		return gcs.New(ctx, bucket, gcsOpts...)
+		if cacheDirectory := strings.TrimSpace(config.ArtifactCacheDirectory); cacheDirectory != "" {
+			gcsOptions = append(gcsOptions, gcs.WithCacheDirectory(cacheDirectory))
+		}
+		return gcs.New(ctx, bucket, gcsOptions...)
 	}
 	if dir != "" {
 		return &artifacts.LocalDirSink{BaseDir: dir}, nil

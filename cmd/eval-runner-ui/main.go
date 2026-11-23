@@ -30,6 +30,7 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
+	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/ui"
 	"github.com/gke-labs/eval-runner/pkg/version"
 	corev1 "k8s.io/api/core/v1"
@@ -59,12 +60,14 @@ func main() {
 	var namespace string
 	var artifactBucket string
 	var artifactDir string
+	var artifactCacheDirectory string
 	var showVersion bool
 
 	flag.StringVar(&listenAddr, "listen-addr", ":8080", "The TCP address for the HTTP server to listen on")
 	flag.StringVar(&namespace, "namespace", defaultNs, "Default Kubernetes namespace to query for Runs and Comparisons")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "Optional GCS bucket for reading artifacts")
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Optional local filesystem directory for reading artifacts")
+	flag.StringVar(&artifactCacheDirectory, "artifact-cache-directory", configkeys.DefaultArtifactCacheDirectory, "Optional local filesystem directory for caching streamed artifacts")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.Parse()
 
@@ -136,29 +139,26 @@ func main() {
 		}
 	}()
 
-	bucket := artifactBucket
-	dir := artifactDir
-	artCfg, err := sinkconfig.LoadArtifactConfig(ctx, k8sClient, namespace, sinkconfig.DefaultConfigMapName)
+	flagConfig := sinkconfig.Config{
+		ArtifactBucket:         artifactBucket,
+		ArtifactDir:            artifactDir,
+		ArtifactCacheDirectory: artifactCacheDirectory,
+	}
+	cm, err := sinkconfig.LoadConfigMap(ctx, k8sClient, namespace, sinkconfig.DefaultConfigMapName)
 	if err != nil {
 		log.Printf("warning: unable to read cluster configmap %s/%s: %v", namespace, sinkconfig.DefaultConfigMapName, err)
-	} else {
-		if bucket == "" {
-			bucket = artCfg.ArtifactBucket
-		}
-		if dir == "" {
-			dir = artCfg.ArtifactDir
-		}
 	}
+	resolvedArtifactConfig := sinkconfig.ResolveConfig(cm, flagConfig)
 
 	var sink artifacts.ArtifactSink
-	if bucket != "" || dir != "" {
-		s, err := sinkconfig.NewArtifactSink(ctx, bucket, dir, artCfg.GCPWorkloadIdentityProvider, 0)
+	if resolvedArtifactConfig.ArtifactBucket != "" || resolvedArtifactConfig.ArtifactDir != "" {
+		s, err := sinkconfig.NewArtifactSink(ctx, resolvedArtifactConfig)
 		if err != nil {
-			log.Printf("warning: unable to configure artifact sink (bucket=%q, dir=%q): %v", bucket, dir, err)
+			log.Printf("warning: unable to configure artifact sink (bucket=%q, dir=%q): %v", resolvedArtifactConfig.ArtifactBucket, resolvedArtifactConfig.ArtifactDir, err)
 		} else {
 			sink = s
 			if sink != nil {
-				log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", bucket, dir)
+				log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", resolvedArtifactConfig.ArtifactBucket, resolvedArtifactConfig.ArtifactDir)
 			}
 		}
 	} else {
@@ -166,14 +166,15 @@ func main() {
 	}
 
 	server := ui.NewServer(ui.Config{
-		Client:           k8sClient,
-		Cache:            informerCache,
-		CacheSyncChecker: cacheSynced.Load,
-		DefaultNamespace: namespace,
-		ArtifactSink:     sink,
-		InitialBucket:    bucket,
-		InitialDir:       dir,
-		Version:          version.String(),
+		Client:                k8sClient,
+		Cache:                 informerCache,
+		CacheSyncChecker:      cacheSynced.Load,
+		DefaultNamespace:      namespace,
+		ArtifactSink:          sink,
+		InitialBucket:         resolvedArtifactConfig.ArtifactBucket,
+		InitialDir:            resolvedArtifactConfig.ArtifactDir,
+		InitialCacheDirectory: resolvedArtifactConfig.ArtifactCacheDirectory,
+		Version:               version.String(),
 	})
 	defer func() {
 		if err := server.ArtifactSink().Close(); err != nil {
@@ -187,7 +188,7 @@ func main() {
 	} else {
 		go func() {
 			if watchErr := sinkconfig.WatchConfigMap(ctx, kubeClient, namespace, sinkconfig.DefaultConfigMapName, func(cm *corev1.ConfigMap) {
-				if reloadErr := server.ReloadConfigMap(ctx, cm, artifactBucket, artifactDir, nil); reloadErr != nil {
+				if reloadErr := server.ReloadConfigMap(ctx, cm, flagConfig, nil); reloadErr != nil {
 					log.Printf("warning: error reloading configmap: %v", reloadErr)
 				}
 			}); watchErr != nil && !errors.Is(watchErr, context.Canceled) {

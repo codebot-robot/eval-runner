@@ -262,6 +262,7 @@ func DefaultGitHubConfig() GitHubConfig {
 type ClusterConfig struct {
 	ArtifactBucket         string
 	ArtifactDir            string
+	ArtifactCacheDirectory string
 	ArtifactMaxUploadBytes int64
 
 	// DiscoveryDeadline is the overall deadline duration for discovery to complete.
@@ -316,10 +317,22 @@ type ClusterConfig struct {
 	ServicePortal ServicePortalOptions
 }
 
+// ArtifactConfig returns the sinkconfig.Config representation of the artifact settings.
+func (c ClusterConfig) ArtifactConfig() sinkconfig.Config {
+	return sinkconfig.Config{
+		ArtifactBucket:              c.ArtifactBucket,
+		ArtifactDir:                 c.ArtifactDir,
+		ArtifactCacheDirectory:      c.ArtifactCacheDirectory,
+		GCPWorkloadIdentityProvider: c.GCPWorkloadIdentityProvider,
+		ArtifactMaxUploadBytes:      c.ArtifactMaxUploadBytes,
+	}
+}
+
 // RawFlags contains the flag values passed to the controller and tracks which flags were explicitly set.
 type RawFlags struct {
 	ArtifactBucket                 string
 	ArtifactDir                    string
+	ArtifactCacheDirectory         string
 	ArtifactMaxUploadBytes         int64
 	DiscoveryDeadline              time.Duration
 	ExecutionDeadline              time.Duration
@@ -355,6 +368,7 @@ func DefaultClusterConfig() ClusterConfig {
 	return ClusterConfig{
 		ArtifactBucket:           "",
 		ArtifactDir:              "",
+		ArtifactCacheDirectory:   configkeys.DefaultArtifactCacheDirectory,
 		ArtifactMaxUploadBytes:   gcs.DefaultMaxUploadBytes,
 		DiscoveryDeadline:        DefaultDiscoveryDeadline,
 		ExecutionDeadline:        DefaultExecutionDeadline,
@@ -390,7 +404,7 @@ func DefaultClusterConfig() ClusterConfig {
 // FlagsFromFlagSet extracts RawFlags from a parsed flag.FlagSet.
 func FlagsFromFlagSet(
 	fs *flag.FlagSet,
-	artifactBucket, artifactDir, sandboxdImage, gitHubTokenSecret, gitHubAppSecret, uiBaseURL string,
+	artifactBucket, artifactDir, artifactCacheDirectory, sandboxdImage, gitHubTokenSecret, gitHubAppSecret, uiBaseURL string,
 	discoveryDeadline, executionDeadline, taskGracePeriod time.Duration,
 	maxParallelTasks int,
 	strictConfig bool,
@@ -410,6 +424,7 @@ func FlagsFromFlagSet(
 	return RawFlags{
 		ArtifactBucket:                 artifactBucket,
 		ArtifactDir:                    artifactDir,
+		ArtifactCacheDirectory:         artifactCacheDirectory,
 		ArtifactMaxUploadBytes:         artifactMaxUploadBytes,
 		DiscoveryDeadline:              discoveryDeadline,
 		ExecutionDeadline:              executionDeadline,
@@ -919,6 +934,9 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			cfg.ArtifactDir = flags.ArtifactDir
 		}
 	}
+	if trimmed := strings.TrimSpace(flags.ArtifactCacheDirectory); trimmed != "" {
+		cfg.ArtifactCacheDirectory = trimmed
+	}
 	if flags.IsExplicit("artifact-max-upload-bytes") {
 		cfg.ArtifactMaxUploadBytes = flags.ArtifactMaxUploadBytes
 	}
@@ -1208,21 +1226,24 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 	sinkChanged := r.lastConfig == nil ||
 		r.lastConfig.ArtifactBucket != resolved.ArtifactBucket ||
 		r.lastConfig.ArtifactDir != resolved.ArtifactDir ||
+		r.lastConfig.ArtifactCacheDirectory != resolved.ArtifactCacheDirectory ||
 		r.lastConfig.ArtifactMaxUploadBytes != resolved.ArtifactMaxUploadBytes ||
 		r.lastConfig.GCPWorkloadIdentityProvider != resolved.GCPWorkloadIdentityProvider
 
 	if sinkChanged && r.reloadableSink != nil {
-		newSink, err := r.sinkFactory(ctx, resolved.ArtifactBucket, resolved.ArtifactDir, resolved.GCPWorkloadIdentityProvider, resolved.ArtifactMaxUploadBytes)
+		newSink, err := r.sinkFactory(ctx, resolved.ArtifactConfig())
 		if err != nil {
 			r.logger.Error(err, "unable to configure artifact sink; retaining active sink", "bucket", resolved.ArtifactBucket, "dir", resolved.ArtifactDir)
 			if r.lastConfig != nil {
 				resolved.ArtifactBucket = r.lastConfig.ArtifactBucket
 				resolved.ArtifactDir = r.lastConfig.ArtifactDir
+				resolved.ArtifactCacheDirectory = r.lastConfig.ArtifactCacheDirectory
 				resolved.ArtifactMaxUploadBytes = r.lastConfig.ArtifactMaxUploadBytes
 				resolved.GCPWorkloadIdentityProvider = r.lastConfig.GCPWorkloadIdentityProvider
 			} else {
 				resolved.ArtifactBucket = ""
 				resolved.ArtifactDir = ""
+				resolved.ArtifactCacheDirectory = ""
 				resolved.ArtifactMaxUploadBytes = 0
 				resolved.GCPWorkloadIdentityProvider = ""
 			}

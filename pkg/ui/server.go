@@ -128,30 +128,32 @@ func buildPageURL(baseURL string, query url.Values, newOffset int, limit int) st
 
 // Config configures the web UI server.
 type Config struct {
-	Client           client.Reader
-	Cache            client.Reader
-	CacheSyncChecker func() bool
-	DefaultNamespace string
-	ArtifactSink     artifacts.ArtifactSink
-	InitialBucket    string
-	InitialDir       string
-	Version          string
+	Client                client.Reader
+	Cache                 client.Reader
+	CacheSyncChecker      func() bool
+	DefaultNamespace      string
+	ArtifactSink          artifacts.ArtifactSink
+	InitialBucket         string
+	InitialDir            string
+	InitialCacheDirectory string
+	Version               string
 }
 
 // Server serves read-only web views of Runs and Comparisons.
 type Server struct {
-	cfg              Config
-	mux              *http.ServeMux
-	repoMux          *http.ServeMux
-	cache            *logLRUCache
-	compCache        *comparisonLRUCache
-	reloadableSink   *artifacts.ReloadableSink
-	configGeneration atomic.Int64
-	sinkMu           sync.RWMutex
-	lastBucket       string
-	lastDir          string
-	lastProvider     string
-	configuredOnce   bool
+	cfg                Config
+	mux                *http.ServeMux
+	repoMux            *http.ServeMux
+	cache              *logLRUCache
+	compCache          *comparisonLRUCache
+	reloadableSink     *artifacts.ReloadableSink
+	configGeneration   atomic.Int64
+	sinkMu             sync.RWMutex
+	lastBucket         string
+	lastDir            string
+	lastCacheDirectory string
+	lastProvider       string
+	configuredOnce     bool
 }
 
 // readerFor returns the cache reader for the default namespace when available,
@@ -182,16 +184,22 @@ func NewServer(cfg Config) *Server {
 		relSink = artifacts.NewReloadableSink(nil)
 	}
 
+	initialCacheDirectory := cfg.InitialCacheDirectory
+	if initialCacheDirectory == "" {
+		initialCacheDirectory = configkeys.DefaultArtifactCacheDirectory
+	}
+
 	s := &Server{
-		cfg:            cfg,
-		mux:            http.NewServeMux(),
-		repoMux:        http.NewServeMux(),
-		cache:          newLogLRUCache(64*1024*1024, 1*time.Hour),
-		compCache:      newComparisonLRUCache(32*1024*1024, 1*time.Hour),
-		reloadableSink: relSink,
-		lastBucket:     cfg.InitialBucket,
-		lastDir:        cfg.InitialDir,
-		configuredOnce: cfg.InitialBucket != "" || cfg.InitialDir != "" || cfg.ArtifactSink != nil,
+		cfg:                cfg,
+		mux:                http.NewServeMux(),
+		repoMux:            http.NewServeMux(),
+		cache:              newLogLRUCache(64*1024*1024, 1*time.Hour),
+		compCache:          newComparisonLRUCache(32*1024*1024, 1*time.Hour),
+		reloadableSink:     relSink,
+		lastBucket:         cfg.InitialBucket,
+		lastDir:            cfg.InitialDir,
+		lastCacheDirectory: initialCacheDirectory,
+		configuredOnce:     cfg.InitialBucket != "" || cfg.InitialDir != "" || cfg.ArtifactSink != nil,
 	}
 	s.configGeneration.Store(1)
 
@@ -227,46 +235,31 @@ func (s *Server) BumpConfigGeneration() int64 {
 
 // ReloadConfigMap updates the server's artifact sink and bumps config_generation
 // based on changes to the eval-runner-config ConfigMap.
-func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flagBucket, flagDir string, sinkFactory sinkconfig.SinkFactory) error {
+func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flagConfig sinkconfig.Config, sinkFactory sinkconfig.SinkFactory) error {
 	if sinkFactory == nil {
 		sinkFactory = sinkconfig.NewArtifactSink
 	}
-	effBucket := flagBucket
-	effDir := flagDir
-	effProvider := ""
-	if cm != nil && cm.Data != nil {
-		if effBucket == "" {
-			effBucket = cm.Data[configkeys.ConfigMapKeyArtifactBucket]
-		}
-		if effDir == "" {
-			effDir = cm.Data[configkeys.ConfigMapKeyArtifactDir]
-		}
-		effProvider = strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider])
-	}
-	effBucket = strings.TrimSpace(effBucket)
-	if strings.EqualFold(effBucket, configkeys.ConfigSentinelDisabled) {
-		effBucket = ""
-	}
-	effDir = strings.TrimSpace(effDir)
-	if strings.EqualFold(effDir, configkeys.ConfigSentinelDisabled) {
-		effDir = ""
-	}
+	resolvedConfig := sinkconfig.ResolveConfig(cm, flagConfig)
 
 	s.sinkMu.Lock()
-	if effBucket == s.lastBucket && effDir == s.lastDir && effProvider == s.lastProvider && s.configuredOnce {
+	if resolvedConfig.ArtifactBucket == s.lastBucket &&
+		resolvedConfig.ArtifactDir == s.lastDir &&
+		resolvedConfig.ArtifactCacheDirectory == s.lastCacheDirectory &&
+		resolvedConfig.GCPWorkloadIdentityProvider == s.lastProvider &&
+		s.configuredOnce {
 		s.sinkMu.Unlock()
 		return nil
 	}
 	s.sinkMu.Unlock()
 
 	var newSink artifacts.ArtifactSink
-	if effBucket != "" || effDir != "" {
-		s, err := sinkFactory(ctx, effBucket, effDir, effProvider, 0)
+	if resolvedConfig.ArtifactBucket != "" || resolvedConfig.ArtifactDir != "" {
+		s, err := sinkFactory(ctx, resolvedConfig)
 		if err != nil {
-			return fmt.Errorf("unable to configure artifact sink (bucket=%q, dir=%q): %w", effBucket, effDir, err)
+			return fmt.Errorf("unable to configure artifact sink (bucket=%q, dir=%q): %w", resolvedConfig.ArtifactBucket, resolvedConfig.ArtifactDir, err)
 		}
 		newSink = s
-		log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", effBucket, effDir)
+		log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", resolvedConfig.ArtifactBucket, resolvedConfig.ArtifactDir)
 	} else {
 		log.Printf("no artifact storage configured; sample trajectories will show configuration guidance")
 	}
@@ -275,9 +268,10 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 	s.BumpConfigGeneration()
 
 	s.sinkMu.Lock()
-	s.lastBucket = effBucket
-	s.lastDir = effDir
-	s.lastProvider = effProvider
+	s.lastBucket = resolvedConfig.ArtifactBucket
+	s.lastDir = resolvedConfig.ArtifactDir
+	s.lastCacheDirectory = resolvedConfig.ArtifactCacheDirectory
+	s.lastProvider = resolvedConfig.GCPWorkloadIdentityProvider
 	s.configuredOnce = true
 	s.sinkMu.Unlock()
 
