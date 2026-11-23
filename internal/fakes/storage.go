@@ -15,8 +15,10 @@
 package fakes
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	"cloud.google.com/go/storage"
@@ -27,6 +29,7 @@ type FakeStorageClient struct {
 	mu                sync.Mutex
 	Objects           map[string]FakeObject // key: "bucket/object"
 	Errors            map[string]error      // key: "bucket/object" -> injected error
+	StreamReaders     map[string]io.ReadCloser
 	BucketAccessError error
 	WriteCalls        []FakeObject
 	Closed            bool
@@ -45,8 +48,9 @@ type FakeObject struct {
 // NewFakeStorageClient creates a new FakeStorageClient.
 func NewFakeStorageClient() *FakeStorageClient {
 	return &FakeStorageClient{
-		Objects: make(map[string]FakeObject),
-		Errors:  make(map[string]error),
+		Objects:       make(map[string]FakeObject),
+		Errors:        make(map[string]error),
+		StreamReaders: make(map[string]io.ReadCloser),
 	}
 }
 
@@ -116,6 +120,32 @@ func (f *FakeStorageClient) ReadObject(ctx context.Context, bucket, object strin
 	dataCopy := make([]byte, len(obj.Data))
 	copy(dataCopy, obj.Data)
 	return dataCopy, nil
+}
+
+// OpenReader opens a stream reader for the object data.
+func (f *FakeStorageClient) OpenReader(ctx context.Context, bucket, object string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := bucket + "/" + object
+	if err, ok := f.Errors[key]; ok {
+		return nil, err
+	}
+	if err, ok := f.Errors[bucket+"/*"]; ok {
+		return nil, err
+	}
+	if reader, ok := f.StreamReaders[key]; ok {
+		delete(f.StreamReaders, key)
+		return reader, nil
+	}
+
+	obj, ok := f.Objects[key]
+	if !ok {
+		return nil, storage.ErrObjectNotExist
+	}
+	dataCopy := make([]byte, len(obj.Data))
+	copy(dataCopy, obj.Data)
+	return io.NopCloser(bytes.NewReader(dataCopy)), nil
 }
 
 // CheckAccess verifies whether the bucket is accessible in memory.

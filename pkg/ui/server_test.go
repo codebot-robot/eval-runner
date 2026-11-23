@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -2293,6 +2294,9 @@ func (s *errorSink) StoreManifest(ctx context.Context, meta artifacts.RunMetadat
 	return "", nil
 }
 func (s *errorSink) Load(ctx context.Context, path string) ([]byte, error) {
+	return nil, s.err
+}
+func (s *errorSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
 	return nil, s.err
 }
 func (s *errorSink) ArtifactPrefix(commit string) string {

@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -571,6 +572,10 @@ func (f *failingSink) StoreManifest(ctx context.Context, meta artifacts.RunMetad
 }
 
 func (f *failingSink) Load(ctx context.Context, path string) ([]byte, error) {
+	return nil, f.err
+}
+
+func (f *failingSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
 	return nil, f.err
 }
 

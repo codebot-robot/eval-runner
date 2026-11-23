@@ -60,6 +60,8 @@ func NewArtifactCache(directory string) (*ArtifactCache, error) {
 }
 
 // Open returns an open file if present under hash.
+// The file holds the artifact bytes as stored in the backend (which may be compressed with gzip);
+// callers decode the stream as needed. A damaged local file is not detected or re-downloaded yet.
 // If the artifact is not found, it returns nil, false, nil.
 // If the hash is invalid, it returns an error.
 func (cache *ArtifactCache) Open(hash string) (*os.File, bool, error) {
@@ -78,11 +80,15 @@ func (cache *ArtifactCache) Open(hash string) (*os.File, bool, error) {
 	return file, true, nil
 }
 
-// Put streams artifact content from source into a local file keyed by SHA-256.
+// Put streams artifact content from source into a local file.
+// The file holds the artifact bytes as received from the backend (which may be compressed with gzip),
+// while keyed by the SHA-256 of the content as produced (decompressed if source is gzip).
+// Callers decode the stream upon reading. A damaged local file is not detected or re-downloaded yet.
+// While streaming, source bytes are written to disk as received and simultaneously decompressed
+// and hashed in a single pass.
 // If expectedHash is non-empty, it verifies that the computed SHA-256 matches.
-// A source that fails or ends early, or a content hash that differs from expectedHash,
-// leaves nothing behind: no file under any hash and no temporary file.
-// It returns an open file and the computed hash.
+// A source that fails or ends early, a truncated gzip, or a hash mismatch leaves nothing behind.
+// It returns an open file to the cached content and the computed content hash.
 func (cache *ArtifactCache) Put(expectedHash string, source io.Reader) (_ *os.File, _ string, returnedError error) {
 	if expectedHash != "" {
 		if _, err := validateHash(expectedHash); err != nil {
@@ -115,10 +121,22 @@ func (cache *ArtifactCache) Put(expectedHash string, source io.Reader) (_ *os.Fi
 		}
 	}()
 
+	teeReader := io.TeeReader(source, temporaryFile)
+	decompressingReader, err := NewDecompressingReader(teeReader)
+	if err != nil {
+		return nil, "", fmt.Errorf("decompress artifact stream: %w", err)
+	}
+
 	hasher := sha256.New()
-	writer := io.MultiWriter(temporaryFile, hasher)
-	if _, err := io.Copy(writer, source); err != nil {
-		return nil, "", fmt.Errorf("write artifact to temporary cache file: %w", err)
+	if _, err := io.Copy(hasher, decompressingReader); err != nil {
+		closeError := decompressingReader.Close()
+		if closeError != nil && !errors.Is(closeError, err) {
+			return nil, "", errors.Join(fmt.Errorf("stream artifact to cache: %w", err), closeError)
+		}
+		return nil, "", fmt.Errorf("stream artifact to cache: %w", err)
+	}
+	if err := decompressingReader.Close(); err != nil {
+		return nil, "", fmt.Errorf("close decompressing reader: %w", err)
 	}
 
 	hexDigest := hex.EncodeToString(hasher.Sum(nil))

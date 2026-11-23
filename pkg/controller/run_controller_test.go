@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -7184,6 +7185,10 @@ func (s *transientErrorSink) Load(ctx context.Context, path string) ([]byte, err
 	return nil, s.err
 }
 
+func (s *transientErrorSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	return nil, s.err
+}
+
 func (s *transientErrorSink) ArtifactPrefix(commit string) string {
 	return "mem://runs/" + commit + "/"
 }
@@ -12513,6 +12518,10 @@ func (s *fakeBlockingOrFailingSink) StoreComparison(ctx context.Context, compari
 
 func (s *fakeBlockingOrFailingSink) Load(ctx context.Context, path string) ([]byte, error) {
 	return []byte(`{"tasks":[{"id":"task-1","spec":"eval.py@task1"}]}`), nil
+}
+
+func (s *fakeBlockingOrFailingSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (s *fakeBlockingOrFailingSink) ArtifactPrefix(commit string) string {

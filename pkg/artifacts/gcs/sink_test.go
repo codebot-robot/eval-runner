@@ -18,11 +18,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -1078,5 +1082,106 @@ func TestStreamCompressionAndDecompression(t *testing.T) {
 	}
 	if string(decompressedPlain) != string(raw) {
 		t.Errorf("plain data should return unchanged: expected %s, got %s", raw, decompressedPlain)
+	}
+}
+
+func TestGCSSink_OpenStream(t *testing.T) {
+	cacheDirectory := t.TempDir()
+	fakeClient := fakes.NewFakeStorageClient()
+	sink, err := New(t.Context(), "gs://my-eval-bucket", WithStorageClient(fakeClient), WithCacheDirectory(cacheDirectory))
+	if err != nil {
+		t.Fatalf("Failed to create GCSSink: %v", err)
+	}
+
+	assertStreamContent := func(t *testing.T, stream io.ReadCloser, expected []byte) {
+		t.Helper()
+		data, readError := io.ReadAll(stream)
+		if readError != nil {
+			t.Fatalf("ReadAll failed: %v", readError)
+		}
+		if closeError := stream.Close(); closeError != nil {
+			t.Fatalf("Close stream failed: %v", closeError)
+		}
+		if string(data) != string(expected) {
+			t.Errorf("content mismatch: expected %q, got %q", string(expected), string(data))
+		}
+	}
+
+	rawContent := []byte(`{"results": {"accuracy": 0.95}, "trace": "sample evaluation data"}`)
+	metadata := artifacts.RunMetadata{
+		Commit: "1234567890abcdef",
+		TaskID: "benchmarks/math",
+	}
+
+	stored, err := sink.StoreArtifact(t.Context(), metadata, "eval.json", rawContent)
+	if err != nil {
+		t.Fatalf("StoreArtifact failed: %v", err)
+	}
+
+	expectedKey := strings.TrimPrefix(stored.Hash, "sha256:")
+	cachedFilePath := filepath.Join(cacheDirectory, expectedKey)
+
+	// 1. Read-back: stream returns decompressed content backed by local file storing compressed bytes
+	stream, err := sink.OpenStream(t.Context(), stored.Location, stored.Hash)
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	assertStreamContent(t, stream, rawContent)
+	cachedBytes, err := os.ReadFile(cachedFilePath)
+	if err != nil {
+		t.Errorf("expected cached file at %s: %v", cachedFilePath, err)
+	} else if len(cachedBytes) < 2 || cachedBytes[0] != 0x1f || cachedBytes[1] != 0x8b {
+		t.Errorf("expected cached file to store compressed gzip bytes, got plain or invalid")
+	}
+
+	// 2. Cache hit: caller knowing the hash does not contact store at all
+	fakeClient.Errors["my-eval-bucket/runs/1234567890abcdef/benchmarks/math/eval.json"] = errors.New("remote store error: must not be contacted")
+	cachedStream, err := sink.OpenStream(t.Context(), stored.Location, stored.Hash)
+	if err != nil {
+		t.Fatalf("OpenStream from cache failed: %v", err)
+	}
+	assertStreamContent(t, cachedStream, rawContent)
+
+	// 3. Artifact without known hash (legacy uncompressed): computes hash as bytes arrive, keeps under hash
+	legacyContent := []byte(`{"legacy": true, "score": 1.0}`)
+	legacyHash := artifacts.ArtifactHash(legacyContent)
+	legacyKey := strings.TrimPrefix(legacyHash, "sha256:")
+	fakeClient.Objects["my-eval-bucket/runs/legacy/task1/log.json"] = fakes.FakeObject{
+		Bucket:      "my-eval-bucket",
+		Object:      "runs/legacy/task1/log.json",
+		ContentType: "application/json",
+		Data:        legacyContent,
+	}
+
+	legacyStream, err := sink.OpenStream(t.Context(), "gs://my-eval-bucket/runs/legacy/task1/log.json", "")
+	if err != nil {
+		t.Fatalf("OpenStream without hash failed: %v", err)
+	}
+	assertStreamContent(t, legacyStream, legacyContent)
+	legacyCachedPath := filepath.Join(cacheDirectory, legacyKey)
+	if _, err := os.Stat(legacyCachedPath); err != nil {
+		t.Errorf("expected legacy cached file at %s: %v", legacyCachedPath, err)
+	}
+
+	// 4. Source that fails mid-stream: returns error and leaves nothing behind in cache
+	midStreamKey := "my-eval-bucket/runs/midstream/task1/log.json"
+	fakeClient.StreamReaders[midStreamKey] = io.NopCloser(io.MultiReader(
+		strings.NewReader(`{"partial": "content before connection fails abruptly"}`),
+		iotest.ErrReader(errors.New("connection reset mid-stream")),
+	))
+	entriesBefore, err := os.ReadDir(cacheDirectory)
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+	_, midStreamError := sink.OpenStream(t.Context(), "gs://"+midStreamKey, "")
+	if midStreamError == nil {
+		t.Fatalf("expected error from mid-stream source failure, got nil")
+	}
+	entriesAfter, err := os.ReadDir(cacheDirectory)
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+	if len(entriesAfter) != len(entriesBefore) {
+		t.Errorf("expected no files left behind after mid-stream failure: before %d, after %d", len(entriesBefore), len(entriesAfter))
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
@@ -269,6 +270,22 @@ type ArtifactSink interface {
 
 	// Load retrieves raw artifact bytes from the given storage path or URI, bounded by the maximum allowed artifact size.
 	Load(ctx context.Context, path string) ([]byte, error)
+
+	// OpenStream opens a task artifact for reading as a stream without size limits.
+	// The returned stream is for reading and closing (io.ReadCloser), not a seekable file.
+	// Content is returned decompressed as produced.
+	// For remote sinks that compress on write (such as GCSSink), what is stored on local disk
+	// is the object as received (compressed), while keyed by the SHA-256 of the content as
+	// produced (sha256:<hex>). If hash is non-empty, it must be "sha256:" followed by 64
+	// lowercase hexadecimal characters or an error is returned.
+	// If the file is already cached locally under that hash, the store is not contacted.
+	// If hash is empty, or on a cache miss, the artifact is streamed from the store, written to
+	// disk as received while simultaneously decompressed and hashed, and committed under the
+	// computed content hash.
+	// A hash mismatch, truncated gzip, or failed download returns an error with nothing kept in the cache.
+	// Local-directory and in-memory sinks do not compress on write, so they return their existing
+	// data directly as a stream and ignore the hash parameter.
+	OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error)
 
 	// ArtifactPrefix returns the run-level storage prefix/URI for a given commit, or empty string if not applicable.
 	ArtifactPrefix(commit string) string

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -215,18 +216,27 @@ func (s *InMemorySink) StoreComparison(ctx context.Context, comparisonName strin
 	return uri, nil
 }
 
-// Load retrieves raw artifact bytes from memory, bounded by the maximum allowed artifact size.
-func (s *InMemorySink) Load(ctx context.Context, path string) ([]byte, error) {
+// validatePath normalizes path and verifies it has a valid runs/ or comparisons/ prefix.
+func (s *InMemorySink) validatePath(path string) (string, error) {
 	cleanPath := strings.TrimSpace(path)
 	cleanPath = strings.TrimPrefix(cleanPath, "mem://")
 	cleanPath = strings.TrimPrefix(cleanPath, "/")
 
 	if cleanPath == "" {
-		return nil, fmt.Errorf("artifact path must not be empty")
+		return "", fmt.Errorf("artifact path must not be empty")
 	}
 
 	if !strings.HasPrefix(cleanPath, "runs/") && !strings.HasPrefix(cleanPath, "comparisons/") {
-		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
+		return "", fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
+	}
+	return cleanPath, nil
+}
+
+// Load retrieves raw artifact bytes from memory, bounded by the maximum allowed artifact size.
+func (s *InMemorySink) Load(ctx context.Context, path string) ([]byte, error) {
+	cleanPath, err := s.validatePath(path)
+	if err != nil {
+		return nil, err
 	}
 
 	s.mu.RLock()
@@ -248,6 +258,24 @@ func (s *InMemorySink) Load(ctx context.Context, path string) ([]byte, error) {
 	copied := make([]byte, len(data))
 	copy(copied, data)
 	return copied, nil
+}
+
+// OpenStream implements ArtifactSink for InMemorySink, returning the in-memory artifact bytes as a stream.
+func (s *InMemorySink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	cleanPath, err := s.validatePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	data, ok := s.objects[cleanPath]
+	s.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("%w: object %q not found", ErrNotFound, path)
+	}
+
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // GetMetadata retrieves metadata stored with an object.

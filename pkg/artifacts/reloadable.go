@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -235,6 +236,25 @@ func (s *ReloadableSink) Load(ctx context.Context, path string) ([]byte, error) 
 	defer ts.wg.Done()
 
 	return ts.sink.Load(ctx, path)
+}
+
+// OpenStream opens a task artifact for reading as a stream using the current active sink.
+func (s *ReloadableSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return nil, ErrSinkClosed
+	}
+	ts := s.currentTracked
+	if ts == nil || ts.sink == nil {
+		s.mu.RUnlock()
+		return nil, ErrNotFound
+	}
+	ts.wg.Add(1)
+	s.mu.RUnlock()
+	defer ts.wg.Done()
+
+	return ts.sink.OpenStream(ctx, path, hash)
 }
 
 // ArtifactPrefix returns the run-level storage prefix for a given commit from the current active sink.
