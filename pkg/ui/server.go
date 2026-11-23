@@ -34,7 +34,6 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
-	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/pooling"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -128,32 +127,30 @@ func buildPageURL(baseURL string, query url.Values, newOffset int, limit int) st
 
 // Config configures the web UI server.
 type Config struct {
-	Client                client.Reader
-	Cache                 client.Reader
-	CacheSyncChecker      func() bool
-	DefaultNamespace      string
-	ArtifactSink          artifacts.ArtifactSink
-	InitialBucket         string
-	InitialDir            string
-	InitialCacheDirectory string
-	Version               string
+	Client           client.Reader
+	Cache            client.Reader
+	CacheSyncChecker func() bool
+	DefaultNamespace string
+	ArtifactSink     artifacts.ArtifactSink
+	InitialBucket    string
+	InitialDir       string
+	Version          string
 }
 
 // Server serves read-only web views of Runs and Comparisons.
 type Server struct {
-	cfg                Config
-	mux                *http.ServeMux
-	repoMux            *http.ServeMux
-	cache              *logLRUCache
-	compCache          *comparisonLRUCache
-	reloadableSink     *artifacts.ReloadableSink
-	configGeneration   atomic.Int64
-	sinkMu             sync.RWMutex
-	lastBucket         string
-	lastDir            string
-	lastCacheDirectory string
-	lastProvider       string
-	configuredOnce     bool
+	cfg              Config
+	mux              *http.ServeMux
+	repoMux          *http.ServeMux
+	cache            *logLRUCache
+	compCache        *comparisonLRUCache
+	reloadableSink   *artifacts.ReloadableSink
+	configGeneration atomic.Int64
+	sinkMu           sync.RWMutex
+	lastBucket       string
+	lastDir          string
+	lastProvider     string
+	configuredOnce   bool
 }
 
 // readerFor returns the cache reader for the default namespace when available,
@@ -184,22 +181,16 @@ func NewServer(cfg Config) *Server {
 		relSink = artifacts.NewReloadableSink(nil)
 	}
 
-	initialCacheDirectory := cfg.InitialCacheDirectory
-	if initialCacheDirectory == "" {
-		initialCacheDirectory = configkeys.DefaultArtifactCacheDirectory
-	}
-
 	s := &Server{
-		cfg:                cfg,
-		mux:                http.NewServeMux(),
-		repoMux:            http.NewServeMux(),
-		cache:              newLogLRUCache(64*1024*1024, 1*time.Hour),
-		compCache:          newComparisonLRUCache(32*1024*1024, 1*time.Hour),
-		reloadableSink:     relSink,
-		lastBucket:         cfg.InitialBucket,
-		lastDir:            cfg.InitialDir,
-		lastCacheDirectory: initialCacheDirectory,
-		configuredOnce:     cfg.InitialBucket != "" || cfg.InitialDir != "" || cfg.ArtifactSink != nil,
+		cfg:            cfg,
+		mux:            http.NewServeMux(),
+		repoMux:        http.NewServeMux(),
+		cache:          newLogLRUCache(64*1024*1024, 1*time.Hour),
+		compCache:      newComparisonLRUCache(32*1024*1024, 1*time.Hour),
+		reloadableSink: relSink,
+		lastBucket:     cfg.InitialBucket,
+		lastDir:        cfg.InitialDir,
+		configuredOnce: cfg.InitialBucket != "" || cfg.InitialDir != "" || cfg.ArtifactSink != nil,
 	}
 	s.configGeneration.Store(1)
 
@@ -244,7 +235,6 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 	s.sinkMu.Lock()
 	if resolvedConfig.ArtifactBucket == s.lastBucket &&
 		resolvedConfig.ArtifactDir == s.lastDir &&
-		resolvedConfig.ArtifactCacheDirectory == s.lastCacheDirectory &&
 		resolvedConfig.GCPWorkloadIdentityProvider == s.lastProvider &&
 		s.configuredOnce {
 		s.sinkMu.Unlock()
@@ -270,7 +260,6 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 	s.sinkMu.Lock()
 	s.lastBucket = resolvedConfig.ArtifactBucket
 	s.lastDir = resolvedConfig.ArtifactDir
-	s.lastCacheDirectory = resolvedConfig.ArtifactCacheDirectory
 	s.lastProvider = resolvedConfig.GCPWorkloadIdentityProvider
 	s.configuredOnce = true
 	s.sinkMu.Unlock()

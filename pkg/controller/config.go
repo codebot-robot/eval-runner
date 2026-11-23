@@ -368,7 +368,6 @@ func DefaultClusterConfig() ClusterConfig {
 	return ClusterConfig{
 		ArtifactBucket:           "",
 		ArtifactDir:              "",
-		ArtifactCacheDirectory:   configkeys.DefaultArtifactCacheDirectory,
 		ArtifactMaxUploadBytes:   gcs.DefaultMaxUploadBytes,
 		DiscoveryDeadline:        DefaultDiscoveryDeadline,
 		ExecutionDeadline:        DefaultExecutionDeadline,
@@ -934,9 +933,7 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 			cfg.ArtifactDir = flags.ArtifactDir
 		}
 	}
-	if trimmed := strings.TrimSpace(flags.ArtifactCacheDirectory); trimmed != "" {
-		cfg.ArtifactCacheDirectory = trimmed
-	}
+	cfg.ArtifactCacheDirectory = flags.ArtifactCacheDirectory
 	if flags.IsExplicit("artifact-max-upload-bytes") {
 		cfg.ArtifactMaxUploadBytes = flags.ArtifactMaxUploadBytes
 	}
@@ -1226,7 +1223,6 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 	sinkChanged := r.lastConfig == nil ||
 		r.lastConfig.ArtifactBucket != resolved.ArtifactBucket ||
 		r.lastConfig.ArtifactDir != resolved.ArtifactDir ||
-		r.lastConfig.ArtifactCacheDirectory != resolved.ArtifactCacheDirectory ||
 		r.lastConfig.ArtifactMaxUploadBytes != resolved.ArtifactMaxUploadBytes ||
 		r.lastConfig.GCPWorkloadIdentityProvider != resolved.GCPWorkloadIdentityProvider
 
@@ -1237,13 +1233,11 @@ func (r *ConfigReloader) reloadInternal(ctx context.Context, cm *corev1.ConfigMa
 			if r.lastConfig != nil {
 				resolved.ArtifactBucket = r.lastConfig.ArtifactBucket
 				resolved.ArtifactDir = r.lastConfig.ArtifactDir
-				resolved.ArtifactCacheDirectory = r.lastConfig.ArtifactCacheDirectory
 				resolved.ArtifactMaxUploadBytes = r.lastConfig.ArtifactMaxUploadBytes
 				resolved.GCPWorkloadIdentityProvider = r.lastConfig.GCPWorkloadIdentityProvider
 			} else {
 				resolved.ArtifactBucket = ""
 				resolved.ArtifactDir = ""
-				resolved.ArtifactCacheDirectory = ""
 				resolved.ArtifactMaxUploadBytes = 0
 				resolved.GCPWorkloadIdentityProvider = ""
 			}

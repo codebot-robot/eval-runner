@@ -67,7 +67,7 @@ func main() {
 	flag.StringVar(&namespace, "namespace", defaultNs, "Default Kubernetes namespace to query for Runs and Comparisons")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "Optional GCS bucket for reading artifacts")
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Optional local filesystem directory for reading artifacts")
-	flag.StringVar(&artifactCacheDirectory, "artifact-cache-directory", configkeys.DefaultArtifactCacheDirectory, "Optional local filesystem directory for caching streamed artifacts")
+	flag.StringVar(&artifactCacheDirectory, "artifact-cache-directory", configkeys.DefaultArtifactCacheDirectory, "Directory for local artifact files")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.Parse()
 
@@ -166,15 +166,14 @@ func main() {
 	}
 
 	server := ui.NewServer(ui.Config{
-		Client:                k8sClient,
-		Cache:                 informerCache,
-		CacheSyncChecker:      cacheSynced.Load,
-		DefaultNamespace:      namespace,
-		ArtifactSink:          sink,
-		InitialBucket:         resolvedArtifactConfig.ArtifactBucket,
-		InitialDir:            resolvedArtifactConfig.ArtifactDir,
-		InitialCacheDirectory: resolvedArtifactConfig.ArtifactCacheDirectory,
-		Version:               version.String(),
+		Client:           k8sClient,
+		Cache:            informerCache,
+		CacheSyncChecker: cacheSynced.Load,
+		DefaultNamespace: namespace,
+		ArtifactSink:     sink,
+		InitialBucket:    resolvedArtifactConfig.ArtifactBucket,
+		InitialDir:       resolvedArtifactConfig.ArtifactDir,
+		Version:          version.String(),
 	})
 	defer func() {
 		if err := server.ArtifactSink().Close(); err != nil {

@@ -152,7 +152,7 @@ func main() {
 	flag.StringVar(&sandboxdImage, "sandboxd-image", "", "Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset)")
 	flag.StringVar(&artifactBucket, "artifact-bucket", "", "GCS bucket URI or name for storing evaluation artifacts (e.g. gs://my-bucket)")
 	flag.StringVar(&artifactDir, "artifact-dir", "", "Local filesystem directory for storing evaluation artifacts")
-	flag.StringVar(&artifactCacheDirectory, "artifact-cache-directory", configkeys.DefaultArtifactCacheDirectory, "Local filesystem directory for caching streamed artifacts")
+	flag.StringVar(&artifactCacheDirectory, "artifact-cache-directory", configkeys.DefaultArtifactCacheDirectory, "Directory for local artifact files")
 	flag.BoolVar(&strictConfig, "strict-config", false, "Fail startup if eval-runner-config contains unrecognised keys")
 	flag.Int64Var(&artifactMaxUploadBytes, "artifact-max-upload-bytes", gcs.DefaultMaxUploadBytes, "Maximum size in bytes of an uploaded artifact before it is refused")
 	flag.DurationVar(&comparisonTTL, "comparison-ttl", 0, "TTL duration for retaining Completed Comparisons (default 0 = disabled)")

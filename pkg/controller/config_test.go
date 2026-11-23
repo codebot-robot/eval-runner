@@ -3274,7 +3274,9 @@ func TestConfigReloader_GCSRebuiltOnReloadRetainsCacheDirectory(t *testing.T) {
 	emulator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/o") {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items": []}`))
+			if _, err := w.Write([]byte(`{"items": []}`)); err != nil {
+				t.Errorf("failed to write emulator response: %v", err)
+			}
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -3299,7 +3301,11 @@ func TestConfigReloader_GCSRebuiltOnReloadRetainsCacheDirectory(t *testing.T) {
 		t.Fatalf("NewArtifactSink: %v", err)
 	}
 	reloadableSink := artifacts.NewReloadableSink(initialSink)
-	defer reloadableSink.Close()
+	defer func() {
+		if closeError := reloadableSink.Close(); closeError != nil {
+			t.Errorf("error closing reloadableSink: %v", closeError)
+		}
+	}()
 
 	reloader := NewConfigReloader(ConfigReloaderOptions{
 		RawFlags:       rawFlags,

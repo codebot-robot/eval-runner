@@ -67,23 +67,19 @@ func (c Config) NewArtifactSink(ctx context.Context) (artifacts.ArtifactSink, er
 // ResolveConfig resolves artifact storage configuration from a ConfigMap and flag values.
 // Precedence: explicit flag > ConfigMap > built-in default.
 func ResolveConfig(cm *corev1.ConfigMap, flags Config) Config {
-	cacheDirectory := strings.TrimSpace(flags.ArtifactCacheDirectory)
-	if cacheDirectory == "" {
-		cacheDirectory = configkeys.DefaultArtifactCacheDirectory
-	}
 	cfg := Config{
-		ArtifactCacheDirectory: cacheDirectory,
+		ArtifactCacheDirectory: strings.TrimSpace(flags.ArtifactCacheDirectory),
 		ArtifactMaxUploadBytes: flags.ArtifactMaxUploadBytes,
 	}
 	if cm != nil && cm.Data != nil {
-		if b := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactBucket]); b != "" && !strings.EqualFold(b, configkeys.ConfigSentinelDisabled) {
-			cfg.ArtifactBucket = b
+		if bucket := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactBucket]); bucket != "" && !strings.EqualFold(bucket, configkeys.ConfigSentinelDisabled) {
+			cfg.ArtifactBucket = bucket
 		}
-		if d := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactDir]); d != "" && !strings.EqualFold(d, configkeys.ConfigSentinelDisabled) {
-			cfg.ArtifactDir = d
+		if directory := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactDir]); directory != "" && !strings.EqualFold(directory, configkeys.ConfigSentinelDisabled) {
+			cfg.ArtifactDir = directory
 		}
-		if p := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider]); p != "" {
-			cfg.GCPWorkloadIdentityProvider = p
+		if provider := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider]); provider != "" {
+			cfg.GCPWorkloadIdentityProvider = provider
 		}
 	}
 	if bucket := strings.TrimSpace(flags.ArtifactBucket); bucket != "" {
@@ -128,30 +124,6 @@ func LoadConfigMap(ctx context.Context, reader client.Reader, namespace, name st
 		return nil, fmt.Errorf("failed to get configmap %s/%s: %w", namespace, name, err)
 	}
 	return &cm, nil
-}
-
-// LoadArtifactConfig reads the cluster ConfigMap and extracts artifact storage settings.
-// If name is empty, DefaultConfigMapName is used.
-// If namespace is empty, DefaultNamespace is used.
-// If the ConfigMap is not found, an empty Config is returned with a nil error.
-func LoadArtifactConfig(ctx context.Context, reader client.Reader, namespace, name string) (Config, error) {
-	cm, err := LoadConfigMap(ctx, reader, namespace, name)
-	if err != nil {
-		return Config{}, err
-	}
-	var cfg Config
-	if cm != nil && cm.Data != nil {
-		if b := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactBucket]); b != "" && !strings.EqualFold(b, configkeys.ConfigSentinelDisabled) {
-			cfg.ArtifactBucket = b
-		}
-		if d := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyArtifactDir]); d != "" && !strings.EqualFold(d, configkeys.ConfigSentinelDisabled) {
-			cfg.ArtifactDir = d
-		}
-		if p := strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider]); p != "" {
-			cfg.GCPWorkloadIdentityProvider = p
-		}
-	}
-	return cfg, nil
 }
 
 // NewArtifactSink constructs an ArtifactSink based on the provided configuration.
