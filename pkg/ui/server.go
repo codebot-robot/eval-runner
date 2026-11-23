@@ -34,7 +34,6 @@ import (
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/artifacts"
 	"github.com/gke-labs/eval-runner/pkg/artifacts/sinkconfig"
-	"github.com/gke-labs/eval-runner/pkg/configkeys"
 	"github.com/gke-labs/eval-runner/pkg/forge/consumer"
 	"github.com/gke-labs/eval-runner/pkg/pooling"
 	"github.com/gke-labs/eval-runner/pkg/stats"
@@ -227,46 +226,30 @@ func (s *Server) BumpConfigGeneration() int64 {
 
 // ReloadConfigMap updates the server's artifact sink and bumps config_generation
 // based on changes to the eval-runner-config ConfigMap.
-func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flagBucket, flagDir string, sinkFactory sinkconfig.SinkFactory) error {
+func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flagConfig sinkconfig.Config, sinkFactory sinkconfig.SinkFactory) error {
 	if sinkFactory == nil {
 		sinkFactory = sinkconfig.NewArtifactSink
 	}
-	effBucket := flagBucket
-	effDir := flagDir
-	effProvider := ""
-	if cm != nil && cm.Data != nil {
-		if effBucket == "" {
-			effBucket = cm.Data[configkeys.ConfigMapKeyArtifactBucket]
-		}
-		if effDir == "" {
-			effDir = cm.Data[configkeys.ConfigMapKeyArtifactDir]
-		}
-		effProvider = strings.TrimSpace(cm.Data[configkeys.ConfigMapKeyGCPWorkloadIdentityProvider])
-	}
-	effBucket = strings.TrimSpace(effBucket)
-	if strings.EqualFold(effBucket, configkeys.ConfigSentinelDisabled) {
-		effBucket = ""
-	}
-	effDir = strings.TrimSpace(effDir)
-	if strings.EqualFold(effDir, configkeys.ConfigSentinelDisabled) {
-		effDir = ""
-	}
+	resolvedConfig := sinkconfig.ResolveConfig(cm, flagConfig)
 
 	s.sinkMu.Lock()
-	if effBucket == s.lastBucket && effDir == s.lastDir && effProvider == s.lastProvider && s.configuredOnce {
+	if resolvedConfig.ArtifactBucket == s.lastBucket &&
+		resolvedConfig.ArtifactDir == s.lastDir &&
+		resolvedConfig.GCPWorkloadIdentityProvider == s.lastProvider &&
+		s.configuredOnce {
 		s.sinkMu.Unlock()
 		return nil
 	}
 	s.sinkMu.Unlock()
 
 	var newSink artifacts.ArtifactSink
-	if effBucket != "" || effDir != "" {
-		s, err := sinkFactory(ctx, effBucket, effDir, effProvider, 0)
+	if resolvedConfig.ArtifactBucket != "" || resolvedConfig.ArtifactDir != "" {
+		s, err := sinkFactory(ctx, resolvedConfig)
 		if err != nil {
-			return fmt.Errorf("unable to configure artifact sink (bucket=%q, dir=%q): %w", effBucket, effDir, err)
+			return fmt.Errorf("unable to configure artifact sink (bucket=%q, dir=%q): %w", resolvedConfig.ArtifactBucket, resolvedConfig.ArtifactDir, err)
 		}
 		newSink = s
-		log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", effBucket, effDir)
+		log.Printf("configured artifact sink for UI (bucket=%q, dir=%q)", resolvedConfig.ArtifactBucket, resolvedConfig.ArtifactDir)
 	} else {
 		log.Printf("no artifact storage configured; sample trajectories will show configuration guidance")
 	}
@@ -275,9 +258,9 @@ func (s *Server) ReloadConfigMap(ctx context.Context, cm *corev1.ConfigMap, flag
 	s.BumpConfigGeneration()
 
 	s.sinkMu.Lock()
-	s.lastBucket = effBucket
-	s.lastDir = effDir
-	s.lastProvider = effProvider
+	s.lastBucket = resolvedConfig.ArtifactBucket
+	s.lastDir = resolvedConfig.ArtifactDir
+	s.lastProvider = resolvedConfig.GCPWorkloadIdentityProvider
 	s.configuredOnce = true
 	s.sinkMu.Unlock()
 

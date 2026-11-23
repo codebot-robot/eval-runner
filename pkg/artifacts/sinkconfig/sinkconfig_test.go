@@ -51,7 +51,7 @@ func TestNewArtifactSink(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("empty bucket and dir returns nil without error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "", "", "", 0)
+		sink, err := NewArtifactSink(ctx, Config{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestNewArtifactSink(t *testing.T) {
 	})
 
 	t.Run("disabled sentinel returns nil without error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "none", "none", "", 0)
+		sink, err := NewArtifactSink(ctx, Config{ArtifactBucket: "none", ArtifactDir: "none"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -72,7 +72,7 @@ func TestNewArtifactSink(t *testing.T) {
 
 	t.Run("local directory sink", func(t *testing.T) {
 		dir := t.TempDir()
-		sink, err := NewArtifactSink(ctx, "", dir, "", 0)
+		sink, err := NewArtifactSink(ctx, Config{ArtifactDir: dir})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -88,7 +88,11 @@ func TestNewArtifactSink(t *testing.T) {
 	t.Run("gcs bucket sink", func(t *testing.T) {
 		// Point the storage client at an emulator so no ADC lookup happens; nothing is dialed at construction time.
 		t.Setenv("STORAGE_EMULATOR_HOST", "127.0.0.1:1")
-		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", "", 1024*1024)
+		sink, err := NewArtifactSink(ctx, Config{
+			ArtifactBucket:         "my-eval-bucket",
+			ArtifactCacheDirectory: "/tmp/test-cache",
+			ArtifactMaxUploadBytes: 1024 * 1024,
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -102,11 +106,17 @@ func TestNewArtifactSink(t *testing.T) {
 		if maxUpload := gcsSink.MaxUploadBytes(); maxUpload != 1024*1024 {
 			t.Errorf("expected max upload bytes 1048576, got %d", maxUpload)
 		}
+		if cacheDirectory := gcsSink.CacheDirectory(); cacheDirectory != "/tmp/test-cache" {
+			t.Errorf("expected cache directory /tmp/test-cache, got %q", cacheDirectory)
+		}
 	})
 
 	t.Run("gcs bucket sink with workload identity provider", func(t *testing.T) {
 		const provider = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr"
-		sink, err := NewArtifactSink(ctx, "my-eval-bucket", "", provider, 0)
+		sink, err := NewArtifactSink(ctx, Config{
+			ArtifactBucket:              "my-eval-bucket",
+			GCPWorkloadIdentityProvider: provider,
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -120,7 +130,7 @@ func TestNewArtifactSink(t *testing.T) {
 	})
 
 	t.Run("invalid gcs bucket returns error", func(t *testing.T) {
-		sink, err := NewArtifactSink(ctx, "invalid bucket name with spaces", "", "", 0)
+		sink, err := NewArtifactSink(ctx, Config{ArtifactBucket: "invalid bucket name with spaces"})
 		if err == nil {
 			t.Fatalf("expected error for invalid bucket, got sink: %v", sink)
 		}
@@ -133,7 +143,7 @@ func TestConfig_NewArtifactSink(t *testing.T) {
 		cfg := Config{
 			ArtifactDir: t.TempDir(),
 		}
-		sink, err := cfg.NewArtifactSink(ctx, 0)
+		sink, err := cfg.NewArtifactSink(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -148,7 +158,7 @@ func TestConfig_NewArtifactSink(t *testing.T) {
 			ArtifactBucket:              "my-eval-bucket",
 			GCPWorkloadIdentityProvider: provider,
 		}
-		sink, err := cfg.NewArtifactSink(ctx, 0)
+		sink, err := cfg.NewArtifactSink(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -226,93 +236,60 @@ func TestLoadConfigMap(t *testing.T) {
 	})
 }
 
-func TestLoadArtifactConfig(t *testing.T) {
-	ctx := t.Context()
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-
-	t.Run("nil reader returns empty config", func(t *testing.T) {
-		cfg, err := LoadArtifactConfig(ctx, nil, "eval-runner", "eval-runner-config")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+func TestResolveConfig(t *testing.T) {
+	t.Run("nil configmap returns flag config", func(t *testing.T) {
+		flags := Config{
+			ArtifactBucket:         "flag-bucket",
+			ArtifactDir:            "/flag/dir",
+			ArtifactCacheDirectory: "/tmp/flag-cache",
+			ArtifactMaxUploadBytes: 1024,
 		}
-		if cfg.ArtifactBucket != "" || cfg.ArtifactDir != "" {
-			t.Fatalf("expected empty config, got %+v", cfg)
-		}
-	})
-
-	t.Run("not found returns empty config without error", func(t *testing.T) {
-		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-		cfg, err := LoadArtifactConfig(ctx, cl, "eval-runner", "eval-runner-config")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.ArtifactBucket != "" || cfg.ArtifactDir != "" {
-			t.Fatalf("expected empty config, got %+v", cfg)
+		resolved := ResolveConfig(nil, flags)
+		if resolved != flags {
+			t.Errorf("expected %+v, got %+v", flags, resolved)
 		}
 	})
 
-	t.Run("reader error propagates", func(t *testing.T) {
-		errReader := &errorReader{err: errors.New("timeout")}
-		_, err := LoadArtifactConfig(ctx, errReader, "eval-runner", "eval-runner-config")
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !strings.Contains(err.Error(), "timeout") {
-			t.Errorf("expected error containing timeout, got %v", err)
-		}
-	})
-
-	t.Run("populates bucket, dir, and workload identity provider", func(t *testing.T) {
-		const provider = "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr"
+	t.Run("flags override configmap", func(t *testing.T) {
 		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "test-ns",
-				Name:      "test-cm",
-			},
 			Data: map[string]string{
-				configkeys.ConfigMapKeyArtifactBucket:              "gs://eval-bucket",
-				configkeys.ConfigMapKeyArtifactDir:                 "/var/artifacts",
-				configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: provider,
+				configkeys.ConfigMapKeyArtifactBucket:              "cm-bucket",
+				configkeys.ConfigMapKeyArtifactDir:                 "/cm/dir",
+				configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: "cm-provider",
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
-		cfg, err := LoadArtifactConfig(ctx, cl, "test-ns", "test-cm")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		flags := Config{
+			ArtifactBucket:         "flag-bucket",
+			ArtifactCacheDirectory: "/tmp/flag-cache",
 		}
-		if cfg.ArtifactBucket != "gs://eval-bucket" {
-			t.Errorf("expected ArtifactBucket gs://eval-bucket, got %q", cfg.ArtifactBucket)
+		resolved := ResolveConfig(cm, flags)
+		if resolved.ArtifactBucket != "flag-bucket" {
+			t.Errorf("expected flag-bucket, got %q", resolved.ArtifactBucket)
 		}
-		if cfg.ArtifactDir != "/var/artifacts" {
-			t.Errorf("expected ArtifactDir /var/artifacts, got %q", cfg.ArtifactDir)
+		if resolved.ArtifactDir != "/cm/dir" {
+			t.Errorf("expected /cm/dir, got %q", resolved.ArtifactDir)
 		}
-		if cfg.GCPWorkloadIdentityProvider != provider {
-			t.Errorf("expected GCPWorkloadIdentityProvider %q, got %q", provider, cfg.GCPWorkloadIdentityProvider)
+		if resolved.GCPWorkloadIdentityProvider != "cm-provider" {
+			t.Errorf("expected cm-provider, got %q", resolved.GCPWorkloadIdentityProvider)
+		}
+		if resolved.ArtifactCacheDirectory != "/tmp/flag-cache" {
+			t.Errorf("expected /tmp/flag-cache, got %q", resolved.ArtifactCacheDirectory)
 		}
 	})
 
-	t.Run("ignores disabled sentinels", func(t *testing.T) {
+	t.Run("disabled sentinels cleared", func(t *testing.T) {
 		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: DefaultNamespace,
-				Name:      DefaultConfigMapName,
-			},
 			Data: map[string]string{
 				configkeys.ConfigMapKeyArtifactBucket: "none",
 				configkeys.ConfigMapKeyArtifactDir:    "NONE",
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
-		cfg, err := LoadArtifactConfig(ctx, cl, "", "")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		resolved := ResolveConfig(cm, Config{ArtifactBucket: "none"})
+		if resolved.ArtifactBucket != "" {
+			t.Errorf("expected empty ArtifactBucket for 'none', got %q", resolved.ArtifactBucket)
 		}
-		if cfg.ArtifactBucket != "" {
-			t.Errorf("expected empty ArtifactBucket for 'none', got %q", cfg.ArtifactBucket)
-		}
-		if cfg.ArtifactDir != "" {
-			t.Errorf("expected empty ArtifactDir for 'none', got %q", cfg.ArtifactDir)
+		if resolved.ArtifactDir != "" {
+			t.Errorf("expected empty ArtifactDir for 'none', got %q", resolved.ArtifactDir)
 		}
 	})
 }

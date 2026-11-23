@@ -123,6 +123,7 @@ func (c *realStorageClient) Close() error {
 // GCSSink implements artifacts.ArtifactSink to write Inspect logs and summary.json to Google Cloud Storage.
 type GCSSink struct {
 	bucket                   string
+	cacheDirectory           string
 	maxUploadBytes           int64
 	client                   StorageClient
 	workloadIdentityProvider string
@@ -140,6 +141,13 @@ type Option func(*GCSSink)
 func WithStorageClient(c StorageClient) Option {
 	return func(s *GCSSink) {
 		s.client = c
+	}
+}
+
+// WithCacheDirectory sets the local artifact cache directory.
+func WithCacheDirectory(directory string) Option {
+	return func(s *GCSSink) {
+		s.cacheDirectory = strings.TrimSpace(directory)
 	}
 }
 
@@ -230,6 +238,11 @@ func (s *GCSSink) CheckAccess(ctx context.Context) error {
 // Bucket returns the target bucket name.
 func (s *GCSSink) Bucket() string {
 	return s.bucket
+}
+
+// CacheDirectory returns the configured local artifact cache directory.
+func (s *GCSSink) CacheDirectory() string {
+	return s.cacheDirectory
 }
 
 // MaxUploadBytes returns the configured maximum upload byte size.

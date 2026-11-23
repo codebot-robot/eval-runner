@@ -22,6 +22,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -516,6 +518,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	bucket := fs.String("artifact-bucket", "", "artifact bucket")
 	dir := fs.String("artifact-dir", "", "artifact dir")
+	cacheDirectory := fs.String("artifact-cache-directory", configkeys.DefaultArtifactCacheDirectory, "artifact cache directory")
 	discovery := fs.Duration("discovery-deadline", 10*time.Minute, "discovery deadline")
 	execution := fs.Duration("execution-deadline", 30*time.Minute, "execution deadline")
 	parallel := fs.Int("max-parallel-tasks", 4, "max parallel tasks")
@@ -542,7 +545,7 @@ func TestFlagsFromFlagSet(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *cacheDirectory, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -2286,9 +2289,9 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 	var factoryCalls []string
 	var createdSinks []*trackingTestSink
 
-	mockFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
-		factoryCalls = append(factoryCalls, bucket)
-		sink := &trackingTestSink{bucket: bucket, dir: dir}
+	mockFactory := func(ctx context.Context, config sinkconfig.Config) (artifacts.ArtifactSink, error) {
+		factoryCalls = append(factoryCalls, config.ArtifactBucket)
+		sink := &trackingTestSink{bucket: config.ArtifactBucket, dir: config.ArtifactDir}
 		createdSinks = append(createdSinks, sink)
 		return sink, nil
 	}
@@ -2299,7 +2302,7 @@ func TestConfigReloader_UpdatesConfigMap_SinkFactoryCalledAndOldSinkClosed(t *te
 		t.Fatalf("failed to resolve initial config: %v", err)
 	}
 
-	initialSink, err := mockFactory(ctx, initialCfg.ArtifactBucket, initialCfg.ArtifactDir, initialCfg.GCPWorkloadIdentityProvider, initialCfg.ArtifactMaxUploadBytes)
+	initialSink, err := mockFactory(ctx, initialCfg.ArtifactConfig())
 	if err != nil {
 		t.Fatalf("failed to construct initial sink: %v", err)
 	}
@@ -2472,10 +2475,10 @@ func TestConfigReloader_UpdatesWorkloadIdentityProvider_SinkReloaded(t *testing.
 
 	var factoryCalls int
 	var capturedProvider string
-	mockFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+	mockFactory := func(ctx context.Context, config sinkconfig.Config) (artifacts.ArtifactSink, error) {
 		factoryCalls++
-		capturedProvider = workloadIdentityProvider
-		return &trackingTestSink{bucket: bucket, dir: dir}, nil
+		capturedProvider = config.GCPWorkloadIdentityProvider
+		return &trackingTestSink{bucket: config.ArtifactBucket, dir: config.ArtifactDir}, nil
 	}
 
 	rawFlags := RawFlags{}
@@ -2484,7 +2487,7 @@ func TestConfigReloader_UpdatesWorkloadIdentityProvider_SinkReloaded(t *testing.
 		t.Fatalf("failed to resolve initial config: %v", err)
 	}
 
-	initialSink, err := mockFactory(ctx, initialCfg.ArtifactBucket, initialCfg.ArtifactDir, initialCfg.GCPWorkloadIdentityProvider, initialCfg.ArtifactMaxUploadBytes)
+	initialSink, err := mockFactory(ctx, initialCfg.ArtifactConfig())
 	if err != nil {
 		t.Fatalf("failed to construct initial sink: %v", err)
 	}
@@ -2913,13 +2916,13 @@ func TestConfigReloader_ProbeCredentials_UnavailableOnFailure(t *testing.T) {
 	fakeStorage := fakes.NewFakeStorageClient()
 	fakeStorage.BucketAccessError = probeErr
 
-	mockFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
-		if bucket == "failing-bucket" {
-			return gcs.New(ctx, bucket, gcs.WithStorageClient(fakeStorage))
+	mockFactory := func(ctx context.Context, config sinkconfig.Config) (artifacts.ArtifactSink, error) {
+		if config.ArtifactBucket == "failing-bucket" {
+			return gcs.New(ctx, config.ArtifactBucket, gcs.WithStorageClient(fakeStorage))
 		}
-		if bucket == "working-bucket" {
+		if config.ArtifactBucket == "working-bucket" {
 			workingStorage := fakes.NewFakeStorageClient()
-			return gcs.New(ctx, bucket, gcs.WithStorageClient(workingStorage))
+			return gcs.New(ctx, config.ArtifactBucket, gcs.WithStorageClient(workingStorage))
 		}
 		return artifacts.NewInMemorySink(), nil
 	}
@@ -3264,5 +3267,69 @@ func TestDefaultGitHubConfig(t *testing.T) {
 	}
 	if cfg.RateLimitFloorPercent != syncer.DefaultRateFloorPercent {
 		t.Errorf("RateLimitFloorPercent = %d, want %d", cfg.RateLimitFloorPercent, syncer.DefaultRateFloorPercent)
+	}
+}
+
+func TestConfigReloader_GCSRebuiltOnReloadRetainsCacheDirectory(t *testing.T) {
+	emulator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/o") {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write([]byte(`{"items": []}`)); err != nil {
+				t.Errorf("failed to write emulator response: %v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer emulator.Close()
+	t.Setenv("STORAGE_EMULATOR_HOST", strings.TrimPrefix(emulator.URL, "http://"))
+
+	ctx := t.Context()
+	rawFlags := RawFlags{
+		ArtifactCacheDirectory: "/tmp/custom-artifact-cache",
+	}
+	initialCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+	}
+	initialConfig, err := ResolveConfig(initialCM, rawFlags)
+	if err != nil {
+		t.Fatalf("ResolveConfig: %v", err)
+	}
+
+	initialSink, err := sinkconfig.NewArtifactSink(ctx, initialConfig.ArtifactConfig())
+	if err != nil {
+		t.Fatalf("NewArtifactSink: %v", err)
+	}
+	reloadableSink := artifacts.NewReloadableSink(initialSink)
+	defer func() {
+		if closeError := reloadableSink.Close(); closeError != nil {
+			t.Errorf("error closing reloadableSink: %v", closeError)
+		}
+	}()
+
+	reloader := NewConfigReloader(ConfigReloaderOptions{
+		RawFlags:       rawFlags,
+		Logger:         logr.Discard(),
+		ReloadableSink: reloadableSink,
+		InitialConfig:  &initialConfig,
+	})
+
+	updatedCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName, ResourceVersion: "2"},
+		Data: map[string]string{
+			configkeys.ConfigMapKeyArtifactBucket: "reloaded-eval-bucket",
+		},
+	}
+	if err := reloader.ReloadWait(ctx, updatedCM); err != nil {
+		t.Fatalf("ReloadWait: %v", err)
+	}
+
+	currentSink := reloadableSink.Current()
+	gcsSink, ok := currentSink.(*gcs.GCSSink)
+	if !ok {
+		t.Fatalf("expected *gcs.GCSSink, got %T", currentSink)
+	}
+	if gcsSink.CacheDirectory() != "/tmp/custom-artifact-cache" {
+		t.Errorf("expected CacheDirectory %q, got %q", "/tmp/custom-artifact-cache", gcsSink.CacheDirectory())
 	}
 }

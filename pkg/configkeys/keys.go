@@ -33,6 +33,8 @@ const (
 	ConfigMapKeyArtifactBucket = "artifactBucket"
 	// ConfigMapKeyArtifactDir is the ConfigMap key for the local artifact directory.
 	ConfigMapKeyArtifactDir = "artifactDir"
+	// DefaultArtifactCacheDirectory is the default local filesystem directory for cached artifact files.
+	DefaultArtifactCacheDirectory = "/tmp/eval-runner-artifacts"
 	// ConfigMapKeyArtifactMaxUploadBytes is the ConfigMap key for the maximum artifact upload byte limit.
 	ConfigMapKeyArtifactMaxUploadBytes = "artifactMaxUploadBytes"
 	// ConfigMapKeyGCPWorkloadIdentityProvider is the ConfigMap key for the GCP Workload Identity Federation provider resource name.

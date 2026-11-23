@@ -456,17 +456,17 @@ func TestServer_ReloadConfigMap_FooterReflectsNewValueWithoutRestart(t *testing.
 			configkeys.ConfigMapKeyArtifactBucket: "gs://reloaded-eval-bucket",
 		},
 	}
-	mockSinkFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
-		if bucket != "" {
-			return &mockFooterSink{bucket: strings.TrimPrefix(bucket, "gs://")}, nil
+	mockSinkFactory := func(ctx context.Context, config sinkconfig.Config) (artifacts.ArtifactSink, error) {
+		if config.ArtifactBucket != "" {
+			return &mockFooterSink{bucket: strings.TrimPrefix(config.ArtifactBucket, "gs://")}, nil
 		}
-		if dir != "" {
-			return &artifacts.LocalDirSink{BaseDir: dir}, nil
+		if config.ArtifactDir != "" {
+			return &artifacts.LocalDirSink{BaseDir: config.ArtifactDir}, nil
 		}
 		return nil, nil
 	}
 
-	if err := server.ReloadConfigMap(t.Context(), cmBucket, "", "", mockSinkFactory); err != nil {
+	if err := server.ReloadConfigMap(t.Context(), cmBucket, sinkconfig.Config{}, mockSinkFactory); err != nil {
 		t.Fatalf("ReloadConfigMap failed: %v", err)
 	}
 
@@ -498,7 +498,7 @@ func TestServer_ReloadConfigMap_FooterReflectsNewValueWithoutRestart(t *testing.
 			configkeys.ConfigMapKeyArtifactDir: "/var/log/artifacts",
 		},
 	}
-	if err := server.ReloadConfigMap(t.Context(), cmDir, "", "", mockSinkFactory); err != nil {
+	if err := server.ReloadConfigMap(t.Context(), cmDir, sinkconfig.Config{}, mockSinkFactory); err != nil {
 		t.Fatalf("ReloadConfigMap failed: %v", err)
 	}
 	if server.ConfigGeneration() != 3 {
@@ -541,7 +541,7 @@ func TestServer_ReloadConfigMap_FooterReflectsNewValueWithoutRestart(t *testing.
 	watchDone := make(chan struct{}, 10)
 	go func() {
 		_ = sinkconfig.WatchConfigMap(ctx, clientset, "eval-runner", sinkconfig.DefaultConfigMapName, func(cm *corev1.ConfigMap) {
-			_ = serverWatch.ReloadConfigMap(ctx, cm, "", "", mockSinkFactory)
+			_ = serverWatch.ReloadConfigMap(ctx, cm, sinkconfig.Config{}, mockSinkFactory)
 			watchDone <- struct{}{}
 		})
 	}()
@@ -599,12 +599,12 @@ func TestServer_InitialBucketDir_DoesNotDuplicateOnStartup(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseRun, candRun, comp).Build()
 
 	var factoryCalls int
-	mockSinkFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+	mockSinkFactory := func(ctx context.Context, config sinkconfig.Config) (artifacts.ArtifactSink, error) {
 		factoryCalls++
-		return &mockFooterSink{bucket: bucket}, nil
+		return &mockFooterSink{bucket: config.ArtifactBucket}, nil
 	}
 
-	initialSink, _ := mockSinkFactory(t.Context(), "initial-bucket", "", "", 0)
+	initialSink, _ := mockSinkFactory(t.Context(), sinkconfig.Config{ArtifactBucket: "initial-bucket"})
 	server := NewServer(Config{
 		Client:           fakeClient,
 		DefaultNamespace: "eval-runner",
@@ -627,7 +627,7 @@ func TestServer_InitialBucketDir_DoesNotDuplicateOnStartup(t *testing.T) {
 	}
 
 	// First watch callback with matching ConfigMap should be a no-op
-	if err := server.ReloadConfigMap(t.Context(), cmInitial, "", "", mockSinkFactory); err != nil {
+	if err := server.ReloadConfigMap(t.Context(), cmInitial, sinkconfig.Config{}, mockSinkFactory); err != nil {
 		t.Fatalf("ReloadConfigMap failed: %v", err)
 	}
 
@@ -657,22 +657,22 @@ func TestServer_ReloadConfigMap_FactoryErrorDoesNotAdvanceState(t *testing.T) {
 	}
 
 	failNext := true
-	mockSinkFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+	mockSinkFactory := func(ctx context.Context, config sinkconfig.Config) (artifacts.ArtifactSink, error) {
 		if failNext {
 			return nil, errors.New("simulated transient network failure")
 		}
-		return &mockFooterSink{bucket: bucket}, nil
+		return &mockFooterSink{bucket: config.ArtifactBucket}, nil
 	}
 
 	// First attempt fails
-	err := server.ReloadConfigMap(t.Context(), cm, "", "", mockSinkFactory)
+	err := server.ReloadConfigMap(t.Context(), cm, sinkconfig.Config{}, mockSinkFactory)
 	if err == nil {
 		t.Fatal("expected error on first attempt, got nil")
 	}
 
 	// State should not have advanced, so re-running with the same ConfigMap retries construction
 	failNext = false
-	err = server.ReloadConfigMap(t.Context(), cm, "", "", mockSinkFactory)
+	err = server.ReloadConfigMap(t.Context(), cm, sinkconfig.Config{}, mockSinkFactory)
 	if err != nil {
 		t.Fatalf("expected retry to succeed, got %v", err)
 	}
@@ -687,10 +687,10 @@ func TestServer_ReloadConfigMap_WorkloadIdentityProvider(t *testing.T) {
 
 	var callCount int
 	var capturedProvider string
-	mockSinkFactory := func(ctx context.Context, bucket, dir, workloadIdentityProvider string, maxUploadBytes int64) (artifacts.ArtifactSink, error) {
+	mockSinkFactory := func(ctx context.Context, config sinkconfig.Config) (artifacts.ArtifactSink, error) {
 		callCount++
-		capturedProvider = workloadIdentityProvider
-		return &mockFooterSink{bucket: bucket}, nil
+		capturedProvider = config.GCPWorkloadIdentityProvider
+		return &mockFooterSink{bucket: config.ArtifactBucket}, nil
 	}
 
 	server := NewServer(Config{
@@ -711,7 +711,7 @@ func TestServer_ReloadConfigMap_WorkloadIdentityProvider(t *testing.T) {
 		},
 	}
 
-	if err := server.ReloadConfigMap(t.Context(), cm, "", "", mockSinkFactory); err != nil {
+	if err := server.ReloadConfigMap(t.Context(), cm, sinkconfig.Config{}, mockSinkFactory); err != nil {
 		t.Fatalf("ReloadConfigMap failed: %v", err)
 	}
 

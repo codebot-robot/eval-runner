@@ -55,6 +55,8 @@ spec:
         - name: http
           containerPort: 8080
         volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         - name: gcp-token
           mountPath: /var/run/secrets/eval-runner/gcp
           readOnly: true
@@ -87,6 +89,8 @@ spec:
             cpu: 250m
             memory: 256Mi
       volumes:
+      - name: tmp
+        emptyDir: {}
       - name: gcp-token
         projected:
           sources:
