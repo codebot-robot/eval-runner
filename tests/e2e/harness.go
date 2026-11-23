@@ -178,8 +178,27 @@ func (h *Harness) DeployEvalRunner() {
 	h.t.Log("Verifying service portal controller and service portal node agent readiness...")
 	controllerRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "deployment/service-portal-controller", "--timeout=60s")
 	h.t.Logf("service portal controller: %s", strings.TrimSpace(controllerRollout))
+
+	// Set LOG_VERBOSITY=1 on portal-node-agent proxy container for e2e diagnostics and wait for rollout and stream connection
+	h.runCmd("kubectl", "set", "env", "daemonset/portal-node-agent", "-n", "service-portal-system", "-c", "proxy", "LOG_VERBOSITY=1")
 	agentRollout := h.runCmd("kubectl", "rollout", "status", "-n", "service-portal-system", "daemonset/portal-node-agent", "--timeout=60s")
 	h.t.Logf("service portal node agent: %s", strings.TrimSpace(agentRollout))
+
+	// Wait up to 60s for service portal node agent stream to connect to service-portal-controller
+	streamConnected := false
+	streamDeadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(streamDeadline) {
+		out, err := exec.Command("kubectl", "logs", "-n", "service-portal-system", "daemonset/portal-node-agent", "-c", "proxy", "--tail=50").CombinedOutput()
+		if err == nil && strings.Contains(string(out), "controller: stream connected") {
+			streamConnected = true
+			h.t.Log("service portal node agent stream connected to controller")
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if !streamConnected {
+		h.t.Log("warning: service portal node agent stream connection not confirmed within 60s")
+	}
 
 	// Apply Secret for eval-runner-webhook HMAC signature verification
 	secManifest := `
@@ -708,6 +727,13 @@ func (h *Harness) logTimeoutDiagnostics(namespace, runName string) {
 		h.t.Logf("Controller logs (tail 100):\n%s", string(ctrlLogs))
 	} else {
 		h.t.Logf("Failed to get controller logs: %v (output: %s)", err, string(ctrlLogs))
+	}
+
+	// 6. Service portal node agent proxy log (tail 1000 to cover failing pod lifetime)
+	if nodeAgentLogs, err := exec.Command("kubectl", "logs", "-n", "service-portal-system", "daemonset/portal-node-agent", "-c", "proxy", "--tail=1000").CombinedOutput(); err == nil {
+		h.t.Logf("Service portal node agent proxy logs (tail 1000):\n%s", string(nodeAgentLogs))
+	} else {
+		h.t.Logf("Failed to get service portal node agent proxy logs: %v (output: %s)", err, string(nodeAgentLogs))
 	}
 
 	h.t.Logf("=== END TIMEOUT DIAGNOSTICS ===")

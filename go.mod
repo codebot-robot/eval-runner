@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	cloud.google.com/go/storage v1.69.0
 	github.com/bmatcuk/doublestar/v4 v4.10.3
-	github.com/gke-labs/service-portals v0.0.0-20261121042008-60920d45402f
+	github.com/gke-labs/service-portals v0.0.0-20261123161426-4e016d063b8e
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/go-logr/logr v1.4.4
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
