@@ -1205,7 +1205,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Check if overall discovery deadline has been exceeded.
 	if run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time) {
 		var podPtr *corev1.Pod
-		if podExists {
+		if podExists && isUsableSandboxPod(&pod, sandbox.UID) {
 			podPtr = &pod
 		}
 		msg := formatPodDeadlineMessage(podPtr)
@@ -1213,8 +1213,8 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.failRun(ctx, &run, &sandbox, msg)
 	}
 
-	if !podExists {
-		logger.Info("Backing pod not yet created", "pod", podKey)
+	if !podExists || !isUsableSandboxPod(&pod, sandbox.UID) {
+		logger.Info("Backing pod not yet created or not controlled by current sandbox", "pod", podKey, "sandboxUID", sandbox.UID)
 		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 	}
 
@@ -1943,7 +1943,10 @@ func (r *RunReconciler) resolveEndpointWithReader(ctx context.Context, reader cl
 	podKey := types.NamespacedName{Namespace: sb.Namespace, Name: podName}
 	err := reader.Get(ctx, podKey, &pod)
 	if err == nil {
-		return pod.Status.PodIP
+		if isUsableSandboxPod(&pod, sb.UID) {
+			return pod.Status.PodIP
+		}
+		return ""
 	}
 	if !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).V(1).Info("failed to get pod for endpoint resolution", "pod", podKey, "error", err)
@@ -2688,18 +2691,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 
 		// Only execute in a pod that is controlled by the current Sandbox and is not terminating.
-		if pod.DeletionTimestamp != nil {
-			logger.V(1).Info("Task pod is terminating", "task", t.ID)
-			continue
-		}
-		controllerRef := metav1.GetControllerOf(&pod)
-		if sb.UID != "" {
-			if controllerRef == nil || controllerRef.UID != sb.UID {
-				logger.V(1).Info("Task pod is not controlled by current sandbox", "task", t.ID, "sandboxUID", sb.UID)
-				continue
-			}
-		} else if controllerRef != nil {
-			logger.V(1).Info("Task pod is not controlled by current sandbox", "task", t.ID, "sandboxUID", sb.UID)
+		if !isUsableSandboxPod(&pod, sb.UID) {
+			logger.V(1).Info("Task pod is terminating or not controlled by current sandbox", "task", t.ID, "sandboxUID", sb.UID)
 			continue
 		}
 
@@ -4290,6 +4283,18 @@ func (r *RunReconciler) failRun(ctx context.Context, run *v1alpha1.Run, sandbox 
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// isUsableSandboxPod checks that a pod is not terminating and is controlled by the given sandbox UID.
+func isUsableSandboxPod(pod *corev1.Pod, sandboxUID types.UID) bool {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	controllerRef := metav1.GetControllerOf(pod)
+	if sandboxUID != "" {
+		return controllerRef != nil && controllerRef.UID == sandboxUID
+	}
+	return controllerRef == nil
 }
 
 func isPodReady(pod *corev1.Pod) bool {
