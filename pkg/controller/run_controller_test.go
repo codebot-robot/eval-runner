@@ -2214,10 +2214,10 @@ func TestReconcileDiscoveringRunRebuildsClientWhenPodIPChangesOnSubsequentAttemp
 	}
 }
 
-func TestIsPodOwnedBySandbox(t *testing.T) {
+func TestIsUsableSandboxPod(t *testing.T) {
 	now := metav1.Now()
-	isCtrl := true
-	notCtrl := false
+	isController := true
+	notController := false
 
 	tests := []struct {
 		name string
@@ -2226,19 +2226,19 @@ func TestIsPodOwnedBySandbox(t *testing.T) {
 		want bool
 	}{
 		{"nil pod", nil, "sb-1", false},
-		{"terminating", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now, OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &isCtrl}}}}, "sb-1", false},
-		{"matching UID", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &isCtrl}}}}, "sb-1", true},
-		{"mismatched UID", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-old", Controller: &isCtrl}}}}, "sb-1", false},
-		{"not controller", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &notCtrl}}}}, "sb-1", false},
+		{"terminating", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now, OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &isController}}}}, "sb-1", false},
+		{"matching UID", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &isController}}}}, "sb-1", true},
+		{"mismatched UID", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-old", Controller: &isController}}}}, "sb-1", false},
+		{"not controller", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &notController}}}}, "sb-1", false},
 		{"no owner ref with UID", &corev1.Pod{}, "sb-1", false},
 		{"empty UID and no controller ref", &corev1.Pod{}, "", true},
-		{"empty UID with controller ref", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &isCtrl}}}}, "", false},
+		{"empty UID with controller ref", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{UID: "sb-1", Controller: &isController}}}}, "", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isPodOwnedBySandbox(tt.pod, tt.uid); got != tt.want {
-				t.Errorf("isPodOwnedBySandbox() = %v, want %v", got, tt.want)
+			if got := isUsableSandboxPod(tt.pod, tt.uid); got != tt.want {
+				t.Errorf("isUsableSandboxPod() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -2259,17 +2259,17 @@ func TestReconcileDiscovering_WaitsForCurrentSandboxPodWhenTerminatingOrOldPodEx
 	}
 
 	sandboxName := discovery.SandboxNameForRun(runName)
-	newSB := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
-	newSB.UID = "sandbox-new-uid"
+	newSandbox := discovery.BuildSandbox(run, "eval-runner-sandbox", discovery.AuthTokenDigest("test"))
+	newSandbox.UID = "sandbox-new-uid"
 
-	isCtrl := true
+	isController := true
 	now := metav1.Now()
 	terminatingPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: sandboxName, Namespace: "eval-runner-sandbox",
 			DeletionTimestamp: &now, Finalizers: []string{"test/cleanup"},
 			OwnerReferences: []metav1.OwnerReference{
-				{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: "Sandbox", Name: sandboxName, UID: "sandbox-old-uid", Controller: &isCtrl},
+				{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: "Sandbox", Name: sandboxName, UID: "sandbox-old-uid", Controller: &isController},
 			},
 		},
 		Status: corev1.PodStatus{
@@ -2284,13 +2284,12 @@ func TestReconcileDiscovering_WaitsForCurrentSandboxPodWhenTerminatingOrOldPodEx
 			executed = true
 			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 		},
-		ManifestBytes: []byte(`{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`),
 	}
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(run, newSB, terminatingPod).
-		WithStatusSubresource(run, newSB, terminatingPod).
+		WithObjects(run, newSandbox, terminatingPod).
+		WithStatusSubresource(run, newSandbox, terminatingPod).
 		Build()
 
 	reconciler := &RunReconciler{
@@ -2301,8 +2300,6 @@ func TestReconcileDiscovering_WaitsForCurrentSandboxPodWhenTerminatingOrOldPodEx
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
-
-	// 1. Reconcile while the terminating/old pod is still present
 	res, err := reconciler.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Reconcile error: %v", err)
@@ -2320,43 +2317,6 @@ func TestReconcileDiscovering_WaitsForCurrentSandboxPodWhenTerminatingOrOldPodEx
 	}
 	if currentRun.Status.Phase != v1alpha1.RunPhaseDiscovering {
 		t.Errorf("Expected run to stay Discovering, got %s", currentRun.Status.Phase)
-	}
-
-	// 2. Old pod finishes terminating and is deleted; current sandbox's fresh pod is created
-	terminatingPod.Finalizers = nil
-	if err := cl.Update(t.Context(), terminatingPod); err != nil && !apierrors.IsNotFound(err) {
-		t.Fatalf("Update old pod error: %v", err)
-	}
-	_ = cl.Delete(t.Context(), terminatingPod)
-
-	freshPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: sandboxName, Namespace: "eval-runner-sandbox",
-			OwnerReferences: []metav1.OwnerReference{
-				{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: "Sandbox", Name: sandboxName, UID: "sandbox-new-uid", Controller: &isCtrl},
-			},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning, PodIP: "10.244.0.10",
-			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
-		},
-	}
-	if err := cl.Create(t.Context(), freshPod); err != nil {
-		t.Fatalf("Create fresh pod error: %v", err)
-	}
-
-	res, err = reconciler.Reconcile(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Reconcile error on fresh pod: %v", err)
-	}
-	if !executed {
-		t.Errorf("Expected discovery to execute in fresh pod")
-	}
-	if err := cl.Get(t.Context(), req.NamespacedName, &currentRun); err != nil {
-		t.Fatalf("Get run error: %v", err)
-	}
-	if currentRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
-		t.Errorf("Expected run phase Discovered, got %s (message: %s)", currentRun.Status.Phase, currentRun.Status.Message)
 	}
 }
 

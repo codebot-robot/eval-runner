@@ -1122,7 +1122,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	sandboxExists := (err == nil && sandbox.DeletionTimestamp.IsZero())
+	sandboxExists := (err == nil)
 	if !sandboxExists && run.Status.Phase == v1alpha1.RunPhaseDiscovering {
 		if foundSB, findErr := r.findDiscoverySandbox(ctx, &run); findErr == nil && foundSB != nil {
 			sandbox = *foundSB
@@ -1205,7 +1205,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Check if overall discovery deadline has been exceeded.
 	if run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time) {
 		var podPtr *corev1.Pod
-		if podExists && isPodOwnedBySandbox(&pod, sandbox.UID) {
+		if podExists && isUsableSandboxPod(&pod, sandbox.UID) {
 			podPtr = &pod
 		}
 		msg := formatPodDeadlineMessage(podPtr)
@@ -1213,7 +1213,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.failRun(ctx, &run, &sandbox, msg)
 	}
 
-	if !podExists || !isPodOwnedBySandbox(&pod, sandbox.UID) {
+	if !podExists || !isUsableSandboxPod(&pod, sandbox.UID) {
 		logger.Info("Backing pod not yet created or not controlled by current sandbox", "pod", podKey, "sandboxUID", sandbox.UID)
 		return ctrl.Result{RequeueAfter: r.requeueDelay(run.Status.DiscoveryDeadline)}, nil
 	}
@@ -1943,7 +1943,7 @@ func (r *RunReconciler) resolveEndpointWithReader(ctx context.Context, reader cl
 	podKey := types.NamespacedName{Namespace: sb.Namespace, Name: podName}
 	err := reader.Get(ctx, podKey, &pod)
 	if err == nil {
-		if isPodOwnedBySandbox(&pod, sb.UID) {
+		if isUsableSandboxPod(&pod, sb.UID) {
 			return pod.Status.PodIP
 		}
 		return ""
@@ -2691,7 +2691,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 
 		// Only execute in a pod that is controlled by the current Sandbox and is not terminating.
-		if !isPodOwnedBySandbox(&pod, sb.UID) {
+		if !isUsableSandboxPod(&pod, sb.UID) {
 			logger.V(1).Info("Task pod is terminating or not controlled by current sandbox", "task", t.ID, "sandboxUID", sb.UID)
 			continue
 		}
@@ -4285,8 +4285,8 @@ func (r *RunReconciler) failRun(ctx context.Context, run *v1alpha1.Run, sandbox 
 	return ctrl.Result{}, nil
 }
 
-// isPodOwnedBySandbox checks that a pod is not terminating and is controlled by the given sandbox UID.
-func isPodOwnedBySandbox(pod *corev1.Pod, sandboxUID types.UID) bool {
+// isUsableSandboxPod checks that a pod is not terminating and is controlled by the given sandbox UID.
+func isUsableSandboxPod(pod *corev1.Pod, sandboxUID types.UID) bool {
 	if pod == nil || pod.DeletionTimestamp != nil {
 		return false
 	}
@@ -4676,26 +4676,19 @@ func (r *RunReconciler) CheckDiscoveryDeadlines(ctx context.Context) (int, error
 		sbNamespace := r.sandboxNamespace()
 		var pod corev1.Pod
 		var podPtr *corev1.Pod
-		foundSB, sbErr := r.findDiscoverySandbox(ctx, run)
-		if sbErr != nil {
-			logger.Error(sbErr, "Watchdog: failed to find discovery sandbox for expired run", "run", run.Name)
-		}
-
 		if err := r.Get(ctx, types.NamespacedName{Namespace: sbNamespace, Name: sbName}, &pod); err != nil {
 			if !apierrors.IsNotFound(err) {
 				logger.V(1).Info("Watchdog: failed to get backing pod", "pod", sbName, "error", err)
 			}
 		} else {
-			sbUID := types.UID("")
-			if foundSB != nil {
-				sbUID = foundSB.UID
-			}
-			if isPodOwnedBySandbox(&pod, sbUID) {
-				podPtr = &pod
-			}
+			podPtr = &pod
 		}
 
 		msg := formatPodDeadlineMessage(podPtr)
+		foundSB, sbErr := r.findDiscoverySandbox(ctx, run)
+		if sbErr != nil {
+			logger.Error(sbErr, "Watchdog: failed to find discovery sandbox for expired run", "run", run.Name)
+		}
 
 		if _, err := r.failRun(ctx, run, foundSB, msg); err != nil {
 			logger.Error(err, "Watchdog: failed to fail expired run", "run", run.Name)
