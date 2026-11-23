@@ -15,6 +15,7 @@
 package artifacts
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -726,179 +727,163 @@ func ExtractTaskSampleSummaries(data []byte) ([]TaskSampleSummary, string, error
 // ParseInspectSamples parses raw Inspect JSON log bytes and returns detailed sample records,
 // reusing the primary scorer selection from ParseInspectLog and latency parsing from parseSampleTime.
 func ParseInspectSamples(data []byte) ([]ParsedInspectSample, error) {
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return nil, fmt.Errorf("empty log data")
+	return ParseInspectSamplesStream(bytes.NewReader(data))
+}
+
+// convertInspectSample transforms an InspectSample into a ParsedInspectSample.
+func convertInspectSample(s InspectSample) (ParsedInspectSample, bool) {
+	idStr := FormatSampleID(s.ID, s.Epoch)
+	if idStr == "" {
+		return ParsedInspectSample{}, false
 	}
 
-	var log InspectLog
-	if err := json.Unmarshal(data, &log); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal inspect log: %w", err)
+	inputStr := extractStringOrJSON(s.Input)
+	targetStr := extractStringOrJSON(s.Target)
+	outputStr := extractOutputString(s.Output)
+
+	var latency *float64
+	start, okStart := parseSampleTime(s.StartedAt)
+	end, okEnd := parseSampleTime(s.CompletedAt)
+	if okStart && okEnd && !end.Before(start) {
+		dur := end.Sub(start).Seconds()
+		latency = &dur
+	} else if s.TotalTime > 0 {
+		dur := s.TotalTime
+		latency = &dur
 	}
 
-	if len(log.Samples) == 0 {
-		return nil, nil
+	inputTokens := 0
+	outputTokens := 0
+	for _, usage := range s.ModelUsage {
+		inputTokens += usage.InputTokens
+		outputTokens += usage.OutputTokens
 	}
+	totalTokens := inputTokens + outputTokens
 
-	primaryScorer := ""
-	if len(log.Eval.Scorers) > 0 {
-		primaryScorer = log.Eval.Scorers[0].Name
-	} else if log.Results != nil && len(log.Results.Scores) > 0 {
-		primaryScorer = log.Results.Scores[0].Name
-	}
-
-	var parsed []ParsedInspectSample
-	for _, s := range log.Samples {
-		idStr := FormatSampleID(s.ID, s.Epoch)
-		if idStr == "" {
-			continue
-		}
-
-		var score *float64
-		var hasScore bool
-		scoreStr := "—"
-		status := "unknown"
-		explanation := ""
-
-		if targetScore, found := selectPrimaryScore(s.Scores, primaryScorer); found {
-			if scoreVal, valid := ScoreToFloat(targetScore.Value); valid {
-				score = &scoreVal
-				hasScore = true
-				scoreStr = fmt.Sprintf("%.2f", scoreVal)
-				if scoreVal >= 1.0 {
-					status = "pass"
-				} else {
-					status = "fail"
+	// Build transcript rows
+	var transcript []InspectTranscriptRow
+	if len(s.Messages) > 0 {
+		for _, m := range s.Messages {
+			role := strings.ToLower(strings.TrimSpace(m.Role))
+			switch role {
+			case "user":
+				content := extractStringOrJSON(m.Content)
+				if content != "" {
+					transcript = append(transcript, InspectTranscriptRow{Kind: "user", Content: content})
 				}
-			}
-			explanation = strings.TrimSpace(extractStringOrJSON(targetScore.Explanation))
-			if explanation == "" {
-				explanation = strings.TrimSpace(targetScore.Reason)
-			}
-		}
-
-		inputStr := extractStringOrJSON(s.Input)
-		targetStr := extractStringOrJSON(s.Target)
-		outputStr := extractOutputString(s.Output)
-
-		var latency *float64
-		start, okStart := parseSampleTime(s.StartedAt)
-		end, okEnd := parseSampleTime(s.CompletedAt)
-		if okStart && okEnd && !end.Before(start) {
-			dur := end.Sub(start).Seconds()
-			latency = &dur
-		} else if s.TotalTime > 0 {
-			dur := s.TotalTime
-			latency = &dur
-		}
-
-		inputTokens := 0
-		outputTokens := 0
-		for _, usage := range s.ModelUsage {
-			inputTokens += usage.InputTokens
-			outputTokens += usage.OutputTokens
-		}
-		totalTokens := inputTokens + outputTokens
-
-		// Build transcript rows
-		var transcript []InspectTranscriptRow
-		if len(s.Messages) > 0 {
-			for _, m := range s.Messages {
-				role := strings.ToLower(strings.TrimSpace(m.Role))
-				switch role {
-				case "user":
-					content := extractStringOrJSON(m.Content)
-					if content != "" {
-						transcript = append(transcript, InspectTranscriptRow{Kind: "user", Content: content})
-					}
-				case "system":
-					content := extractStringOrJSON(m.Content)
-					if content != "" {
-						transcript = append(transcript, InspectTranscriptRow{Kind: "system", Content: content})
-					}
-				case "assistant":
-					for _, tc := range m.ToolCalls {
-						transcript = append(transcript, InspectTranscriptRow{
-							Kind:    "tool_call",
-							Content: formatToolCall(tc.Function, tc.Arguments),
-						})
-					}
-					content := extractStringOrJSON(m.Content)
-					if content != "" {
-						transcript = append(transcript, InspectTranscriptRow{Kind: "assistant", Content: content})
-					}
-				case "tool":
-					content := extractStringOrJSON(m.Content)
-					transcript = append(transcript, InspectTranscriptRow{Kind: "tool", Content: content})
-				default:
-					content := extractStringOrJSON(m.Content)
-					if content != "" {
-						transcript = append(transcript, InspectTranscriptRow{Kind: role, Content: content})
-					}
+			case "system":
+				content := extractStringOrJSON(m.Content)
+				if content != "" {
+					transcript = append(transcript, InspectTranscriptRow{Kind: "system", Content: content})
 				}
-			}
-		} else if len(s.Events) > 0 {
-			for _, e := range s.Events {
-				evType := strings.ToLower(strings.TrimSpace(e.Event))
-				if evType == "tool" || e.Function != "" {
+			case "assistant":
+				for _, tc := range m.ToolCalls {
 					transcript = append(transcript, InspectTranscriptRow{
 						Kind:    "tool_call",
-						Content: formatToolCall(e.Function, e.Arguments),
+						Content: formatToolCall(tc.Function, tc.Arguments),
 					})
-					if e.Result != nil {
-						transcript = append(transcript, InspectTranscriptRow{
-							Kind:    "tool",
-							Content: extractStringOrJSON(e.Result),
-						})
-					}
-				} else if evType == "model" {
-					outStr := extractOutputString(e.Output)
-					if outStr != "" {
-						transcript = append(transcript, InspectTranscriptRow{
-							Kind:    "assistant",
-							Content: outStr,
-						})
-					}
-				} else if evType == "input" || evType == "sample_init" {
-					inStr := extractStringOrJSON(e.Input)
-					if inStr != "" {
-						transcript = append(transcript, InspectTranscriptRow{
-							Kind:    "user",
-							Content: inStr,
-						})
-					}
+				}
+				content := extractStringOrJSON(m.Content)
+				if content != "" {
+					transcript = append(transcript, InspectTranscriptRow{Kind: "assistant", Content: content})
+				}
+			case "tool":
+				content := extractStringOrJSON(m.Content)
+				transcript = append(transcript, InspectTranscriptRow{Kind: "tool", Content: content})
+			default:
+				content := extractStringOrJSON(m.Content)
+				if content != "" {
+					transcript = append(transcript, InspectTranscriptRow{Kind: role, Content: content})
 				}
 			}
 		}
-
-		if len(transcript) == 0 {
-			if inputStr != "" {
-				transcript = append(transcript, InspectTranscriptRow{Kind: "user", Content: inputStr})
-			}
-			if outputStr != "" {
-				transcript = append(transcript, InspectTranscriptRow{Kind: "assistant", Content: outputStr})
+	} else if len(s.Events) > 0 {
+		for _, e := range s.Events {
+			evType := strings.ToLower(strings.TrimSpace(e.Event))
+			if evType == "tool" || e.Function != "" {
+				transcript = append(transcript, InspectTranscriptRow{
+					Kind:    "tool_call",
+					Content: formatToolCall(e.Function, e.Arguments),
+				})
+				if e.Result != nil {
+					transcript = append(transcript, InspectTranscriptRow{
+						Kind:    "tool",
+						Content: extractStringOrJSON(e.Result),
+					})
+				}
+			} else if evType == "model" {
+				outStr := extractOutputString(e.Output)
+				if outStr != "" {
+					transcript = append(transcript, InspectTranscriptRow{
+						Kind:    "assistant",
+						Content: outStr,
+					})
+				}
+			} else if evType == "input" || evType == "sample_init" {
+				inStr := extractStringOrJSON(e.Input)
+				if inStr != "" {
+					transcript = append(transcript, InspectTranscriptRow{
+						Kind:    "user",
+						Content: inStr,
+					})
+				}
 			}
 		}
-
-		parsed = append(parsed, ParsedInspectSample{
-			ID:           idStr,
-			Epoch:        s.Epoch,
-			Score:        score,
-			HasScore:     hasScore,
-			ScoreStr:     scoreStr,
-			Status:       status,
-			Input:        inputStr,
-			Target:       targetStr,
-			Explanation:  explanation,
-			Output:       outputStr,
-			Latency:      latency,
-			TotalTokens:  totalTokens,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Transcript:   transcript,
-		})
 	}
 
-	return parsed, nil
+	if len(transcript) == 0 {
+		if inputStr != "" {
+			transcript = append(transcript, InspectTranscriptRow{Kind: "user", Content: inputStr})
+		}
+		if outputStr != "" {
+			transcript = append(transcript, InspectTranscriptRow{Kind: "assistant", Content: outputStr})
+		}
+	}
+
+	return ParsedInspectSample{
+		ID:           idStr,
+		Epoch:        s.Epoch,
+		Input:        inputStr,
+		Target:       targetStr,
+		Output:       outputStr,
+		Latency:      latency,
+		TotalTokens:  totalTokens,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		Transcript:   transcript,
+	}, true
+}
+
+// scoreInspectSample evaluates and applies scorer outcome to a ParsedInspectSample.
+func scoreInspectSample(sample *ParsedInspectSample, scores map[string]InspectSampleScore, primaryScorer string) {
+	var score *float64
+	var hasScore bool
+	scoreStr := "—"
+	status := "unknown"
+	explanation := ""
+
+	if targetScore, found := selectPrimaryScore(scores, primaryScorer); found {
+		if scoreVal, valid := ScoreToFloat(targetScore.Value); valid {
+			score = &scoreVal
+			hasScore = true
+			scoreStr = fmt.Sprintf("%.2f", scoreVal)
+			if scoreVal >= 1.0 {
+				status = "pass"
+			} else {
+				status = "fail"
+			}
+		}
+		explanation = strings.TrimSpace(extractStringOrJSON(targetScore.Explanation))
+		if explanation == "" {
+			explanation = strings.TrimSpace(targetScore.Reason)
+		}
+	}
+
+	sample.Score = score
+	sample.HasScore = hasScore
+	sample.ScoreStr = scoreStr
+	sample.Status = status
+	sample.Explanation = explanation
 }
 
 // ExtractInspectTokens parses raw Inspect log JSON bytes and returns token usage breakdown if present.
