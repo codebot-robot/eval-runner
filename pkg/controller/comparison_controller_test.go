@@ -23,6 +23,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -18203,6 +18204,10 @@ func (b *blockingSinkComparison) Load(ctx context.Context, path string) ([]byte,
 		return b.loadFn(ctx, path)
 	}
 	return []byte("{}"), nil
+}
+
+func (b *blockingSinkComparison) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (b *blockingSinkComparison) ArtifactPrefix(commit string) string {

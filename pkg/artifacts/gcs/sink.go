@@ -15,7 +15,6 @@
 package gcs
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -52,6 +51,7 @@ type StorageClient interface {
 	WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error
 	WriteObjectWithMetadata(ctx context.Context, bucket, object, contentType, contentEncoding string, metadata map[string]string, data []byte) error
 	ReadObject(ctx context.Context, bucket, object string, maxBytes int64) ([]byte, error)
+	OpenReader(ctx context.Context, bucket, object string) (io.ReadCloser, error)
 	CheckAccess(ctx context.Context, bucket string) error
 	Close() error
 }
@@ -70,6 +70,10 @@ func (c *realStorageClient) CheckAccess(ctx context.Context, bucket string) erro
 		return err
 	}
 	return nil
+}
+
+func (c *realStorageClient) OpenReader(ctx context.Context, bucket, object string) (io.ReadCloser, error) {
+	return c.client.Bucket(bucket).Object(object).ReadCompressed(true).NewReader(ctx)
 }
 
 func (c *realStorageClient) WriteObject(ctx context.Context, bucket, object, contentType string, data []byte) error {
@@ -123,6 +127,7 @@ func (c *realStorageClient) Close() error {
 // GCSSink implements artifacts.ArtifactSink to write Inspect logs and summary.json to Google Cloud Storage.
 type GCSSink struct {
 	bucket                   string
+	cache                    *artifacts.ArtifactCache
 	cacheDirectory           string
 	maxUploadBytes           int64
 	client                   StorageClient
@@ -206,6 +211,14 @@ func New(ctx context.Context, bucket string, opts ...Option) (*GCSSink, error) {
 	}
 	for _, opt := range opts {
 		opt(sink)
+	}
+
+	if sink.cacheDirectory != "" {
+		cache, err := artifacts.NewArtifactCache(sink.cacheDirectory)
+		if err != nil {
+			return nil, fmt.Errorf("create artifact cache: %w", err)
+		}
+		sink.cache = cache
 	}
 
 	if sink.client == nil {
@@ -348,11 +361,11 @@ func (s *GCSSink) StoreComparison(ctx context.Context, comparisonName string, da
 	return fmt.Sprintf("gs://%s/%s", s.bucket, compObject), nil
 }
 
-// Load retrieves raw artifact bytes from the given storage path or URI, bounded by the maximum allowed artifact size.
-func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
+// parseAndValidatePath extracts and validates the bucket and object components from path.
+func (s *GCSSink) parseAndValidatePath(path string) (string, string, error) {
 	cleanPath := strings.TrimSpace(path)
 	if cleanPath == "" {
-		return nil, fmt.Errorf("artifact path must not be empty")
+		return "", "", fmt.Errorf("artifact path must not be empty")
 	}
 
 	bucket := s.bucket
@@ -362,10 +375,10 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 		trimmed := strings.TrimPrefix(cleanPath, "gs://")
 		parts := strings.SplitN(trimmed, "/", 2)
 		if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
-			return nil, fmt.Errorf("invalid gs:// URI %q", path)
+			return "", "", fmt.Errorf("invalid gs:// URI %q", path)
 		}
 		if s.bucket != "" && parts[0] != s.bucket {
-			return nil, fmt.Errorf("bucket mismatch: requested %q but sink configured for %q", parts[0], s.bucket)
+			return "", "", fmt.Errorf("bucket mismatch: requested %q but sink configured for %q", parts[0], s.bucket)
 		}
 		bucket = parts[0]
 		object = parts[1]
@@ -374,11 +387,21 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 	}
 
 	if bucket == "" {
-		return nil, fmt.Errorf("bucket name is empty")
+		return "", "", fmt.Errorf("bucket name is empty")
 	}
 
 	if !strings.HasPrefix(object, "runs/") && !strings.HasPrefix(object, "comparisons/") {
-		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
+		return "", "", fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
+	}
+
+	return bucket, object, nil
+}
+
+// Load retrieves raw artifact bytes from the given storage path or URI, bounded by the maximum allowed artifact size.
+func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
+	bucket, object, err := s.parseAndValidatePath(path)
+	if err != nil {
+		return nil, err
 	}
 
 	capLimit := s.maxUploadBytes
@@ -400,6 +423,60 @@ func (s *GCSSink) Load(ctx context.Context, path string) ([]byte, error) {
 	}
 
 	return decompressed, nil
+}
+
+// OpenStream opens a task artifact for reading as a stream backed by a local file keyed by SHA-256.
+func (s *GCSSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	if s.cache == nil {
+		return nil, errors.New("artifact cache is not configured")
+	}
+
+	bucket, object, err := s.parseAndValidatePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// If caller knows the hash and the file is already present in cache, do not contact store at all.
+	if hash != "" {
+		if cachedFile, found, err := s.cache.Open(hash); found {
+			reader, decompressError := artifacts.NewDecompressingReader(cachedFile)
+			if decompressError != nil {
+				closeCachedError := cachedFile.Close()
+				return nil, errors.Join(fmt.Errorf("decompress cached artifact %s: %w", hash, decompressError), closeCachedError)
+			}
+			return reader, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("open cached artifact %s: %w", hash, err)
+		}
+	}
+
+	rawReader, err := s.client.OpenReader(ctx, bucket, object)
+	if err != nil {
+		if isObjectNotFound(err) {
+			return nil, fmt.Errorf("%w: failed to read artifact from gs://%s/%s: %v", artifacts.ErrNotFound, bucket, object, err)
+		}
+		return nil, fmt.Errorf("open artifact stream from gs://%s/%s: %w", bucket, object, err)
+	}
+
+	cachedFile, _, putError := s.cache.Put(hash, rawReader)
+	closeError := rawReader.Close()
+	if putError != nil {
+		if closeError != nil && !errors.Is(closeError, putError) {
+			return nil, errors.Join(fmt.Errorf("cache artifact stream gs://%s/%s: %w", bucket, object, putError), closeError)
+		}
+		return nil, fmt.Errorf("cache artifact stream gs://%s/%s: %w", bucket, object, putError)
+	}
+	if closeError != nil {
+		closeCachedError := cachedFile.Close()
+		return nil, errors.Join(fmt.Errorf("close storage reader gs://%s/%s: %w", bucket, object, closeError), closeCachedError)
+	}
+
+	reader, err := artifacts.NewDecompressingReader(cachedFile)
+	if err != nil {
+		closeCachedError := cachedFile.Close()
+		return nil, errors.Join(fmt.Errorf("decompress cached artifact gs://%s/%s: %w", bucket, object, err), closeCachedError)
+	}
+	return reader, nil
 }
 
 func (s *GCSSink) effectiveCapBytes() int64 {
@@ -468,54 +545,8 @@ func compressBytes(data []byte) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-type decompressingReadCloser struct {
-	io.Reader
-	closers []io.Closer
-}
-
-func (d *decompressingReadCloser) Close() error {
-	var closeErr error
-	for _, closer := range d.closers {
-		if closer != nil {
-			if err := closer.Close(); err != nil {
-				closeErr = errors.Join(closeErr, err)
-			}
-		}
-	}
-	return closeErr
-}
-
-// newDecompressingReader peeks at the source to detect gzip magic bytes (0x1f, 0x8b).
-// If gzip is detected, it returns a gzip.Reader wrapping the source.
-// Otherwise, it returns the source uncompressed without decompression.
-func newDecompressingReader(source io.Reader) (io.ReadCloser, error) {
-	bufferedReader := bufio.NewReader(source)
-	magic, err := bufferedReader.Peek(2)
-	if err == nil && len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
-		gzipReader, err := gzip.NewReader(bufferedReader)
-		if err != nil {
-			return nil, err
-		}
-		closers := []io.Closer{gzipReader}
-		if closer, ok := source.(io.Closer); ok {
-			closers = append(closers, closer)
-		}
-		return &decompressingReadCloser{
-			Reader:  gzipReader,
-			closers: closers,
-		}, nil
-	}
-	if closer, ok := source.(io.Closer); ok {
-		return &decompressingReadCloser{
-			Reader:  bufferedReader,
-			closers: []io.Closer{closer},
-		}, nil
-	}
-	return io.NopCloser(bufferedReader), nil
-}
-
 func decompressBytes(data []byte) ([]byte, error) {
-	reader, err := newDecompressingReader(bytes.NewReader(data))
+	reader, err := artifacts.NewDecompressingReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}

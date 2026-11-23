@@ -16,6 +16,7 @@ package artifacts_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"io"
 	"io/fs"
@@ -191,5 +192,54 @@ func TestArtifactCache_InvalidHash(t *testing.T) {
 				t.Errorf("Put(%q): expected error, got file=%v err=%v", h, file, err)
 			}
 		}
+	}
+}
+
+func TestArtifactCache_CompressedContent(t *testing.T) {
+	cache, dir := newCache(t)
+	plainContent := []byte("decompressed log trace payload for testing cache")
+	expectedHash := artifacts.ArtifactHash(plainContent)
+
+	var compressedBuffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressedBuffer)
+	if _, err := gzipWriter.Write(plainContent); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	compressedBytes := compressedBuffer.Bytes()
+
+	file, computedHash, err := cache.Put("", bytes.NewReader(compressedBytes))
+	if err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+	if computedHash != expectedHash {
+		t.Fatalf("expected computed hash %q (uncompressed), got %q", expectedHash, computedHash)
+	}
+	if got := readAndClose(t, file); !bytes.Equal(got, compressedBytes) {
+		t.Fatalf("cached file should store compressed bytes: expected %q, got %q", compressedBytes, got)
+	}
+
+	cachedFile, found, err := cache.Open(expectedHash)
+	if err != nil || !found {
+		t.Fatalf("Open hit failed: found=%v err=%v", found, err)
+	}
+	if got := readAndClose(t, cachedFile); !bytes.Equal(got, compressedBytes) {
+		t.Fatalf("cached file on disk should store compressed bytes: expected %q, got %q", compressedBytes, got)
+	}
+
+	// Truncated gzip should fail and leave nothing behind
+	badSource := bytes.NewReader(compressedBytes[:len(compressedBytes)-5])
+	if file, _, err := cache.Put("", badSource); file != nil || err == nil {
+		t.Fatalf("expected error on truncated gzip, got file=%v err=%v", file, err)
+	}
+	// Only the successfully committed file should exist
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 file on disk after truncated write failure, got %d", len(entries))
 	}
 }

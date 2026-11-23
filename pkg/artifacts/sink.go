@@ -69,6 +69,11 @@ func (s *NoopSink) Load(ctx context.Context, path string) ([]byte, error) {
 	return nil, fmt.Errorf("noop sink cannot load artifacts: %w", ErrNotFound)
 }
 
+// OpenStream implements ArtifactSink for NoopSink.
+func (s *NoopSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	return nil, fmt.Errorf("noop sink cannot open artifacts: %w", ErrNotFound)
+}
+
 // ArtifactPrefix implements ArtifactSink for NoopSink.
 func (s *NoopSink) ArtifactPrefix(commit string) string {
 	return ""
@@ -172,24 +177,34 @@ func (s *LocalDirSink) IsDurable() bool {
 	return true
 }
 
-// Load implements ArtifactSink for LocalDirSink.
-func (s *LocalDirSink) Load(ctx context.Context, path string) ([]byte, error) {
+// validatePath checks that path does not escape s.BaseDir and has a valid runs/ or comparisons/ prefix.
+func (s *LocalDirSink) validatePath(path string) (string, error) {
 	if strings.TrimSpace(s.BaseDir) == "" {
-		return nil, fmt.Errorf("base directory must not be empty")
+		return "", fmt.Errorf("base directory must not be empty")
 	}
 	if strings.TrimSpace(path) == "" {
-		return nil, fmt.Errorf("artifact path must not be empty")
+		return "", fmt.Errorf("artifact path must not be empty")
 	}
 
 	cleanBase := filepath.Clean(s.BaseDir)
 	cleanPath := filepath.Clean(path)
 	rel, err := filepath.Rel(cleanBase, cleanPath)
 	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
-		return nil, fmt.Errorf("artifact path %q escapes base directory %q", path, s.BaseDir)
+		return "", fmt.Errorf("artifact path %q escapes base directory %q", path, s.BaseDir)
 	}
 	if !strings.HasPrefix(rel, "runs"+string(filepath.Separator)) && rel != "runs" &&
 		!strings.HasPrefix(rel, "comparisons"+string(filepath.Separator)) && rel != "comparisons" {
-		return nil, fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
+		return "", fmt.Errorf("artifact path %q does not have required 'runs/' or 'comparisons/' prefix", path)
+	}
+
+	return cleanPath, nil
+}
+
+// Load implements ArtifactSink for LocalDirSink.
+func (s *LocalDirSink) Load(ctx context.Context, path string) ([]byte, error) {
+	cleanPath, err := s.validatePath(path)
+	if err != nil {
+		return nil, err
 	}
 
 	f, err := os.Open(cleanPath)
@@ -214,6 +229,24 @@ func (s *LocalDirSink) Load(ctx context.Context, path string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// OpenStream implements ArtifactSink for LocalDirSink, opening the local artifact file as a stream.
+func (s *LocalDirSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	cleanPath, err := s.validatePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := os.Open(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
+		return nil, err
+	}
+
+	return file, nil
 }
 
 // TaskArtifactPather is an optional interface implemented by sinks that provide custom path derivation for task artifacts.

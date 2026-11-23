@@ -17,6 +17,7 @@ package artifacts
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -70,6 +71,11 @@ func (s *UnavailableSink) StoreManifest(ctx context.Context, meta RunMetadata, d
 
 // Load implements ArtifactSink, failing immediately with the unavailability error.
 func (s *UnavailableSink) Load(ctx context.Context, path string) ([]byte, error) {
+	return nil, fmt.Errorf("artifactBucket is set but artifact storage is unavailable: %w", s.err)
+}
+
+// OpenStream implements ArtifactSink, failing immediately with the unavailability error.
+func (s *UnavailableSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("artifactBucket is set but artifact storage is unavailable: %w", s.err)
 }
 

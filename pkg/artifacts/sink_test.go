@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -742,5 +743,48 @@ func TestReadTaskSummary_ValidationAndLegacyShape(t *testing.T) {
 	}
 	if len(legacySummary.Samples) != 0 {
 		t.Errorf("Expected empty Samples slice for legacy summary, got %d items", len(legacySummary.Samples))
+	}
+}
+
+func TestLocalAndInMemorySink_OpenStream(t *testing.T) {
+	baseDirectory := t.TempDir()
+	testCases := []struct {
+		name string
+		sink artifacts.ArtifactSink
+	}{
+		{name: "LocalDirSink", sink: &artifacts.LocalDirSink{BaseDir: baseDirectory}},
+		{name: "InMemorySink", sink: artifacts.NewInMemorySink()},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			content := []byte(`{"stream": "data"}`)
+			metadata := artifacts.RunMetadata{Commit: "commit123", TaskID: "task1"}
+			stored, err := testCase.sink.StoreArtifact(t.Context(), metadata, "output.json", content)
+			if err != nil {
+				t.Fatalf("StoreArtifact failed: %v", err)
+			}
+
+			stream, err := testCase.sink.OpenStream(t.Context(), stored.Location, stored.Hash)
+			if err != nil {
+				t.Fatalf("OpenStream failed: %v", err)
+			}
+			retrievedContent, err := io.ReadAll(stream)
+			if err != nil {
+				t.Fatalf("ReadAll failed: %v", err)
+			}
+			if closeError := stream.Close(); closeError != nil {
+				t.Fatalf("Close failed: %v", closeError)
+			}
+			if string(retrievedContent) != string(content) {
+				t.Errorf("got %q, want %q", retrievedContent, content)
+			}
+
+			// Not found
+			_, err = testCase.sink.OpenStream(t.Context(), stored.Location+"-missing", "")
+			if !artifacts.IsNotFound(err) {
+				t.Errorf("expected IsNotFound, got %v", err)
+			}
+		})
 	}
 }
