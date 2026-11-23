@@ -425,6 +425,7 @@ func main() {
 		ArtifactSink:         reloadableSink,
 		ControllerVersion:    version.String(),
 		ServicePortalClient:  servicePortalClient,
+		InstanceID:           controller.NewProcessInstanceID(),
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {

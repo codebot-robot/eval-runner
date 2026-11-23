@@ -1564,6 +1564,155 @@ spec:
 		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 	})
 
+	t.Run("ControllerRestartInFlightTaskRunsInFreshSandbox", func(t *testing.T) {
+		bucket := "inflight-restart-bucket"
+		harness.DeployFakeGCSServer("eval-runner", bucket)
+		harness.ConfigureGCSSink(bucket)
+		t.Cleanup(func() {
+			harness.ConfigureLocalDirSink()
+		})
+
+		gitDir := "/git/docs-eval.git"
+		branchName := fmt.Sprintf("inflight-test-%d", time.Now().UnixNano()%1000000)
+
+		// Create a slow task commit on git-server with author identity set
+		harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+			"sh", "-c", fmt.Sprintf(`
+				rm -rf /tmp/work &&
+				git clone %s /tmp/work &&
+				cd /tmp/work &&
+				sed -i '/def readme_comprehension_blind/a \    import time; time.sleep(10)' evals/docs_comprehension.py &&
+				git -c user.name=eval-runner-e2e -c user.email=e2e@example.com commit -am "slow blind task for in-flight restart" &&
+				git push origin HEAD:%s &&
+				rm -rf /tmp/work
+			`, gitDir, branchName))
+
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+				"git", "--git-dir="+gitDir, "branch", "-D", branchName)
+		})
+
+		commit := strings.TrimSpace(harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+			"git", "--git-dir="+gitDir, "rev-parse", "refs/heads/"+branchName))
+		runName := fmt.Sprintf("restart-inflight-%s", commit[:7])
+
+		manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  limit: 2
+  tasks:
+  - docs/readme_comprehension_blind
+`, runName, commit)
+
+		harness.KubectlApplyContent(manifest)
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+		})
+
+		sandboxName := discovery.TaskSandboxNameForRun(runName, "docs/readme_comprehension_blind")
+
+		// Wait until task is in-flight and its pod has a UID
+		t.Logf("Waiting for task docs/readme_comprehension_blind to enter Running in Run %s...", runName)
+		startWait := time.Now()
+		var podUIDBefore string
+
+		for time.Since(startWait) < 120*time.Second {
+			out, err := exec.Command("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "json").Output()
+			if err == nil {
+				var runObj v1alpha1.Run
+				if json.Unmarshal(out, &runObj) == nil && runObj.Status.Phase == v1alpha1.RunPhaseRunning {
+					var taskRunning bool
+					for _, task := range runObj.Status.Tasks {
+						if task.ID == "docs/readme_comprehension_blind" && task.Phase == v1alpha1.TaskPhaseRunning {
+							taskRunning = true
+							break
+						}
+					}
+					if taskRunning {
+						podUIDOut, err := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "-o", "jsonpath={.metadata.uid}").Output()
+						if err == nil && len(strings.TrimSpace(string(podUIDOut))) > 0 {
+							podUIDBefore = strings.TrimSpace(string(podUIDOut))
+							break
+						}
+					}
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if podUIDBefore == "" {
+			t.Fatalf("timed out waiting for task to be in-flight with pod UID in Run %s", runName)
+		}
+
+		// Ensure controller is restored if test fails
+		t.Cleanup(func() {
+			harness.runCmd("kubectl", "scale", "deployment/eval-runner-controller", "-n", "eval-runner", "--replicas=1")
+			harness.runCmd("kubectl", "rollout", "status", "deployment/eval-runner-controller", "-n", "eval-runner", "--timeout=90s")
+		})
+
+		// Scale down controller to 0, wait for pod to terminate, and scale back to 1
+		t.Logf("Restarting eval-runner-controller deployment while task is in-flight in pod %s...", podUIDBefore)
+		harness.runCmd("kubectl", "scale", "deployment/eval-runner-controller", "-n", "eval-runner", "--replicas=0")
+		harness.runCmd("kubectl", "wait", "--for=delete", "pod", "-l", "app=eval-runner-controller", "-n", "eval-runner", "--timeout=60s")
+
+		harness.runCmd("kubectl", "scale", "deployment/eval-runner-controller", "-n", "eval-runner", "--replicas=1")
+		harness.runCmd("kubectl", "rollout", "status", "deployment/eval-runner-controller", "-n", "eval-runner", "--timeout=90s")
+
+		// Wait for task to be recreated with a different pod UID
+		var podUIDAfter string
+		waitNewPod := time.Now()
+		for time.Since(waitNewPod) < 120*time.Second {
+			podUIDOut, err := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "-o", "jsonpath={.metadata.uid}").Output()
+			uid := strings.TrimSpace(string(podUIDOut))
+			if err == nil && uid != "" && uid != podUIDBefore {
+				podUIDAfter = uid
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if podUIDAfter == "" {
+			t.Log("=== E2E FAILURE DIAGNOSTICS DUMP ===")
+			t.Logf("Run:\n%s", harness.runCmd("kubectl", "get", "run", runName, "-n", "eval-runner", "-o", "yaml"))
+			t.Logf("Sandbox, Pods:\n%s", harness.runCmd("kubectl", "get", "sandbox,pods", "-o", "wide", "-n", "eval-runner-sandbox"))
+			t.Logf("Controller logs:\n%s", harness.runCmd("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", "--tail=200"))
+			t.Log("=== END E2E FAILURE DIAGNOSTICS DUMP ===")
+			t.Fatalf("expected task to run in a fresh pod with different UID, but pod UID never changed from %s", podUIDBefore)
+		}
+
+		// Wait for the Run to reach Completed
+		runObj := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+		var task *v1alpha1.TaskStatus
+		for i := range runObj.Status.Tasks {
+			if runObj.Status.Tasks[i].ID == "docs/readme_comprehension_blind" {
+				task = &runObj.Status.Tasks[i]
+				break
+			}
+		}
+		if task == nil {
+			t.Fatalf("expected task docs/readme_comprehension_blind in status.tasks: %+v", runObj.Status.Tasks)
+		}
+
+		// Assert in-flight task finished in clean sandbox with incremented restarts and valid samples
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Errorf("task expected Completed, got %s (message: %s)", task.Phase, task.Message)
+		}
+		if task.Restarts != 1 {
+			t.Errorf("task expected 1 restart, got %d", task.Restarts)
+		}
+		if task.Samples == 0 || task.SamplesDone != task.Samples {
+			t.Errorf("task expected samples > 0 and samplesDone == samples, got samples=%d, samplesDone=%d", task.Samples, task.SamplesDone)
+		}
+	})
+
 	t.Run("PollingWithoutWebhook_NewBranchCreatesRun", func(t *testing.T) {
 		branchName := fmt.Sprintf("poll-test-%d", time.Now().UnixNano()%1000000)
 		pollInterval := 5 * time.Second
