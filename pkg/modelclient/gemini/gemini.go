@@ -325,6 +325,10 @@ func (client *Client) parseResponse(responseBytes []byte) (*agent.Response, erro
 		if finishReason == "" {
 			finishReason = "UNSPECIFIED"
 		}
+		if finishReason == "MAX_TOKENS" {
+			result.Text = "[model stopped with no content (finishReason: MAX_TOKENS)]"
+			return result, nil
+		}
 		return nil, fmt.Errorf("gemini candidate stopped with no content (finishReason: %s)", finishReason)
 	}
 	return result, nil
