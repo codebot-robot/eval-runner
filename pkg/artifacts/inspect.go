@@ -399,9 +399,10 @@ func FormatSampleID(rawID any, epoch int) string {
 	return idStr
 }
 
-func selectPrimaryScore(scores map[string]InspectSampleScore, primaryScorer string) (InspectSampleScore, bool) {
+func selectPrimaryScore[T any](scores map[string]T, primaryScorer string) (T, bool) {
+	var zero T
 	if len(scores) == 0 {
-		return InspectSampleScore{}, false
+		return zero, false
 	}
 	if primaryScorer != "" {
 		if targetScore, found := scores[primaryScorer]; found {
@@ -413,10 +414,7 @@ func selectPrimaryScore(scores map[string]InspectSampleScore, primaryScorer stri
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if len(keys) > 0 {
-		return scores[keys[0]], true
-	}
-	return InspectSampleScore{}, false
+	return scores[keys[0]], true
 }
 
 func extractStringOrJSON(val any) string {

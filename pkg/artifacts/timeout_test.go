@@ -17,6 +17,7 @@ package artifacts_test
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,17 @@ func (b *blockingSink) Load(ctx context.Context, path string) ([]byte, error) {
 	return []byte("data"), nil
 }
 
+func (b *blockingSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	if b.blockLoad != nil {
+		select {
+		case <-b.blockLoad:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return io.NopCloser(strings.NewReader("data")), nil
+}
+
 func (b *blockingSink) ArtifactPrefix(commit string) string {
 	return "gs://bucket/runs/" + commit + "/"
 }
@@ -103,6 +115,12 @@ func (u *unyieldingSink) StoreComparison(ctx context.Context, compName string, d
 }
 
 func (u *unyieldingSink) Load(ctx context.Context, path string) ([]byte, error) {
+	ch := make(chan struct{})
+	<-ch
+	return nil, nil
+}
+
+func (u *unyieldingSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
 	ch := make(chan struct{})
 	<-ch
 	return nil, nil
@@ -144,6 +162,12 @@ func (g *graceWindowSink) StoreComparison(ctx context.Context, compName string, 
 }
 
 func (g *graceWindowSink) Load(ctx context.Context, path string) ([]byte, error) {
+	<-ctx.Done()
+	time.Sleep(10 * time.Millisecond)
+	return nil, g.errToReturn
+}
+
+func (g *graceWindowSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
 	<-ctx.Done()
 	time.Sleep(10 * time.Millisecond)
 	return nil, g.errToReturn
@@ -225,6 +249,19 @@ func TestTimeoutWrappers_CancelPromptly(t *testing.T) {
 		}
 	})
 
+	t.Run("OpenStreamWithTimeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err := artifacts.OpenStreamWithTimeout(ctx, sink, "gs://bucket/runs/abcdef/task/log.json", "sha256:abc")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 1*time.Second {
+			t.Fatalf("OpenStreamWithTimeout took too long: %v", elapsed)
+		}
+	})
+
 	t.Run("NilSink", func(t *testing.T) {
 		ctx := t.Context()
 		if _, err := artifacts.StoreManifestWithTimeout(ctx, nil, meta, []byte("{}")); !errors.Is(err, artifacts.ErrNoSinkConfigured) {
@@ -237,6 +274,9 @@ func TestTimeoutWrappers_CancelPromptly(t *testing.T) {
 			t.Errorf("expected ErrNoSinkConfigured, got %v", err)
 		}
 		if _, err := artifacts.LoadWithTimeout(ctx, nil, "p"); !errors.Is(err, artifacts.ErrNoSinkConfigured) {
+			t.Errorf("expected ErrNoSinkConfigured, got %v", err)
+		}
+		if _, err := artifacts.OpenStreamWithTimeout(ctx, nil, "p", ""); !errors.Is(err, artifacts.ErrNoSinkConfigured) {
 			t.Errorf("expected ErrNoSinkConfigured, got %v", err)
 		}
 	})
@@ -326,6 +366,26 @@ func TestTimeoutWrappers_TimeoutMessageNamesTargetAndCause(t *testing.T) {
 			t.Errorf("expected wrapped context.DeadlineExceeded, got: %v", err)
 		}
 	})
+
+	t.Run("OpenStreamWithTimeout names operation and target", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		streamPath := "gs://bucket/runs/abcdef12/task-abc/eval.json"
+		_, err := artifacts.OpenStreamWithTimeout(ctx, sink, streamPath, "sha256:abc")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		errMsg := err.Error()
+		if !strings.HasPrefix(errMsg, "open artifact stream from gs://bucket/runs/abcdef12/task-abc/eval.json:") {
+			t.Errorf("expected error to name operation and target path, got: %v", errMsg)
+		}
+		if !strings.Contains(errMsg, "sink did not report completion within deadline") {
+			t.Errorf("expected error to indicate sink completion deadline, got: %v", errMsg)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("expected wrapped context.DeadlineExceeded, got: %v", err)
+		}
+	})
 }
 
 func TestTimeoutWrappers_GraceWindowPrefersSinkError(t *testing.T) {
@@ -368,6 +428,15 @@ func TestTimeoutWrappers_GraceWindowPrefersSinkError(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		defer cancel()
 		_, err := artifacts.LoadWithTimeout(ctx, sink, "gs://bucket/runs/abcdef12/manifest.json")
+		if !errors.Is(err, sinkErr) {
+			t.Fatalf("expected sink error %v within grace window, got: %v", sinkErr, err)
+		}
+	})
+
+	t.Run("OpenStreamWithTimeout returns sink error", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		_, err := artifacts.OpenStreamWithTimeout(ctx, sink, "gs://bucket/runs/abcdef12/task-abc/eval.json", "")
 		if !errors.Is(err, sinkErr) {
 			t.Fatalf("expected sink error %v within grace window, got: %v", sinkErr, err)
 		}

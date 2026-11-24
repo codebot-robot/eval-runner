@@ -330,7 +330,7 @@ func TestComparisonReconciler_SyntheticPairedData(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeGCS := fakes.NewFakeStorageClient()
-			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 			if err != nil {
 				t.Fatalf("Failed to create GCS sink: %v", err)
 			}
@@ -522,7 +522,7 @@ func TestComparisonReconciler_TaskPImprovementSetAndRoundTrips(t *testing.T) {
 	}
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestComparisonReconciler_PairsTableExecutionOrder(t *testing.T) {
 	baseScores = append([]stats.SampleScore{{ID: "base-only", Score: 0.5}}, baseScores...)
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -873,7 +873,7 @@ func TestComparisonReconciler_CommitPrefixMismatch(t *testing.T) {
 	scheme := setupScheme(t)
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -978,7 +978,7 @@ func TestComparisonReconciler_UnreadableArtifacts_PrefixMismatch_CompletesInconc
 	defer server.Close()
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -1159,7 +1159,7 @@ func TestComparisonReconciler_UnreadableArtifacts_NotFound_CompletesInconclusive
 	defer server.Close()
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -1310,7 +1310,7 @@ func TestComparisonReconciler_UnreadableArtifacts_TransientSinkError_Retries(t *
 	// Inject a transient 503 error
 	fakeGCS.Errors["test-bucket/runs/cand-commit/docs/readme_comprehension/log.json"] = errors.New("503 Service Unavailable")
 
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -1421,7 +1421,7 @@ func TestComparisonReconciler_UnreadableArtifacts_BaselineVariants(t *testing.T)
 
 	t.Run("BaselinePrefixMismatch", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -1520,7 +1520,7 @@ func TestComparisonReconciler_UnreadableArtifacts_BaselineVariants(t *testing.T)
 			Data: makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "1", Score: 1.0}}),
 		}
 
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -1620,7 +1620,7 @@ func TestComparisonReconciler_UnreadableArtifacts_InconclusivePolicyFailure(t *t
 	defer server.Close()
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -1726,7 +1726,7 @@ func TestComparisonReconciler_TerminalComparison_NotFound_PreservesVerdict(t *te
 	}
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -1919,7 +1919,7 @@ func TestComparisonReconciler_BatchRun_NotFound_TreatsBatchAsFailed(t *testing.T
 		Data: makeSyntheticInspectLog(taskID, []stats.SampleScore{{ID: "2", Score: 0.0}}),
 	}
 
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -2216,7 +2216,7 @@ func TestComparisonReconciler_EpochAwarePairing(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeGCS := fakes.NewFakeStorageClient()
-			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 			if err != nil {
 				t.Fatalf("Failed to create GCS sink: %v", err)
 			}
@@ -2329,7 +2329,7 @@ func TestComparisonReconciler_ExplicitMarginZero(t *testing.T) {
 	}
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -2448,7 +2448,7 @@ func TestComparisonReconciler_GitHubReporting(t *testing.T) {
 
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://eval-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("failed to create GCS sink: %v", err)
 	}
@@ -4017,7 +4017,7 @@ func TestComparisonReconcile_SampleRangePairing(t *testing.T) {
 
 	t.Run("same range yields full pairs", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -4135,7 +4135,7 @@ func TestComparisonReconcile_SampleRangePairing(t *testing.T) {
 
 	t.Run("disjoint ranges yield zero pairs", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -4259,7 +4259,7 @@ func TestComparisonReconcile_SampleRangePairing(t *testing.T) {
 func TestComparisonReconciler_ManifestOnlyTasksExcluded(t *testing.T) {
 	scheme := setupScheme(t)
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -4744,7 +4744,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 
 	t.Run("candidate task failed while baseline completed caps UNCHANGED verdict to INCONCLUSIVE and names failed task", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -4861,7 +4861,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 
 	t.Run("candidate task failed while baseline completed caps IMPROVED verdict to INCONCLUSIVE and caps P(improvement) to 0.50", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -4975,7 +4975,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 
 	t.Run("candidate task failed while another task regressed preserves REGRESSED verdict and names failed task in message", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -5077,7 +5077,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 
 	t.Run("baseline task failed while candidate completed does not cap UNCHANGED verdict and notes task not executed by both runs", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -5180,7 +5180,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 
 	t.Run("task failed in both runs does not cap UNCHANGED verdict and notes failed in both runs", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -5298,7 +5298,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 
 	t.Run("task unattempted in both runs does not cap UNCHANGED verdict and notes tasks not executed", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -5414,7 +5414,7 @@ func TestComparisonReconciler_TaskFailedPolicy(t *testing.T) {
 
 	t.Run("one sandbox task skipped plus one plain task completed leaves verdict and check-run unaffected", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -5570,7 +5570,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 
 	t.Run("ClearImprovement_DecidesAfterBatch1_NoFurtherBatch", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -5688,7 +5688,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 
 	t.Run("IdenticalScores_ReachesUnchangedWithinMargin", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -5867,7 +5867,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 
 	t.Run("NoisyScores_HitsMaxSamples_Inconclusive", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -6022,7 +6022,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 
 	t.Run("ExhaustedDataset_Stops", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -6130,7 +6130,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 
 	t.Run("Reconcile_IsIdempotent", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -6240,7 +6240,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 
 	t.Run("MixedRun_OneStopsEarlyOneContinues", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -6452,7 +6452,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 
 	t.Run("DecidedLabelsSurviveNextBatchSchedulingAndRunning", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -6651,7 +6651,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 	// Blocking (2) test: Seeds 1-8, cap 8, one unmatched id (7 pairs). Window must clamp by remaining samples, not position, and stop as inconclusive if no window can be issued.
 	t.Run("WindowClampingByRemainingSamples_DoesNotHangInRunning", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -6808,7 +6808,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 	// Blocking (3) test: A deleted/NotFound batch Run should be treated as Failed terminal, not hang in Running.
 	t.Run("DisappearedBatchRun_TreatedAsFailedTerminal_DoesNotHang", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -6925,7 +6925,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 	// Blocking (4) test: Both batch Runs fail with no status.tasks (e.g. clone/discovery failure). Must not loop.
 	t.Run("BatchRunFailedBeforeTaskStatus_StopsWithoutLoopingToCap", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -7048,7 +7048,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 	// Blocking (5) test: Unwindowed seeds run the whole dataset, must not issue batch 2 past the end.
 	t.Run("UnwindowedSeeds_TreatedAsExhausted_NoBatch2Issued", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -7154,7 +7154,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 	// to INCONCLUSIVE, and the failed task is never scheduled into later batches.
 	t.Run("CandidateSeedTaskFailed_CapsVerdictInconclusive_NeverSchedulesFailedTask", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -7372,7 +7372,7 @@ func TestComparisonReconciler_PairedBatchLoop(t *testing.T) {
 	// aggregate is already INCONCLUSIVE and main's policy appends the "candidate task failed" note.
 	t.Run("CandidateBatch2TaskFailed_NamesFailedTaskInMessage", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -7635,7 +7635,7 @@ func TestAdaptivePairedSampling_ExtraSamplesOnDecidedComparison(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -7813,7 +7813,7 @@ func TestAdaptivePairedSampling_ExtraSamples_LargerThanBatchSize(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -7985,7 +7985,7 @@ func TestAdaptivePairedSampling_BaselineReuse(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -8166,7 +8166,7 @@ func TestAdaptivePairedSampling_BaselineReuse_AcrossCompletedComparison(t *testi
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -8408,7 +8408,7 @@ func TestAdaptivePairedSampling_BaselineReuse_StaleReadStateRecovery(t *testing.
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -8634,7 +8634,7 @@ func TestAdaptivePairedSampling_CostAccountingAndTokens(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -8751,7 +8751,7 @@ func TestComparison_Tokens_AccountingInvariantWithFixture(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -8940,7 +8940,7 @@ func TestComparison_Tokens_AccountingFallbackPerSample(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -9138,7 +9138,7 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 
 	t.Run("PriceKnown_CostAndLatencyComputed", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -9285,7 +9285,7 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 
 	t.Run("DefaultModel_NoConfigMap_CostAndProvenanceDefault", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -9391,7 +9391,7 @@ func TestComparison_CostAndLatencyAccountingWithFixture(t *testing.T) {
 
 	t.Run("PriceUnknown_CostOmitted", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -9492,7 +9492,7 @@ func TestAdaptivePairedSampling_DatasetExhausted_ZeroSuggestedNext(t *testing.T)
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -9604,7 +9604,7 @@ func TestAdaptivePairedSampling_DatasetExhausted_ZeroSuggestedNext(t *testing.T)
 func TestAdaptivePairedSampling_MixedPerTaskStopping(t *testing.T) {
 	scheme := setupScheme(t)
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -9856,7 +9856,7 @@ func TestAdaptivePairedSampling_DatasetExhaustion(t *testing.T) {
 	t.Run("PartialWindow_Dataset13", func(t *testing.T) {
 		taskID := "docs/readme_comprehension"
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -10014,7 +10014,7 @@ func TestAdaptivePairedSampling_DatasetExhaustion(t *testing.T) {
 	t.Run("WindowPastEnd_TaskFailedNoScoredSamples", func(t *testing.T) {
 		taskID := "docs/readme_comprehension"
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -10176,7 +10176,7 @@ func TestAdaptivePairedSampling_CapBySampleCountNotPosition(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -10321,7 +10321,7 @@ func TestAdaptivePairedSampling_TransientErrorFetchingBatchRun(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -10484,7 +10484,7 @@ func TestAdaptivePairedSampling_ZeroSampleCrashNotDatasetExhausted(t *testing.T)
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -10640,7 +10640,7 @@ func TestComparisonReconciler_StatusMessageBoundedWithMarker(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -10804,7 +10804,7 @@ func TestComparisonReconciler_ArtifactRecordsAllUnexecutedAndFailedLists(t *test
 	_ = corev1.AddToScheme(scheme)
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -11201,7 +11201,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 		server.InjectError(500, `{"message":"Internal Server Error"}`)
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://eval-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("failed to create GCS sink: %v", err)
 		}
@@ -11375,7 +11375,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 	t.Run("ExtraSamplesBumpClearsCompletionTimestamp", func(t *testing.T) {
 		taskID := "docs/readme_comprehension"
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -11494,7 +11494,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 		}
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -11722,7 +11722,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 		}
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -11903,7 +11903,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 		}
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -12074,7 +12074,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 
 	t.Run("TerminalComparisonForeignPrefixPastTTLRequeuesForDelete", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -12198,7 +12198,7 @@ func TestComparisonReconciler_TTLReconcile(t *testing.T) {
 
 	t.Run("TerminalComparisonForeignPrefixDirectExtraSamplesDeletedByTTL", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://new-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -12361,7 +12361,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 		server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -12604,7 +12604,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 		server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -12847,7 +12847,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 		server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -13104,7 +13104,7 @@ func TestComparisonReconciler_TerminalComparisonNoEligibleTasks(t *testing.T) {
 		server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -13352,7 +13352,7 @@ func TestComparisonReconciler_ExtraSamples_ConditionResetOnServiceableRequest(t 
 			server.SetUserPermission("gke-labs", "eval-runner", "reviewer", "write")
 
 			fakeGCS := fakes.NewFakeStorageClient()
-			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+			sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 			if err != nil {
 				t.Fatalf("failed to create GCS sink: %v", err)
 			}
@@ -14756,7 +14756,7 @@ func TestComparisonController_PendingCommands(t *testing.T) {
 	t.Run("check run action button press results in a new batch Run same as more 32", func(t *testing.T) {
 		taskID := "docs/readme_comprehension"
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("failed to create sink: %v", err)
 		}
@@ -15174,7 +15174,7 @@ func TestAdaptivePairedSampling_BaselineReuse_AddOwnerReferenceErrorRequeues(t *
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -15319,7 +15319,7 @@ func TestAdaptivePairedSampling_ExtraSamples_ConsumedRequestMarker_ShortOrFailed
 	task1 := "task-short"
 	task2 := "task-normal"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -15489,7 +15489,7 @@ func TestComparisonReconciler_MissingBatchRunMessage(t *testing.T) {
 	scheme := setupScheme(t)
 	taskID := "docs/readme_comprehension"
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Failed to create GCS sink: %v", err)
 	}
@@ -16318,7 +16318,7 @@ func TestComparisonReconciler_TaskAffinity(t *testing.T) {
 		server.SetPullRequestFiles("gke-labs", "eval-runner", 123, []string{"docs/readme.md"})
 
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("failed to create GCS sink: %v", err)
 		}
@@ -17100,7 +17100,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 
 	t.Run("BudgetHitAfterBatch2_Inconclusive_NoBatch3", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -17261,7 +17261,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 
 	t.Run("UnknownPrice_NotEnforced_NoteSet", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -17357,7 +17357,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 
 	t.Run("ShrinkToFit", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -17452,7 +17452,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 
 	t.Run("ShrinkToFit_StopWhenOnePairExceeds", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -17560,7 +17560,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 
 	t.Run("BudgetUSD_ZeroIsUnset", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -17647,7 +17647,7 @@ func TestAdaptivePairedSampling_Budget(t *testing.T) {
 
 	t.Run("ExtraSamples_Bypass", func(t *testing.T) {
 		fakeGCS := fakes.NewFakeStorageClient()
-		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS))
+		sink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 		if err != nil {
 			t.Fatalf("Failed to create GCS sink: %v", err)
 		}
@@ -18207,7 +18207,14 @@ func (b *blockingSinkComparison) Load(ctx context.Context, path string) ([]byte,
 }
 
 func (b *blockingSinkComparison) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
-	return nil, errors.New("not implemented")
+	if b.loadFn != nil {
+		data, err := b.loadFn(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(strings.NewReader(string(data))), nil
+	}
+	return io.NopCloser(strings.NewReader("{}")), nil
 }
 
 func (b *blockingSinkComparison) ArtifactPrefix(commit string) string {
@@ -18248,7 +18255,7 @@ func newHeadMoveFixture(t *testing.T, withGitHub bool, interceptorFuncs ...inter
 	baseSHA := "0000000000000000000000000000000000000000"
 
 	fakeGCS := fakes.NewFakeStorageClient()
-	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("failed to create GCS sink: %v", err)
 	}
@@ -19098,7 +19105,7 @@ func TestComparisonReconciler_HeadMove_ExtraSamplesWorksAfterReset(t *testing.T)
 	fakeGCS.Objects["eval-bucket/runs/"+f.baseSHA+"/"+f.taskID+"/inspect.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(f.taskID, b1Base)}
 	fakeGCS.Objects["eval-bucket/runs/"+f.cand1SHA+"/"+f.taskID+"/inspect.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(f.taskID, b1Cand)}
 	fakeGCS.Objects["eval-bucket/runs/"+f.cand2SHA+"/"+f.taskID+"/inspect.json"] = fakes.FakeObject{Data: makeSyntheticInspectLog(f.taskID, b1Cand)}
-	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS))
+	sink, err := gcs.New(ctx, "gs://eval-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
 	if err != nil {
 		t.Fatalf("failed to create GCS sink: %v", err)
 	}
@@ -19566,5 +19573,126 @@ func TestComparisonReconciler_HeadMove_CandidateRunNotFound(t *testing.T) {
 	}
 	if curComp.Status.Phase != v1alpha1.ComparisonPhaseCompleted {
 		t.Errorf("expected phase Completed, got %v", curComp.Status.Phase)
+	}
+}
+
+type streamTrackingSink struct {
+	artifacts.ArtifactSink
+	loadCalls   []string
+	openCalls   []string
+	openedCount int
+	closedCount int
+}
+
+func (sink *streamTrackingSink) Load(ctx context.Context, path string) ([]byte, error) {
+	sink.loadCalls = append(sink.loadCalls, path)
+	return sink.ArtifactSink.Load(ctx, path)
+}
+
+func (sink *streamTrackingSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	sink.openCalls = append(sink.openCalls, path+"|"+hash)
+	stream, err := sink.ArtifactSink.OpenStream(ctx, path, hash)
+	if err != nil {
+		return nil, err
+	}
+	sink.openedCount++
+	return &closeTrackingReadCloser{ReadCloser: stream, sink: sink}, nil
+}
+
+type closeTrackingReadCloser struct {
+	io.ReadCloser
+	sink   *streamTrackingSink
+	closed bool
+}
+
+func (tracker *closeTrackingReadCloser) Close() error {
+	if !tracker.closed {
+		tracker.closed = true
+		tracker.sink.closedCount++
+	}
+	return tracker.ReadCloser.Close()
+}
+
+func TestComparisonReconciler_LargeLogStreamingAndStreamClosure(t *testing.T) {
+	scheme := setupScheme(t)
+	taskID := "docs/large_log_eval"
+	padding := strings.Repeat("A", 1500*1024) // 8 * 1.5 MiB = ~12 MiB (> 10 MiB DefaultMaxLoadBytes)
+
+	buildLargeLog := func(score float64, input, output, reasoning, cacheRead, cacheWrite int) []byte {
+		var builder strings.Builder
+		fmt.Fprintf(&builder, `{"version":2,"eval":{"task":%q,"scorers":[{"name":"accuracy"}],"dataset":{"samples":8}},"stats":{"model_usage":{"gemini":{"input_tokens":%d,"output_tokens":%d,"reasoning_tokens":%d,"input_tokens_cache_read":%d,"input_tokens_cache_write":%d}}},"samples":[`,
+			taskID, input, output, reasoning, cacheRead, cacheWrite)
+		for index := 1; index <= 8; index++ {
+			if index > 1 {
+				builder.WriteByte(',')
+			}
+			fmt.Fprintf(&builder, `{"id":"%d","total_time":1.5,"scores":{"accuracy":{"value":%.1f}},"events":[{"result":"%s"}]}`, index, score, padding)
+		}
+		builder.WriteString(`]}`)
+		return []byte(builder.String())
+	}
+
+	reconcilePair := func(t *testing.T, candidateData, baselineData []byte, candidateHash, baselineHash string) (v1alpha1.Comparison, *streamTrackingSink, error) {
+		t.Helper()
+		fakeGCS := fakes.NewFakeStorageClient()
+		candidatePath := "gs://test-bucket/runs/cand-stream/" + taskID + "/inspect.json"
+		baselinePath := "gs://test-bucket/runs/base-stream/" + taskID + "/inspect.json"
+		fakeGCS.Objects["test-bucket/runs/cand-stream/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: candidateData}
+		fakeGCS.Objects["test-bucket/runs/base-stream/"+taskID+"/inspect.json"] = fakes.FakeObject{Data: baselineData}
+		gcsSink, err := gcs.New(t.Context(), "gs://test-bucket", gcs.WithStorageClient(fakeGCS), gcs.WithCacheDirectory(t.TempDir()))
+		if err != nil {
+			t.Fatalf("failed to create GCS sink: %v", err)
+		}
+		trackingSink := &streamTrackingSink{ArtifactSink: gcsSink}
+		newRun := func(name, commit, logPath, logHash string) *v1alpha1.Run {
+			return &v1alpha1.Run{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "eval-runner"},
+				Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: "git://repo", Commit: commit}, Model: "gemini-2.5-flash"},
+				Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseCompleted, Tasks: []v1alpha1.TaskStatus{{ID: taskID, Phase: v1alpha1.TaskPhaseCompleted, LogPath: logPath, LogHash: logHash, Samples: 8}}},
+			}
+		}
+		comparison := &v1alpha1.Comparison{
+			ObjectMeta: metav1.ObjectMeta{Name: "comp-stream", Namespace: "eval-runner"},
+			Spec:       v1alpha1.ComparisonSpec{Candidate: v1alpha1.ComparisonRunRef{Run: "cand-run"}, Baseline: v1alpha1.ComparisonRunRef{Run: "base-run"}},
+		}
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+			newRun("cand-run", "cand-stream", candidatePath, candidateHash),
+			newRun("base-run", "base-stream", baselinePath, baselineHash),
+			comparison,
+		).WithStatusSubresource(comparison).Build()
+		reconciler := &ComparisonReconciler{Client: fakeClient, Scheme: scheme, ArtifactSink: trackingSink}
+		request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: comparison.Namespace, Name: comparison.Name}}
+		_, reconcileErr := reconciler.Reconcile(t.Context(), request)
+		var updated v1alpha1.Comparison
+		_ = fakeClient.Get(t.Context(), request.NamespacedName, &updated)
+		return updated, trackingSink, reconcileErr
+	}
+
+	candidateLog := buildLargeLog(1.0, 2000, 500, 120, 400, 80)
+	baselineLog := buildLargeLog(0.0, 1800, 450, 90, 300, 60)
+	if int64(len(candidateLog)) <= artifacts.DefaultMaxLoadBytes || int64(len(baselineLog)) <= artifacts.DefaultMaxLoadBytes {
+		t.Fatalf("expected >10 MiB logs, got candidate=%d baseline=%d", len(candidateLog), len(baselineLog))
+	}
+	candidateHash, baselineHash := artifacts.ArtifactHash(candidateLog), artifacts.ArtifactHash(baselineLog)
+
+	updated, sink, err := reconcilePair(t, candidateLog, baselineLog, candidateHash, baselineHash)
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+	wantTokens := v1alpha1.TaskTokens{Input: 3800, Output: 950, Total: 4750, Reasoning: 210, CacheRead: 700, CacheWrite: 140}
+	if updated.Status.Phase != v1alpha1.ComparisonPhaseCompleted || updated.Status.Verdict != v1alpha1.ComparisonVerdictImproved ||
+		len(updated.Status.Tasks) != 1 || updated.Status.Tasks[0].Tokens == nil || *updated.Status.Tasks[0].Tokens != wantTokens ||
+		updated.Status.Tasks[0].Latency == nil || updated.Status.Tasks[0].Latency.P50 != 1.5 {
+		t.Fatalf("unexpected comparison status: %+v", updated.Status)
+	}
+	wantOpens := []string{
+		"gs://test-bucket/runs/cand-stream/" + taskID + "/inspect.json|" + candidateHash,
+		"gs://test-bucket/runs/base-stream/" + taskID + "/inspect.json|" + baselineHash,
+	}
+	if len(sink.loadCalls) != 0 || len(sink.openCalls) != 2 || sink.openCalls[0] != wantOpens[0] || sink.openCalls[1] != wantOpens[1] || sink.openedCount != 2 || sink.closedCount != 2 {
+		t.Errorf("unexpected sink activity: loads=%v opens=%v opened=%d closed=%d", sink.loadCalls, sink.openCalls, sink.openedCount, sink.closedCount)
+	}
+	if _, parseErrSink, parseErr := reconcilePair(t, []byte("{corrupt"), baselineLog, "", ""); parseErr == nil || parseErrSink.openedCount != 1 || parseErrSink.closedCount != 1 {
+		t.Errorf("expected parse error with closed stream: err=%v opened=%d closed=%d", parseErr, parseErrSink.openedCount, parseErrSink.closedCount)
 	}
 }

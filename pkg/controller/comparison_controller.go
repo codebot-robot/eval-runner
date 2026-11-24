@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -1206,7 +1207,7 @@ func (r *ComparisonReconciler) buildTerminalAnnotations(
 
 	// Filter tasks: must declare paths that resolve to concrete changed files,
 	// and candidate task must have recorded failures.
-	taskLogs := make(map[string][]byte)
+	failures := make(map[string][]github.TaskSampleFailure)
 	for _, mt := range manifest.Tasks {
 		if len(mt.Paths) == 0 {
 			continue
@@ -1217,22 +1218,49 @@ func (r *ComparisonReconciler) buildTerminalAnnotations(
 		}
 		for _, ct := range candRun.Status.Tasks {
 			if ct.ID == mt.ID && ct.LogPath != "" && ct.Samples > ct.Successes {
-				loadCtx, loadCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
-				data, err := artifacts.LoadWithTimeout(loadCtx, r.artifactSink(), ct.LogPath)
-				loadCancel()
-				if err == nil && len(data) > 0 {
-					taskLogs[mt.ID] = data
+				stream, err := r.openTaskLogStream(ctx, ct.LogPath, ct.LogHash)
+				if err != nil {
+					log.FromContext(ctx).V(1).Info("skipping terminal annotations for task: failed to open task log stream", "task", mt.ID, "path", ct.LogPath, "error", err)
+					break
+				}
+				metrics, parseErr := parseAndCloseTaskMetrics(stream)
+				if parseErr != nil {
+					log.FromContext(ctx).V(1).Info("skipping terminal annotations for task: failed to parse task log", "task", mt.ID, "path", ct.LogPath, "error", parseErr)
+					break
+				}
+				for _, score := range metrics.SampleScores {
+					if score.Score < 1.0 {
+						failures[mt.ID] = append(failures[mt.ID], github.TaskSampleFailure{
+							SampleID: score.ID,
+							Score:    score.Score,
+						})
+					}
 				}
 				break
 			}
 		}
 	}
 
-	if len(taskLogs) == 0 {
+	if len(failures) == 0 {
 		return nil
 	}
 
-	return github.BuildCheckRunAnnotations(manifest.Tasks, changedFiles, taskLogs)
+	return github.BuildCheckRunAnnotationsFromFailures(manifest.Tasks, changedFiles, failures)
+}
+
+func (r *ComparisonReconciler) openTaskLogStream(ctx context.Context, logPath string, logHash string) (io.ReadCloser, error) {
+	openCtx, openCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
+	defer openCancel()
+	return artifacts.OpenStreamWithTimeout(openCtx, r.artifactSink(), logPath, logHash)
+}
+
+func parseAndCloseTaskMetrics(stream io.ReadCloser) (metrics *artifacts.TaskLogMetrics, err error) {
+	defer func() {
+		if closeErr := stream.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	return artifacts.ParseTaskMetricsStream(stream)
 }
 
 func computeAnnotationsHash(anns []forge.CheckRunAnnotation) string {
@@ -2749,10 +2777,8 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				return r.completeInconclusiveArtifactsUnreadable(ctx, &comp, &baselineRun, &candidateRun, batches, v1alpha1.ConditionReasonPrefixMismatch, mismatchMsg)
 			}
 
-			// Load Inspect log for candidate
-			candCtx, candCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
-			candData, err := artifacts.LoadWithTimeout(candCtx, r.artifactSink(), candTask.LogPath)
-			candCancel()
+			// Stream task log for candidate
+			candidateStream, err := r.openTaskLogStream(ctx, candTask.LogPath, candTask.LogHash)
 			if err != nil {
 				if artifacts.IsNotFound(err) {
 					if batchIdx > 0 {
@@ -2782,10 +2808,20 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				return ctrl.Result{}, err
 			}
 
-			// Load Inspect log for baseline
-			baseCtx, baseCancel := context.WithTimeout(ctx, r.artifactSinkTimeout())
-			baseData, err := artifacts.LoadWithTimeout(baseCtx, r.artifactSink(), baseTask.LogPath)
-			baseCancel()
+			candidateMetrics, err := parseAndCloseTaskMetrics(candidateStream)
+			if err != nil {
+				msg := fmt.Sprintf("failed to parse candidate sample scores for task %q: %v", taskID, err)
+				logger.Error(err, "failed to parse candidate sample scores", "task", taskID)
+				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
+					status.Message = msg
+				}); statusErr != nil {
+					return ctrl.Result{}, errors.Join(err, statusErr)
+				}
+				return ctrl.Result{}, err
+			}
+
+			// Stream task log for baseline
+			baselineStream, err := r.openTaskLogStream(ctx, baseTask.LogPath, baseTask.LogHash)
 			if err != nil {
 				if artifacts.IsNotFound(err) {
 					if batchIdx > 0 {
@@ -2815,18 +2851,7 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				return ctrl.Result{}, err
 			}
 
-			candScores, err := artifacts.ParseInspectSampleScores(candData)
-			if err != nil {
-				msg := fmt.Sprintf("failed to parse candidate sample scores for task %q: %v", taskID, err)
-				logger.Error(err, "failed to parse candidate sample scores", "task", taskID)
-				if _, statusErr := r.updateComparisonStatus(ctx, &comp, &baselineRun, &candidateRun, func(status *v1alpha1.ComparisonStatus) {
-					status.Message = msg
-				}); statusErr != nil {
-					return ctrl.Result{}, errors.Join(err, statusErr)
-				}
-				return ctrl.Result{}, err
-			}
-			baseScores, err := artifacts.ParseInspectSampleScores(baseData)
+			baselineMetrics, err := parseAndCloseTaskMetrics(baselineStream)
 			if err != nil {
 				msg := fmt.Sprintf("failed to parse baseline sample scores for task %q: %v", taskID, err)
 				logger.Error(err, "failed to parse baseline sample scores", "task", taskID)
@@ -2838,37 +2863,40 @@ func (r *ComparisonReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 				return ctrl.Result{}, err
 			}
 
-			if candTok, err := artifacts.ExtractInspectTokens(candData); err == nil && candTok != nil {
-				candInputSum += candTok.Input
-				candOutputSum += candTok.Output
-				candReasoningSum += candTok.Reasoning
-				candCacheReadSum += candTok.CacheRead
-				candCacheWriteSum += candTok.CacheWrite
+			candScores := candidateMetrics.SampleScores
+			baseScores := baselineMetrics.SampleScores
+
+			if candidateMetrics.Tokens != nil {
+				candInputSum += candidateMetrics.Tokens.Input
+				candOutputSum += candidateMetrics.Tokens.Output
+				candReasoningSum += candidateMetrics.Tokens.Reasoning
+				candCacheReadSum += candidateMetrics.Tokens.CacheRead
+				candCacheWriteSum += candidateMetrics.Tokens.CacheWrite
 				hasCandTokens = true
 			}
-			if baseTok, err := artifacts.ExtractInspectTokens(baseData); err == nil && baseTok != nil {
-				baseInputSum += baseTok.Input
-				baseOutputSum += baseTok.Output
-				baseReasoningSum += baseTok.Reasoning
-				baseCacheReadSum += baseTok.CacheRead
-				baseCacheWriteSum += baseTok.CacheWrite
+			if baselineMetrics.Tokens != nil {
+				baseInputSum += baselineMetrics.Tokens.Input
+				baseOutputSum += baselineMetrics.Tokens.Output
+				baseReasoningSum += baselineMetrics.Tokens.Reasoning
+				baseCacheReadSum += baselineMetrics.Tokens.CacheRead
+				baseCacheWriteSum += baselineMetrics.Tokens.CacheWrite
 				hasBaseTokens = true
 			}
 
-			if candLats, err := artifacts.ExtractInspectSampleLatencies(candData); err == nil && len(candLats) > 0 {
-				allCandLatencies = append(allCandLatencies, candLats...)
-				allTaskLatencies = append(allTaskLatencies, candLats...)
+			if len(candidateMetrics.Latencies) > 0 {
+				allCandLatencies = append(allCandLatencies, candidateMetrics.Latencies...)
+				allTaskLatencies = append(allTaskLatencies, candidateMetrics.Latencies...)
 			}
-			if baseLats, err := artifacts.ExtractInspectSampleLatencies(baseData); err == nil && len(baseLats) > 0 {
-				allBaseLatencies = append(allBaseLatencies, baseLats...)
-				allTaskLatencies = append(allTaskLatencies, baseLats...)
+			if len(baselineMetrics.Latencies) > 0 {
+				allBaseLatencies = append(allBaseLatencies, baselineMetrics.Latencies...)
+				allTaskLatencies = append(allTaskLatencies, baselineMetrics.Latencies...)
 			}
 
-			if ds, err := artifacts.ExtractInspectDatasetSamples(candData); err == nil && ds > taskPossibleSamples {
-				taskPossibleSamples = ds
+			if candidateMetrics.DatasetSamples > taskPossibleSamples {
+				taskPossibleSamples = candidateMetrics.DatasetSamples
 			}
-			if ds, err := artifacts.ExtractInspectDatasetSamples(baseData); err == nil && ds > taskPossibleSamples {
-				taskPossibleSamples = ds
+			if baselineMetrics.DatasetSamples > taskPossibleSamples {
+				taskPossibleSamples = baselineMetrics.DatasetSamples
 			}
 
 			// Check window length for dataset exhaustion:

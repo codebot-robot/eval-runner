@@ -276,7 +276,7 @@ func buildSyntheticInspectLogStream(sampleCount int, payloadSize int) io.Reader 
 }
 
 func runStreamParseWithMemoryTracking(
-	parse func(io.Reader) ([]ParsedInspectSample, error),
+	parse func(io.Reader) (int, error),
 	sampleCount int,
 	payloadSize int,
 ) (uint64, error) {
@@ -287,12 +287,12 @@ func runStreamParseWithMemoryTracking(
 	runtime.ReadMemStats(&baseline)
 
 	observer := &memoryObservingReader{reader: stream, peakHeap: baseline.HeapAlloc}
-	samples, err := parse(observer)
+	parsedCount, err := parse(observer)
 	if err != nil {
 		return 0, err
 	}
-	if len(samples) != sampleCount {
-		return 0, fmt.Errorf("expected %d samples, got %d", sampleCount, len(samples))
+	if parsedCount != sampleCount {
+		return 0, fmt.Errorf("expected %d samples, got %d", sampleCount, parsedCount)
 	}
 
 	return observer.peakHeap - baseline.HeapAlloc, nil
@@ -304,10 +304,23 @@ func TestParseInspectSamplesStream_BoundedMemoryAcrossLogSizes(t *testing.T) {
 
 	parsers := []struct {
 		name  string
-		parse func(io.Reader) ([]ParsedInspectSample, error)
+		parse func(io.Reader) (int, error)
 	}{
-		{name: "Inspect", parse: ParseInspectSamplesStream},
-		{name: "TaskDispatch", parse: ParseTaskSamplesStream},
+		{"Inspect", func(reader io.Reader) (int, error) {
+			samples, err := ParseInspectSamplesStream(reader)
+			return len(samples), err
+		}},
+		{"TaskDispatch", func(reader io.Reader) (int, error) {
+			samples, err := ParseTaskSamplesStream(reader)
+			return len(samples), err
+		}},
+		{"TaskMetrics", func(reader io.Reader) (int, error) {
+			metrics, err := ParseTaskMetricsStream(reader)
+			if err != nil {
+				return 0, err
+			}
+			return len(metrics.SampleScores), nil
+		}},
 	}
 
 	for _, parser := range parsers {
@@ -327,4 +340,74 @@ func TestParseInspectSamplesStream_BoundedMemoryAcrossLogSizes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseTaskMetricsStream(t *testing.T) {
+	t.Run("InspectLogWithTrailingEvalAndStats", func(t *testing.T) {
+		document := `{"version":2,"samples":[` +
+			`{"id":1,"epoch":2,"started_at":"2026-10-21T12:00:00Z","completed_at":"2026-10-21T12:00:02.5Z","scores":{"alpha":{"value":"I"},"primary":{"value":"C"}},"model_usage":{"m":{"input_tokens":10,"output_tokens":5}}},` +
+			`{"id":"s-2","total_time":1.25,"scores":{"primary":{"value":0.5}},"model_usage":{"m":{"input_tokens":20,"output_tokens":10}}}],` +
+			`"eval":{"scorers":[{"name":"primary"}],"dataset":{"samples":42}},` +
+			`"stats":{"model_usage":{"gemini":{"input_tokens":100,"output_tokens":50,"total_tokens":999,"reasoning_tokens":12,"input_tokens_cache_read":30,"input_tokens_cache_write":7}}}}`
+		metrics, err := ParseTaskMetricsStream(strings.NewReader(document))
+		if err != nil {
+			t.Fatalf("ParseTaskMetricsStream failed: %v", err)
+		}
+		if len(metrics.SampleScores) != 2 || metrics.SampleScores[0].ID != "1#2" || metrics.SampleScores[0].Score != 1.0 || metrics.SampleScores[1].ID != "s-2" || metrics.SampleScores[1].Score != 0.5 {
+			t.Errorf("unexpected sample scores: %+v", metrics.SampleScores)
+		}
+		wantTokens := TaskTokens{Input: 100, Output: 50, Total: 150, Reasoning: 12, CacheRead: 30, CacheWrite: 7}
+		if metrics.Tokens == nil || *metrics.Tokens != wantTokens {
+			t.Errorf("tokens = %+v, want %+v", metrics.Tokens, wantTokens)
+		}
+		if len(metrics.Latencies) != 2 || metrics.Latencies[0] != 2.5 || metrics.Latencies[1] != 1.25 || metrics.DatasetSamples != 42 {
+			t.Errorf("unexpected latencies=%v datasetSamples=%d", metrics.Latencies, metrics.DatasetSamples)
+		}
+	})
+
+	t.Run("InspectLogPerSampleTokenFallback", func(t *testing.T) {
+		document := `{"version":2,"samples":[` +
+			`{"id":"1","scores":{"acc":{"value":1.0}},"model_usage":{"m":{"input_tokens":10,"output_tokens":5,"reasoning_tokens":3,"input_tokens_cache_read":4,"input_tokens_cache_write":2}}},` +
+			`{"id":"2","scores":{"acc":{"value":0.0}},"model_usage":{"m":{"input_tokens":20,"output_tokens":15}}}]}`
+		metrics, err := ParseTaskMetricsStream(strings.NewReader(document))
+		if err != nil {
+			t.Fatalf("ParseTaskMetricsStream failed: %v", err)
+		}
+		wantTokens := TaskTokens{Input: 30, Output: 20, Total: 50, Reasoning: 3, CacheRead: 4, CacheWrite: 2}
+		if metrics.Tokens == nil || *metrics.Tokens != wantTokens {
+			t.Errorf("fallback tokens = %+v, want %+v", metrics.Tokens, wantTokens)
+		}
+	})
+
+	t.Run("ResultsJSONKeyOrders", func(t *testing.T) {
+		documents := []string{
+			`{"schemaVersion":1,"samples":[{"id":"s1","passed":true},{"id":"s2","passed":false,"score":0.25}]}`,
+			`{"samples":[{"id":"s1","passed":true},{"id":"s2","passed":false,"score":0.25}],"schemaVersion":1}`,
+		}
+		for index, document := range documents {
+			metrics, err := ParseTaskMetricsStream(strings.NewReader(document))
+			if err != nil {
+				t.Fatalf("case %d: ParseTaskMetricsStream failed: %v", index, err)
+			}
+			if len(metrics.SampleScores) != 2 || metrics.SampleScores[0].ID != "s1" || metrics.SampleScores[0].Score != 1.0 || metrics.SampleScores[1].ID != "s2" || metrics.SampleScores[1].Score != 0.25 {
+				t.Errorf("case %d: unexpected scores: %+v", index, metrics.SampleScores)
+			}
+			if metrics.Tokens != nil || len(metrics.Latencies) != 0 || metrics.DatasetSamples != 0 {
+				t.Errorf("case %d: unexpected inspect-only fields: %+v", index, metrics)
+			}
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		for _, testCase := range []struct{ document, expectedError string }{
+			{"  ", "empty artifact data"},
+			{"{bad", "failed to parse task log"},
+			{`{"schemaVersion":2,"samples":[]}`, "unsupported results schemaVersion 2"},
+			{`{"schemaVersion":1,"samples":[{"id":"s1"}]}`, "missing required 'passed' field"},
+		} {
+			if _, err := ParseTaskMetricsStream(strings.NewReader(testCase.document)); err == nil || !strings.Contains(err.Error(), testCase.expectedError) {
+				t.Errorf("document %q: expected error containing %q, got %v", testCase.document, testCase.expectedError, err)
+			}
+		}
+	})
 }

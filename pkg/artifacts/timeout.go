@@ -16,9 +16,13 @@ package artifacts
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 const defaultGraceWindow = 250 * time.Millisecond
@@ -164,6 +168,55 @@ func LoadWithTimeout(ctx context.Context, sink ArtifactSink, path string) ([]byt
 			return r.data, r.err
 		case <-time.After(defaultGraceWindow):
 			return nil, fmt.Errorf("load artifact from %s: sink did not report completion within deadline: %w", path, ctx.Err())
+		}
+	}
+}
+
+// OpenStreamWithTimeout executes sink.OpenStream concurrently, returning immediately if ctx expires.
+// If the sink returns a stream after the deadline elapses, the stream is closed to prevent leaking handles.
+func OpenStreamWithTimeout(ctx context.Context, sink ArtifactSink, path string, hash string) (io.ReadCloser, error) {
+	if sink == nil {
+		return nil, ErrNoSinkConfigured
+	}
+	type result struct {
+		stream io.ReadCloser
+		err    error
+	}
+	resultChannel := make(chan result, 1)
+	timedOut := make(chan struct{})
+	go func() {
+		stream, err := sink.OpenStream(ctx, path, hash)
+		select {
+		case <-timedOut:
+			if stream != nil {
+				if closeErr := stream.Close(); closeErr != nil {
+					klog.Warningf("failed to close late artifact stream from %s: %v", path, closeErr)
+				}
+			}
+		case resultChannel <- result{stream: stream, err: err}:
+		}
+	}()
+
+	select {
+	case openResult := <-resultChannel:
+		return openResult.stream, openResult.err
+	case <-ctx.Done():
+		select {
+		case openResult := <-resultChannel:
+			return openResult.stream, openResult.err
+		case <-time.After(defaultGraceWindow):
+			close(timedOut)
+			deadlineErr := fmt.Errorf("open artifact stream from %s: sink did not report completion within deadline: %w", path, ctx.Err())
+			select {
+			case lateResult := <-resultChannel:
+				if lateResult.stream != nil {
+					if closeErr := lateResult.stream.Close(); closeErr != nil {
+						return nil, errors.Join(deadlineErr, closeErr)
+					}
+				}
+			default:
+			}
+			return nil, deadlineErr
 		}
 	}
 }
