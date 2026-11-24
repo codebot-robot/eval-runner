@@ -348,6 +348,11 @@ spec:
                       description: CostUSD is the estimated task evaluation cost in
                         USD from model prices.
                       type: number
+                    failureAttempts:
+                      description: |-
+                        FailureAttempts records the number of attempts that failed due to infrastructure issues.
+                        Controller restarts do not count toward this limit.
+                      type: integer
                     finishedAt:
                       description: FinishedAt is the time when the task reached a
                         terminal phase (Completed, Failed).
@@ -419,6 +424,10 @@ spec:
                             resources allowed.
                           type: object
                       type: object
+                    restartReason:
+                      description: RestartReason records the reason why the last task
+                        restart occurred.
+                      type: string
                     restarts:
                       description: Restarts records the number of times the task was
                         restarted after being interrupted.

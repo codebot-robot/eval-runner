@@ -96,6 +96,11 @@ const (
 	// DefaultMaxParallelTasks is the default maximum number of concurrent task sandboxes.
 	DefaultMaxParallelTasks = 4
 
+	// maxTaskAttempts is the maximum number of attempts allowed for an infrastructure failure before marking a task failed.
+	// Three attempts (the initial run plus up to two retries) tolerates transient disruptions such as
+	// pod evictions, node preemptions, or network partitions without consuming unbounded cluster resources.
+	maxTaskAttempts = 3
+
 	// DefaultTaskGracePeriod is the default grace period before treating absence of a running task's sandbox as a failure.
 	DefaultTaskGracePeriod = 30 * time.Second
 
@@ -2393,12 +2398,16 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	availableSlots := r.maxParallelTasks() - runningCount
 	waitingForOldSandbox := false
 	if availableSlots > 0 {
-		var tasksToStart []string
+		type pendingTaskStart struct {
+			id       string
+			restarts int
+		}
+		var tasksToStart []pendingTaskStart
 		for _, task := range run.Status.Tasks {
 			if task.Phase == v1alpha1.TaskPhasePending && availableSlots > 0 {
 				if existingSandbox, exists := sandboxesByTask[task.ID]; exists {
-					if existingSandbox.Annotations[discovery.AnnotationControllerInstance] != r.InstanceID {
-						// Sandbox from an earlier controller instance: delete it and wait for it and its pod to terminate.
+					if isOldTaskSandbox(&existingSandbox, r.InstanceID, task.Restarts) {
+						// Sandbox from an earlier attempt or controller instance: delete it and wait for it and its pod to terminate.
 						sandboxKey := types.NamespacedName{Namespace: existingSandbox.Namespace, Name: existingSandbox.Name}
 						if err := r.Delete(ctx, &existingSandbox); err != nil && !apierrors.IsNotFound(err) {
 							logger.Error(err, "failed to delete old task sandbox for pending task", "task", task.ID)
@@ -2408,7 +2417,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 						waitingForOldSandbox = true
 						continue
 					}
-					// Sandbox belongs to this process instance (e.g. status write after Create failed on previous reconcile).
+					// Sandbox belongs to this process instance for the current attempt (e.g. status write after Create failed on previous reconcile).
 					// Allow tasksToStart to proceed; Create will tolerate AlreadyExists and status write will record Running.
 				} else {
 					// Check if a terminating pod with the same name still exists from an earlier attempt
@@ -2422,15 +2431,16 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 						return ctrl.Result{}, err
 					}
 				}
-				tasksToStart = append(tasksToStart, task.ID)
+				tasksToStart = append(tasksToStart, pendingTaskStart{id: task.ID, restarts: task.Restarts})
 				availableSlots--
 			}
 		}
 
 		if len(tasksToStart) > 0 {
-			var started []string
+			started := make(map[string]int)
 			failedTasks := make(map[string]string)
-			for _, taskID := range tasksToStart {
+			for _, pendingTask := range tasksToStart {
+				taskID := pendingTask.id
 				taskImage := ""
 				isSandboxTask := false
 				isAgentTask := false
@@ -2477,6 +2487,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
 					Namespace:              r.sandboxNamespace(),
 					ControllerInstance:     r.InstanceID,
+					TaskAttempt:            pendingTask.restarts,
 					SampleRunnerImage:      r.sampleRunnerImage(),
 					Image:                  taskImage,
 					AuthTokenDigest:        discovery.AuthTokenDigest(token),
@@ -2494,73 +2505,47 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 					logger.Error(err, "Failed to create task sandbox", "task", taskID)
 					failedTasks[taskID] = fmt.Sprintf("failed to create sandbox: %v", err)
 				} else {
-					started = append(started, taskID)
+					started[taskID] = pendingTask.restarts
 					sandboxesByTask[taskID] = *desiredSandbox
 				}
 			}
 
 			if len(started) > 0 || len(failedTasks) > 0 {
 				now := metav1.NewTime(r.now())
-				err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
+				applyStartedTasks := func(status *v1alpha1.RunStatus) {
 					for i := range status.Tasks {
-						tid := status.Tasks[i].ID
-						if failMsg, failed := failedTasks[tid]; failed {
+						taskID := status.Tasks[i].ID
+						if failMessage, failed := failedTasks[taskID]; failed {
 							status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
-							status.Tasks[i].Message = failMsg
+							status.Tasks[i].Message = failMessage
 							status.Tasks[i].FinishedAt = &now
-						} else {
-							for _, s := range started {
-								if s == tid {
-									status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
-									status.Tasks[i].StartedAt = &now
-									if manifest != nil {
-										for _, manifestTask := range manifest.Tasks {
-											if manifestTask.ID == tid && isSandboxOnlyTask(manifestTask) {
-												status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
-												status.Tasks[i].Resources = &v1alpha1.TaskResources{
-													Limits: discovery.TaskResourceLimits(manifestTask),
-												}
-												break
-											}
-										}
-									}
-									break
-								}
-							}
-						}
-					}
-					status.Summary = ComputeRunSummary(status.Tasks)
-				})
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-				for i := range run.Status.Tasks {
-					tid := run.Status.Tasks[i].ID
-					if failMsg, failed := failedTasks[tid]; failed {
-						run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
-						run.Status.Tasks[i].Message = failMsg
-						run.Status.Tasks[i].FinishedAt = &now
-					} else {
-						for _, s := range started {
-							if s == tid {
-								run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
-								run.Status.Tasks[i].StartedAt = &now
+						} else if expectedRestarts, ok := started[taskID]; ok {
+							if status.Tasks[i].Phase == v1alpha1.TaskPhasePending && status.Tasks[i].Restarts == expectedRestarts {
+								status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
+								status.Tasks[i].StartedAt = &now
 								if manifest != nil {
 									for _, manifestTask := range manifest.Tasks {
-										if manifestTask.ID == tid && isSandboxOnlyTask(manifestTask) {
-											run.Status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
-											run.Status.Tasks[i].Resources = &v1alpha1.TaskResources{
+										if manifestTask.ID == taskID && isSandboxOnlyTask(manifestTask) {
+											status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
+											status.Tasks[i].Resources = &v1alpha1.TaskResources{
 												Limits: discovery.TaskResourceLimits(manifestTask),
 											}
 											break
 										}
 									}
 								}
-								break
 							}
 						}
 					}
+					status.Summary = ComputeRunSummary(status.Tasks)
 				}
+				err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
+					applyStartedTasks(status)
+				})
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				applyStartedTasks(&run.Status)
 				if len(started) == 0 && len(failedTasks) > 0 {
 					return ctrl.Result{Requeue: true}, nil
 				}
@@ -2576,6 +2561,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 	now := r.now()
 	gracePeriod := r.taskGracePeriod()
+	maxMessageBytes := r.maxMessageBytes()
 	observations := make(map[string]runningTaskObservation)
 	for _, task := range run.Status.Tasks {
 		if task.Phase != v1alpha1.TaskPhaseRunning {
@@ -2594,9 +2580,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		if !ok {
 			continue
 		}
-		decision := decideRunningTask(task, observation, now, gracePeriod)
+		decision := decideRunningTask(task, observation, now, gracePeriod, maxMessageBytes)
 		if decision.action == runningTaskActionBindServicePortal {
-			decision = r.bindAndDecideRunningTask(ctx, run, task, observation, now, gracePeriod)
+			decision = r.bindAndDecideRunningTask(ctx, run, task, observation, now, gracePeriod, maxMessageBytes)
 		}
 		decisions[task.ID] = decision
 	}
@@ -2629,7 +2615,11 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			logger.Info("restart rescue", "task", task.ID, "run", run.Name, "samples", rescuedSampleCount(task, decision.rescued))
 			hasStatusUpdates = true
 		case runningTaskActionRestart:
-			logger.Info("restarting interrupted in-flight task in fresh sandbox", "task", task.ID, "run", run.Name, "oldSandbox", decision.sandbox.Name)
+			oldSandbox := ""
+			if decision.sandbox != nil {
+				oldSandbox = decision.sandbox.Name
+			}
+			logger.Info("restarting task in fresh sandbox", "task", task.ID, "run", run.Name, "oldSandbox", oldSandbox, "reason", decision.restartReason)
 			hasStatusUpdates = true
 		case runningTaskActionFail:
 			hasStatusUpdates = true
@@ -2808,11 +2798,30 @@ type runningTaskObservation struct {
 type runningTaskDecision struct {
 	action                 runningTaskAction
 	message                string
+	restartReason          string
+	countsAsFailure        bool
 	graceRemaining         time.Duration
 	rescued                *rescuedTaskInfo
 	sandbox                *sandboxv1beta1.Sandbox
 	pod                    *corev1.Pod
 	unmarkServicePortalPod bool
+}
+
+// isOldTaskSandbox reports whether sandbox belongs to an earlier attempt or controller process
+// or is terminating, so it cannot be reused for the task's current Pending attempt.
+func isOldTaskSandbox(sandbox *sandboxv1beta1.Sandbox, controllerInstance string, taskRestarts int) bool {
+	if sandbox.DeletionTimestamp != nil {
+		return true
+	}
+	if sandbox.Annotations[discovery.AnnotationControllerInstance] != controllerInstance {
+		return true
+	}
+	if rawAttempt, ok := sandbox.Annotations[discovery.AnnotationTaskAttempt]; ok {
+		if attempt, err := strconv.Atoi(rawAttempt); err == nil && attempt < taskRestarts {
+			return true
+		}
+	}
+	return false
 }
 
 func (decision runningTaskDecision) updatesStatus() bool {
@@ -2951,11 +2960,44 @@ func (r *RunReconciler) observeTaskPod(ctx context.Context, taskID string, sandb
 	return &pod, true
 }
 
+// decideInfrastructureFailure decides whether an infrastructure failure retries in a fresh sandbox
+// or fails the task terminally once maxTaskAttempts have been exhausted.
+func decideInfrastructureFailure(
+	task v1alpha1.TaskStatus,
+	reason string,
+	sandbox *sandboxv1beta1.Sandbox,
+	pod *corev1.Pod,
+	unmarkServicePortalPod bool,
+	maxMessageBytes int,
+) runningTaskDecision {
+	reason = truncateMessage(reason, maxMessageBytes)
+	attempts := task.FailureAttempts + 1
+	if attempts >= maxTaskAttempts {
+		return runningTaskDecision{
+			action:                 runningTaskActionFail,
+			message:                truncateMessage(fmt.Sprintf("failed after %d attempts: %s", attempts, reason), maxMessageBytes),
+			countsAsFailure:        true,
+			sandbox:                sandbox,
+			pod:                    pod,
+			unmarkServicePortalPod: unmarkServicePortalPod,
+		}
+	}
+	return runningTaskDecision{
+		action:                 runningTaskActionRestart,
+		restartReason:          reason,
+		countsAsFailure:        true,
+		sandbox:                sandbox,
+		pod:                    pod,
+		unmarkServicePortalPod: unmarkServicePortalPod,
+	}
+}
+
 func decideRunningTask(
 	task v1alpha1.TaskStatus,
 	observation runningTaskObservation,
 	now time.Time,
 	gracePeriod time.Duration,
+	maxMessageBytes int,
 ) runningTaskDecision {
 	if observation.sandbox == nil {
 		startedAt := observation.startedAt
@@ -2970,14 +3012,19 @@ func decideRunningTask(
 		if observation.rescued != nil {
 			return runningTaskDecision{action: runningTaskActionRescue, rescued: observation.rescued}
 		}
-		return runningTaskDecision{action: runningTaskActionFail, message: "task sandbox missing while in Running phase"}
+		return decideInfrastructureFailure(task, "task sandbox missing while in Running phase", nil, nil, false, maxMessageBytes)
 	}
 
 	if observation.sandboxDirty {
 		if observation.rescued != nil {
 			return runningTaskDecision{action: runningTaskActionRescue, rescued: observation.rescued}
 		}
-		return runningTaskDecision{action: runningTaskActionRestart, message: "interrupted in-flight task in dirty sandbox", sandbox: observation.sandbox}
+		return runningTaskDecision{
+			action:          runningTaskActionRestart,
+			restartReason:   "controller restart",
+			countsAsFailure: false,
+			sandbox:         observation.sandbox,
+		}
 	}
 
 	if observation.pod == nil || !observation.podUsable {
@@ -2991,13 +3038,27 @@ func decideRunningTask(
 		return runningTaskDecision{action: runningTaskActionBindServicePortal, pod: observation.pod}
 	}
 
-	if failureMessage := runningTaskPodFailure(observation.pod); failureMessage != "" {
-		return runningTaskDecision{action: runningTaskActionFail, message: failureMessage, pod: observation.pod, unmarkServicePortalPod: true}
+	// Setup-step failures (init containers: git clone, git checkout) stay terminal in this slice.
+	if failureMessage := taskPodInitFailureMessage(observation.pod); failureMessage != "" {
+		return runningTaskDecision{
+			action:                 runningTaskActionFail,
+			message:                truncateMessage(failureMessage, maxMessageBytes),
+			sandbox:                observation.sandbox,
+			pod:                    observation.pod,
+			unmarkServicePortalPod: true,
+		}
+	}
+
+	if observation.pod.Status.Phase == corev1.PodFailed {
+		return decideInfrastructureFailure(task, taskPodFailureMessage(observation.pod), observation.sandbox, observation.pod, true, maxMessageBytes)
+	}
+	if observation.pod.Status.Phase == corev1.PodSucceeded {
+		return decideInfrastructureFailure(task, "task pod succeeded unexpectedly before execution", observation.sandbox, observation.pod, true, maxMessageBytes)
 	}
 
 	finishedCondition := meta.FindStatusCondition(observation.sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
 	if finishedCondition != nil && finishedCondition.Status == metav1.ConditionTrue {
-		return runningTaskDecision{action: runningTaskActionFail, message: fmt.Sprintf("task sandbox finished: %s", finishedCondition.Message)}
+		return decideInfrastructureFailure(task, fmt.Sprintf("task sandbox finished: %s", finishedCondition.Message), observation.sandbox, observation.pod, false, maxMessageBytes)
 	}
 
 	sandboxReady := meta.IsStatusConditionTrue(observation.sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
@@ -3008,16 +3069,6 @@ func decideRunningTask(
 	return runningTaskDecision{action: runningTaskActionWait}
 }
 
-func runningTaskPodFailure(pod *corev1.Pod) string {
-	if pod.Status.Phase == corev1.PodFailed {
-		return taskPodFailureMessage(pod)
-	}
-	if pod.Status.Phase == corev1.PodSucceeded {
-		return "task pod succeeded unexpectedly before execution"
-	}
-	return taskPodInitFailureMessage(pod)
-}
-
 func (r *RunReconciler) bindAndDecideRunningTask(
 	ctx context.Context,
 	run *v1alpha1.Run,
@@ -3025,19 +3076,17 @@ func (r *RunReconciler) bindAndDecideRunningTask(
 	observation runningTaskObservation,
 	now time.Time,
 	gracePeriod time.Duration,
+	maxMessageBytes int,
 ) runningTaskDecision {
 	bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	bindError := r.bindServicePortalPolicy(bindContext, string(observation.pod.UID))
 	bindCancel()
 	if bindError != nil {
-		return runningTaskDecision{
-			action:  runningTaskActionFail,
-			message: bindError.Error(),
-		}
+		return decideInfrastructureFailure(task, bindError.Error(), observation.sandbox, observation.pod, false, maxMessageBytes)
 	}
 	r.markServicePortalPodBound(observation.pod.UID)
 	observation.servicePortalBound = true
-	return decideRunningTask(task, observation, now, gracePeriod)
+	return decideRunningTask(task, observation, now, gracePeriod, maxMessageBytes)
 }
 
 func applyRunningTaskDecisions(status *v1alpha1.RunStatus, decisions map[string]runningTaskDecision, now metav1.Time) {
@@ -3061,11 +3110,19 @@ func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDec
 		task.Phase = v1alpha1.TaskPhaseFailed
 		task.Message = decision.message
 		task.FinishedAt = &now
+		if decision.countsAsFailure {
+			task.FailureAttempts++
+		}
 	case runningTaskActionRescue:
 		applyRescuedTaskStatus(task, decision.rescued)
 	case runningTaskActionRestart:
 		task.Phase = v1alpha1.TaskPhasePending
 		task.Restarts++
+		if decision.countsAsFailure {
+			task.FailureAttempts++
+		}
+		task.RestartReason = decision.restartReason
+		task.Message = ""
 		task.StartedAt = nil
 		task.SamplesDone = 0
 		task.LastProgressAt = nil

@@ -91,6 +91,9 @@ const (
 	// AnnotationControllerInstance tracks the controller instance that created the sandbox.
 	AnnotationControllerInstance = "evalrunner.gke-labs.dev/controller-instance"
 
+	// AnnotationTaskAttempt tracks the attempt number (restarts count) of the task when the sandbox was created.
+	AnnotationTaskAttempt = "evalrunner.gke-labs.dev/task-attempt"
+
 	// LabelServicePortalIntercept is the pod label opting the sandbox into NRI service portal interception.
 	LabelServicePortalIntercept = "service-portal.gke.io/intercept"
 
@@ -215,6 +218,7 @@ func TaskSandboxNameForRun(runName, taskID string) string {
 type TaskSandboxConfig struct {
 	Namespace              string
 	ControllerInstance     string
+	TaskAttempt            int
 	SampleRunnerImage      string
 	Image                  string
 	AuthTokenDigest        string
@@ -313,7 +317,8 @@ func BuildTaskSandbox(run *v1alpha1.Run, taskID string, cfg TaskSandboxConfig) *
 	}
 
 	annotations := map[string]string{
-		AnnotationTaskID: taskID,
+		AnnotationTaskID:      taskID,
+		AnnotationTaskAttempt: strconv.Itoa(cfg.TaskAttempt),
 	}
 	if cfg.ControllerInstance != "" {
 		annotations[AnnotationControllerInstance] = cfg.ControllerInstance
