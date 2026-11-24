@@ -2445,7 +2445,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 		decision := decideRunningTask(task, observation, now, gracePeriod, maxMessageBytes)
 		if decision.action == runningTaskActionBindServicePortal {
-			decision = r.bindAndDecideRunningTask(ctx, run, task, observation, now, gracePeriod, maxMessageBytes)
+			decision = r.bindAndDecideRunningTask(ctx, run, manifest, task, observation, now, gracePeriod, maxMessageBytes)
 		}
 		decisions[task.ID] = decision
 	}
@@ -3120,6 +3120,7 @@ func decideRunningTask(
 func (r *RunReconciler) bindAndDecideRunningTask(
 	ctx context.Context,
 	run *v1alpha1.Run,
+	manifest *v1alpha1.Manifest,
 	task v1alpha1.TaskStatus,
 	observation runningTaskObservation,
 	now time.Time,
@@ -3130,18 +3131,33 @@ func (r *RunReconciler) bindAndDecideRunningTask(
 	r.cfgMu.RLock()
 	servicePortalOptions := r.Config.ServicePortal
 	r.cfgMu.RUnlock()
-	policy := BuildServicePortalEgressPolicy(servicePortalOptions)
-	logger.Info("Binding service portal policy", "task", task.ID, "podUID", observation.pod.UID, "node", observation.pod.Spec.NodeName,
-		"httpsHostsCount", len(servicePortalOptions.AllowedHosts), "httpHostsCount", len(servicePortalOptions.AllowedHTTPHosts),
-		"httpsHosts", truncateHostList(servicePortalOptions.AllowedHosts, 5), "httpHosts", truncateHostList(servicePortalOptions.AllowedHTTPHosts, 5))
 	bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-	bindError := r.bindServicePortalPolicy(bindContext, string(observation.pod.UID), policy)
-	bindCancel()
-	if bindError != nil {
+	defer bindCancel()
+
+	policy, secrets, modelCredential, prepareError := r.prepareServicePortalBinding(bindContext, run, manifest, task.ID, servicePortalOptions)
+	if prepareError != nil {
+		logger.Error(prepareError, "Failed to prepare service portal binding", "task", task.ID, "podUID", observation.pod.UID)
+		return decideInfrastructureFailure(task, prepareError.Error(), observation.sandbox, observation.pod, false, maxMessageBytes)
+	}
+	logFields := []any{
+		"task", task.ID,
+		"podUID", observation.pod.UID,
+		"node", observation.pod.Spec.NodeName,
+		"httpsHostsCount", len(servicePortalOptions.AllowedHosts),
+		"httpHostsCount", len(servicePortalOptions.AllowedHTTPHosts),
+		"httpsHosts", truncateHostList(servicePortalOptions.AllowedHosts, 5),
+		"httpHosts", truncateHostList(servicePortalOptions.AllowedHTTPHosts, 5),
+		"modelCredentialInjected", modelCredential != nil,
+	}
+	if modelCredential != nil {
+		logFields = append(logFields, "modelHost", modelCredential.Host, "modelHeader", modelCredential.Header)
+	}
+	logger.Info("Binding service portal policy", logFields...)
+	if bindError := r.bindServicePortalPolicy(bindContext, string(observation.pod.UID), policy, secrets, modelCredential); bindError != nil {
 		logger.Error(bindError, "Failed to bind service portal policy", "task", task.ID, "podUID", observation.pod.UID)
 		return decideInfrastructureFailure(task, bindError.Error(), observation.sandbox, observation.pod, false, maxMessageBytes)
 	}
-	logger.Info("Successfully bound service portal policy", "task", task.ID, "podUID", observation.pod.UID)
+	logger.Info("Successfully bound service portal policy", "task", task.ID, "podUID", observation.pod.UID, "modelCredentialInjected", modelCredential != nil)
 	r.markServicePortalPodBound(observation.pod.UID)
 	observation.servicePortalBound = true
 	return decideRunningTask(task, observation, now, gracePeriod, maxMessageBytes)
@@ -3919,6 +3935,9 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 
 	inspectCmd := InspectEvalArgs(*targetTask, run.Spec)
+	if modelBaseURL := r.servicePortalModelBaseURL(); modelBaseURL != "" && !isMockModel(run.Spec.Model) {
+		inspectCmd = append(inspectCmd, "--model-base-url", modelBaseURL)
+	}
 
 	logger.Info("Starting task step 3: inspect eval", "command", inspectCmd, "cwd", cwd)
 

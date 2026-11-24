@@ -105,6 +105,8 @@ const (
 	ConfigMapKeyServicePortalAllowedHosts = configkeys.ConfigMapKeyServicePortalAllowedHosts
 	// ConfigMapKeyServicePortalAllowedHTTPHosts is the ConfigMap key for comma-separated allowed cleartext HTTP egress hosts for the service portal.
 	ConfigMapKeyServicePortalAllowedHTTPHosts = configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts
+	// ConfigMapKeyServicePortalModelBaseURL is the ConfigMap key for an optional custom model API base URL routed through the service portal.
+	ConfigMapKeyServicePortalModelBaseURL = configkeys.ConfigMapKeyServicePortalModelBaseURL
 )
 
 const (
@@ -167,6 +169,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyServicePortalTokenFile:         {},
 	configkeys.ConfigMapKeyServicePortalAllowedHosts:      {},
 	configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts:  {},
+	configkeys.ConfigMapKeyServicePortalModelBaseURL:      {},
 
 	// Workload Identity Federation
 	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
@@ -899,6 +902,14 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				}
 			}
 		}
+		if val, ok := cm.Data[ConfigMapKeyServicePortalModelBaseURL]; ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed == "" || strings.EqualFold(trimmed, "disabled") || strings.EqualFold(trimmed, ConfigSentinelDisabled) || strings.EqualFold(trimmed, "none") {
+				cfg.ServicePortal.ModelBaseURL = ""
+			} else {
+				cfg.ServicePortal.ModelBaseURL = trimmed
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -1123,6 +1134,7 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"sandboxdImage", resolved.SandboxdImage,
 		"taskGracePeriod", resolved.TaskGracePeriod,
 		"sandboxEgressHosts", strings.Join(resolved.SandboxEgressHosts, ","),
+		"servicePortalModelBaseURL", resolved.ServicePortal.ModelBaseURL,
 		"headTopUpInterval", resolved.HeadTopUpInterval,
 		"headTargetCIHalfWidth", resolved.HeadTargetCIHalfWidth,
 		"headMaxSamplesPerTask", resolved.HeadMaxSamplesPerTask,
