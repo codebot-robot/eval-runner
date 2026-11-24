@@ -6588,7 +6588,7 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 				TaskIDs:           []string{"task-missing"},
 			},
 			Tasks: []v1alpha1.TaskStatus{
-				{ID: "task-missing", Phase: v1alpha1.TaskPhaseRunning},
+				{ID: "task-missing", Phase: v1alpha1.TaskPhaseRunning, FailureAttempts: 2},
 			},
 		},
 	}
@@ -6622,8 +6622,14 @@ func TestReconcileRunningTaskWithMissingSandboxFailsFast(t *testing.T) {
 	if tMissing.Phase != v1alpha1.TaskPhaseFailed {
 		t.Errorf("Expected task to fail fast when sandbox missing, got phase %s", tMissing.Phase)
 	}
+	if tMissing.FailureAttempts != 3 {
+		t.Errorf("Expected FailureAttempts 3, got %d", tMissing.FailureAttempts)
+	}
 	if !strings.Contains(tMissing.Message, "task sandbox missing") {
 		t.Errorf("Expected failure message to mention sandbox missing, got: %s", tMissing.Message)
+	}
+	if !strings.Contains(tMissing.Message, "failed after 3 attempts") {
+		t.Errorf("Expected failure message to mention attempts, got: %s", tMissing.Message)
 	}
 }
 
@@ -6747,10 +6753,11 @@ func TestReconcileRunningTask_RestartRescue(t *testing.T) {
 				},
 				Tasks: []v1alpha1.TaskStatus{
 					{
-						ID:             "task-zero",
-						Phase:          v1alpha1.TaskPhaseRunning,
-						Samples:        0,
-						SamplesPlanned: 8,
+						ID:              "task-zero",
+						Phase:           v1alpha1.TaskPhaseRunning,
+						FailureAttempts: 2,
+						Samples:         0,
+						SamplesPlanned:  8,
 					},
 				},
 			},
@@ -7223,11 +7230,12 @@ func TestReconcileRunningTask_RestartRescueFromReadableLog(t *testing.T) {
 				},
 				Tasks: []v1alpha1.TaskStatus{
 					{
-						ID:             "task-missing-log",
-						Phase:          v1alpha1.TaskPhaseRunning,
-						Samples:        0,
-						SamplesPlanned: 2,
-						LogPath:        "mem://runs/nonexistent/inspect.json",
+						ID:              "task-missing-log",
+						Phase:           v1alpha1.TaskPhaseRunning,
+						FailureAttempts: 2,
+						Samples:         0,
+						SamplesPlanned:  2,
+						LogPath:         "mem://runs/nonexistent/inspect.json",
 					},
 				},
 			},
@@ -7567,11 +7575,12 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 				},
 				Tasks: []v1alpha1.TaskStatus{
 					{
-						ID:             "task-probe-rescue",
-						Phase:          v1alpha1.TaskPhaseRunning,
-						Samples:        0,
-						SamplesPlanned: 2,
-						LogPath:        "",
+						ID:              "task-probe-rescue",
+						Phase:           v1alpha1.TaskPhaseRunning,
+						FailureAttempts: 2,
+						Samples:         0,
+						SamplesPlanned:  2,
+						LogPath:         "",
 					},
 				},
 			},
@@ -7658,11 +7667,12 @@ func TestReconcileRunningTask_RestartRescueFromDerivedLogPath(t *testing.T) {
 				},
 				Tasks: []v1alpha1.TaskStatus{
 					{
-						ID:             "task-probe-rescue",
-						Phase:          v1alpha1.TaskPhaseRunning,
-						Samples:        0,
-						SamplesPlanned: 2,
-						LogPath:        "",
+						ID:              "task-probe-rescue",
+						Phase:           v1alpha1.TaskPhaseRunning,
+						FailureAttempts: 2,
+						Samples:         0,
+						SamplesPlanned:  2,
+						LogPath:         "",
 					},
 				},
 			},
@@ -8010,15 +8020,21 @@ func TestReconcileRunningTaskSandboxCacheLagGracePeriodAndExpiry(t *testing.T) {
 		t.Fatalf("Turn 3 reconcile error: %v", err)
 	}
 
-	// Verify task now fails terminal
+	// Verify task now restarts in fresh sandbox
 	if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
 		t.Fatalf("Failed to get run after Turn 3: %v", err)
 	}
-	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
-		t.Errorf("Expected task to fail after grace period elapsed, got %s", updatedRun.Status.Tasks[0].Phase)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhasePending {
+		t.Errorf("Expected task to restart to Pending after grace period elapsed, got %s", updatedRun.Status.Tasks[0].Phase)
 	}
-	if !strings.Contains(updatedRun.Status.Tasks[0].Message, "task sandbox missing") {
-		t.Errorf("Expected failure message to mention sandbox missing, got: %s", updatedRun.Status.Tasks[0].Message)
+	if updatedRun.Status.Tasks[0].Restarts != 1 {
+		t.Errorf("Expected task Restarts 1, got %d", updatedRun.Status.Tasks[0].Restarts)
+	}
+	if updatedRun.Status.Tasks[0].FailureAttempts != 1 {
+		t.Errorf("Expected task FailureAttempts 1, got %d", updatedRun.Status.Tasks[0].FailureAttempts)
+	}
+	if !strings.Contains(updatedRun.Status.Tasks[0].RestartReason, "task sandbox missing") {
+		t.Errorf("Expected restart reason to mention sandbox missing, got: %s", updatedRun.Status.Tasks[0].RestartReason)
 	}
 }
 
@@ -8261,7 +8277,7 @@ func TestReconcileRunningTaskSandboxCacheLagDirectAPIReader(t *testing.T) {
 	}
 }
 
-func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T) {
+func TestReconcileRunningTaskGenuinelyDeletedRestartsAfterGracePeriod(t *testing.T) {
 	scheme := setupScheme(t)
 
 	startTime := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
@@ -8342,7 +8358,7 @@ func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T)
 		t.Errorf("Expected task to remain Running within grace period, got %s", updatedRun.Status.Tasks[0].Phase)
 	}
 
-	// Turn 3: Reconcile at t = 35s (past grace period). Task must now fail.
+	// Turn 3: Reconcile at t = 35s (past grace period). Genuinely deleted sandbox now causes task to restart in fresh sandbox.
 	currentTime = startTime.Add(35 * time.Second)
 	_, err = reconciler.Reconcile(t.Context(), req)
 	if err != nil {
@@ -8350,11 +8366,17 @@ func TestReconcileRunningTaskGenuinelyDeletedFailsAfterGracePeriod(t *testing.T)
 	}
 
 	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
-		t.Errorf("Expected genuinely deleted sandbox to fail task after grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhasePending {
+		t.Errorf("Expected genuinely deleted sandbox to restart task to Pending after grace period, got %s", updatedRun.Status.Tasks[0].Phase)
 	}
-	if !strings.Contains(updatedRun.Status.Tasks[0].Message, "task sandbox missing") {
-		t.Errorf("Expected failure message to mention sandbox missing, got: %s", updatedRun.Status.Tasks[0].Message)
+	if updatedRun.Status.Tasks[0].Restarts != 1 {
+		t.Errorf("Expected task Restarts 1, got %d", updatedRun.Status.Tasks[0].Restarts)
+	}
+	if updatedRun.Status.Tasks[0].FailureAttempts != 1 {
+		t.Errorf("Expected task FailureAttempts 1, got %d", updatedRun.Status.Tasks[0].FailureAttempts)
+	}
+	if !strings.Contains(updatedRun.Status.Tasks[0].RestartReason, "task sandbox missing") {
+		t.Errorf("Expected restart reason to mention sandbox missing, got: %s", updatedRun.Status.Tasks[0].RestartReason)
 	}
 }
 
@@ -8434,7 +8456,7 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 		t.Errorf("Expected task to remain Running within grace period, got %s", updatedRun.Status.Tasks[0].Phase)
 	}
 
-	// At t = 35s (past grace period): fails
+	// At t = 35s (past grace period): restarts
 	currentTime = startTime.Add(35 * time.Second)
 	_, err = reconciler.Reconcile(t.Context(), req)
 	if err != nil {
@@ -8442,8 +8464,17 @@ func TestReconcileRunningTaskGracePeriodFromSecretCreationTimestamp(t *testing.T
 	}
 
 	_ = cl.Get(t.Context(), req.NamespacedName, &updatedRun)
-	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed {
-		t.Errorf("Expected task to fail after grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhasePending {
+		t.Errorf("Expected task to restart to Pending after grace period, got %s", updatedRun.Status.Tasks[0].Phase)
+	}
+	if updatedRun.Status.Tasks[0].Restarts != 1 {
+		t.Errorf("Expected task Restarts 1, got %d", updatedRun.Status.Tasks[0].Restarts)
+	}
+	if updatedRun.Status.Tasks[0].FailureAttempts != 1 {
+		t.Errorf("Expected task FailureAttempts 1, got %d", updatedRun.Status.Tasks[0].FailureAttempts)
+	}
+	if !strings.Contains(updatedRun.Status.Tasks[0].RestartReason, "task sandbox missing") {
+		t.Errorf("Expected restart reason to mention sandbox missing, got: %s", updatedRun.Status.Tasks[0].RestartReason)
 	}
 }
 
@@ -13181,13 +13212,15 @@ func TestDecideRunningTask(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name               string
-		task               v1alpha1.TaskStatus
-		observation        runningTaskObservation
-		wantAction         runningTaskAction
-		wantMessage        string
-		wantGraceRemaining time.Duration
-		wantUnmark         bool
+		name                string
+		task                v1alpha1.TaskStatus
+		observation         runningTaskObservation
+		wantAction          runningTaskAction
+		wantMessage         string
+		wantRestartReason   string
+		wantCountsAsFailure bool
+		wantGraceRemaining  time.Duration
+		wantUnmark          bool
 	}{
 		{
 			name:               "missing sandbox within grace period from task StartedAt",
@@ -13209,10 +13242,18 @@ func TestDecideRunningTask(t *testing.T) {
 			wantAction:  runningTaskActionRescue,
 		},
 		{
-			name:        "missing sandbox past grace period fails",
-			task:        v1alpha1.TaskStatus{ID: "task-1", StartedAt: &startedPastGrace},
-			wantAction:  runningTaskActionFail,
-			wantMessage: "task sandbox missing while in Running phase",
+			name:                "missing sandbox past grace period retries",
+			task:                v1alpha1.TaskStatus{ID: "task-1", StartedAt: &startedPastGrace},
+			wantAction:          runningTaskActionRestart,
+			wantRestartReason:   "task sandbox missing while in Running phase",
+			wantCountsAsFailure: true,
+		},
+		{
+			name:                "missing sandbox past grace period fails after max attempts",
+			task:                v1alpha1.TaskStatus{ID: "task-1", StartedAt: &startedPastGrace, FailureAttempts: 2},
+			wantAction:          runningTaskActionFail,
+			wantMessage:         "failed after 3 attempts: task sandbox missing while in Running phase",
+			wantCountsAsFailure: true,
 		},
 		{
 			name:        "dirty sandbox rescued",
@@ -13221,10 +13262,12 @@ func TestDecideRunningTask(t *testing.T) {
 			wantAction:  runningTaskActionRescue,
 		},
 		{
-			name:        "dirty sandbox restarts",
-			task:        v1alpha1.TaskStatus{ID: "task-1"},
-			observation: runningTaskObservation{sandbox: cleanSandbox, sandboxDirty: true},
-			wantAction:  runningTaskActionRestart,
+			name:                "dirty sandbox restarts without counting toward failure bound",
+			task:                v1alpha1.TaskStatus{ID: "task-1", FailureAttempts: 2},
+			observation:         runningTaskObservation{sandbox: cleanSandbox, sandboxDirty: true},
+			wantAction:          runningTaskActionRestart,
+			wantRestartReason:   "controller restart",
+			wantCountsAsFailure: false,
 		},
 		{
 			name:        "pod not yet created waits",
@@ -13261,37 +13304,52 @@ func TestDecideRunningTask(t *testing.T) {
 			wantAction: runningTaskActionBindServicePortal,
 		},
 		{
-			name: "failed pod fails and unmarks service portal binding",
+			name: "failed pod retries and unmarks service portal binding",
 			task: v1alpha1.TaskStatus{ID: "task-1"},
 			observation: runningTaskObservation{
 				sandbox:   cleanSandbox,
 				pod:       &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
 				podUsable: true,
 			},
-			wantAction:  runningTaskActionFail,
-			wantMessage: "task pod failed",
-			wantUnmark:  true,
+			wantAction:          runningTaskActionRestart,
+			wantRestartReason:   "task pod failed",
+			wantCountsAsFailure: true,
+			wantUnmark:          true,
 		},
 		{
-			name: "succeeded pod fails and unmarks service portal binding",
+			name: "failed pod fails after max attempts and unmarks service portal binding",
+			task: v1alpha1.TaskStatus{ID: "task-1", FailureAttempts: 2},
+			observation: runningTaskObservation{
+				sandbox:   cleanSandbox,
+				pod:       &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+				podUsable: true,
+			},
+			wantAction:          runningTaskActionFail,
+			wantMessage:         "failed after 3 attempts: task pod failed",
+			wantCountsAsFailure: true,
+			wantUnmark:          true,
+		},
+		{
+			name: "succeeded pod retries and unmarks service portal binding",
 			task: v1alpha1.TaskStatus{ID: "task-1"},
 			observation: runningTaskObservation{
 				sandbox:   cleanSandbox,
 				pod:       &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 				podUsable: true,
 			},
-			wantAction:  runningTaskActionFail,
-			wantMessage: "task pod succeeded unexpectedly before execution",
-			wantUnmark:  true,
+			wantAction:          runningTaskActionRestart,
+			wantRestartReason:   "task pod succeeded unexpectedly before execution",
+			wantCountsAsFailure: true,
+			wantUnmark:          true,
 		},
 		{
-			name: "init container failure fails and unmarks service portal binding",
+			name: "init container failure stays terminal even on failed pod",
 			task: v1alpha1.TaskStatus{ID: "task-1"},
 			observation: runningTaskObservation{
 				sandbox: cleanSandbox,
 				pod: &corev1.Pod{
 					Status: corev1.PodStatus{
-						Phase: corev1.PodPending,
+						Phase: corev1.PodFailed,
 						InitContainerStatuses: []corev1.ContainerStatus{
 							{
 								Name: "clone",
@@ -13304,20 +13362,34 @@ func TestDecideRunningTask(t *testing.T) {
 				},
 				podUsable: true,
 			},
-			wantAction:  runningTaskActionFail,
-			wantMessage: "clone failed",
-			wantUnmark:  true,
+			wantAction:          runningTaskActionFail,
+			wantMessage:         "clone failed",
+			wantCountsAsFailure: false,
+			wantUnmark:          true,
 		},
 		{
-			name: "finished sandbox fails",
+			name: "finished sandbox retries",
 			task: v1alpha1.TaskStatus{ID: "task-1"},
 			observation: runningTaskObservation{
 				sandbox:   finishedSandbox,
 				pod:       runningPod,
 				podUsable: true,
 			},
-			wantAction:  runningTaskActionFail,
-			wantMessage: "task sandbox finished: pod exited",
+			wantAction:          runningTaskActionRestart,
+			wantRestartReason:   "task sandbox finished: pod exited",
+			wantCountsAsFailure: true,
+		},
+		{
+			name: "finished sandbox fails after max attempts",
+			task: v1alpha1.TaskStatus{ID: "task-1", FailureAttempts: 2},
+			observation: runningTaskObservation{
+				sandbox:   finishedSandbox,
+				pod:       runningPod,
+				podUsable: true,
+			},
+			wantAction:          runningTaskActionFail,
+			wantMessage:         "failed after 3 attempts: task sandbox finished: pod exited",
+			wantCountsAsFailure: true,
 		},
 		{
 			name: "ready sandbox with pod IP executes",
@@ -13353,12 +13425,18 @@ func TestDecideRunningTask(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			decision := decideRunningTask(testCase.task, testCase.observation, now, gracePeriod)
+			decision := decideRunningTask(testCase.task, testCase.observation, now, gracePeriod, discovery.MaxMessageBytes)
 			if decision.action != testCase.wantAction {
 				t.Errorf("action = %q, want %q", decision.action, testCase.wantAction)
 			}
 			if testCase.wantMessage != "" && decision.message != testCase.wantMessage {
 				t.Errorf("message = %q, want %q", decision.message, testCase.wantMessage)
+			}
+			if testCase.wantRestartReason != "" && decision.restartReason != testCase.wantRestartReason {
+				t.Errorf("restartReason = %q, want %q", decision.restartReason, testCase.wantRestartReason)
+			}
+			if decision.countsAsFailure != testCase.wantCountsAsFailure {
+				t.Errorf("countsAsFailure = %v, want %v", decision.countsAsFailure, testCase.wantCountsAsFailure)
 			}
 			if decision.graceRemaining != testCase.wantGraceRemaining {
 				t.Errorf("graceRemaining = %v, want %v", decision.graceRemaining, testCase.wantGraceRemaining)

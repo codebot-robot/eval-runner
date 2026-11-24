@@ -1701,12 +1701,18 @@ spec:
 			t.Fatalf("expected task docs/readme_comprehension_blind in status.tasks: %+v", runObj.Status.Tasks)
 		}
 
-		// Assert in-flight task finished in clean sandbox with incremented restarts and valid samples
+		// Assert in-flight task finished in clean sandbox with incremented restarts, zero failureAttempts, and valid samples
 		if task.Phase != v1alpha1.TaskPhaseCompleted {
 			t.Errorf("task expected Completed, got %s (message: %s)", task.Phase, task.Message)
 		}
 		if task.Restarts != 1 {
 			t.Errorf("task expected 1 restart, got %d", task.Restarts)
+		}
+		if task.FailureAttempts != 0 {
+			t.Errorf("task expected 0 failureAttempts, got %d", task.FailureAttempts)
+		}
+		if task.RestartReason != "controller restart" {
+			t.Errorf("task expected restartReason 'controller restart', got %q", task.RestartReason)
 		}
 		if task.Samples == 0 || task.SamplesDone != task.Samples {
 			t.Errorf("task expected samples > 0 and samplesDone == samples, got samples=%d, samplesDone=%d", task.Samples, task.SamplesDone)

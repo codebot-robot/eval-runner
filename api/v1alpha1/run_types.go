@@ -206,6 +206,15 @@ type TaskStatus struct {
 	// Restarts records the number of times the task was restarted after being interrupted.
 	// +optional
 	Restarts int `json:"restarts,omitempty"`
+
+	// FailureAttempts records the number of attempts that failed due to infrastructure issues.
+	// Controller restarts do not count toward this limit.
+	// +optional
+	FailureAttempts int `json:"failureAttempts,omitempty"`
+
+	// RestartReason records the reason why the last task restart occurred.
+	// +optional
+	RestartReason string `json:"restartReason,omitempty"`
 }
 
 // TaskResources describes compute resource requirements and limits for a task container.
