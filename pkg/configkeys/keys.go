@@ -81,6 +81,8 @@ const (
 	ConfigMapKeyServicePortalAllowedHosts = "servicePortalAllowedHosts"
 	// ConfigMapKeyServicePortalAllowedHTTPHosts is the ConfigMap key for comma-separated allowed cleartext HTTP egress hosts for the service portal.
 	ConfigMapKeyServicePortalAllowedHTTPHosts = "servicePortalAllowedHTTPHosts"
+	// ConfigMapKeyServicePortalModelBaseURL is the ConfigMap key for an optional custom model API base URL routed through the service portal.
+	ConfigMapKeyServicePortalModelBaseURL = "servicePortalModelBaseURL"
 
 	// Webhook keys
 

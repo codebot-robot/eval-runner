@@ -3219,6 +3219,42 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 			t.Errorf("expected nil ServicePortal.AllowedHTTPHosts, got %v", cfg.ServicePortal.AllowedHTTPHosts)
 		}
 	})
+
+	t.Run("model base URL parsed and validated from configmap", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalModelBaseURL: "http://model-standin.eval-runner-sandbox.svc.cluster.local",
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := "http://model-standin.eval-runner-sandbox.svc.cluster.local"
+		if cfg.ServicePortal.ModelBaseURL != want {
+			t.Errorf("ServicePortal.ModelBaseURL = %q, want %q", cfg.ServicePortal.ModelBaseURL, want)
+		}
+		if err := cfg.ServicePortal.Validate(); err != nil {
+			t.Errorf("expected valid ServicePortal options, got %v", err)
+		}
+	})
+
+	t.Run("none sentinel clears model base URL", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalModelBaseURL: "none",
+			},
+		}
+		cfg, err := ResolveConfig(cm, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ServicePortal.ModelBaseURL != "" {
+			t.Errorf("expected empty ServicePortal.ModelBaseURL, got %q", cfg.ServicePortal.ModelBaseURL)
+		}
+	})
 }
 
 func TestDefaultModelConfig(t *testing.T) {

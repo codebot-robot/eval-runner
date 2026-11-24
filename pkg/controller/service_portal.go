@@ -18,10 +18,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
 
+	"github.com/gke-labs/eval-runner/api/v1alpha1"
+	"github.com/gke-labs/eval-runner/pkg/modelclient/gemini"
 	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+)
+
+const (
+	// DefaultModelCredentialsSecretName is the Secret in the controller's namespace
+	// holding model API keys for agent tasks and service portal credential injection.
+	DefaultModelCredentialsSecretName = "model-credentials"
+
+	servicePortalCredentialURIScheme = "secret://"
 )
 
 // DefaultServicePortalAllowedHosts defines the default allowed hostnames for task sandboxes behind the service portal:
@@ -79,6 +94,119 @@ type ServicePortalOptions struct {
 
 	// AllowedHTTPHosts is the list of allowed cleartext HTTP egress hostnames for the service portal.
 	AllowedHTTPHosts []string
+
+	// ModelBaseURL optionally overrides the model API base URL for sample-runner tasks
+	// and targets the service portal credential replacement rule at that endpoint.
+	ModelBaseURL string
+}
+
+// ServicePortalModelCredential describes how a model provider's API credential is
+// injected on egress by the service portal.
+type ServicePortalModelCredential struct {
+	Host           string
+	Protocol       string
+	Port           int32
+	Header         string
+	Prefix         string
+	SecretKey      string
+	CredentialName string
+}
+
+var modelCredentialProviders = []struct {
+	matches    func(model string) bool
+	credential ServicePortalModelCredential
+}{
+	{
+		matches: isGoogleModel,
+		credential: ServicePortalModelCredential{
+			Host:           "generativelanguage.googleapis.com",
+			Protocol:       "https",
+			Header:         "x-goog-api-key",
+			SecretKey:      "GEMINI_API_KEY",
+			CredentialName: "gemini-api-key",
+		},
+	},
+	{
+		matches: func(model string) bool {
+			return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "openai/")
+		},
+		credential: ServicePortalModelCredential{
+			Host:           "api.openai.com",
+			Protocol:       "https",
+			Header:         "Authorization",
+			Prefix:         "Bearer ",
+			SecretKey:      "OPENAI_API_KEY",
+			CredentialName: "openai-api-key",
+		},
+	},
+	{
+		matches: func(model string) bool {
+			return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "anthropic/")
+		},
+		credential: ServicePortalModelCredential{
+			Host:           "api.anthropic.com",
+			Protocol:       "https",
+			Header:         "x-api-key",
+			SecretKey:      "ANTHROPIC_API_KEY",
+			CredentialName: "anthropic-api-key",
+		},
+	},
+}
+
+func isGoogleModel(model string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(trimmed, "google/") || gemini.IsGeminiModel(model)
+}
+
+func parseServicePortalModelBaseURL(rawURL string) (protocol string, host string, port int32, err error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", "", 0, fmt.Errorf("invalid service portal model base URL %q: %w", rawURL, err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", "", 0, fmt.Errorf("invalid service portal model base URL %q: scheme must be http or https", rawURL)
+	}
+	if parsed.User != nil {
+		return "", "", 0, fmt.Errorf("invalid service portal model base URL %q: userinfo is not allowed", rawURL)
+	}
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "" {
+		return "", "", 0, fmt.Errorf("invalid service portal model base URL %q: hostname is required", rawURL)
+	}
+	var parsedPort int32
+	if portText := parsed.Port(); portText != "" {
+		portNumber, parseErr := strconv.ParseUint(portText, 10, 16)
+		if parseErr != nil || portNumber == 0 {
+			return "", "", 0, fmt.Errorf("invalid service portal model base URL %q: invalid port %q", rawURL, portText)
+		}
+		parsedPort = int32(portNumber)
+	}
+	return scheme, hostname, parsedPort, nil
+}
+
+// ModelCredentialForModel returns the service portal credential mapping for a real model.
+// Mock and unrecognized models return ok=false.
+func ModelCredentialForModel(model string, modelBaseURL string) (ServicePortalModelCredential, bool, error) {
+	if strings.TrimSpace(model) == "" || isMockModel(model) {
+		return ServicePortalModelCredential{}, false, nil
+	}
+	for _, provider := range modelCredentialProviders {
+		if provider.matches(model) {
+			credential := provider.credential
+			if strings.TrimSpace(modelBaseURL) != "" {
+				protocol, host, port, err := parseServicePortalModelBaseURL(modelBaseURL)
+				if err != nil {
+					return ServicePortalModelCredential{}, false, err
+				}
+				credential.Protocol = protocol
+				credential.Host = host
+				credential.Port = port
+			}
+			return credential, true, nil
+		}
+	}
+	return ServicePortalModelCredential{}, false, nil
 }
 
 // ClientOptions returns the serviceportalclient.Options corresponding to the service portal configuration.
@@ -100,33 +228,204 @@ func (options ServicePortalOptions) Validate() error {
 			return errors.New("service portal token file is required when controller address is set")
 		}
 	}
+	if strings.TrimSpace(options.ModelBaseURL) != "" {
+		if _, _, _, err := parseServicePortalModelBaseURL(options.ModelBaseURL); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // BuildServicePortalEgressPolicy constructs an EgressPolicy proto for the given service portal options.
 // The HTTP rule is populated with options.AllowedHTTPHosts; the HTTPS rule is populated with options.AllowedHosts.
 func BuildServicePortalEgressPolicy(options ServicePortalOptions) *portalsv1.EgressPolicy {
-	if len(options.AllowedHosts) == 0 && len(options.AllowedHTTPHosts) == 0 {
+	return BuildServicePortalEgressPolicyWithCredential(options, nil)
+}
+
+// BuildServicePortalEgressPolicyWithCredential constructs an EgressPolicy proto for the given service portal options
+// and optional model credential rule replacing the provider's API key header from per-pod injected secrets.
+func BuildServicePortalEgressPolicyWithCredential(
+	options ServicePortalOptions,
+	modelCredential *ServicePortalModelCredential,
+) *portalsv1.EgressPolicy {
+	httpHosts := append([]string(nil), options.AllowedHTTPHosts...)
+	httpsHosts := append([]string(nil), options.AllowedHosts...)
+
+	var credentialRule *portalsv1.EgressRule
+	if modelCredential != nil {
+		credentialHost := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(modelCredential.Host)), ".")
+		isHTTP := strings.EqualFold(modelCredential.Protocol, "http")
+		effectivePort := modelCredential.Port
+		if effectivePort == 0 {
+			if isHTTP {
+				effectivePort = 80
+			} else {
+				effectivePort = 443
+			}
+		}
+		// Remove exact duplicates on the same port from the plain allow lists so EgressPolicy.Validate() sees no ties.
+		if effectivePort == 80 {
+			httpHosts = filterOutHostname(httpHosts, credentialHost)
+		}
+		if effectivePort == 443 {
+			httpsHosts = filterOutHostname(httpsHosts, credentialHost)
+		}
+
+		effects := &portalsv1.HttpRuleEffects{
+			ReplaceHeaders: []*portalsv1.CredentialHeader{
+				{
+					Header:        modelCredential.Header,
+					Prefix:        modelCredential.Prefix,
+					CredentialUri: servicePortalCredentialURIScheme + modelCredential.CredentialName,
+				},
+			},
+		}
+		var ports *portalsv1.Ports
+		if modelCredential.Port > 0 {
+			ports = &portalsv1.Ports{Numbers: []int32{modelCredential.Port}}
+		}
+		if isHTTP {
+			credentialRule = &portalsv1.EgressRule{
+				Http: &portalsv1.HttpRule{
+					Hostnames: []string{credentialHost},
+					Ports:     ports,
+					Effects:   effects,
+				},
+			}
+		} else {
+			credentialRule = &portalsv1.EgressRule{
+				Https: &portalsv1.HttpsRule{
+					Hostnames: []string{credentialHost},
+					Ports:     ports,
+					Effects:   effects,
+				},
+			}
+		}
+	}
+
+	if len(httpHosts) == 0 && len(httpsHosts) == 0 && credentialRule == nil {
 		return &portalsv1.EgressPolicy{}
 	}
 	var rules []*portalsv1.EgressRule
-	if len(options.AllowedHTTPHosts) > 0 {
+	if len(httpHosts) > 0 {
 		rules = append(rules, &portalsv1.EgressRule{
 			Http: &portalsv1.HttpRule{
-				Hostnames: append([]string(nil), options.AllowedHTTPHosts...),
+				Hostnames: httpHosts,
 			},
 		})
 	}
-	if len(options.AllowedHosts) > 0 {
+	if len(httpsHosts) > 0 {
 		rules = append(rules, &portalsv1.EgressRule{
 			Https: &portalsv1.HttpsRule{
-				Hostnames: append([]string(nil), options.AllowedHosts...),
+				Hostnames: httpsHosts,
 			},
 		})
+	}
+	if credentialRule != nil {
+		rules = append(rules, credentialRule)
 	}
 	return &portalsv1.EgressPolicy{
 		Rules: rules,
 	}
+}
+
+func filterOutHostname(hosts []string, target string) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	var filtered []string
+	for _, host := range hosts {
+		normalized := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		if normalized == target {
+			continue
+		}
+		filtered = append(filtered, host)
+	}
+	return filtered
+}
+
+func isValidHTTPHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		character := value[i]
+		if character != '\t' && (character < ' ' || character == 0x7f) {
+			return false
+		}
+	}
+	return true
+}
+
+func redactSecrets(message string, secrets map[string][]byte) string {
+	for _, secretBytes := range secrets {
+		if len(secretBytes) == 0 {
+			continue
+		}
+		message = strings.ReplaceAll(message, string(secretBytes), "[REDACTED]")
+	}
+	return message
+}
+
+func (r *RunReconciler) readControllerModelCredential(
+	ctx context.Context,
+	credential ServicePortalModelCredential,
+) ([]byte, bool, error) {
+	namespace := r.controllerNamespace()
+	var secret corev1.Secret
+	err := r.uncachedReader().Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      DefaultModelCredentialsSecretName,
+	}, &secret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to read model credential secret %s/%s for host %q header %q: %w",
+			namespace, DefaultModelCredentialsSecretName, credential.Host, credential.Header, err)
+	}
+	rawValue, ok := secret.Data[credential.SecretKey]
+	if !ok {
+		return nil, false, nil
+	}
+	trimmed := strings.TrimSpace(string(rawValue))
+	if trimmed == "" {
+		return nil, false, nil
+	}
+	if !isValidHTTPHeaderValue(trimmed) {
+		return nil, false, fmt.Errorf("invalid model credential in secret %s/%s key %q for host %q header %q: value contains invalid HTTP header characters",
+			namespace, DefaultModelCredentialsSecretName, credential.SecretKey, credential.Host, credential.Header)
+	}
+	return []byte(trimmed), true, nil
+}
+
+func (r *RunReconciler) prepareServicePortalBinding(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	manifest *v1alpha1.Manifest,
+	taskID string,
+	options ServicePortalOptions,
+) (*portalsv1.EgressPolicy, map[string][]byte, *ServicePortalModelCredential, error) {
+	manifestTask := findManifestTask(manifest, taskID)
+	if manifestTask != nil && isSandboxOnlyTask(*manifestTask) {
+		return BuildServicePortalEgressPolicy(options), nil, nil, nil
+	}
+	credential, hasCredential, err := ModelCredentialForModel(run.Spec.Model, options.ModelBaseURL)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !hasCredential {
+		return BuildServicePortalEgressPolicy(options), nil, nil, nil
+	}
+	secretValue, found, err := r.readControllerModelCredential(ctx, credential)
+	if err != nil {
+		return nil, nil, &credential, err
+	}
+	if !found {
+		return BuildServicePortalEgressPolicy(options), nil, nil, nil
+	}
+	policy := BuildServicePortalEgressPolicyWithCredential(options, &credential)
+	secrets := map[string][]byte{
+		credential.CredentialName: secretValue,
+	}
+	return policy, secrets, &credential, nil
 }
 
 func (r *RunReconciler) servicePortalPolicy() *portalsv1.EgressPolicy {
@@ -136,12 +435,29 @@ func (r *RunReconciler) servicePortalPolicy() *portalsv1.EgressPolicy {
 	return BuildServicePortalEgressPolicy(servicePortal)
 }
 
-func (r *RunReconciler) bindServicePortalPolicy(ctx context.Context, podUID string, policy *portalsv1.EgressPolicy) error {
+func (r *RunReconciler) servicePortalModelBaseURL() string {
+	r.cfgMu.RLock()
+	modelBaseURL := r.Config.ServicePortal.ModelBaseURL
+	r.cfgMu.RUnlock()
+	return modelBaseURL
+}
+
+func (r *RunReconciler) bindServicePortalPolicy(
+	ctx context.Context,
+	podUID string,
+	policy *portalsv1.EgressPolicy,
+	secrets map[string][]byte,
+	modelCredential *ServicePortalModelCredential,
+) error {
 	if policy == nil {
 		policy = r.servicePortalPolicy()
 	}
-	if err := r.ServicePortalClient.Bind(ctx, podUID, policy, nil); err != nil {
-		return fmt.Errorf("service portal bind failed: %w", err)
+	if err := r.ServicePortalClient.Bind(ctx, podUID, policy, secrets); err != nil {
+		message := redactSecrets(err.Error(), secrets)
+		if modelCredential != nil {
+			return fmt.Errorf("service portal bind failed for host %q header %q: %s", modelCredential.Host, modelCredential.Header, message)
+		}
+		return fmt.Errorf("service portal bind failed: %s", message)
 	}
 	return nil
 }
