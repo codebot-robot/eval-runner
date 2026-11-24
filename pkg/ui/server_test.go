@@ -3273,27 +3273,27 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_CorruptLog(t *testing.T) {
 	}
 }
 
-func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *testing.T) {
+func TestServer_TaskSamplesFallbackWithSummaryJSON_UnparsableLog_InMemorySink(t *testing.T) {
 	sink := artifacts.NewInMemorySink()
-	commit := "commitoversized1234"
-	taskID := "task/oversized"
+	commit := "commitunparsable1234"
+	taskID := "task/unparsable"
 
 	scoreVal := 1.0
 	sampleSummaries := []artifacts.TaskSampleSummary{
 		{
-			ID:     "sample-oversized-1",
+			ID:     "sample-unparsable-1",
 			Score:  &scoreVal,
 			Status: "pass",
 		},
 		{
-			ID:     "sample-oversized-2",
+			ID:     "sample-unparsable-2",
 			Score:  &scoreVal,
 			Status: "fail",
 		},
 	}
 
 	meta := artifacts.RunMetadata{
-		RunName:           "oversized-run",
+		RunName:           "unparsable-run",
 		RunNamespace:      "eval-runner",
 		TaskID:            taskID,
 		Commit:            commit,
@@ -3304,10 +3304,9 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *
 		SampleCount:       len(sampleSummaries),
 	}
 
-	// Oversized log exceeding DefaultMaxLoadBytes (10 MiB)
-	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
+	unparsableLog := []byte("{invalid json")
 
-	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	stored, err := sink.StoreArtifact(t.Context(), meta, "inspect.json", unparsableLog)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
@@ -3315,7 +3314,7 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "oversized-run",
+			Name:      "unparsable-run",
 			Namespace: "eval-runner",
 		},
 		Spec: v1alpha1.RunSpec{
@@ -3341,17 +3340,17 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *
 	srv := NewServer(Config{Client: cl, ArtifactSink: sink})
 
 	// 1. Request samples list: returns 200 with no /samples/ hrefs and the extended banner
-	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/task%2Foversized/samples", nil)
+	reqList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/unparsable-run/tasks/task%2Funparsable/samples", nil)
 	wList := httptest.NewRecorder()
 	srv.ServeHTTP(wList, reqList)
 	if wList.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for oversized log sample list, got %d: %s", wList.Code, wList.Body.String())
+		t.Fatalf("expected 200 OK for unparsable log sample list, got %d: %s", wList.Code, wList.Body.String())
 	}
 
 	body := wList.Body.String()
 
 	// Samples rendered as plain text
-	if !strings.Contains(body, "sample-oversized-1") || !strings.Contains(body, "sample-oversized-2") {
+	if !strings.Contains(body, "sample-unparsable-1") || !strings.Contains(body, "sample-unparsable-2") {
 		t.Errorf("expected sample IDs in body, got:\n%s", body)
 	}
 
@@ -3361,7 +3360,7 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *
 	}
 
 	// Extended banner with plain text artifact path
-	wantBanner := fmt.Sprintf("transcripts unavailable: the evaluation log exceeds the UI load cap (10 MiB); download it from %s", logPath)
+	wantBanner := fmt.Sprintf("transcripts unavailable: the evaluation log could not be parsed; download it from %s", logPath)
 	if !strings.Contains(body, wantBanner) {
 		t.Errorf("expected extended banner %q in body, got:\n%s", wantBanner, body)
 	}
@@ -3370,19 +3369,232 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_OversizedLog_InMemorySink(t *
 	}
 
 	// 2. Direct transcript URL: returns 404 with fixed public error string
-	reqTranscript := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/oversized-run/tasks/task%2Foversized/samples/sample-oversized-1", nil)
+	reqTranscript := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/unparsable-run/tasks/task%2Funparsable/samples/sample-unparsable-1", nil)
 	wTranscript := httptest.NewRecorder()
 	srv.ServeHTTP(wTranscript, reqTranscript)
 
 	if wTranscript.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 Not Found for direct transcript URL in fallback mode, got %d", wTranscript.Code)
 	}
-	wantError := "transcript unavailable: log exceeds the UI load cap"
+	wantError := "transcript unavailable: log could not be parsed"
 	if !strings.Contains(wTranscript.Body.String(), wantError) {
 		t.Errorf("expected error %q, got:\n%s", wantError, wTranscript.Body.String())
 	}
 	if strings.Contains(wTranscript.Body.String(), "Log Truncated") {
 		t.Errorf("expected no generic Log Truncated page, got:\n%s", wTranscript.Body.String())
+	}
+}
+
+type trackingReadCloser struct {
+	inner   io.ReadCloser
+	onClose func()
+}
+
+func (reader *trackingReadCloser) Read(buffer []byte) (int, error) {
+	return reader.inner.Read(buffer)
+}
+
+func (reader *trackingReadCloser) Close() error {
+	reader.onClose()
+	return reader.inner.Close()
+}
+
+type failingMidStreamReader struct {
+	prefix []byte
+	read   bool
+	err    error
+}
+
+func (reader *failingMidStreamReader) Read(buffer []byte) (int, error) {
+	if !reader.read {
+		reader.read = true
+		return copy(buffer, reader.prefix), nil
+	}
+	return 0, reader.err
+}
+
+type trackingStreamSink struct {
+	artifacts.ArtifactSink
+	openCount      atomic.Int32
+	closeCount     atomic.Int32
+	lastHash       string
+	overrideStream func(path string, hash string) (io.ReadCloser, error)
+}
+
+func (sink *trackingStreamSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	sink.openCount.Add(1)
+	sink.lastHash = hash
+	var stream io.ReadCloser
+	var err error
+	if sink.overrideStream != nil {
+		stream, err = sink.overrideStream(path, hash)
+	} else {
+		stream, err = sink.ArtifactSink.OpenStream(ctx, path, hash)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &trackingReadCloser{
+		inner:   stream,
+		onClose: func() { sink.closeCount.Add(1) },
+	}, nil
+}
+
+func TestServer_TaskSamples_StreamAndCache(testingT *testing.T) {
+	baseSink := artifacts.NewInMemorySink()
+	trackedSink := &trackingStreamSink{ArtifactSink: baseSink}
+	commit := "commitlarge1234"
+	taskID := "task/large"
+
+	// 1. Valid Inspect log exceeding 10 MiB loads through OpenStream and caches parsed samples.
+	largeContent := strings.Repeat("x", 1024*1024)
+	var builder strings.Builder
+	builder.WriteString(`{"version": 2, "status": "success", "eval": {"task": "task/large", "scorers": [{"name": "choice"}]}, "samples": [`)
+	for index := 0; index < 11; index++ {
+		if index > 0 {
+			builder.WriteString(",")
+		}
+		fmt.Fprintf(&builder, `{"id": "sample-large-%d", "scores": {"choice": {"value": 1.0}}, "messages": [{"role": "assistant", "content": %q}]}`, index, largeContent)
+	}
+	builder.WriteString(`]}`)
+	largeLog := []byte(builder.String())
+	if int64(len(largeLog)) <= artifacts.DefaultMaxLoadBytes {
+		testingT.Fatalf("expected log size > 10 MiB, got %d", len(largeLog))
+	}
+
+	largeStored, err := baseSink.StoreArtifact(testingT.Context(), artifacts.RunMetadata{
+		RunName: "large-run", RunNamespace: "eval-runner", TaskID: taskID, Commit: commit, Model: "gemini-2.5-pro",
+	}, "inspect.json", largeLog)
+	if err != nil {
+		testingT.Fatalf("StoreArtifact large inspect log failed: %v", err)
+	}
+
+	resultsLog := []byte(`{"schemaVersion": 1, "samples": [{"id": "sample-results-1", "passed": true, "score": 1.0, "message": "all checks passed"}]}`)
+	resultsStored, err := baseSink.StoreArtifact(testingT.Context(), artifacts.RunMetadata{
+		RunName: "results-run", RunNamespace: "eval-runner", TaskID: "task/results", Commit: commit, Model: "gemini-2.5-pro",
+	}, "results.json", resultsLog)
+	if err != nil {
+		testingT.Fatalf("StoreArtifact results.json failed: %v", err)
+	}
+
+	badStored, err := baseSink.StoreArtifact(testingT.Context(), artifacts.RunMetadata{
+		RunName: "bad-run", RunNamespace: "eval-runner", TaskID: "task/bad", Commit: commit, Model: "gemini-2.5-pro",
+	}, "inspect.json", []byte("{invalid json"))
+	if err != nil {
+		testingT.Fatalf("StoreArtifact invalid log failed: %v", err)
+	}
+
+	scoreOne := 1.0
+	readErrorStored, err := baseSink.StoreArtifact(testingT.Context(), artifacts.RunMetadata{
+		RunName: "read-error-run", RunNamespace: "eval-runner", TaskID: "task/read-error", Commit: commit, Model: "gemini-2.5-pro",
+		Scorer: "choice", Samples: []artifacts.TaskSampleSummary{{ID: "sample-read-error-1", Score: &scoreOne, Status: "pass"}}, SampleCount: 1,
+	}, "inspect.json", []byte(`{"version": 2, "status": "success", "eval": {"scorers": [{"name": "choice"}]}, "samples": [{"id": "sample-read-error-1", "scores": {"choice": {"value": 1.0}}}]}`))
+	if err != nil {
+		testingT.Fatalf("StoreArtifact read-error log failed: %v", err)
+	}
+
+	makeRun := func(name, id, path, hash string) *v1alpha1.Run {
+		return &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "gemini-2.5-pro", Repo: v1alpha1.RepoSpec{Commit: commit}},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{{ID: id, Phase: v1alpha1.TaskPhaseCompleted, LogPath: path, LogHash: hash}},
+			},
+		}
+	}
+
+	scheme := runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		makeRun("large-run", taskID, largeStored.Location, largeStored.Hash),
+		makeRun("results-run", "task/results", resultsStored.Location, resultsStored.Hash),
+		makeRun("bad-run", "task/bad", badStored.Location, badStored.Hash),
+		makeRun("read-error-run", "task/read-error", readErrorStored.Location, readErrorStored.Hash),
+	).Build()
+	server := NewServer(Config{Client: fakeClient, ArtifactSink: trackedSink})
+
+	requestList := httptest.NewRequest(http.MethodGet, "/runs/eval-runner/large-run/tasks/task%2Flarge/samples", nil)
+	responseList := httptest.NewRecorder()
+	server.ServeHTTP(responseList, requestList)
+	if responseList.Code != http.StatusOK {
+		testingT.Fatalf("expected 200 OK for >10 MiB log, got %d: %s", responseList.Code, responseList.Body.String())
+	}
+	listBody := responseList.Body.String()
+	expectedSampleLink := "/runs/eval-runner/large-run/tasks/task%2Flarge/samples/sample-large-0"
+	if strings.Contains(listBody, "transcripts unavailable") || !strings.Contains(listBody, expectedSampleLink) {
+		testingT.Errorf("unexpected >10 MiB samples body:\n%s", listBody)
+	}
+	if trackedSink.openCount.Load() != 1 || trackedSink.closeCount.Load() != 1 || trackedSink.lastHash != largeStored.Hash {
+		testingT.Errorf("expected 1 open/close with hash %q, got open=%d close=%d hash=%q", largeStored.Hash, trackedSink.openCount.Load(), trackedSink.closeCount.Load(), trackedSink.lastHash)
+	}
+
+	// Second view and transcript page hit in-memory cache without re-opening stream.
+	responseTranscript := httptest.NewRecorder()
+	server.ServeHTTP(responseTranscript, httptest.NewRequest(http.MethodGet, expectedSampleLink, nil))
+	if responseTranscript.Code != http.StatusOK || !strings.Contains(responseTranscript.Body.String(), "sample-large-0") {
+		testingT.Fatalf("expected 200 OK transcript from cache, got %d", responseTranscript.Code)
+	}
+	secondResponse := httptest.NewRecorder()
+	server.ServeHTTP(secondResponse, requestList)
+	if secondResponse.Code != http.StatusOK || trackedSink.openCount.Load() != 1 {
+		testingT.Fatalf("expected second view to hit cache (openCount=1), got code=%d openCount=%d", secondResponse.Code, trackedSink.openCount.Load())
+	}
+
+	// 2. Legacy run without LogHash loads cleanly.
+	legacyClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(makeRun("legacy-run", taskID, largeStored.Location, "")).Build()
+	legacyServer := NewServer(Config{Client: legacyClient, ArtifactSink: trackedSink})
+	legacyResponse := httptest.NewRecorder()
+	legacyServer.ServeHTTP(legacyResponse, httptest.NewRequest(http.MethodGet, "/runs/eval-runner/legacy-run/tasks/task%2Flarge/samples", nil))
+	if legacyResponse.Code != http.StatusOK || trackedSink.lastHash != "" || trackedSink.closeCount.Load() != trackedSink.openCount.Load() {
+		testingT.Fatalf("legacy run failed: code=%d hash=%q open=%d close=%d", legacyResponse.Code, trackedSink.lastHash, trackedSink.openCount.Load(), trackedSink.closeCount.Load())
+	}
+
+	// 3. Sandbox results.json log renders samples and transcript and hits cache on second view.
+	opensBeforeResults := trackedSink.openCount.Load()
+	resultsResponse := httptest.NewRecorder()
+	server.ServeHTTP(resultsResponse, httptest.NewRequest(http.MethodGet, "/runs/eval-runner/results-run/tasks/task%2Fresults/samples", nil))
+	if resultsResponse.Code != http.StatusOK || !strings.Contains(resultsResponse.Body.String(), "sample-results-1") || !strings.Contains(resultsResponse.Body.String(), "all checks passed") {
+		testingT.Fatalf("unexpected results.json response: code=%d body=%s", resultsResponse.Code, resultsResponse.Body.String())
+	}
+	resultsTranscript := httptest.NewRecorder()
+	server.ServeHTTP(resultsTranscript, httptest.NewRequest(http.MethodGet, "/runs/eval-runner/results-run/tasks/task%2Fresults/samples/sample-results-1", nil))
+	if resultsTranscript.Code != http.StatusOK || trackedSink.openCount.Load() != opensBeforeResults+1 || trackedSink.closeCount.Load() != trackedSink.openCount.Load() {
+		testingT.Fatalf("unexpected results.json transcript/cache counts: code=%d open=%d close=%d", resultsTranscript.Code, trackedSink.openCount.Load(), trackedSink.closeCount.Load())
+	}
+
+	// 4. Parse error closes stream and renders updated unparsable message (no size-limit text).
+	badResponse := httptest.NewRecorder()
+	server.ServeHTTP(badResponse, httptest.NewRequest(http.MethodGet, "/runs/eval-runner/bad-run/tasks/task%2Fbad/samples", nil))
+	if badResponse.Code != http.StatusOK || !strings.Contains(badResponse.Body.String(), "The evaluation log could not be parsed.") || strings.Contains(badResponse.Body.String(), "exceeded the size limit") {
+		testingT.Errorf("unexpected unparsable page: code=%d body=%s", badResponse.Code, badResponse.Body.String())
+	}
+	if trackedSink.closeCount.Load() != trackedSink.openCount.Load() {
+		testingT.Errorf("stream not closed on parse error: open=%d close=%d", trackedSink.openCount.Load(), trackedSink.closeCount.Load())
+	}
+
+	// 5. Mid-stream read error is treated as unavailable (not unparsable), closes stream, and is NOT cached.
+	var failedOnce atomic.Bool
+	trackedSink.overrideStream = func(path string, hash string) (io.ReadCloser, error) {
+		if path == readErrorStored.Location && failedOnce.CompareAndSwap(false, true) {
+			return io.NopCloser(&failingMidStreamReader{prefix: []byte(`{"version": 2, `), err: io.ErrUnexpectedEOF}), nil
+		}
+		return baseSink.OpenStream(testingT.Context(), path, hash)
+	}
+	opensBeforeReadError := trackedSink.openCount.Load()
+	readErrorResponse := httptest.NewRecorder()
+	server.ServeHTTP(readErrorResponse, httptest.NewRequest(http.MethodGet, "/runs/eval-runner/read-error-run/tasks/task%2Fread-error/samples", nil))
+	if readErrorResponse.Code != http.StatusOK || !strings.Contains(readErrorResponse.Body.String(), "the evaluation log could not be loaded") || strings.Contains(readErrorResponse.Body.String(), "could not be parsed") {
+		testingT.Fatalf("expected unavailable fallback for mid-stream read error, got code=%d body=%s", readErrorResponse.Code, readErrorResponse.Body.String())
+	}
+	if trackedSink.closeCount.Load() != trackedSink.openCount.Load() {
+		testingT.Errorf("stream not closed on mid-stream read error: open=%d close=%d", trackedSink.openCount.Load(), trackedSink.closeCount.Load())
+	}
+	// Retry after transient read error must re-open stream (not cached) and load full samples.
+	readErrorRetry := httptest.NewRecorder()
+	server.ServeHTTP(readErrorRetry, httptest.NewRequest(http.MethodGet, "/runs/eval-runner/read-error-run/tasks/task%2Fread-error/samples", nil))
+	if readErrorRetry.Code != http.StatusOK || strings.Contains(readErrorRetry.Body.String(), "transcripts unavailable") || trackedSink.openCount.Load() != opensBeforeReadError+2 {
+		testingT.Fatalf("expected retry after mid-stream error to re-open and succeed, got code=%d opens=%d body=%s", readErrorRetry.Code, trackedSink.openCount.Load()-opensBeforeReadError, readErrorRetry.Body.String())
 	}
 }
 
@@ -3398,6 +3610,11 @@ func (m *mockGCSTaskSink) ArtifactPrefix(commit string) string {
 func (m *mockGCSTaskSink) Load(ctx context.Context, path string) ([]byte, error) {
 	memPath := "mem://" + strings.TrimPrefix(path, fmt.Sprintf("gs://%s/", m.bucket))
 	return m.ArtifactSink.Load(ctx, memPath)
+}
+
+func (m *mockGCSTaskSink) OpenStream(ctx context.Context, path string, hash string) (io.ReadCloser, error) {
+	memPath := "mem://" + strings.TrimPrefix(path, fmt.Sprintf("gs://%s/", m.bucket))
+	return m.ArtifactSink.OpenStream(ctx, memPath, hash)
 }
 
 func TestServer_TaskSamplesFallbackWithSummaryJSON_GCSConsoleLink(t *testing.T) {
@@ -3427,8 +3644,8 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_GCSConsoleLink(t *testing.T) 
 		SampleCount:       len(sampleSummaries),
 	}
 
-	oversizedLog := make([]byte, artifacts.DefaultMaxLoadBytes+1024)
-	stored, err := inMem.StoreArtifact(t.Context(), meta, "inspect.json", oversizedLog)
+	unparsableLog := []byte("{invalid json")
+	stored, err := inMem.StoreArtifact(t.Context(), meta, "inspect.json", unparsableLog)
 	if err != nil {
 		t.Fatalf("StoreArtifact failed: %v", err)
 	}
@@ -3483,7 +3700,7 @@ func TestServer_TaskSamplesFallbackWithSummaryJSON_GCSConsoleLink(t *testing.T) 
 	if !strings.Contains(body, gcsLogPath) {
 		t.Errorf("expected GCS log path %q in body, got:\n%s", gcsLogPath, body)
 	}
-	wantBanner := "transcripts unavailable: the evaluation log exceeds the UI load cap (10 MiB)"
+	wantBanner := "transcripts unavailable: the evaluation log could not be parsed"
 	if !strings.Contains(body, wantBanner) {
 		t.Errorf("expected extended banner in body, got:\n%s", body)
 	}
