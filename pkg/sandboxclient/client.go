@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -88,6 +89,12 @@ type ExecuteResult struct {
 type Client interface {
 	// Execute synchronously runs a command in the sandbox.
 	Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error)
+
+	// StartAsync launches a detached command in the sandbox under executionID and returns immediately.
+	StartAsync(ctx context.Context, executionID string, cfg ProcessConfig) error
+
+	// PollAsync inspects the state and captured output of a previously started async task.
+	PollAsync(ctx context.Context, executionID string) (*AsyncTaskStatus, error)
 
 	// ReadFile retrieves a file from the sandbox filesystem via REST.
 	ReadFile(ctx context.Context, path string) ([]byte, error)
@@ -201,6 +208,7 @@ type sandboxdClient struct {
 	processClient processv1.ProcessServiceClient
 	httpClient    *http.Client
 	restBaseURL   string
+	workspaceRoot string
 	stdoutLimit   int64
 	stderrLimit   int64
 	readFileLimit int64
@@ -300,11 +308,26 @@ func New(podIP string, opts ...Option) (Client, error) {
 		processClient: processv1.NewProcessServiceClient(conn),
 		httpClient:    httpClient,
 		restBaseURL:   restBaseURL,
+		workspaceRoot: defaultWorkspaceRoot,
 		stdoutLimit:   options.StdoutLimit,
 		stderrLimit:   options.StderrLimit,
 		readFileLimit: options.ReadFileLimit,
 		authToken:     options.AuthToken,
 	}, nil
+}
+
+func (c *sandboxdClient) effectiveStdoutLimit() int64 {
+	if c.stdoutLimit > 0 {
+		return c.stdoutLimit
+	}
+	return discovery.MaxStdoutBytes
+}
+
+func (c *sandboxdClient) effectiveStderrLimit() int64 {
+	if c.stderrLimit > 0 {
+		return c.stderrLimit
+	}
+	return discovery.MaxStderrBytes
 }
 
 func (c *sandboxdClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error) {
@@ -318,14 +341,8 @@ func (c *sandboxdClient) Execute(ctx context.Context, cfg ProcessConfig) (*Execu
 		req.Config.Cwd = &cfg.Cwd
 	}
 
-	stdoutLimit := c.stdoutLimit
-	if stdoutLimit <= 0 {
-		stdoutLimit = discovery.MaxStdoutBytes
-	}
-	stderrLimit := c.stderrLimit
-	if stderrLimit <= 0 {
-		stderrLimit = discovery.MaxStderrBytes
-	}
+	stdoutLimit := c.effectiveStdoutLimit()
+	stderrLimit := c.effectiveStderrLimit()
 
 	resp, err := c.processClient.Execute(ctx, req)
 	if err != nil {
@@ -371,8 +388,16 @@ func isResourceExhausted(err error) bool {
 	return false
 }
 
-func (c *sandboxdClient) ReadFile(ctx context.Context, path string) (_ []byte, retErr error) {
-	cleanPath := strings.TrimPrefix(path, "/")
+func (c *sandboxdClient) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	limit := c.readFileLimit
+	if limit <= 0 {
+		limit = DefaultReadFileLimit
+	}
+	return c.readFile(ctx, path, limit, false)
+}
+
+func (c *sandboxdClient) readFile(ctx context.Context, filePath string, limit int64, truncate bool) (_ []byte, retErr error) {
+	cleanPath := strings.TrimPrefix(filePath, "/")
 	reqURL := fmt.Sprintf("%s/v1/files/%s", c.restBaseURL, cleanPath)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
@@ -385,7 +410,7 @@ func (c *sandboxdClient) ReadFile(ctx context.Context, path string) (_ []byte, r
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute HTTP GET for %s: %w", path, err)
+		return nil, fmt.Errorf("failed to execute HTTP GET for %s: %w", filePath, err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -396,29 +421,27 @@ func (c *sandboxdClient) ReadFile(ctx context.Context, path string) (_ []byte, r
 	}()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("file %q not found (HTTP 404)", path)
-	}
-
-	limit := c.readFileLimit
-	if limit <= 0 {
-		limit = DefaultReadFileLimit
+		return nil, fmt.Errorf("file %q not found (HTTP 404): %w", filePath, os.ErrNotExist)
 	}
 
 	limitedReader := io.LimitReader(resp.Body, limit+1)
 	body, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body for %s: %w", path, err)
+		return nil, fmt.Errorf("failed to read response body for %s: %w", filePath, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP GET %s failed with status %d: %s", filePath, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	if int64(len(body)) > limit {
+		if truncate {
+			return body[:limit], nil
+		}
 		return nil, &discovery.LimitError{
 			Stream: "file",
 			Limit:  limit,
 		}
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP GET %s failed with status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	return body, nil
