@@ -27,12 +27,24 @@ type ResultsFile struct {
 	Samples       []SampleResult `json:"samples"`
 }
 
+// SampleTranscriptRow represents a single typed transcript entry within a SampleResult.
+type SampleTranscriptRow struct {
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
+}
+
 // SampleResult represents an individual sample result within /out/results.json.
 type SampleResult struct {
-	ID      string   `json:"id"`
-	Passed  *bool    `json:"passed"`
-	Score   *float64 `json:"score,omitempty"`
-	Message string   `json:"message,omitempty"`
+	ID             string                `json:"id"`
+	Passed         *bool                 `json:"passed"`
+	Score          *float64              `json:"score,omitempty"`
+	Message        string                `json:"message,omitempty"`
+	Input          string                `json:"input,omitempty"`
+	Output         string                `json:"output,omitempty"`
+	LatencySeconds *float64              `json:"latencySeconds,omitempty"`
+	InputTokens    int                   `json:"inputTokens,omitempty"`
+	OutputTokens   int                   `json:"outputTokens,omitempty"`
+	Transcript     []SampleTranscriptRow `json:"transcript,omitempty"`
 }
 
 // ParseSandboxResults parses raw JSON bytes from /out/results.json, validates the schema,
@@ -174,12 +186,36 @@ func convertResultsSample(index int, sample SampleResult) (ParsedInspectSample, 
 		scoreValue = 1.0
 	}
 
+	var latency *float64
+	if sample.LatencySeconds != nil {
+		latencySeconds := *sample.LatencySeconds
+		latency = &latencySeconds
+	}
+
+	var transcript []InspectTranscriptRow
+	if len(sample.Transcript) > 0 {
+		transcript = make([]InspectTranscriptRow, len(sample.Transcript))
+		for i, row := range sample.Transcript {
+			transcript[i] = InspectTranscriptRow{
+				Kind:    row.Kind,
+				Content: row.Content,
+			}
+		}
+	}
+
 	return ParsedInspectSample{
-		ID:          sample.ID,
-		Status:      status,
-		Score:       &scoreValue,
-		HasScore:    true,
-		ScoreStr:    fmt.Sprintf("%.2f", scoreValue),
-		Explanation: sample.Message,
+		ID:           sample.ID,
+		Status:       status,
+		Score:        &scoreValue,
+		HasScore:     true,
+		ScoreStr:     fmt.Sprintf("%.2f", scoreValue),
+		Input:        sample.Input,
+		Explanation:  sample.Message,
+		Output:       sample.Output,
+		Latency:      latency,
+		TotalTokens:  sample.InputTokens + sample.OutputTokens,
+		InputTokens:  sample.InputTokens,
+		OutputTokens: sample.OutputTokens,
+		Transcript:   transcript,
 	}, nil
 }
