@@ -436,11 +436,11 @@ func TestGenerate_Retry(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if attempts != 4 {
-			t.Errorf("expected 4 attempts, got %d", attempts)
+		if attempts != 7 {
+			t.Errorf("expected 7 attempts, got %d", attempts)
 		}
 		errorMessage := err.Error()
-		if !strings.HasPrefix(errorMessage, "after 4 attempts:") || !strings.Contains(errorMessage, "gemini API error (503 Service Unavailable)") || !strings.Contains(errorMessage, "This model is currently experiencing high demand") {
+		if !strings.HasPrefix(errorMessage, "after 7 attempts:") || !strings.Contains(errorMessage, "gemini API error (503 Service Unavailable)") || !strings.Contains(errorMessage, "This model is currently experiencing high demand") {
 			t.Errorf("unexpected error message: %q", errorMessage)
 		}
 	})
