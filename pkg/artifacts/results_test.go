@@ -15,6 +15,7 @@
 package artifacts
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -252,6 +253,74 @@ func TestParseResultsSamples_Valid(t *testing.T) {
 		parsedSamples[3].Score == nil || *parsedSamples[3].Score != 0.5 || parsedSamples[3].ScoreStr != "0.50" ||
 		parsedSamples[3].Explanation != "partial credit" {
 		t.Errorf("sample-4 mismatch: %+v", parsedSamples[3])
+	}
+}
+
+func TestParseResultsSamples_TranscriptAndUsage(t *testing.T) {
+	data := []byte(`{
+		"schemaVersion": 1,
+		"samples": [
+			{
+				"id": "hello-world",
+				"passed": true,
+				"score": 1.0,
+				"message": "all assertions passed",
+				"input": "Create /app/hello.txt",
+				"output": "Created /app/hello.txt.",
+				"latencySeconds": 12.5,
+				"inputTokens": 1200,
+				"outputTokens": 350,
+				"transcript": [
+					{"kind": "user", "content": "Create /app/hello.txt"},
+					{"kind": "tool_call", "content": "echo hello > /app/hello.txt"},
+					{"kind": "tool", "content": ""},
+					{"kind": "assistant", "content": "Created /app/hello.txt."}
+				]
+			},
+			{"id": "minimal", "passed": false}
+		]
+	}`)
+
+	parsedSamples, err := ParseResultsSamples(data)
+	if err != nil {
+		t.Fatalf("ParseResultsSamples failed: %v", err)
+	}
+
+	fullScore := 1.0
+	fullLatency := 12.5
+	minimalScore := 0.0
+	expected := []ParsedInspectSample{
+		{
+			ID:           "hello-world",
+			Status:       "pass",
+			Score:        &fullScore,
+			HasScore:     true,
+			ScoreStr:     "1.00",
+			Input:        "Create /app/hello.txt",
+			Explanation:  "all assertions passed",
+			Output:       "Created /app/hello.txt.",
+			Latency:      &fullLatency,
+			TotalTokens:  1550,
+			InputTokens:  1200,
+			OutputTokens: 350,
+			Transcript: []InspectTranscriptRow{
+				{Kind: "user", Content: "Create /app/hello.txt"},
+				{Kind: "tool_call", Content: "echo hello > /app/hello.txt"},
+				{Kind: "tool", Content: ""},
+				{Kind: "assistant", Content: "Created /app/hello.txt."},
+			},
+		},
+		{
+			ID:       "minimal",
+			Status:   "fail",
+			Score:    &minimalScore,
+			HasScore: true,
+			ScoreStr: "0.00",
+		},
+	}
+
+	if !reflect.DeepEqual(parsedSamples, expected) {
+		t.Errorf("parsed samples mismatch:\ngot:  %+v\nwant: %+v", parsedSamples, expected)
 	}
 }
 
