@@ -217,9 +217,19 @@ func TestGenerate_CandidateWithNoPartsReturnsFinishReasonError(t *testing.T) {
 			expectedText: "finishReason: SAFETY",
 		},
 		{
-			name:         "max tokens with empty parts",
-			responseJSON: `{"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]}`,
-			expectedText: "finishReason: MAX_TOKENS",
+			name:         "recitation block without parts",
+			responseJSON: `{"candidates": [{"finishReason": "RECITATION"}]}`,
+			expectedText: "finishReason: RECITATION",
+		},
+		{
+			name:         "unspecified finish reason without parts",
+			responseJSON: `{"candidates": [{"content": {"parts": []}}]}`,
+			expectedText: "finishReason: UNSPECIFIED",
+		},
+		{
+			name:         "stop with empty parts",
+			responseJSON: `{"candidates": [{"finishReason": "STOP", "content": {"parts": []}}]}`,
+			expectedText: "finishReason: STOP",
 		},
 	}
 
@@ -249,6 +259,65 @@ func TestGenerate_CandidateWithNoPartsReturnsFinishReasonError(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), testCase.expectedText) {
 				t.Errorf("error %q does not contain expected %q", err.Error(), testCase.expectedText)
+			}
+		})
+	}
+}
+
+func TestGenerate_MaxTokensWithNoContentCompletesTurn(t *testing.T) {
+	testCases := []struct {
+		name                 string
+		responseJSON         string
+		expectedInputTokens  int
+		expectedOutputTokens int
+	}{
+		{
+			name:                 "max tokens with empty parts",
+			responseJSON:         `{"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}], "usageMetadata": {"promptTokenCount": 1200, "candidatesTokenCount": 8192}}`,
+			expectedInputTokens:  1200,
+			expectedOutputTokens: 8192,
+		},
+		{
+			name:                 "max tokens without content field",
+			responseJSON:         `{"candidates": [{"finishReason": "MAX_TOKENS"}], "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 4096}}`,
+			expectedInputTokens:  500,
+			expectedOutputTokens: 4096,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				responseWriter.WriteHeader(http.StatusOK)
+				_, _ = responseWriter.Write([]byte(testCase.responseJSON))
+			}))
+			defer server.Close()
+
+			client, err := New(Options{
+				BaseURL:    server.URL,
+				Model:      "gemini-2.5-flash",
+				APIKey:     "test-key",
+				HTTPClient: server.Client(),
+			})
+			if err != nil {
+				t.Fatalf("New() failed: %v", err)
+			}
+
+			response, err := client.Generate(t.Context(), agent.Request{
+				Messages: []agent.Message{{Role: agent.RoleUser, Text: "solve the task"}},
+			})
+			if err != nil {
+				t.Fatalf("Generate() failed: %v", err)
+			}
+			if len(response.ToolCalls) != 0 {
+				t.Errorf("expected no tool calls, got %+v", response.ToolCalls)
+			}
+			if !strings.Contains(response.Text, "MAX_TOKENS") {
+				t.Errorf("expected response text to mention MAX_TOKENS, got %q", response.Text)
+			}
+			if response.InputTokens != testCase.expectedInputTokens || response.OutputTokens != testCase.expectedOutputTokens {
+				t.Errorf("usage mismatch: got inputTokens=%d outputTokens=%d, want inputTokens=%d outputTokens=%d",
+					response.InputTokens, response.OutputTokens, testCase.expectedInputTokens, testCase.expectedOutputTokens)
 			}
 		})
 	}
