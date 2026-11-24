@@ -2568,337 +2568,88 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 	}
 
-	// Check running tasks for ready pods
+	// Check running tasks for ready pods: observe, decide, apply.
 	type readyTaskItem struct {
 		task    v1alpha1.TaskStatus
 		sandbox sandboxv1beta1.Sandbox
 		pod     corev1.Pod
 	}
+	now := r.now()
+	gracePeriod := r.taskGracePeriod()
+	observations := make(map[string]runningTaskObservation)
+	for _, task := range run.Status.Tasks {
+		if task.Phase != v1alpha1.TaskPhaseRunning {
+			continue
+		}
+		observation, err := r.observeRunningTask(ctx, run, task, sandboxesByTask, now, gracePeriod)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		observations[task.ID] = observation
+	}
+
+	decisions := make(map[string]runningTaskDecision, len(observations))
+	for _, task := range run.Status.Tasks {
+		observation, ok := observations[task.ID]
+		if !ok {
+			continue
+		}
+		decision := decideRunningTask(task, observation, now, gracePeriod)
+		if decision.action == runningTaskActionBindServicePortal {
+			decision = r.bindAndDecideRunningTask(ctx, run, task, observation, now, gracePeriod)
+		}
+		decisions[task.ID] = decision
+	}
+
 	var readyTasks []readyTaskItem
-	terminalFailures := make(map[string]string)
-	rescuedTasks := make(map[string]rescuedTaskInfo)
-	restartedTasks := make(map[string]struct{})
+	hasStatusUpdates := false
 	waitingInGracePeriod := false
 	var minGraceRemaining time.Duration
-
-	for _, t := range run.Status.Tasks {
-		if t.Phase != v1alpha1.TaskPhaseRunning {
+	for _, task := range run.Status.Tasks {
+		decision, ok := decisions[task.ID]
+		if !ok {
 			continue
 		}
-
-		sb, hasSB := sandboxesByTask[t.ID]
-		if !hasSB {
-			// Prefer reading back the created object with the API reader (uncached)
-			sbName := discovery.TaskSandboxNameForRun(run.Name, t.ID)
-			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
-			reader := client.Reader(r.Client)
-			if r.APIReader != nil {
-				reader = r.APIReader
-			}
-			var directSB sandboxv1beta1.Sandbox
-			if err := reader.Get(ctx, sbKey, &directSB); err != nil {
-				if !apierrors.IsNotFound(err) {
-					return ctrl.Result{}, err
-				}
-			} else {
-				sb = directSB
-				hasSB = true
-				sandboxesByTask[t.ID] = directSB
-			}
-		}
-
-		var isDirtySandbox bool
-		if !hasSB {
-			var startedAt time.Time
-			if t.StartedAt != nil {
-				startedAt = t.StartedAt.Time
-			} else {
-				secretName := discovery.TaskAuthSecretNameForRun(run.Name, t.ID)
-				secretNamespace := run.Namespace
-				if secretNamespace == "" {
-					secretNamespace = discovery.DefaultControllerNamespace
-				}
-				reader := client.Reader(r.Client)
-				if r.APIReader != nil {
-					reader = r.APIReader
-				}
-				var secret corev1.Secret
-				if err := reader.Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: secretName}, &secret); err != nil {
-					if !apierrors.IsNotFound(err) {
-						return ctrl.Result{}, err
-					}
-				} else if !secret.CreationTimestamp.IsZero() {
-					startedAt = secret.CreationTimestamp.Time
+		switch decision.action {
+		case runningTaskActionWait:
+			if decision.graceRemaining > 0 {
+				logger.V(1).Info("Task sandbox not yet visible in cache; waiting within grace period", "task", task.ID)
+				waitingInGracePeriod = true
+				if minGraceRemaining == 0 || decision.graceRemaining < minGraceRemaining {
+					minGraceRemaining = decision.graceRemaining
 				}
 			}
-
-			if !startedAt.IsZero() {
-				elapsed := r.now().Sub(startedAt)
-				if elapsed < r.taskGracePeriod() {
-					logger.V(1).Info("Task sandbox not yet visible in cache; waiting within grace period", "task", t.ID)
-					waitingInGracePeriod = true
-					remaining := r.taskGracePeriod() - elapsed
-					if minGraceRemaining == 0 || remaining < minGraceRemaining {
-						minGraceRemaining = remaining
-					}
-					continue
-				}
-			}
-		} else if sb.Annotations[discovery.AnnotationControllerInstance] != r.InstanceID {
-			isDirtySandbox = true
-		}
-
-		if !hasSB || isDirtySandbox {
-			rescuedInfo, probeErr := r.probeTaskRescue(ctx, run, t)
-			if probeErr != nil {
-				return ctrl.Result{}, probeErr
-			}
-			if rescuedInfo != nil {
-				sampleCount := t.Samples
-				if sampleCount == 0 {
-					if rescuedInfo.summary != nil {
-						sampleCount = rescuedInfo.summary.SampleCount
-					} else if rescuedInfo.agg != nil {
-						sampleCount = rescuedInfo.agg.Samples
-					}
-				}
-				logger.Info("restart rescue", "task", t.ID, "run", run.Name, "samples", sampleCount)
-				rescuedTasks[t.ID] = *rescuedInfo
-				continue
-			}
-
-			if isDirtySandbox {
-				logger.Info("restarting interrupted in-flight task in fresh sandbox", "task", t.ID, "run", run.Name, "oldSandbox", sb.Name)
-				restartedTasks[t.ID] = struct{}{}
-				continue
-			}
-
-			terminalFailures[t.ID] = "task sandbox missing while in Running phase"
-			continue
-		}
-
-		podName := sb.Name
-		if name, ok := sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
-			podName = name
-		}
-		podKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: podName}
-		var pod corev1.Pod
-		if err := r.Get(ctx, podKey, &pod); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.V(1).Info("Task pod not yet created", "task", t.ID)
-			}
-			continue
-		}
-
-		// Only execute in a pod that is controlled by the current Sandbox and is not terminating.
-		if !isUsableSandboxPod(&pod, sb.UID) {
-			logger.V(1).Info("Task pod is terminating or not controlled by current sandbox", "task", t.ID, "sandboxUID", sb.UID)
-			continue
-		}
-
-		if r.ServicePortalClient != nil && !r.isServicePortalPodBound(pod.UID) {
-			if pod.Spec.NodeName == "" {
-				continue
-			}
-			bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-			bindError := r.bindServicePortalPolicy(bindContext, string(pod.UID))
-			bindCancel()
-			if bindError != nil {
-				terminalFailures[t.ID] = bindError.Error()
-				continue
-			}
-			r.markServicePortalPodBound(pod.UID)
-		}
-
-		if pod.Status.Phase == corev1.PodFailed {
-			r.unmarkServicePortalPodBound(pod.UID)
-			terminalFailures[t.ID] = taskPodFailureMessage(&pod)
-			continue
-		}
-		if pod.Status.Phase == corev1.PodSucceeded {
-			r.unmarkServicePortalPodBound(pod.UID)
-			terminalFailures[t.ID] = "task pod succeeded unexpectedly before execution"
-			continue
-		}
-		if failureMessage := taskPodInitFailureMessage(&pod); failureMessage != "" {
-			r.unmarkServicePortalPodBound(pod.UID)
-			terminalFailures[t.ID] = failureMessage
-			continue
-		}
-
-		finishedCond := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
-		if finishedCond != nil && finishedCond.Status == metav1.ConditionTrue {
-			terminalFailures[t.ID] = fmt.Sprintf("task sandbox finished: %s", finishedCond.Message)
-			continue
-		}
-
-		sandboxReady := meta.IsStatusConditionTrue(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-		if (sandboxReady || isPodReady(&pod)) && pod.Status.PodIP != "" {
+		case runningTaskActionExecute:
 			readyTasks = append(readyTasks, readyTaskItem{
-				task:    t,
-				sandbox: sb,
-				pod:     pod,
+				task:    task,
+				sandbox: *decision.sandbox,
+				pod:     *decision.pod,
 			})
+		case runningTaskActionRescue:
+			logger.Info("restart rescue", "task", task.ID, "run", run.Name, "samples", rescuedSampleCount(task, decision.rescued))
+			hasStatusUpdates = true
+		case runningTaskActionRestart:
+			logger.Info("restarting interrupted in-flight task in fresh sandbox", "task", task.ID, "run", run.Name, "oldSandbox", decision.sandbox.Name)
+			hasStatusUpdates = true
+		case runningTaskActionFail:
+			hasStatusUpdates = true
 		}
 	}
 
-	if len(terminalFailures) > 0 || len(rescuedTasks) > 0 || len(restartedTasks) > 0 {
-		now := metav1.NewTime(r.now())
-		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, gen int64) {
-			for i := range status.Tasks {
-				if status.Tasks[i].Phase != v1alpha1.TaskPhaseRunning {
-					continue
-				}
-				tid := status.Tasks[i].ID
-				if msg, failed := terminalFailures[tid]; failed {
-					status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
-					status.Tasks[i].Message = msg
-					status.Tasks[i].FinishedAt = &now
-				} else if info, ok := rescuedTasks[tid]; ok {
-					status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
-					if info.summary != nil && info.summary.FinishedAt != nil {
-						finishedAt := metav1.NewTime(*info.summary.FinishedAt)
-						status.Tasks[i].FinishedAt = &finishedAt
-					}
-					if status.Tasks[i].Message == "" {
-						status.Tasks[i].Message = "restart rescue"
-					} else if !strings.Contains(status.Tasks[i].Message, "restart rescue") {
-						status.Tasks[i].Message = status.Tasks[i].Message + " (restart rescue)"
-					}
-					if status.Tasks[i].LogPath == "" && info.logPath != "" {
-						status.Tasks[i].LogPath = info.logPath
-					}
-					if status.Tasks[i].LogHash == "" && info.logHash != "" {
-						status.Tasks[i].LogHash = info.logHash
-					}
-					if info.summary != nil {
-						status.Tasks[i].Samples = info.summary.SampleCount
-						status.Tasks[i].Successes = info.summary.Successes
-						status.Tasks[i].MeanScore = info.summary.MeanScore
-						status.Tasks[i].SuccessRate = info.summary.SuccessRate
-						status.Tasks[i].SuccessRateCI = info.summary.SuccessRateCI
-						status.Tasks[i].SuccessRateSD = info.summary.SuccessRateSD
-						status.Tasks[i].PossibleSamples = info.summary.PossibleSamples
-						if info.summary.SampleRange != nil {
-							status.Tasks[i].SampleRange = &v1alpha1.SampleRange{
-								Start: info.summary.SampleRange.Start,
-								End:   info.summary.SampleRange.End,
-							}
-						}
-					} else if info.agg != nil {
-						if status.Tasks[i].Samples == 0 {
-							status.Tasks[i].Samples = info.agg.Samples
-							status.Tasks[i].Successes = info.agg.Successes
-							status.Tasks[i].MeanScore = info.agg.MeanScore
-						}
-						if status.Tasks[i].SuccessRate == nil && info.agg.Samples > 0 {
-							rate, ci, sd := computeTaskAggregateStats(info.agg)
-							status.Tasks[i].SuccessRate = rate
-							status.Tasks[i].SuccessRateCI = ci
-							status.Tasks[i].SuccessRateSD = sd
-						}
-					}
-					if status.Tasks[i].MeanScore == nil && status.Tasks[i].Samples > 0 {
-						mean := float64(status.Tasks[i].Successes) / float64(status.Tasks[i].Samples)
-						status.Tasks[i].MeanScore = &mean
-					}
-					if status.Tasks[i].SuccessRate == nil && status.Tasks[i].Samples > 0 {
-						rate := float64(status.Tasks[i].Successes) / float64(status.Tasks[i].Samples)
-						status.Tasks[i].SuccessRate = &rate
-					}
-					if status.Tasks[i].SuccessRateCI == nil && status.Tasks[i].Samples > 0 {
-						est := stats.Proportion(status.Tasks[i].Successes, status.Tasks[i].Samples, 0.95)
-						status.Tasks[i].SuccessRateCI = &v1alpha1.ConfidenceInterval{
-							Lower:      est.CI.Lower,
-							Upper:      est.CI.Upper,
-							Confidence: 0.95,
-							Method:     "wilson",
-						}
-					}
-					if status.Tasks[i].SamplesDone < status.Tasks[i].Samples {
-						status.Tasks[i].SamplesDone = status.Tasks[i].Samples
-					}
-				} else if _, ok := restartedTasks[tid]; ok {
-					status.Tasks[i].Phase = v1alpha1.TaskPhasePending
-					status.Tasks[i].Restarts++
-					status.Tasks[i].StartedAt = nil
-					status.Tasks[i].SamplesDone = 0
-					status.Tasks[i].LastProgressAt = nil
-				}
-			}
-			status.Summary = ComputeRunSummary(status.Tasks)
+	if hasStatusUpdates {
+		statusNow := metav1.NewTime(r.now())
+		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
+			applyRunningTaskDecisions(status, decisions, statusNow)
 		})
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-
-		for i := range run.Status.Tasks {
-			if run.Status.Tasks[i].Phase != v1alpha1.TaskPhaseRunning {
-				continue
-			}
-			tid := run.Status.Tasks[i].ID
-			if msg, failed := terminalFailures[tid]; failed {
-				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
-				run.Status.Tasks[i].Message = msg
-				run.Status.Tasks[i].FinishedAt = &now
-			} else if info, ok := rescuedTasks[tid]; ok {
-				run.Status.Tasks[i].Phase = v1alpha1.TaskPhaseCompleted
-				if info.summary != nil && info.summary.FinishedAt != nil {
-					finishedAt := metav1.NewTime(*info.summary.FinishedAt)
-					run.Status.Tasks[i].FinishedAt = &finishedAt
-				}
-				if run.Status.Tasks[i].Message == "" {
-					run.Status.Tasks[i].Message = "restart rescue"
-				}
-				if run.Status.Tasks[i].LogPath == "" && info.logPath != "" {
-					run.Status.Tasks[i].LogPath = info.logPath
-				}
-				if run.Status.Tasks[i].LogHash == "" && info.logHash != "" {
-					run.Status.Tasks[i].LogHash = info.logHash
-				}
-			} else if _, ok := restartedTasks[tid]; ok {
-				run.Status.Tasks[i].Phase = v1alpha1.TaskPhasePending
-				run.Status.Tasks[i].Restarts++
-				run.Status.Tasks[i].StartedAt = nil
-				run.Status.Tasks[i].SamplesDone = 0
-				run.Status.Tasks[i].LastProgressAt = nil
-			}
-		}
-
-		for tid := range terminalFailures {
-			sbName := discovery.TaskSandboxNameForRun(run.Name, tid)
-			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
-			if sb, ok := sandboxesByTask[tid]; ok {
-				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
-					logger.Error(err, "failed to delete task sandbox on terminal failure", "task", tid)
-				}
-			}
-			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
-		}
-		for tid := range rescuedTasks {
-			sbName := discovery.TaskSandboxNameForRun(run.Name, tid)
-			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
-			if sb, ok := sandboxesByTask[tid]; ok {
-				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
-					logger.Error(err, "failed to delete task sandbox on restart rescue", "task", tid)
-				}
-			}
-			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
-		}
-		for tid := range restartedTasks {
-			sbName := discovery.TaskSandboxNameForRun(run.Name, tid)
-			sbKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sbName}
-			if sb, ok := sandboxesByTask[tid]; ok {
-				if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
-					logger.Error(err, "failed to delete task sandbox on restart", "task", tid)
-				}
-			}
-			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, tid, sbKey)
-		}
+		applyRunningTaskDecisions(&run.Status, decisions, statusNow)
+		r.cleanupDecidedTaskSandboxes(ctx, run, decisions, sandboxesByTask)
 	}
 
 	if len(readyTasks) == 0 {
-		if len(terminalFailures) > 0 || len(rescuedTasks) > 0 || len(restartedTasks) > 0 {
+		if hasStatusUpdates {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		if waitingForOldSandbox {
@@ -3030,6 +2781,417 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 
 	return ctrl.Result{Requeue: true}, nil
+}
+
+type runningTaskAction string
+
+const (
+	runningTaskActionWait              runningTaskAction = "wait"
+	runningTaskActionBindServicePortal runningTaskAction = "bind-service-portal"
+	runningTaskActionExecute           runningTaskAction = "execute"
+	runningTaskActionRestart           runningTaskAction = "restart"
+	runningTaskActionRescue            runningTaskAction = "rescue"
+	runningTaskActionFail              runningTaskAction = "fail"
+)
+
+type runningTaskObservation struct {
+	sandbox              *sandboxv1beta1.Sandbox
+	sandboxDirty         bool
+	startedAt            time.Time
+	rescued              *rescuedTaskInfo
+	pod                  *corev1.Pod
+	podUsable            bool
+	servicePortalEnabled bool
+	servicePortalBound   bool
+}
+
+type runningTaskDecision struct {
+	action                 runningTaskAction
+	message                string
+	graceRemaining         time.Duration
+	rescued                *rescuedTaskInfo
+	sandbox                *sandboxv1beta1.Sandbox
+	pod                    *corev1.Pod
+	unmarkServicePortalPod bool
+}
+
+func (decision runningTaskDecision) updatesStatus() bool {
+	switch decision.action {
+	case runningTaskActionFail, runningTaskActionRescue, runningTaskActionRestart:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *RunReconciler) uncachedReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func (r *RunReconciler) observeRunningTask(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	task v1alpha1.TaskStatus,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+	now time.Time,
+	gracePeriod time.Duration,
+) (runningTaskObservation, error) {
+	var observation runningTaskObservation
+
+	sandbox, err := r.observeTaskSandbox(ctx, run, task.ID, sandboxesByTask)
+	if err != nil {
+		return observation, err
+	}
+
+	if sandbox == nil {
+		startedAt, err := r.observeTaskStartedAt(ctx, run, task)
+		if err != nil {
+			return observation, err
+		}
+		observation.startedAt = startedAt
+		if !startedAt.IsZero() && now.Sub(startedAt) < gracePeriod {
+			return observation, nil
+		}
+		rescued, probeErr := r.probeTaskRescue(ctx, run, task)
+		if probeErr != nil {
+			return observation, probeErr
+		}
+		observation.rescued = rescued
+		return observation, nil
+	}
+
+	observation.sandbox = sandbox
+	if sandbox.Annotations[discovery.AnnotationControllerInstance] != r.InstanceID {
+		observation.sandboxDirty = true
+		rescued, probeErr := r.probeTaskRescue(ctx, run, task)
+		if probeErr != nil {
+			return observation, probeErr
+		}
+		observation.rescued = rescued
+		return observation, nil
+	}
+
+	pod, usable := r.observeTaskPod(ctx, task.ID, sandbox)
+	observation.pod = pod
+	observation.podUsable = usable
+	if pod != nil && usable {
+		observation.servicePortalEnabled = r.ServicePortalClient != nil
+		observation.servicePortalBound = r.isServicePortalPodBound(pod.UID)
+	}
+	return observation, nil
+}
+
+func (r *RunReconciler) observeTaskSandbox(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	taskID string,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+) (*sandboxv1beta1.Sandbox, error) {
+	if sandbox, ok := sandboxesByTask[taskID]; ok {
+		return &sandbox, nil
+	}
+	// Prefer reading back the created object with the API reader (uncached)
+	sandboxName := discovery.TaskSandboxNameForRun(run.Name, taskID)
+	sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
+	var directSandbox sandboxv1beta1.Sandbox
+	if err := r.uncachedReader().Get(ctx, sandboxKey, &directSandbox); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		return nil, nil
+	}
+	sandboxesByTask[taskID] = directSandbox
+	return &directSandbox, nil
+}
+
+func (r *RunReconciler) observeTaskStartedAt(ctx context.Context, run *v1alpha1.Run, task v1alpha1.TaskStatus) (time.Time, error) {
+	if task.StartedAt != nil {
+		return task.StartedAt.Time, nil
+	}
+	secretName := discovery.TaskAuthSecretNameForRun(run.Name, task.ID)
+	secretNamespace := run.Namespace
+	if secretNamespace == "" {
+		secretNamespace = discovery.DefaultControllerNamespace
+	}
+	var secret corev1.Secret
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: secretName}, &secret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return time.Time{}, err
+		}
+		return time.Time{}, nil
+	}
+	if !secret.CreationTimestamp.IsZero() {
+		return secret.CreationTimestamp.Time, nil
+	}
+	return time.Time{}, nil
+}
+
+func (r *RunReconciler) observeTaskPod(ctx context.Context, taskID string, sandbox *sandboxv1beta1.Sandbox) (*corev1.Pod, bool) {
+	logger := log.FromContext(ctx)
+	podName := sandbox.Name
+	if name, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
+		podName = name
+	}
+	podKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: podName}
+	var pod corev1.Pod
+	if err := r.Get(ctx, podKey, &pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.V(1).Info("Task pod not yet created", "task", taskID)
+		}
+		return nil, false
+	}
+	// Only execute in a pod that is controlled by the current Sandbox and is not terminating.
+	if !isUsableSandboxPod(&pod, sandbox.UID) {
+		logger.V(1).Info("Task pod is terminating or not controlled by current sandbox", "task", taskID, "sandboxUID", sandbox.UID)
+		return &pod, false
+	}
+	return &pod, true
+}
+
+func decideRunningTask(
+	task v1alpha1.TaskStatus,
+	observation runningTaskObservation,
+	now time.Time,
+	gracePeriod time.Duration,
+) runningTaskDecision {
+	if observation.sandbox == nil {
+		startedAt := observation.startedAt
+		if task.StartedAt != nil {
+			startedAt = task.StartedAt.Time
+		}
+		if !startedAt.IsZero() {
+			if elapsed := now.Sub(startedAt); elapsed < gracePeriod {
+				return runningTaskDecision{action: runningTaskActionWait, graceRemaining: gracePeriod - elapsed}
+			}
+		}
+		if observation.rescued != nil {
+			return runningTaskDecision{action: runningTaskActionRescue, rescued: observation.rescued}
+		}
+		return runningTaskDecision{action: runningTaskActionFail, message: "task sandbox missing while in Running phase"}
+	}
+
+	if observation.sandboxDirty {
+		if observation.rescued != nil {
+			return runningTaskDecision{action: runningTaskActionRescue, rescued: observation.rescued}
+		}
+		return runningTaskDecision{action: runningTaskActionRestart, message: "interrupted in-flight task in dirty sandbox", sandbox: observation.sandbox}
+	}
+
+	if observation.pod == nil || !observation.podUsable {
+		return runningTaskDecision{action: runningTaskActionWait}
+	}
+
+	if observation.servicePortalEnabled && !observation.servicePortalBound {
+		if observation.pod.Spec.NodeName == "" {
+			return runningTaskDecision{action: runningTaskActionWait}
+		}
+		return runningTaskDecision{action: runningTaskActionBindServicePortal, pod: observation.pod}
+	}
+
+	if failureMessage := runningTaskPodFailure(observation.pod); failureMessage != "" {
+		return runningTaskDecision{action: runningTaskActionFail, message: failureMessage, pod: observation.pod, unmarkServicePortalPod: true}
+	}
+
+	finishedCondition := meta.FindStatusCondition(observation.sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	if finishedCondition != nil && finishedCondition.Status == metav1.ConditionTrue {
+		return runningTaskDecision{action: runningTaskActionFail, message: fmt.Sprintf("task sandbox finished: %s", finishedCondition.Message)}
+	}
+
+	sandboxReady := meta.IsStatusConditionTrue(observation.sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if (sandboxReady || isPodReady(observation.pod)) && observation.pod.Status.PodIP != "" {
+		return runningTaskDecision{action: runningTaskActionExecute, sandbox: observation.sandbox, pod: observation.pod}
+	}
+
+	return runningTaskDecision{action: runningTaskActionWait}
+}
+
+func runningTaskPodFailure(pod *corev1.Pod) string {
+	if pod.Status.Phase == corev1.PodFailed {
+		return taskPodFailureMessage(pod)
+	}
+	if pod.Status.Phase == corev1.PodSucceeded {
+		return "task pod succeeded unexpectedly before execution"
+	}
+	return taskPodInitFailureMessage(pod)
+}
+
+func (r *RunReconciler) bindAndDecideRunningTask(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	task v1alpha1.TaskStatus,
+	observation runningTaskObservation,
+	now time.Time,
+	gracePeriod time.Duration,
+) runningTaskDecision {
+	bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	bindError := r.bindServicePortalPolicy(bindContext, string(observation.pod.UID))
+	bindCancel()
+	if bindError != nil {
+		return runningTaskDecision{
+			action:  runningTaskActionFail,
+			message: bindError.Error(),
+		}
+	}
+	r.markServicePortalPodBound(observation.pod.UID)
+	observation.servicePortalBound = true
+	return decideRunningTask(task, observation, now, gracePeriod)
+}
+
+func applyRunningTaskDecisions(status *v1alpha1.RunStatus, decisions map[string]runningTaskDecision, now metav1.Time) {
+	for i := range status.Tasks {
+		task := &status.Tasks[i]
+		if task.Phase != v1alpha1.TaskPhaseRunning {
+			continue
+		}
+		decision, ok := decisions[task.ID]
+		if !ok || !decision.updatesStatus() {
+			continue
+		}
+		applyRunningTaskDecision(task, decision, now)
+	}
+	status.Summary = ComputeRunSummary(status.Tasks)
+}
+
+func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDecision, now metav1.Time) {
+	switch decision.action {
+	case runningTaskActionFail:
+		task.Phase = v1alpha1.TaskPhaseFailed
+		task.Message = decision.message
+		task.FinishedAt = &now
+	case runningTaskActionRescue:
+		applyRescuedTaskStatus(task, decision.rescued)
+	case runningTaskActionRestart:
+		task.Phase = v1alpha1.TaskPhasePending
+		task.Restarts++
+		task.StartedAt = nil
+		task.SamplesDone = 0
+		task.LastProgressAt = nil
+	}
+}
+
+func applyRescuedTaskStatus(task *v1alpha1.TaskStatus, rescued *rescuedTaskInfo) {
+	task.Phase = v1alpha1.TaskPhaseCompleted
+	if rescued.summary != nil && rescued.summary.FinishedAt != nil {
+		finishedAt := metav1.NewTime(*rescued.summary.FinishedAt)
+		task.FinishedAt = &finishedAt
+	}
+	if task.Message == "" {
+		task.Message = "restart rescue"
+	} else if !strings.Contains(task.Message, "restart rescue") {
+		task.Message = task.Message + " (restart rescue)"
+	}
+	if task.LogPath == "" && rescued.logPath != "" {
+		task.LogPath = rescued.logPath
+	}
+	if task.LogHash == "" && rescued.logHash != "" {
+		task.LogHash = rescued.logHash
+	}
+	if rescued.summary != nil {
+		task.Samples = rescued.summary.SampleCount
+		task.Successes = rescued.summary.Successes
+		task.MeanScore = rescued.summary.MeanScore
+		task.SuccessRate = rescued.summary.SuccessRate
+		task.SuccessRateCI = rescued.summary.SuccessRateCI
+		task.SuccessRateSD = rescued.summary.SuccessRateSD
+		task.PossibleSamples = rescued.summary.PossibleSamples
+		if rescued.summary.SampleRange != nil {
+			task.SampleRange = &v1alpha1.SampleRange{
+				Start: rescued.summary.SampleRange.Start,
+				End:   rescued.summary.SampleRange.End,
+			}
+		}
+	} else if rescued.agg != nil {
+		if task.Samples == 0 {
+			task.Samples = rescued.agg.Samples
+			task.Successes = rescued.agg.Successes
+			task.MeanScore = rescued.agg.MeanScore
+		}
+		if task.SuccessRate == nil && rescued.agg.Samples > 0 {
+			successRate, successRateCI, successRateSD := computeTaskAggregateStats(rescued.agg)
+			task.SuccessRate = successRate
+			task.SuccessRateCI = successRateCI
+			task.SuccessRateSD = successRateSD
+		}
+	}
+	fillRescuedTaskDefaults(task)
+}
+
+func fillRescuedTaskDefaults(task *v1alpha1.TaskStatus) {
+	if task.MeanScore == nil && task.Samples > 0 {
+		mean := float64(task.Successes) / float64(task.Samples)
+		task.MeanScore = &mean
+	}
+	if task.SuccessRate == nil && task.Samples > 0 {
+		successRate := float64(task.Successes) / float64(task.Samples)
+		task.SuccessRate = &successRate
+	}
+	if task.SuccessRateCI == nil && task.Samples > 0 {
+		estimate := stats.Proportion(task.Successes, task.Samples, 0.95)
+		task.SuccessRateCI = &v1alpha1.ConfidenceInterval{
+			Lower:      estimate.CI.Lower,
+			Upper:      estimate.CI.Upper,
+			Confidence: 0.95,
+			Method:     "wilson",
+		}
+	}
+	if task.SamplesDone < task.Samples {
+		task.SamplesDone = task.Samples
+	}
+}
+
+func rescuedSampleCount(task v1alpha1.TaskStatus, rescued *rescuedTaskInfo) int {
+	if task.Samples != 0 {
+		return task.Samples
+	}
+	if rescued.summary != nil {
+		return rescued.summary.SampleCount
+	}
+	if rescued.agg != nil {
+		return rescued.agg.Samples
+	}
+	return 0
+}
+
+func (r *RunReconciler) cleanupDecidedTaskSandboxes(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	decisions map[string]runningTaskDecision,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+) {
+	logger := log.FromContext(ctx)
+	for _, task := range run.Status.Tasks {
+		decision, ok := decisions[task.ID]
+		if !ok || !decision.updatesStatus() {
+			continue
+		}
+		if decision.unmarkServicePortalPod && decision.pod != nil {
+			r.unmarkServicePortalPodBound(decision.pod.UID)
+		}
+		sandboxName := discovery.TaskSandboxNameForRun(run.Name, task.ID)
+		sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
+		if sandbox, ok := sandboxesByTask[task.ID]; ok {
+			if err := r.Delete(ctx, &sandbox); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, deleteTaskSandboxErrorMessage(decision.action), "task", task.ID)
+			}
+		}
+		r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, task.ID, sandboxKey)
+	}
+}
+
+func deleteTaskSandboxErrorMessage(action runningTaskAction) string {
+	switch action {
+	case runningTaskActionFail:
+		return "failed to delete task sandbox on terminal failure"
+	case runningTaskActionRescue:
+		return "failed to delete task sandbox on restart rescue"
+	case runningTaskActionRestart:
+		return "failed to delete task sandbox on restart"
+	default:
+		return "failed to delete task sandbox"
+	}
 }
 
 type rescuedTaskInfo struct {

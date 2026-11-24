@@ -13136,3 +13136,236 @@ func TestReconcile_StoreManifestGraceWindowSurfacesSinkError(t *testing.T) {
 		t.Errorf("Expected message to surface sink's own error from grace window, got: %s", updatedRun.Status.Message)
 	}
 }
+
+func TestDecideRunningTask(t *testing.T) {
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	gracePeriod := 30 * time.Second
+	startedWithinGrace := metav1.NewTime(now.Add(-10 * time.Second))
+	startedPastGrace := metav1.NewTime(now.Add(-45 * time.Second))
+	rescued := &rescuedTaskInfo{logPath: "gs://bucket/task.json"}
+
+	cleanSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-task", UID: "sandbox-uid"},
+	}
+	readySandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-task", UID: "sandbox-uid"},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{
+				{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+		},
+	}
+	finishedSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-task", UID: "sandbox-uid"},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{
+				{Type: string(sandboxv1beta1.SandboxConditionFinished), Status: metav1.ConditionTrue, Message: "pod exited"},
+			},
+		},
+	}
+	runningPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-task", UID: "pod-uid"},
+		Spec:       corev1.PodSpec{NodeName: "node-1"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
+	}
+	readyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-task", UID: "pod-uid"},
+		Spec:       corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.2",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name               string
+		task               v1alpha1.TaskStatus
+		observation        runningTaskObservation
+		wantAction         runningTaskAction
+		wantMessage        string
+		wantGraceRemaining time.Duration
+		wantUnmark         bool
+	}{
+		{
+			name:               "missing sandbox within grace period from task StartedAt",
+			task:               v1alpha1.TaskStatus{ID: "task-1", StartedAt: &startedWithinGrace},
+			wantAction:         runningTaskActionWait,
+			wantGraceRemaining: 20 * time.Second,
+		},
+		{
+			name:               "missing sandbox within grace period from secret timestamp",
+			task:               v1alpha1.TaskStatus{ID: "task-1"},
+			observation:        runningTaskObservation{startedAt: startedWithinGrace.Time},
+			wantAction:         runningTaskActionWait,
+			wantGraceRemaining: 20 * time.Second,
+		},
+		{
+			name:        "missing sandbox past grace period rescued",
+			task:        v1alpha1.TaskStatus{ID: "task-1", StartedAt: &startedPastGrace},
+			observation: runningTaskObservation{rescued: rescued},
+			wantAction:  runningTaskActionRescue,
+		},
+		{
+			name:        "missing sandbox past grace period fails",
+			task:        v1alpha1.TaskStatus{ID: "task-1", StartedAt: &startedPastGrace},
+			wantAction:  runningTaskActionFail,
+			wantMessage: "task sandbox missing while in Running phase",
+		},
+		{
+			name:        "dirty sandbox rescued",
+			task:        v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{sandbox: cleanSandbox, sandboxDirty: true, rescued: rescued},
+			wantAction:  runningTaskActionRescue,
+		},
+		{
+			name:        "dirty sandbox restarts",
+			task:        v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{sandbox: cleanSandbox, sandboxDirty: true},
+			wantAction:  runningTaskActionRestart,
+		},
+		{
+			name:        "pod not yet created waits",
+			task:        v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{sandbox: cleanSandbox},
+			wantAction:  runningTaskActionWait,
+		},
+		{
+			name:        "unusable pod waits",
+			task:        v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{sandbox: cleanSandbox, pod: readyPod, podUsable: false},
+			wantAction:  runningTaskActionWait,
+		},
+		{
+			name: "unbound pod without node waits before service portal bind",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:              cleanSandbox,
+				pod:                  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-uid"}},
+				podUsable:            true,
+				servicePortalEnabled: true,
+			},
+			wantAction: runningTaskActionWait,
+		},
+		{
+			name: "scheduled unbound pod requests service portal bind",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:              cleanSandbox,
+				pod:                  runningPod,
+				podUsable:            true,
+				servicePortalEnabled: true,
+			},
+			wantAction: runningTaskActionBindServicePortal,
+		},
+		{
+			name: "failed pod fails and unmarks service portal binding",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:   cleanSandbox,
+				pod:       &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+				podUsable: true,
+			},
+			wantAction:  runningTaskActionFail,
+			wantMessage: "task pod failed",
+			wantUnmark:  true,
+		},
+		{
+			name: "succeeded pod fails and unmarks service portal binding",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:   cleanSandbox,
+				pod:       &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
+				podUsable: true,
+			},
+			wantAction:  runningTaskActionFail,
+			wantMessage: "task pod succeeded unexpectedly before execution",
+			wantUnmark:  true,
+		},
+		{
+			name: "init container failure fails and unmarks service portal binding",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox: cleanSandbox,
+				pod: &corev1.Pod{
+					Status: corev1.PodStatus{
+						Phase: corev1.PodPending,
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name: "clone",
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{ExitCode: 128, Message: "clone failed"},
+								},
+							},
+						},
+					},
+				},
+				podUsable: true,
+			},
+			wantAction:  runningTaskActionFail,
+			wantMessage: "clone failed",
+			wantUnmark:  true,
+		},
+		{
+			name: "finished sandbox fails",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:   finishedSandbox,
+				pod:       runningPod,
+				podUsable: true,
+			},
+			wantAction:  runningTaskActionFail,
+			wantMessage: "task sandbox finished: pod exited",
+		},
+		{
+			name: "ready sandbox with pod IP executes",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:   readySandbox,
+				pod:       runningPod,
+				podUsable: true,
+			},
+			wantAction: runningTaskActionExecute,
+		},
+		{
+			name: "ready pod with pod IP executes",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:   cleanSandbox,
+				pod:       readyPod,
+				podUsable: true,
+			},
+			wantAction: runningTaskActionExecute,
+		},
+		{
+			name: "ready sandbox without pod IP waits",
+			task: v1alpha1.TaskStatus{ID: "task-1"},
+			observation: runningTaskObservation{
+				sandbox:   readySandbox,
+				pod:       &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}},
+				podUsable: true,
+			},
+			wantAction: runningTaskActionWait,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			decision := decideRunningTask(testCase.task, testCase.observation, now, gracePeriod)
+			if decision.action != testCase.wantAction {
+				t.Errorf("action = %q, want %q", decision.action, testCase.wantAction)
+			}
+			if testCase.wantMessage != "" && decision.message != testCase.wantMessage {
+				t.Errorf("message = %q, want %q", decision.message, testCase.wantMessage)
+			}
+			if decision.graceRemaining != testCase.wantGraceRemaining {
+				t.Errorf("graceRemaining = %v, want %v", decision.graceRemaining, testCase.wantGraceRemaining)
+			}
+			if decision.unmarkServicePortalPod != testCase.wantUnmark {
+				t.Errorf("unmarkServicePortalPod = %v, want %v", decision.unmarkServicePortalPod, testCase.wantUnmark)
+			}
+		})
+	}
+}
