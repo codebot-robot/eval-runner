@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strconv"
@@ -31,7 +32,7 @@ import (
 const (
 	defaultInitialBackoff = 1 * time.Second
 	maxRetryAfter         = 60 * time.Second
-	maxRetries            = 3
+	maxRetries            = 6
 	maxErrorResponseBytes = 64 * 1024
 )
 
@@ -46,12 +47,13 @@ type PostOptions struct {
 	Redact         func(string) string
 }
 
-// PostWithRetry executes an HTTP POST request with exponential backoff and retry for rate-limit and server errors.
+// PostWithRetry executes an HTTP POST request with capped, jittered exponential backoff and retry for rate-limit and server errors.
 func PostWithRetry(ctx context.Context, options PostOptions) (*http.Response, error) {
 	backoffDuration := options.InitialBackoff
 	if backoffDuration <= 0 {
 		backoffDuration = defaultInitialBackoff
 	}
+	backoffDuration = min(backoffDuration, maxRetryAfter)
 
 	for attempt := 0; ; attempt++ {
 		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, options.EndpointURL, bytes.NewReader(options.Body))
@@ -63,7 +65,8 @@ func PostWithRetry(ctx context.Context, options PostOptions) (*http.Response, er
 		}
 
 		var lastError error
-		waitDuration := backoffDuration
+		var retryAfterDuration time.Duration
+		hasRetryAfter := false
 
 		httpResponse, err := options.HTTPClient.Do(httpRequest)
 		if err != nil {
@@ -91,24 +94,40 @@ func PostWithRetry(ctx context.Context, options PostOptions) (*http.Response, er
 			if httpResponse.StatusCode != http.StatusTooManyRequests && (httpResponse.StatusCode < 500 || httpResponse.StatusCode > 599) {
 				return nil, lastError
 			}
-			if retryAfter, ok := parseRetryAfter(httpResponse.Header.Get("Retry-After")); ok {
-				waitDuration = retryAfter
-			}
+			retryAfterDuration, hasRetryAfter = parseRetryAfter(httpResponse.Header.Get("Retry-After"))
 		}
 
 		if attempt >= maxRetries {
 			return nil, fmt.Errorf("after %s: %w", formatAttempts(attempt+1), lastError)
 		}
+		waitDuration := retryAfterDuration
+		if !hasRetryAfter {
+			waitDuration = jitterBackoff(backoffDuration)
+		}
 		if deadline, hasDeadline := ctx.Deadline(); hasDeadline && time.Until(deadline) < waitDuration {
 			return nil, fmt.Errorf("after %s (stopped because no time left to retry): %w", formatAttempts(attempt+1), lastError)
 		}
-		backoffDuration *= 2
+		backoffDuration = min(backoffDuration*2, maxRetryAfter)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(waitDuration):
 		}
 	}
+}
+
+func jitterBackoff(baseDuration time.Duration) time.Duration {
+	capped := min(baseDuration, maxRetryAfter)
+	if capped <= 0 {
+		return 0
+	}
+	quarter := capped / 4
+	if quarter == 0 {
+		return capped
+	}
+	minimumWait := capped - quarter
+	maximumWait := min(capped+quarter, maxRetryAfter)
+	return minimumWait + time.Duration(rand.Int64N(int64(maximumWait-minimumWait)+1))
 }
 
 func isRetryableNetworkError(err error) bool {
