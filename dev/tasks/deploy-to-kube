@@ -420,11 +420,15 @@ else
   if kubectl -n eval-runner get secret model-credentials -o name >/dev/null 2>&1; then
     echo "    secret eval-runner/model-credentials present"
   else
-    echo "    secret eval-runner/model-credentials is MISSING. Controller reads GEMINI_API_KEY from it for agent tasks."
+    echo "    secret eval-runner/model-credentials is MISSING. Controller reads model API keys from it for agent tasks and service portal credential injection."
     echo "    Create it with the keys your evals need, for example:"
     echo "      kubectl -n eval-runner create secret generic model-credentials \\"
     echo "        --from-literal=GEMINI_API_KEY=<key>"
-    echo "    (see docs/development.md, 'Running Agent Tasks with a Real Model')."
+    echo "    (see docs/development.md, 'Running Sample Evaluations with a Real Model')."
+  fi
+  if kubectl -n eval-runner-sandbox get secret model-credentials -o name >/dev/null 2>&1; then
+    echo "    NOTE: legacy secret eval-runner-sandbox/model-credentials still exists; sandbox pods never mount it and it can be removed:"
+    echo "      kubectl -n eval-runner-sandbox delete secret model-credentials"
   fi
 fi
 

@@ -570,8 +570,21 @@ To manually verify ingress and egress policy enforcement on an enforcing cluster
 
 Task sandboxes and pods NEVER receive or hold real model credentials. Real model credentials belong exclusively to the controller and service portals:
 
+- **Controller-namespace Secret**: Create a Secret named `model-credentials` in the controller's namespace (`eval-runner`) holding the provider API keys your evals need (`GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`):
+
+  ```bash
+  kubectl -n eval-runner create secret generic model-credentials \
+    --from-literal=GEMINI_API_KEY=<your-api-key>
+  ```
+
 - **Placeholder credentials in pods**: Sample-runner pods hold recognisable placeholder credentials (plain literal values like `GEMINI_API_KEY=placeholder-model-credential`, never referencing any Secret) so that evaluation SDKs construct and dispatch requests normally without hanging.
-- **Service Portal model interception**: Authentic model credentials belong exclusively to the controller and service portals. The service portal swaps authentic credentials in on egress. On clusters where the service portal is not connected, the provider rejects the placeholder at once, and tasks fail promptly with the provider's authentication error.
+- **Service portal model interception**: For each sample-runner pod running a real model, the controller reads the provider key from `eval-runner/model-credentials`, binds a service portal egress policy rule with `replace_headers` referencing `secret://<name>`, and delivers the secret bytes for that pod via `InjectSecrets`. The service portal node proxy swaps in the real key only on requests to the model API host that carry the provider header; requests without the header or to any other host are forwarded without the credential. On clusters where the service portal is not connected, the provider rejects the placeholder at once, and tasks fail promptly with the provider's authentication error.
+- **Removing legacy sandbox Secrets**: Once service portal interception is active, no pod in `eval-runner-sandbox` needs or mounts `model-credentials`. Remove any leftover Secret from the sandbox namespace:
+
+  ```bash
+  kubectl -n eval-runner-sandbox delete secret model-credentials --ignore-not-found
+  ```
+
 - **Mock / offline models**: For offline or mock models (e.g. `mockllm/model`), evals run directly in the sandbox without credentials.
 
 To create a Run with a model:
@@ -810,6 +823,7 @@ Supported ConfigMap keys include:
 - `pollProgressInterval`: Interval between task progress polling attempts and per-task write floor (default `10s`, minimum `1s`).
 - `modelSecret`: Deprecated and ignored. Model credentials are never injected into task sandboxes. Tolerated for backwards compatibility so existing ConfigMaps do not prevent startup.
 - `sandboxdImage`: Container image used for sandboxd init container (defaults to pinned SandboxdImage if unset).
+- `servicePortalModelBaseURL`: Optional custom model API base URL (`http://` or `https://`) for sample-runner tasks routed through the service portal. When set, the controller passes `--model-base-url` to `inspect eval` for non-mock models and binds the service portal `replace_headers` rule to that endpoint's scheme, hostname, and port.
 - `taskGracePeriod`: Grace period before failing a Running task whose sandbox is missing (default `30s`).
 - `uiBaseURL`: Base URL for the eval-runner UI (e.g. `https://eval-runner.example.com`) to generate absolute links in PR comments.
 - `webhookRepositories`: Comma-separated list of allowed repositories (`owner/name`). If unset or empty, all incoming repositories are rejected (fail-closed). Use `*` to explicitly allow all repositories.
