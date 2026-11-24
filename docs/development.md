@@ -176,7 +176,7 @@ For generic Kubernetes clusters (kind, kops, EKS, etc.), `./dev/tasks/deploy-to-
 1. Ensures namespaces `eval-runner` and `eval-runner-sandbox` exist with restricted pod-security labels (`k8s/00-namespaces.yaml`).
 2. Installs `agent-sandbox` at the pinned release (`v1.0.7`, shared with the e2e test harness via `dev/tasks/versions.sh`), waits for the CRD to be established, and waits for the controller deployment rollout.
 3. Builds and makes the pinned fork `sandboxd` image available under `IMAGE_PREFIX` (or reuses an existing image with `--skip-sandboxd-build`). When built on an arm64 host, it produces a `linux/amd64` image by default so x86 cluster nodes can execute it.
-4. Writes the `eval-runner-config` ConfigMap with `sandboxdImage` and any extra settings supplied via `--set KEY=VALUE`.
+4. Updates the `eval-runner-config` ConfigMap via `./dev/tasks/configure` with `sandboxdImage`, default service portal settings, and any extra settings supplied via `--set KEY=VALUE`.
 5. Invokes `./dev/tasks/deploy`, waits for controller, UI, and webhook rollouts, and confirms effective cluster settings took effect.
 
 Usage:
@@ -758,9 +758,28 @@ To allow the web dashboard (`eval-runner-ui`) to read Inspect logs and display s
 
 ### Configuring the Cluster ConfigMap
 
-Per-cluster settings (such as the artifact bucket) live in a ConfigMap named `eval-runner-config` in the `eval-runner` namespace, created once by the operator. Because deployment manifests in `k8s/` are project-agnostic, deploys require no argument patching with `kubectl patch`.
+Per-cluster settings (such as the artifact bucket or default model) live in a ConfigMap named `eval-runner-config` in the `eval-runner` namespace. Because deployment manifests in `k8s/` are project-agnostic, deploys require no argument patching with `kubectl patch`.
 
-Create the ConfigMap once:
+Use `./dev/tasks/configure` to update `eval-runner/eval-runner-config` without re-running infrastructure provisioning or image builds. It verifies and prints the active `kubectl` context, merges changes while preserving untouched keys, skips applying when nothing changed, and automatically restarts `eval-runner-controller` or `eval-runner-webhook` when restart-only keys change:
+
+```bash
+# Change defaultModel (automatically restarts eval-runner-webhook)
+./dev/tasks/configure --set defaultModel=google/gemini-2.5-flash
+
+# Update multiple hot-reloaded settings (no restart needed)
+./dev/tasks/configure --set maxParallelTasks=8 --set uiBaseURL=https://evals.example.com
+
+# Remove a key or preview changes without mutating the cluster
+./dev/tasks/configure --unset defaultModel --dry-run
+```
+
+Options:
+- `--set KEY=VALUE`: Sets a ConfigMap key (repeatable).
+- `--unset KEY`: Removes a ConfigMap key if present (repeatable).
+- `--restart` / `--no-restart`: Automatically restarts deployments affected by restart-only key changes (default: `--restart`). Pass `--no-restart` to apply the ConfigMap without restarting deployments.
+- `--dry-run`: Prints mutating `kubectl` commands without executing them.
+
+You can also create or apply the ConfigMap directly with `kubectl`:
 
 ```bash
 kubectl -n eval-runner create configmap eval-runner-config \
