@@ -27,7 +27,7 @@ import (
 // DefaultServicePortalAllowedHosts defines the default allowed hostnames for task sandboxes behind the service portal:
 // - Model APIs (*.googleapis.com)
 // - Git hosts (github.com, *.github.com, *.githubusercontent.com)
-// - Python package repositories (pypi.org, *.pypi.org, files.pythonhosted.org, *.pythonhosted.org)
+// - Python package repositories and tokenizer assets (pypi.org, *.pypi.org, files.pythonhosted.org, *.pythonhosted.org, openaipublic.blob.core.windows.net)
 // - Tool and package distributors for Terminal-Bench tasks (astral.sh, *.astral.sh, deb.debian.org, security.debian.org, *.debian.org, archive.ubuntu.com, security.ubuntu.com, ports.ubuntu.com, *.ubuntu.com)
 var DefaultServicePortalAllowedHosts = []string{
 	"*.googleapis.com",
@@ -38,6 +38,7 @@ var DefaultServicePortalAllowedHosts = []string{
 	"*.pypi.org",
 	"files.pythonhosted.org",
 	"*.pythonhosted.org",
+	"openaipublic.blob.core.windows.net",
 	"astral.sh",
 	"*.astral.sh",
 	"deb.debian.org",
@@ -135,8 +136,10 @@ func (r *RunReconciler) servicePortalPolicy() *portalsv1.EgressPolicy {
 	return BuildServicePortalEgressPolicy(servicePortal)
 }
 
-func (r *RunReconciler) bindServicePortalPolicy(ctx context.Context, podUID string) error {
-	policy := r.servicePortalPolicy()
+func (r *RunReconciler) bindServicePortalPolicy(ctx context.Context, podUID string, policy *portalsv1.EgressPolicy) error {
+	if policy == nil {
+		policy = r.servicePortalPolicy()
+	}
 	if err := r.ServicePortalClient.Bind(ctx, podUID, policy, nil); err != nil {
 		return fmt.Errorf("service portal bind failed: %w", err)
 	}

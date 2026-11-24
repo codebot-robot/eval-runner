@@ -583,14 +583,15 @@ func main() {
 	}
 
 	egressController := controller.NewSandboxEgressController(controller.SandboxEgressControllerOptions{
-		Client:           mgr.GetClient(),
-		KubeClient:       kubeClient,
-		DynamicClient:    dynamicClient,
-		SandboxNamespace: sandboxNamespace,
-		FQDNSupported:    fqdnSupported,
-		FQDNVersion:      fqdnVersion,
-		InitialHosts:     clusterConfig.SandboxEgressHosts,
-		Logger:           setupLog,
+		Client:               mgr.GetClient(),
+		KubeClient:           kubeClient,
+		DynamicClient:        dynamicClient,
+		SandboxNamespace:     sandboxNamespace,
+		FQDNSupported:        fqdnSupported,
+		FQDNVersion:          fqdnVersion,
+		ServicePortalEnabled: servicePortalClient != nil,
+		InitialHosts:         clusterConfig.SandboxEgressHosts,
+		Logger:               setupLog,
 	})
 
 	egressCtx, egressCancel := context.WithTimeout(context.Background(), 15*time.Second)

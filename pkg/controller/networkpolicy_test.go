@@ -550,3 +550,97 @@ func TestSandboxEgressController_DebounceRateLimit(t *testing.T) {
 		t.Fatalf("expected 3 egress rules, got %d", len(baseline.Spec.Egress))
 	}
 }
+
+func TestReconcileServicePortalEgress(t *testing.T) {
+	ctx := t.Context()
+	scheme := newTestScheme()
+	logger := logr.Discard()
+	namespace := "eval-runner-sandbox"
+	policyKey := types.NamespacedName{
+		Namespace: namespace,
+		Name:      discovery.DefaultServicePortalEgressNetworkPolicyName,
+	}
+
+	t.Run("CreatesIdempotentAndRepairsDriftWhenEnabled", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		if err := ReconcileServicePortalEgress(ctx, cl, namespace, true, logger); err != nil {
+			t.Fatalf("initial reconcile failed: %v", err)
+		}
+
+		policy := &networkingv1.NetworkPolicy{}
+		if err := cl.Get(ctx, policyKey, policy); err != nil {
+			t.Fatalf("expected service portal egress NetworkPolicy to exist: %v", err)
+		}
+		if policy.Spec.PodSelector.MatchLabels[discovery.LabelServicePortalIntercept] != "true" {
+			t.Fatalf("expected podSelector %s=true, got %v", discovery.LabelServicePortalIntercept, policy.Spec.PodSelector.MatchLabels)
+		}
+		if len(policy.Spec.Egress) != 1 || len(policy.Spec.Egress[0].Ports) != 4 {
+			t.Fatalf("expected 1 egress rule with 4 ports, got %+v", policy.Spec.Egress)
+		}
+		rvAfterCreate := policy.ResourceVersion
+
+		// Second reconcile is a no-op
+		if err := ReconcileServicePortalEgress(ctx, cl, namespace, true, logger); err != nil {
+			t.Fatalf("idempotent reconcile failed: %v", err)
+		}
+		if err := cl.Get(ctx, policyKey, policy); err != nil {
+			t.Fatalf("failed to get policy after idempotent reconcile: %v", err)
+		}
+		if policy.ResourceVersion != rvAfterCreate {
+			t.Fatalf("expected ResourceVersion to remain %s, got %s", rvAfterCreate, policy.ResourceVersion)
+		}
+
+		// Simulate drift and confirm repair
+		policy.Spec.Egress = nil
+		if err := cl.Update(ctx, policy); err != nil {
+			t.Fatalf("failed to inject drift: %v", err)
+		}
+		if err := ReconcileServicePortalEgress(ctx, cl, namespace, true, logger); err != nil {
+			t.Fatalf("drift repair reconcile failed: %v", err)
+		}
+		if err := cl.Get(ctx, policyKey, policy); err != nil {
+			t.Fatalf("failed to get repaired policy: %v", err)
+		}
+		if len(policy.Spec.Egress) != 1 || len(policy.Spec.Egress[0].Ports) != 4 {
+			t.Fatalf("expected drift to be repaired to 1 rule / 4 ports, got %+v", policy.Spec.Egress)
+		}
+	})
+
+	t.Run("DeletesStalePolicyWhenDisabled", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		// No-op when absent
+		if err := ReconcileServicePortalEgress(ctx, cl, namespace, false, logger); err != nil {
+			t.Fatalf("reconcile when absent failed: %v", err)
+		}
+
+		// Create while enabled, then disable via controller reconcile
+		enabledController := NewSandboxEgressController(SandboxEgressControllerOptions{
+			Client:               cl,
+			SandboxNamespace:     namespace,
+			ServicePortalEnabled: true,
+			Logger:               logger,
+		})
+		if err := enabledController.Reconcile(ctx); err != nil {
+			t.Fatalf("enabled controller reconcile failed: %v", err)
+		}
+		policy := &networkingv1.NetworkPolicy{}
+		if err := cl.Get(ctx, policyKey, policy); err != nil {
+			t.Fatalf("expected policy to exist when enabled: %v", err)
+		}
+
+		disabledController := NewSandboxEgressController(SandboxEgressControllerOptions{
+			Client:               cl,
+			SandboxNamespace:     namespace,
+			ServicePortalEnabled: false,
+			Logger:               logger,
+		})
+		if err := disabledController.Reconcile(ctx); err != nil {
+			t.Fatalf("disabled controller reconcile failed: %v", err)
+		}
+		if err := cl.Get(ctx, policyKey, policy); err == nil {
+			t.Fatal("expected service portal egress NetworkPolicy to be deleted when disabled")
+		}
+	})
+}

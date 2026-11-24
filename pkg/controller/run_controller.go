@@ -3126,12 +3126,22 @@ func (r *RunReconciler) bindAndDecideRunningTask(
 	gracePeriod time.Duration,
 	maxMessageBytes int,
 ) runningTaskDecision {
+	logger := log.FromContext(ctx)
+	r.cfgMu.RLock()
+	servicePortalOptions := r.Config.ServicePortal
+	r.cfgMu.RUnlock()
+	policy := BuildServicePortalEgressPolicy(servicePortalOptions)
+	logger.Info("Binding service portal policy", "task", task.ID, "podUID", observation.pod.UID, "node", observation.pod.Spec.NodeName,
+		"httpsHostsCount", len(servicePortalOptions.AllowedHosts), "httpHostsCount", len(servicePortalOptions.AllowedHTTPHosts),
+		"httpsHosts", truncateHostList(servicePortalOptions.AllowedHosts, 5), "httpHosts", truncateHostList(servicePortalOptions.AllowedHTTPHosts, 5))
 	bindContext, bindCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-	bindError := r.bindServicePortalPolicy(bindContext, string(observation.pod.UID))
+	bindError := r.bindServicePortalPolicy(bindContext, string(observation.pod.UID), policy)
 	bindCancel()
 	if bindError != nil {
+		logger.Error(bindError, "Failed to bind service portal policy", "task", task.ID, "podUID", observation.pod.UID)
 		return decideInfrastructureFailure(task, bindError.Error(), observation.sandbox, observation.pod, false, maxMessageBytes)
 	}
+	logger.Info("Successfully bound service portal policy", "task", task.ID, "podUID", observation.pod.UID)
 	r.markServicePortalPodBound(observation.pod.UID)
 	observation.servicePortalBound = true
 	return decideRunningTask(task, observation, now, gracePeriod, maxMessageBytes)
@@ -5348,4 +5358,12 @@ func (r *RunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		Complete(r)
+}
+
+func truncateHostList(hosts []string, limit int) []string {
+	if len(hosts) <= limit {
+		return hosts
+	}
+	res := append([]string(nil), hosts[:limit]...)
+	return append(res, fmt.Sprintf("... (%d total)", len(hosts)))
 }
