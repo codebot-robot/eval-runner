@@ -61,8 +61,8 @@ func TestPostWithRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		always503 := func(int) (int, string) { return http.StatusServiceUnavailable, "" }
 		waits, err := runRetries(t.Context(), 0, always503)
-		if err == nil || !strings.HasPrefix(err.Error(), "after 7 attempts:") || len(waits) != maxRetries {
-			t.Fatalf("got waits=%d err=%v, want %d waits after 7 attempts", len(waits), err, maxRetries)
+		if err == nil || !strings.HasPrefix(err.Error(), "after 16 attempts:") || len(waits) != maxRetries {
+			t.Fatalf("got waits=%d err=%v, want %d waits after 16 attempts", len(waits), err, maxRetries)
 		}
 		expectedBase, totalWait := defaultInitialBackoff, time.Duration(0)
 		for i, waitDuration := range waits {
@@ -72,8 +72,17 @@ func TestPostWithRetry(t *testing.T) {
 			totalWait += waitDuration
 			expectedBase = min(expectedBase*2, maxRetryAfter)
 		}
-		if totalWait < 47*time.Second || totalWait > 79*time.Second {
-			t.Errorf("total retry window %v outside expected ~60s range", totalWait)
+		if totalWait < 452*time.Second || totalWait > 619*time.Second {
+			t.Errorf("total retry window %v outside expected ~10m range", totalWait)
+		}
+
+		if waits, err := runRetries(t.Context(), 0, func(attempt int) (int, string) {
+			if attempt <= 8 {
+				return http.StatusServiceUnavailable, ""
+			}
+			return http.StatusOK, ""
+		}); err != nil || len(waits) != 8 {
+			t.Errorf("got waits=%d err=%v, want 8 waits and nil error after >6 transient 503s", len(waits), err)
 		}
 
 		waits, err = runRetries(t.Context(), 45*time.Second, func(int) (int, string) { return http.StatusTooManyRequests, "" })
@@ -107,6 +116,13 @@ func TestPostWithRetry(t *testing.T) {
 		if waits, err := runRetries(deadlineContext, 0, always503); err == nil || !strings.Contains(err.Error(), "stopped because no time left to retry") || len(waits) != 0 {
 			t.Errorf("got waits=%v err=%v, want immediate deadline guard error", waits, err)
 		}
+
+		midRetryDeadlineContext, cancelMidRetry := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancelMidRetry()
+		if waits, err := runRetries(midRetryDeadlineContext, 0, always503); err == nil || !strings.Contains(err.Error(), "stopped because no time left to retry") || len(waits) == 0 || len(waits) >= maxRetries {
+			t.Errorf("got waits=%d err=%v, want mid-retry deadline guard stop before %d retries", len(waits), err, maxRetries)
+		}
+
 		cancelContext, stop := context.WithCancel(t.Context())
 		if _, err := runRetries(cancelContext, 0, func(int) (int, string) {
 			go func() { time.Sleep(100 * time.Millisecond); stop() }()

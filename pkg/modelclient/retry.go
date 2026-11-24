@@ -32,7 +32,7 @@ import (
 const (
 	defaultInitialBackoff = 1 * time.Second
 	maxRetryAfter         = 60 * time.Second
-	maxRetries            = 6
+	maxRetries            = 15
 	maxErrorResponseBytes = 64 * 1024
 )
 

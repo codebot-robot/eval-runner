@@ -423,7 +423,7 @@ func TestGenerate_Retry(t *testing.T) {
 			Model:          "gemini-2.5-flash",
 			APIKey:         "test-secret-key",
 			HTTPClient:     server.Client(),
-			InitialBackoff: time.Millisecond,
+			InitialBackoff: time.Microsecond,
 		})
 		if err != nil {
 			t.Fatalf("New() failed: %v", err)
@@ -505,11 +505,11 @@ func TestGenerate_Retry(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if attempts != 7 {
-			t.Errorf("expected 7 attempts, got %d", attempts)
+		if attempts != 16 {
+			t.Errorf("expected 16 attempts, got %d", attempts)
 		}
 		errorMessage := err.Error()
-		if !strings.HasPrefix(errorMessage, "after 7 attempts:") || !strings.Contains(errorMessage, "gemini API error (503 Service Unavailable)") || !strings.Contains(errorMessage, "This model is currently experiencing high demand") {
+		if !strings.HasPrefix(errorMessage, "after 16 attempts:") || !strings.Contains(errorMessage, "gemini API error (503 Service Unavailable)") || !strings.Contains(errorMessage, "This model is currently experiencing high demand") {
 			t.Errorf("unexpected error message: %q", errorMessage)
 		}
 	})
