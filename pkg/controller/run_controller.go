@@ -2394,161 +2394,29 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		}
 	}
 
-	// Start pending tasks up to MaxParallelTasks
+	// Start pending tasks up to MaxParallelTasks: observe, decide, apply.
 	availableSlots := r.maxParallelTasks() - runningCount
 	waitingForOldSandbox := false
 	if availableSlots > 0 {
-		type pendingTaskStart struct {
-			id       string
-			restarts int
+		pendingObservations, err := r.observePendingTasks(ctx, run, sandboxesByTask)
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-		var tasksToStart []pendingTaskStart
-		for _, task := range run.Status.Tasks {
-			if task.Phase == v1alpha1.TaskPhasePending && availableSlots > 0 {
-				if existingSandbox, exists := sandboxesByTask[task.ID]; exists {
-					if isOldTaskSandbox(&existingSandbox, r.InstanceID, task.Restarts) {
-						// Sandbox from an earlier attempt or controller instance: delete it and wait for it and its pod to terminate.
-						sandboxKey := types.NamespacedName{Namespace: existingSandbox.Namespace, Name: existingSandbox.Name}
-						if err := r.Delete(ctx, &existingSandbox); err != nil && !apierrors.IsNotFound(err) {
-							logger.Error(err, "failed to delete old task sandbox for pending task", "task", task.ID)
-						}
-						r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, task.ID, sandboxKey)
-						delete(sandboxesByTask, task.ID)
-						waitingForOldSandbox = true
-						continue
-					}
-					// Sandbox belongs to this process instance for the current attempt (e.g. status write after Create failed on previous reconcile).
-					// Allow tasksToStart to proceed; Create will tolerate AlreadyExists and status write will record Running.
-				} else {
-					// Check if a terminating pod with the same name still exists from an earlier attempt
-					sandboxName := discovery.TaskSandboxNameForRun(run.Name, task.ID)
-					podKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
-					var existingPod corev1.Pod
-					if err := r.Get(ctx, podKey, &existingPod); err == nil {
-						waitingForOldSandbox = true
-						continue
-					} else if !apierrors.IsNotFound(err) {
-						return ctrl.Result{}, err
-					}
-				}
-				tasksToStart = append(tasksToStart, pendingTaskStart{id: task.ID, restarts: task.Restarts})
-				availableSlots--
+		pendingDecisions := decidePendingTasks(run.Status.Tasks, pendingObservations, availableSlots, r.InstanceID)
+
+		var startOutcomes map[string]pendingTaskStartOutcome
+		waitingForOldSandbox, startOutcomes = r.executePendingTaskDecisions(ctx, run, manifest, pendingDecisions, sandboxesByTask)
+		if len(startOutcomes) > 0 {
+			statusNow := metav1.NewTime(r.now())
+			err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
+				applyPendingTaskStartOutcomes(status, startOutcomes, statusNow)
+			})
+			if err != nil {
+				return ctrl.Result{}, err
 			}
-		}
-
-		if len(tasksToStart) > 0 {
-			started := make(map[string]int)
-			failedTasks := make(map[string]string)
-			for _, pendingTask := range tasksToStart {
-				taskID := pendingTask.id
-				taskImage := ""
-				isSandboxTask := false
-				isAgentTask := false
-				var taskLimits corev1.ResourceList
-				if manifest != nil {
-					for _, manifestTask := range manifest.Tasks {
-						if manifestTask.ID == taskID {
-							taskImage = manifestTask.Image
-							isSandboxTask = isSandboxOnlyTask(manifestTask)
-							isAgentTask = manifestTask.Agent != nil
-							if isSandboxTask {
-								taskLimits = discovery.TaskResourceLimits(manifestTask)
-							}
-							break
-						}
-					}
-				}
-
-				if isAgentTask {
-					if _, err := r.agentModelForRun(run); err != nil {
-						msg := err.Error()
-						logger.Info("Rejecting agent task launch", "task", taskID, "model", run.Spec.Model, "message", msg)
-						failedTasks[taskID] = msg
-						continue
-					}
-				}
-
-				sandboxName := discovery.TaskSandboxNameForRun(run.Name, taskID)
-				sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
-				token, tokenErr := r.ensureTaskAuthToken(ctx, run, taskID, sandboxKey)
-				if tokenErr != nil {
-					logger.Error(tokenErr, "Failed to ensure task auth token", "task", taskID)
-					failedTasks[taskID] = fmt.Sprintf("failed to ensure task auth token: %v", tokenErr)
-					continue
-				}
-
-				// Create server cert Secret before Sandbox so it exists when pod starts
-				if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.executionDeadline()+time.Hour); err != nil {
-					logger.Error(err, "Failed to ensure task server cert secret", "task", taskID)
-					failedTasks[taskID] = fmt.Sprintf("failed to ensure server cert secret: %v", err)
-					continue
-				}
-
-				desiredSandbox := discovery.BuildTaskSandbox(run, taskID, discovery.TaskSandboxConfig{
-					Namespace:              r.sandboxNamespace(),
-					ControllerInstance:     r.InstanceID,
-					TaskAttempt:            pendingTask.restarts,
-					SampleRunnerImage:      r.sampleRunnerImage(),
-					Image:                  taskImage,
-					AuthTokenDigest:        discovery.AuthTokenDigest(token),
-					ServerCertSecret:       pki.ServerSecretName(sandboxName),
-					CAConfigMap:            pki.DefaultCAConfigMapName,
-					SandboxdImage:          r.sandboxdImage(),
-					CloneRepo:              isSandboxTask && run.Spec.Repo.URL != "",
-					StepTimeoutSeconds:     int(r.executionStepTimeout().Seconds()),
-					SandboxTask:            isSandboxTask,
-					Limits:                 taskLimits,
-					ServicePortalIntercept: r.ServicePortalClient != nil,
-				})
-
-				if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
-					logger.Error(err, "Failed to create task sandbox", "task", taskID)
-					failedTasks[taskID] = fmt.Sprintf("failed to create sandbox: %v", err)
-				} else {
-					started[taskID] = pendingTask.restarts
-					sandboxesByTask[taskID] = *desiredSandbox
-				}
-			}
-
-			if len(started) > 0 || len(failedTasks) > 0 {
-				now := metav1.NewTime(r.now())
-				applyStartedTasks := func(status *v1alpha1.RunStatus) {
-					for i := range status.Tasks {
-						taskID := status.Tasks[i].ID
-						if failMessage, failed := failedTasks[taskID]; failed {
-							status.Tasks[i].Phase = v1alpha1.TaskPhaseFailed
-							status.Tasks[i].Message = failMessage
-							status.Tasks[i].FinishedAt = &now
-						} else if expectedRestarts, ok := started[taskID]; ok {
-							if status.Tasks[i].Phase == v1alpha1.TaskPhasePending && status.Tasks[i].Restarts == expectedRestarts {
-								status.Tasks[i].Phase = v1alpha1.TaskPhaseRunning
-								status.Tasks[i].StartedAt = &now
-								if manifest != nil {
-									for _, manifestTask := range manifest.Tasks {
-										if manifestTask.ID == taskID && isSandboxOnlyTask(manifestTask) {
-											status.Tasks[i].TimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(manifestTask, run.Status.ExecutionDeadline)
-											status.Tasks[i].Resources = &v1alpha1.TaskResources{
-												Limits: discovery.TaskResourceLimits(manifestTask),
-											}
-											break
-										}
-									}
-								}
-							}
-						}
-					}
-					status.Summary = ComputeRunSummary(status.Tasks)
-				}
-				err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
-					applyStartedTasks(status)
-				})
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-				applyStartedTasks(&run.Status)
-				if len(started) == 0 && len(failedTasks) > 0 {
-					return ctrl.Result{Requeue: true}, nil
-				}
+			applyPendingTaskStartOutcomes(&run.Status, startOutcomes, statusNow)
+			if !hasStartedPendingTask(startOutcomes) {
+				return ctrl.Result{Requeue: true}, nil
 			}
 		}
 	}
@@ -2771,6 +2639,295 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 
 	return ctrl.Result{Requeue: true}, nil
+}
+
+type pendingTaskAction string
+
+const (
+	pendingTaskActionWait             pendingTaskAction = "wait"
+	pendingTaskActionDeleteOldSandbox pendingTaskAction = "delete-old-sandbox"
+	pendingTaskActionStart            pendingTaskAction = "start"
+)
+
+type pendingTaskObservation struct {
+	sandbox     *sandboxv1beta1.Sandbox
+	existingPod bool
+}
+
+type pendingTaskDecision struct {
+	task    v1alpha1.TaskStatus
+	action  pendingTaskAction
+	sandbox *sandboxv1beta1.Sandbox
+}
+
+type pendingTaskStartOutcome struct {
+	started          bool
+	expectedRestarts int
+	failureMessage   string
+	sandboxOnly      bool
+	timeoutSeconds   int
+	resources        *v1alpha1.TaskResources
+}
+
+func (r *RunReconciler) observePendingTasks(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+) (map[string]pendingTaskObservation, error) {
+	observations := make(map[string]pendingTaskObservation)
+	for _, task := range run.Status.Tasks {
+		if task.Phase != v1alpha1.TaskPhasePending {
+			continue
+		}
+		observation, err := r.observePendingTask(ctx, run, task, sandboxesByTask)
+		if err != nil {
+			return nil, err
+		}
+		observations[task.ID] = observation
+	}
+	return observations, nil
+}
+
+func (r *RunReconciler) observePendingTask(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	task v1alpha1.TaskStatus,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+) (pendingTaskObservation, error) {
+	if existingSandbox, exists := sandboxesByTask[task.ID]; exists {
+		sandboxCopy := existingSandbox
+		return pendingTaskObservation{sandbox: &sandboxCopy}, nil
+	}
+	// Check if a terminating pod with the same name still exists from an earlier attempt.
+	sandboxName := discovery.TaskSandboxNameForRun(run.Name, task.ID)
+	podKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
+	var existingPod corev1.Pod
+	if err := r.Get(ctx, podKey, &existingPod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return pendingTaskObservation{}, nil
+		}
+		return pendingTaskObservation{}, err
+	}
+	return pendingTaskObservation{existingPod: true}, nil
+}
+
+func decidePendingTasks(
+	tasks []v1alpha1.TaskStatus,
+	observations map[string]pendingTaskObservation,
+	availableSlots int,
+	controllerInstance string,
+) []pendingTaskDecision {
+	if availableSlots <= 0 {
+		return nil
+	}
+	remainingSlots := availableSlots
+	var decisions []pendingTaskDecision
+	for _, task := range tasks {
+		if task.Phase != v1alpha1.TaskPhasePending {
+			continue
+		}
+		if remainingSlots <= 0 {
+			break
+		}
+		observation := observations[task.ID]
+		if observation.sandbox != nil {
+			if isOldTaskSandbox(observation.sandbox, controllerInstance, task.Restarts) {
+				decisions = append(decisions, pendingTaskDecision{
+					task:    task,
+					action:  pendingTaskActionDeleteOldSandbox,
+					sandbox: observation.sandbox,
+				})
+				continue
+			}
+			// Sandbox belongs to this process instance for the current attempt (e.g. status write after Create failed on previous reconcile).
+			// Allow start to proceed; Create will tolerate AlreadyExists and status write will record Running.
+		} else if observation.existingPod {
+			decisions = append(decisions, pendingTaskDecision{
+				task:   task,
+				action: pendingTaskActionWait,
+			})
+			continue
+		}
+		decisions = append(decisions, pendingTaskDecision{
+			task:   task,
+			action: pendingTaskActionStart,
+		})
+		remainingSlots--
+	}
+	return decisions
+}
+
+func (r *RunReconciler) executePendingTaskDecisions(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	manifest *v1alpha1.Manifest,
+	decisions []pendingTaskDecision,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+) (bool, map[string]pendingTaskStartOutcome) {
+	logger := log.FromContext(ctx)
+	waitingForOldSandbox := false
+	for _, decision := range decisions {
+		switch decision.action {
+		case pendingTaskActionDeleteOldSandbox:
+			existingSandbox := decision.sandbox
+			sandboxKey := types.NamespacedName{Namespace: existingSandbox.Namespace, Name: existingSandbox.Name}
+			if err := r.Delete(ctx, existingSandbox); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "failed to delete old task sandbox for pending task", "task", decision.task.ID)
+			}
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, decision.task.ID, sandboxKey)
+			delete(sandboxesByTask, decision.task.ID)
+			waitingForOldSandbox = true
+		case pendingTaskActionWait:
+			waitingForOldSandbox = true
+		}
+	}
+
+	outcomes := make(map[string]pendingTaskStartOutcome)
+	for _, decision := range decisions {
+		if decision.action != pendingTaskActionStart {
+			continue
+		}
+		outcomes[decision.task.ID] = r.startPendingTask(ctx, run, manifest, decision.task, sandboxesByTask)
+	}
+	return waitingForOldSandbox, outcomes
+}
+
+func findManifestTask(manifest *v1alpha1.Manifest, taskID string) *v1alpha1.ManifestTask {
+	if manifest == nil {
+		return nil
+	}
+	for i := range manifest.Tasks {
+		if manifest.Tasks[i].ID == taskID {
+			return &manifest.Tasks[i]
+		}
+	}
+	return nil
+}
+
+func (r *RunReconciler) startPendingTask(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	manifest *v1alpha1.Manifest,
+	task v1alpha1.TaskStatus,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+) pendingTaskStartOutcome {
+	logger := log.FromContext(ctx)
+	taskID := task.ID
+	manifestTask := findManifestTask(manifest, taskID)
+	if manifestTask != nil && manifestTask.Agent != nil {
+		if _, err := r.agentModelForRun(run); err != nil {
+			message := err.Error()
+			logger.Info("Rejecting agent task launch", "task", taskID, "model", run.Spec.Model, "message", message)
+			return pendingTaskStartOutcome{failureMessage: message}
+		}
+	}
+
+	sandboxName := discovery.TaskSandboxNameForRun(run.Name, taskID)
+	sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
+	token, err := r.ensureTaskAuthToken(ctx, run, taskID, sandboxKey)
+	if err != nil {
+		logger.Error(err, "Failed to ensure task auth token", "task", taskID)
+		return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to ensure task auth token: %v", err)}
+	}
+
+	// Create server cert Secret before Sandbox so it exists when pod starts.
+	if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.executionDeadline()+time.Hour); err != nil {
+		logger.Error(err, "Failed to ensure task server cert secret", "task", taskID)
+		return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to ensure server cert secret: %v", err)}
+	}
+
+	desiredSandbox := r.buildPendingTaskSandbox(run, task, manifestTask, sandboxName, token)
+	if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
+		logger.Error(err, "Failed to create task sandbox", "task", taskID)
+		return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to create sandbox: %v", err)}
+	}
+
+	sandboxesByTask[taskID] = *desiredSandbox
+	outcome := pendingTaskStartOutcome{
+		started:          true,
+		expectedRestarts: task.Restarts,
+	}
+	if manifestTask != nil && isSandboxOnlyTask(*manifestTask) {
+		outcome.sandboxOnly = true
+		outcome.timeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(*manifestTask, run.Status.ExecutionDeadline)
+		outcome.resources = &v1alpha1.TaskResources{
+			Limits: discovery.TaskResourceLimits(*manifestTask),
+		}
+	}
+	return outcome
+}
+
+func (r *RunReconciler) buildPendingTaskSandbox(
+	run *v1alpha1.Run,
+	task v1alpha1.TaskStatus,
+	manifestTask *v1alpha1.ManifestTask,
+	sandboxName string,
+	token string,
+) *sandboxv1beta1.Sandbox {
+	taskImage := ""
+	isSandboxTask := false
+	var taskLimits corev1.ResourceList
+	if manifestTask != nil {
+		taskImage = manifestTask.Image
+		isSandboxTask = isSandboxOnlyTask(*manifestTask)
+		if isSandboxTask {
+			taskLimits = discovery.TaskResourceLimits(*manifestTask)
+		}
+	}
+	return discovery.BuildTaskSandbox(run, task.ID, discovery.TaskSandboxConfig{
+		Namespace:              r.sandboxNamespace(),
+		ControllerInstance:     r.InstanceID,
+		TaskAttempt:            task.Restarts,
+		SampleRunnerImage:      r.sampleRunnerImage(),
+		Image:                  taskImage,
+		AuthTokenDigest:        discovery.AuthTokenDigest(token),
+		ServerCertSecret:       pki.ServerSecretName(sandboxName),
+		CAConfigMap:            pki.DefaultCAConfigMapName,
+		SandboxdImage:          r.sandboxdImage(),
+		CloneRepo:              isSandboxTask && run.Spec.Repo.URL != "",
+		StepTimeoutSeconds:     int(r.executionStepTimeout().Seconds()),
+		SandboxTask:            isSandboxTask,
+		Limits:                 taskLimits,
+		ServicePortalIntercept: r.ServicePortalClient != nil,
+	})
+}
+
+func applyPendingTaskStartOutcomes(
+	status *v1alpha1.RunStatus,
+	outcomes map[string]pendingTaskStartOutcome,
+	now metav1.Time,
+) {
+	for i := range status.Tasks {
+		task := &status.Tasks[i]
+		outcome, ok := outcomes[task.ID]
+		if !ok {
+			continue
+		}
+		if !outcome.started {
+			task.Phase = v1alpha1.TaskPhaseFailed
+			task.Message = outcome.failureMessage
+			task.FinishedAt = &now
+			continue
+		}
+		if task.Phase == v1alpha1.TaskPhasePending && task.Restarts == outcome.expectedRestarts {
+			task.Phase = v1alpha1.TaskPhaseRunning
+			task.StartedAt = &now
+			if outcome.sandboxOnly {
+				task.TimeoutSeconds = outcome.timeoutSeconds
+				task.Resources = outcome.resources.DeepCopy()
+			}
+		}
+	}
+	status.Summary = ComputeRunSummary(status.Tasks)
+}
+
+func hasStartedPendingTask(outcomes map[string]pendingTaskStartOutcome) bool {
+	for _, outcome := range outcomes {
+		if outcome.started {
+			return true
+		}
+	}
+	return false
 }
 
 type runningTaskAction string

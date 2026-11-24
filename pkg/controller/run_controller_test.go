@@ -13447,3 +13447,153 @@ func TestDecideRunningTask(t *testing.T) {
 		})
 	}
 }
+
+func TestDecidePendingTasks(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC))
+	currentInstance := "controller-current"
+	previousInstance := "controller-previous"
+
+	currentSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-task-current",
+			Annotations: map[string]string{
+				discovery.AnnotationControllerInstance: currentInstance,
+				discovery.AnnotationTaskAttempt:        "1",
+			},
+		},
+	}
+	terminatingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-task-terminating",
+			DeletionTimestamp: &now,
+			Annotations: map[string]string{
+				discovery.AnnotationControllerInstance: currentInstance,
+				discovery.AnnotationTaskAttempt:        "0",
+			},
+		},
+	}
+	previousInstanceSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-task-previous-instance",
+			Annotations: map[string]string{
+				discovery.AnnotationControllerInstance: previousInstance,
+				discovery.AnnotationTaskAttempt:        "0",
+			},
+		},
+	}
+	earlierAttemptSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-task-earlier-attempt",
+			Annotations: map[string]string{
+				discovery.AnnotationControllerInstance: currentInstance,
+				discovery.AnnotationTaskAttempt:        "0",
+			},
+		},
+	}
+
+	type expectedDecision struct {
+		taskID string
+		action pendingTaskAction
+	}
+
+	testCases := []struct {
+		name           string
+		tasks          []v1alpha1.TaskStatus
+		observations   map[string]pendingTaskObservation
+		availableSlots int
+		want           []expectedDecision
+	}{
+		{
+			name: "zero available slots emits no decisions",
+			tasks: []v1alpha1.TaskStatus{
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+			},
+			availableSlots: 0,
+			want:           nil,
+		},
+		{
+			name: "starts pending tasks in order up to available slots and skips non-pending tasks",
+			tasks: []v1alpha1.TaskStatus{
+				{ID: "task-running", Phase: v1alpha1.TaskPhaseRunning},
+				{ID: "task-1", Phase: v1alpha1.TaskPhasePending},
+				{ID: "task-completed", Phase: v1alpha1.TaskPhaseCompleted},
+				{ID: "task-2", Phase: v1alpha1.TaskPhasePending},
+				{ID: "task-3", Phase: v1alpha1.TaskPhasePending},
+			},
+			observations: map[string]pendingTaskObservation{
+				"task-3": {sandbox: previousInstanceSandbox},
+			},
+			availableSlots: 2,
+			want: []expectedDecision{
+				{taskID: "task-1", action: pendingTaskActionStart},
+				{taskID: "task-2", action: pendingTaskActionStart},
+			},
+		},
+		{
+			name: "deletes old sandboxes without consuming slots and starts subsequent pending task",
+			tasks: []v1alpha1.TaskStatus{
+				{ID: "task-terminating", Phase: v1alpha1.TaskPhasePending, Restarts: 0},
+				{ID: "task-previous-instance", Phase: v1alpha1.TaskPhasePending, Restarts: 0},
+				{ID: "task-old-attempt", Phase: v1alpha1.TaskPhasePending, Restarts: 1},
+				{ID: "task-ready", Phase: v1alpha1.TaskPhasePending, Restarts: 0},
+				{ID: "task-after-slots", Phase: v1alpha1.TaskPhasePending, Restarts: 0},
+			},
+			observations: map[string]pendingTaskObservation{
+				"task-terminating":       {sandbox: terminatingSandbox},
+				"task-previous-instance": {sandbox: previousInstanceSandbox},
+				"task-old-attempt":       {sandbox: earlierAttemptSandbox},
+				"task-after-slots":       {existingPod: true},
+			},
+			availableSlots: 1,
+			want: []expectedDecision{
+				{taskID: "task-terminating", action: pendingTaskActionDeleteOldSandbox},
+				{taskID: "task-previous-instance", action: pendingTaskActionDeleteOldSandbox},
+				{taskID: "task-old-attempt", action: pendingTaskActionDeleteOldSandbox},
+				{taskID: "task-ready", action: pendingTaskActionStart},
+			},
+		},
+		{
+			name: "waits for existing pod without consuming a slot",
+			tasks: []v1alpha1.TaskStatus{
+				{ID: "task-pod-terminating", Phase: v1alpha1.TaskPhasePending},
+				{ID: "task-ready", Phase: v1alpha1.TaskPhasePending},
+			},
+			observations: map[string]pendingTaskObservation{
+				"task-pod-terminating": {existingPod: true},
+			},
+			availableSlots: 1,
+			want: []expectedDecision{
+				{taskID: "task-pod-terminating", action: pendingTaskActionWait},
+				{taskID: "task-ready", action: pendingTaskActionStart},
+			},
+		},
+		{
+			name: "reuses current-instance current-attempt sandbox and consumes a slot",
+			tasks: []v1alpha1.TaskStatus{
+				{ID: "task-reuse", Phase: v1alpha1.TaskPhasePending, Restarts: 1},
+				{ID: "task-next", Phase: v1alpha1.TaskPhasePending},
+			},
+			observations: map[string]pendingTaskObservation{
+				"task-reuse": {sandbox: currentSandbox},
+			},
+			availableSlots: 1,
+			want: []expectedDecision{
+				{taskID: "task-reuse", action: pendingTaskActionStart},
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			decisions := decidePendingTasks(testCase.tasks, testCase.observations, testCase.availableSlots, currentInstance)
+			if len(decisions) != len(testCase.want) {
+				t.Fatalf("len(decisions) = %d, want %d (%+v)", len(decisions), len(testCase.want), decisions)
+			}
+			for i, want := range testCase.want {
+				if decisions[i].task.ID != want.taskID || decisions[i].action != want.action {
+					t.Errorf("decisions[%d] = (%q, %q), want (%q, %q)", i, decisions[i].task.ID, decisions[i].action, want.taskID, want.action)
+				}
+			}
+		})
+	}
+}
