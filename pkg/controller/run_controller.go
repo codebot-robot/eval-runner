@@ -2422,11 +2422,6 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 
 	// Check running tasks for ready pods: observe, decide, apply.
-	type readyTaskItem struct {
-		task    v1alpha1.TaskStatus
-		sandbox sandboxv1beta1.Sandbox
-		pod     corev1.Pod
-	}
 	now := r.now()
 	gracePeriod := r.taskGracePeriod()
 	maxMessageBytes := r.maxMessageBytes()
@@ -2520,123 +2515,19 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
-	resultsChan := make(chan taskExecutionResult, len(readyTasks))
-	var wg sync.WaitGroup
-
-	for _, item := range readyTasks {
-		wg.Add(1)
-		go func(task v1alpha1.TaskStatus, sb sandboxv1beta1.Sandbox, pod corev1.Pod) {
-			defer wg.Done()
-			defer r.unmarkServicePortalPodBound(pod.UID)
-			res := r.executeTask(ctx, run, task.ID, &sb, &pod)
-			resultsChan <- res
-		}(item.task, item.sandbox, item.pod)
-	}
-
-	wg.Wait()
-	close(resultsChan)
-
-	taskResults := make(map[string]taskExecutionResult)
-	for res := range resultsChan {
-		taskResults[res.taskID] = res
-	}
-
+	// Execute ready tasks, decide outcomes, and apply status updates before cleanup.
+	taskResults := r.executeReadyTasks(ctx, run, readyTasks)
+	executionDecisions := decideExecutionResults(run.Status.Tasks, taskResults)
 	deadlineExceeded := r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline)
 
-	// Update task statuses FIRST before deleting sandboxes
-	err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
-		for i := range status.Tasks {
-			if res, ok := taskResults[status.Tasks[i].ID]; ok {
-				status.Tasks[i].Phase = res.phase
-				if res.cohort != "" {
-					status.Tasks[i].Cohort = res.cohort
-				} else if status.Tasks[i].Cohort == "" {
-					status.Tasks[i].Cohort = v1alpha1.DefaultCohort
-				}
-				status.Tasks[i].Samples = res.samples
-				status.Tasks[i].Successes = res.successes
-				status.Tasks[i].MeanScore = res.meanScore
-				status.Tasks[i].SuccessRate = res.successRate
-				status.Tasks[i].SuccessRateCI = res.successRateCI
-				status.Tasks[i].SuccessRateSD = res.successRateSD
-				status.Tasks[i].Message = res.message
-				status.Tasks[i].LogPath = res.logPath
-				status.Tasks[i].LogHash = res.logHash
-				status.Tasks[i].Tokens = res.tokens
-				status.Tasks[i].Latency = res.latency
-				status.Tasks[i].CostUSD = res.costUSD
-				status.Tasks[i].CostSource = res.costSource
-				status.Tasks[i].PossibleSamples = res.possibleSamples
-				status.Tasks[i].FinishedAt = res.finishedAt
-				finalSamplesDone := res.samples
-				if res.phase != v1alpha1.TaskPhaseCompleted && status.Tasks[i].SamplesDone > finalSamplesDone {
-					finalSamplesDone = status.Tasks[i].SamplesDone
-				}
-				if finalSamplesDone > status.Tasks[i].SamplesDone {
-					nowMeta := metav1.NewTime(r.now())
-					status.Tasks[i].LastProgressAt = &nowMeta
-				}
-				status.Tasks[i].SamplesDone = finalSamplesDone
-
-				if res.samplesPlanned > 0 {
-					status.Tasks[i].SamplesPlanned = res.samplesPlanned
-				} else if status.Tasks[i].SamplesPlanned == 0 {
-					status.Tasks[i].SamplesPlanned = computeSamplesPlanned(res.sampleRange, run.Spec.Limit, res.possibleSamples)
-				}
-				if res.sampleRange != nil {
-					status.Tasks[i].SampleRange = res.sampleRange
-				} else if status.Tasks[i].SampleRange == nil {
-					status.Tasks[i].SampleRange = EffectiveSampleRange(run.Spec)
-				}
-				if res.timeoutSeconds > 0 {
-					status.Tasks[i].TimeoutSeconds = res.timeoutSeconds
-				}
-				if res.resources != nil {
-					status.Tasks[i].Resources = res.resources
-				}
-			}
-		}
-		status.Summary = ComputeRunSummary(status.Tasks)
-
-		var totalCost float64
-		hasCost := false
-		for i := range status.Tasks {
-			if status.Tasks[i].CostUSD != nil {
-				totalCost += *status.Tasks[i].CostUSD
-				hasCost = true
-			}
-		}
-		if hasCost {
-			status.CostUSD = &totalCost
-		}
-
-		if deadlineExceeded {
-			r.markDeadlineCutOff(status, generation, taskResults)
-		}
-	})
-	if err != nil {
+	if err := r.applyExecutionResultStatus(ctx, req.NamespacedName, run.Spec, executionDecisions, taskResults, deadlineExceeded); err != nil {
 		return ctrl.Result{}, err
 	}
-
 	if deadlineExceeded {
-		r.evictCachedManifest(run.Namespace + "/" + run.Name)
-		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
-			logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
-		}
-		logger.Info("Execution deadline exceeded", "run", run.Name)
+		r.cleanupExecutionDeadlineExceeded(ctx, run)
 		return ctrl.Result{}, nil
 	}
-
-	// Delete task sandboxes and clean up auth tokens only after status update succeeds
-	for taskID := range taskResults {
-		if sb, ok := sandboxesByTask[taskID]; ok {
-			sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
-			if err := r.Delete(ctx, &sb); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to delete task sandbox after execution", "task", taskID)
-			}
-			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, taskID, sbKey)
-		}
-	}
+	r.cleanupExecutedTaskSandboxes(ctx, run, executionDecisions, sandboxesByTask)
 
 	return ctrl.Result{Requeue: true}, nil
 }
@@ -3405,6 +3296,220 @@ func deleteTaskSandboxErrorMessage(action runningTaskAction) string {
 		return "failed to delete task sandbox on restart"
 	default:
 		return "failed to delete task sandbox"
+	}
+}
+
+type readyTaskItem struct {
+	task    v1alpha1.TaskStatus
+	sandbox sandboxv1beta1.Sandbox
+	pod     corev1.Pod
+}
+
+type executionResultAction string
+
+const (
+	executionResultActionApply executionResultAction = "apply"
+)
+
+type executionResultDecision struct {
+	action executionResultAction
+	result taskExecutionResult
+}
+
+func (r *RunReconciler) executeReadyTasks(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	readyTasks []readyTaskItem,
+) map[string]taskExecutionResult {
+	resultsChannel := make(chan taskExecutionResult, len(readyTasks))
+	var waitGroup sync.WaitGroup
+
+	for _, item := range readyTasks {
+		waitGroup.Add(1)
+		go func(task v1alpha1.TaskStatus, sandbox sandboxv1beta1.Sandbox, pod corev1.Pod) {
+			defer waitGroup.Done()
+			defer r.unmarkServicePortalPodBound(pod.UID)
+			result := r.executeTask(ctx, run, task.ID, &sandbox, &pod)
+			resultsChannel <- result
+		}(item.task, item.sandbox, item.pod)
+	}
+
+	waitGroup.Wait()
+	close(resultsChannel)
+
+	taskResults := make(map[string]taskExecutionResult, len(readyTasks))
+	for result := range resultsChannel {
+		taskResults[result.taskID] = result
+	}
+	return taskResults
+}
+
+func decideExecutionResults(
+	tasks []v1alpha1.TaskStatus,
+	taskResults map[string]taskExecutionResult,
+) map[string]executionResultDecision {
+	decisions := make(map[string]executionResultDecision, len(taskResults))
+	for _, task := range tasks {
+		result, ok := taskResults[task.ID]
+		if !ok {
+			continue
+		}
+		decisions[task.ID] = decideExecutionResult(task, result)
+	}
+	return decisions
+}
+
+func decideExecutionResult(task v1alpha1.TaskStatus, result taskExecutionResult) executionResultDecision {
+	return executionResultDecision{
+		action: executionResultActionApply,
+		result: result,
+	}
+}
+
+func (r *RunReconciler) applyExecutionResultStatus(
+	ctx context.Context,
+	runKey types.NamespacedName,
+	runSpec v1alpha1.RunSpec,
+	decisions map[string]executionResultDecision,
+	taskResults map[string]taskExecutionResult,
+	deadlineExceeded bool,
+) error {
+	// Update task statuses FIRST before deleting sandboxes.
+	return r.updateRunStatus(ctx, runKey, func(status *v1alpha1.RunStatus, generation int64) {
+		applyExecutionResultDecisions(status, runSpec, decisions, metav1.NewTime(r.now()))
+		if deadlineExceeded {
+			r.markDeadlineCutOff(status, generation, taskResults)
+		}
+	})
+}
+
+func applyExecutionResultDecisions(
+	status *v1alpha1.RunStatus,
+	runSpec v1alpha1.RunSpec,
+	decisions map[string]executionResultDecision,
+	now metav1.Time,
+) {
+	for i := range status.Tasks {
+		task := &status.Tasks[i]
+		decision, ok := decisions[task.ID]
+		if !ok {
+			continue
+		}
+		applyExecutionResultDecision(task, runSpec, decision, now)
+	}
+	status.Summary = ComputeRunSummary(status.Tasks)
+	if totalCost, hasCost := computeRunTotalCost(status.Tasks); hasCost {
+		status.CostUSD = &totalCost
+	}
+}
+
+func applyExecutionResultDecision(
+	task *v1alpha1.TaskStatus,
+	runSpec v1alpha1.RunSpec,
+	decision executionResultDecision,
+	now metav1.Time,
+) {
+	switch decision.action {
+	case executionResultActionApply:
+		applyTaskExecutionResult(task, runSpec, decision.result, now)
+	}
+}
+
+func applyTaskExecutionResult(
+	task *v1alpha1.TaskStatus,
+	runSpec v1alpha1.RunSpec,
+	result taskExecutionResult,
+	now metav1.Time,
+) {
+	task.Phase = result.phase
+	if result.cohort != "" {
+		task.Cohort = result.cohort
+	} else if task.Cohort == "" {
+		task.Cohort = v1alpha1.DefaultCohort
+	}
+	task.Samples = result.samples
+	task.Successes = result.successes
+	task.MeanScore = result.meanScore
+	task.SuccessRate = result.successRate
+	task.SuccessRateCI = result.successRateCI
+	task.SuccessRateSD = result.successRateSD
+	task.Message = result.message
+	task.LogPath = result.logPath
+	task.LogHash = result.logHash
+	task.Tokens = result.tokens
+	task.Latency = result.latency
+	task.CostUSD = result.costUSD
+	task.CostSource = result.costSource
+	task.PossibleSamples = result.possibleSamples
+	task.FinishedAt = result.finishedAt
+
+	finalSamplesDone := result.samples
+	if result.phase != v1alpha1.TaskPhaseCompleted && task.SamplesDone > finalSamplesDone {
+		finalSamplesDone = task.SamplesDone
+	}
+	if finalSamplesDone > task.SamplesDone {
+		progressTime := now
+		task.LastProgressAt = &progressTime
+	}
+	task.SamplesDone = finalSamplesDone
+
+	if result.samplesPlanned > 0 {
+		task.SamplesPlanned = result.samplesPlanned
+	} else if task.SamplesPlanned == 0 {
+		task.SamplesPlanned = computeSamplesPlanned(result.sampleRange, runSpec.Limit, result.possibleSamples)
+	}
+	if result.sampleRange != nil {
+		task.SampleRange = result.sampleRange
+	} else if task.SampleRange == nil {
+		task.SampleRange = EffectiveSampleRange(runSpec)
+	}
+	if result.timeoutSeconds > 0 {
+		task.TimeoutSeconds = result.timeoutSeconds
+	}
+	if result.resources != nil {
+		task.Resources = result.resources
+	}
+}
+
+func computeRunTotalCost(tasks []v1alpha1.TaskStatus) (float64, bool) {
+	var totalCost float64
+	hasCost := false
+	for i := range tasks {
+		if tasks[i].CostUSD != nil {
+			totalCost += *tasks[i].CostUSD
+			hasCost = true
+		}
+	}
+	return totalCost, hasCost
+}
+
+func (r *RunReconciler) cleanupExecutionDeadlineExceeded(ctx context.Context, run *v1alpha1.Run) {
+	logger := log.FromContext(ctx)
+	r.evictCachedManifest(run.Namespace + "/" + run.Name)
+	if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
+		logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
+	}
+	logger.Info("Execution deadline exceeded", "run", run.Name)
+}
+
+func (r *RunReconciler) cleanupExecutedTaskSandboxes(
+	ctx context.Context,
+	run *v1alpha1.Run,
+	decisions map[string]executionResultDecision,
+	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+) {
+	logger := log.FromContext(ctx)
+	for _, task := range run.Status.Tasks {
+		if _, ok := decisions[task.ID]; !ok {
+			continue
+		}
+		if sandbox, ok := sandboxesByTask[task.ID]; ok {
+			sandboxKey := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
+			if err := r.Delete(ctx, &sandbox); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "failed to delete task sandbox after execution", "task", task.ID)
+			}
+			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, task.ID, sandboxKey)
+		}
 	}
 }
 
