@@ -15,6 +15,7 @@
 package artifacts
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -147,60 +148,38 @@ func ClassifyArtifact(data []byte) ArtifactKind {
 // ParseResultsSamples parses raw JSON bytes from a sandbox task results.json file,
 // validates the schema, and returns ParsedInspectSample records for UI display.
 func ParseResultsSamples(data []byte) ([]ParsedInspectSample, error) {
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return nil, fmt.Errorf("empty results data")
+	return ParseResultsSamplesStream(bytes.NewReader(data))
+}
+
+func convertResultsSample(index int, sample SampleResult) (ParsedInspectSample, error) {
+	if strings.TrimSpace(sample.ID) == "" {
+		return ParsedInspectSample{}, fmt.Errorf("sample at index %d has empty id", index)
+	}
+	if sample.Passed == nil {
+		return ParsedInspectSample{}, fmt.Errorf("sample %q missing required 'passed' field", sample.ID)
+	}
+	if sample.Score != nil && (*sample.Score < 0.0 || *sample.Score > 1.0) {
+		return ParsedInspectSample{}, fmt.Errorf("sample %q score %f out of range [0, 1]", sample.ID, *sample.Score)
 	}
 
-	var resultsFile ResultsFile
-	if err := json.Unmarshal(data, &resultsFile); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal results JSON: %w", err)
+	status := "fail"
+	if *sample.Passed {
+		status = "pass"
 	}
 
-	if resultsFile.SchemaVersion != 1 {
-		return nil, fmt.Errorf("unsupported results schemaVersion %d, expected 1", resultsFile.SchemaVersion)
+	var scoreValue float64
+	if sample.Score != nil {
+		scoreValue = *sample.Score
+	} else if *sample.Passed {
+		scoreValue = 1.0
 	}
 
-	if len(resultsFile.Samples) == 0 {
-		return nil, nil
-	}
-
-	parsedSamples := make([]ParsedInspectSample, len(resultsFile.Samples))
-	for index, sample := range resultsFile.Samples {
-		if strings.TrimSpace(sample.ID) == "" {
-			return nil, fmt.Errorf("sample at index %d has empty id", index)
-		}
-		if sample.Passed == nil {
-			return nil, fmt.Errorf("sample %q missing required 'passed' field", sample.ID)
-		}
-		if sample.Score != nil && (*sample.Score < 0.0 || *sample.Score > 1.0) {
-			return nil, fmt.Errorf("sample %q score %f out of range [0, 1]", sample.ID, *sample.Score)
-		}
-
-		status := "fail"
-		if *sample.Passed {
-			status = "pass"
-		}
-
-		var scoreValue float64
-		if sample.Score != nil {
-			scoreValue = *sample.Score
-		} else if *sample.Passed {
-			scoreValue = 1.0
-		} else {
-			scoreValue = 0.0
-		}
-
-		scoreString := fmt.Sprintf("%.2f", scoreValue)
-
-		parsedSamples[index] = ParsedInspectSample{
-			ID:          sample.ID,
-			Status:      status,
-			Score:       &scoreValue,
-			HasScore:    true,
-			ScoreStr:    scoreString,
-			Explanation: sample.Message,
-		}
-	}
-
-	return parsedSamples, nil
+	return ParsedInspectSample{
+		ID:          sample.ID,
+		Status:      status,
+		Score:       &scoreValue,
+		HasScore:    true,
+		ScoreStr:    fmt.Sprintf("%.2f", scoreValue),
+		Explanation: sample.Message,
+	}, nil
 }
