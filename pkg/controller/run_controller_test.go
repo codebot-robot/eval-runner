@@ -13597,3 +13597,105 @@ func TestDecidePendingTasks(t *testing.T) {
 		})
 	}
 }
+
+func TestDecideAndApplyExecutionResults(t *testing.T) {
+	earlierProgress := metav1.NewTime(time.Date(2026, 11, 24, 11, 55, 0, 0, time.UTC))
+	applyTime := metav1.NewTime(time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC))
+	finishedAt := metav1.NewTime(time.Date(2026, 11, 24, 11, 59, 0, 0, time.UTC))
+	limit := 10
+	priorCost := 0.25
+	completedCost := 0.50
+	meanScore := 0.8
+
+	status := &v1alpha1.RunStatus{
+		Tasks: []v1alpha1.TaskStatus{
+			{
+				ID:      "task-already-done",
+				Cohort:  v1alpha1.DefaultCohort,
+				Phase:   v1alpha1.TaskPhaseCompleted,
+				Samples: 4,
+				CostUSD: &priorCost,
+			},
+			{
+				ID:          "task-complete",
+				Phase:       v1alpha1.TaskPhaseRunning,
+				SamplesDone: 2,
+			},
+			{
+				ID:             "task-failed",
+				Cohort:         "custom-cohort",
+				Phase:          v1alpha1.TaskPhaseRunning,
+				SamplesDone:    7,
+				SamplesPlanned: 10,
+				LastProgressAt: &earlierProgress,
+			},
+		},
+	}
+
+	results := map[string]taskExecutionResult{
+		"task-complete": {
+			taskID:          "task-complete",
+			phase:           v1alpha1.TaskPhaseCompleted,
+			samples:         5,
+			successes:       4,
+			meanScore:       &meanScore,
+			costUSD:         &completedCost,
+			costSource:      v1alpha1.CostSourceDefault,
+			possibleSamples: 20,
+			logPath:         "gs://bucket/task-complete.json",
+			logHash:         "sha256:abc",
+			timeoutSeconds:  120,
+			finishedAt:      &finishedAt,
+		},
+		"task-failed": {
+			taskID:     "task-failed",
+			phase:      v1alpha1.TaskPhaseFailed,
+			message:    "step inspect eval failed",
+			finishedAt: &finishedAt,
+		},
+	}
+
+	decisions := decideExecutionResults(status.Tasks, results)
+	if len(decisions) != 2 {
+		t.Fatalf("len(decisions) = %d, want 2", len(decisions))
+	}
+	for _, taskID := range []string{"task-complete", "task-failed"} {
+		if decisions[taskID].action != executionResultActionApply {
+			t.Errorf("decisions[%q].action = %q, want %q", taskID, decisions[taskID].action, executionResultActionApply)
+		}
+	}
+
+	applyExecutionResultDecisions(status, v1alpha1.RunSpec{Limit: &limit}, decisions, applyTime)
+
+	completedTask := status.Tasks[1]
+	if completedTask.Phase != v1alpha1.TaskPhaseCompleted || completedTask.Cohort != v1alpha1.DefaultCohort {
+		t.Errorf("completedTask phase/cohort = (%q, %q), want (%q, %q)", completedTask.Phase, completedTask.Cohort, v1alpha1.TaskPhaseCompleted, v1alpha1.DefaultCohort)
+	}
+	if completedTask.SamplesDone != 5 || completedTask.LastProgressAt == nil || !completedTask.LastProgressAt.Equal(&applyTime) {
+		t.Errorf("completedTask progress = (%d, %v), want (5, %v)", completedTask.SamplesDone, completedTask.LastProgressAt, applyTime)
+	}
+	if completedTask.SamplesPlanned != 10 || completedTask.SampleRange == nil || completedTask.SampleRange.Start != 1 || completedTask.SampleRange.End != 10 {
+		t.Errorf("completedTask planned/range = (%d, %+v), want (10, 1..10)", completedTask.SamplesPlanned, completedTask.SampleRange)
+	}
+	if completedTask.TimeoutSeconds != 120 || completedTask.LogPath != "gs://bucket/task-complete.json" || completedTask.LogHash != "sha256:abc" {
+		t.Errorf("completedTask metadata mismatch: %+v", completedTask)
+	}
+
+	failedTask := status.Tasks[2]
+	if failedTask.Phase != v1alpha1.TaskPhaseFailed || failedTask.Cohort != "custom-cohort" {
+		t.Errorf("failedTask phase/cohort = (%q, %q), want (%q, %q)", failedTask.Phase, failedTask.Cohort, v1alpha1.TaskPhaseFailed, "custom-cohort")
+	}
+	if failedTask.SamplesDone != 7 || failedTask.LastProgressAt == nil || !failedTask.LastProgressAt.Equal(&earlierProgress) {
+		t.Errorf("failedTask progress = (%d, %v), want preserved (7, %v)", failedTask.SamplesDone, failedTask.LastProgressAt, earlierProgress)
+	}
+	if failedTask.SamplesPlanned != 10 {
+		t.Errorf("failedTask SamplesPlanned = %d, want preserved 10", failedTask.SamplesPlanned)
+	}
+
+	if status.CostUSD == nil || *status.CostUSD != 0.75 {
+		t.Errorf("status.CostUSD = %v, want 0.75", status.CostUSD)
+	}
+	if status.Summary == nil || status.Summary.TasksCompleted != 2 || status.Summary.TasksFailed != 1 {
+		t.Errorf("status.Summary = %+v, want 2 completed and 1 failed", status.Summary)
+	}
+}
