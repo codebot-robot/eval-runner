@@ -485,13 +485,13 @@ spec:
     commit: %s
   model: mockllm/model
   tasks:
-  - terminal-bench/regex-log
+  - terminal-bench/regex-log/oracle
 `, runName, terminalBenchCommit)
 
 		harness.KubectlApplyContent(manifest)
 
 		// Assert that the regex-log sandbox pod's task container has limits cpu: 1, memory: 2G
-		sandboxName := discovery.TaskSandboxNameForRun(runName, "terminal-bench/regex-log")
+		sandboxName := discovery.TaskSandboxNameForRun(runName, "terminal-bench/regex-log/oracle")
 		var observedCPULimit, observedMemoryLimit string
 		var observedPod *corev1.Pod
 		podObservedDeadline := time.Now().Add(180 * time.Second)
@@ -540,8 +540,8 @@ spec:
 		}
 
 		task := run.Status.Tasks[0]
-		if task.ID != "terminal-bench/regex-log" {
-			t.Errorf("Expected task ID terminal-bench/regex-log, got %s", task.ID)
+		if task.ID != "terminal-bench/regex-log/oracle" {
+			t.Errorf("Expected task ID terminal-bench/regex-log/oracle, got %s", task.ID)
 		}
 		if task.Phase != v1alpha1.TaskPhaseCompleted {
 			t.Errorf("Expected task %s Completed, got %s (msg: %s)", task.ID, task.Phase, task.Message)

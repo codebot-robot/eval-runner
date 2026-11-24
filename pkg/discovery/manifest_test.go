@@ -472,21 +472,14 @@ func TestDiscoveryPathsAgreement(t *testing.T) {
 	}
 }
 
-func assertTerminalBenchTask(t *testing.T, task *v1alpha1.ManifestTask, taskName string) {
+func assertTerminalBenchCommonFields(t *testing.T, task *v1alpha1.ManifestTask, taskName string) {
 	t.Helper()
-	expectedID := "terminal-bench/" + taskName
-	if task.ID != expectedID {
-		t.Errorf("task ID = %q, want %q", task.ID, expectedID)
-	}
 	expectedImage := "alexgshaw/" + taskName + ":20251031"
 	if task.Image != expectedImage {
 		t.Errorf("task %s Image = %q, want %q", task.ID, task.Image, expectedImage)
 	}
 	if task.TimeoutSeconds == nil || *task.TimeoutSeconds < 1 || *task.TimeoutSeconds > 7200 {
 		t.Errorf("task %s expected timeoutSeconds in [1, 7200], got %v", task.ID, task.TimeoutSeconds)
-	}
-	if len(task.Command) != 5 || task.Command[0] != "bash" || task.Command[1] != "examples/terminal-bench/run-task.sh" || task.Command[2] != taskName || task.Command[3] != "oracle" || task.Command[4] == "" {
-		t.Errorf("task %s Command = %v, want [bash examples/terminal-bench/run-task.sh %s oracle <workdir>]", task.ID, task.Command, taskName)
 	}
 	if len(task.Resources) != 1 || task.Resources[0].Type != v1alpha1.ResourceTypeSandbox {
 		t.Errorf("task %s Resources = %v, want [{Type: 'sandbox'}]", task.ID, task.Resources)
@@ -498,14 +491,33 @@ func assertTerminalBenchTask(t *testing.T, task *v1alpha1.ManifestTask, taskName
 	}
 }
 
-func assertTerminalBenchAgentTask(t *testing.T, task *v1alpha1.ManifestTask, taskName string) {
+func assertTerminalBenchOracleTask(t *testing.T, task *v1alpha1.ManifestTask, taskName string) {
 	t.Helper()
-	expectedID := "terminal-bench/" + taskName + "/agent"
+	expectedID := "terminal-bench/" + taskName + "/oracle"
 	if task.ID != expectedID {
 		t.Errorf("task ID = %q, want %q", task.ID, expectedID)
 	}
+	assertTerminalBenchCommonFields(t, task, taskName)
+	if len(task.Command) != 5 || task.Command[0] != "bash" || task.Command[1] != "examples/terminal-bench/run-task.sh" || task.Command[2] != taskName || task.Command[3] != "oracle" || task.Command[4] == "" {
+		t.Errorf("task %s Command = %v, want [bash examples/terminal-bench/run-task.sh %s oracle <workdir>]", task.ID, task.Command, taskName)
+	}
+	if task.Agent != nil {
+		t.Errorf("task %s expected nil Agent for oracle variant, got %+v", task.ID, task.Agent)
+	}
+}
+
+func assertTerminalBenchAgentTask(t *testing.T, task *v1alpha1.ManifestTask, taskName string) {
+	t.Helper()
+	expectedID := "terminal-bench/" + taskName
+	if task.ID != expectedID {
+		t.Errorf("task ID = %q, want %q", task.ID, expectedID)
+	}
+	assertTerminalBenchCommonFields(t, task, taskName)
 	if len(task.Command) != 5 || task.Command[0] != "bash" || task.Command[1] != "examples/terminal-bench/run-task.sh" || task.Command[2] != taskName || task.Command[3] != "verify" || task.Command[4] == "" {
 		t.Errorf("task %s Command = %v, want [bash examples/terminal-bench/run-task.sh %s verify <workdir>]", task.ID, task.Command, taskName)
+	}
+	if task.Agent == nil {
+		t.Errorf("task %s expected non-nil Agent block", task.ID)
 	}
 }
 
@@ -543,14 +555,14 @@ func TestTerminalBenchManifest(t *testing.T) {
 	var count4G, count8G int
 	var countOracle, countAgent int
 	for _, task := range manifest.Tasks {
-		if strings.HasSuffix(task.ID, "/agent") {
-			countAgent++
-			taskName := strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/agent")
-			assertTerminalBenchAgentTask(t, &task, taskName)
-		} else {
+		if strings.HasSuffix(task.ID, "/oracle") {
 			countOracle++
+			taskName := strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/oracle")
+			assertTerminalBenchOracleTask(t, &task, taskName)
+		} else {
+			countAgent++
 			taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
-			assertTerminalBenchTask(t, &task, taskName)
+			assertTerminalBenchAgentTask(t, &task, taskName)
 		}
 		if task.Spec == "terminal-bench/regex-log" {
 			cpuLimit := task.Resources[0].Limits[corev1.ResourceCPU]
@@ -586,14 +598,14 @@ func TestTerminalBenchManifest(t *testing.T) {
 		task := &rootManifest.Tasks[i]
 		if strings.HasPrefix(task.ID, "terminal-bench/") {
 			foundTerminalBenchCount++
-			if strings.HasSuffix(task.ID, "/agent") {
-				taskName := strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/agent")
-				assertTerminalBenchAgentTask(t, task, taskName)
+			var taskName string
+			if strings.HasSuffix(task.ID, "/oracle") {
+				taskName = strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/oracle")
+				assertTerminalBenchOracleTask(t, task, taskName)
 			} else {
-				taskName := strings.TrimPrefix(task.ID, "terminal-bench/")
-				assertTerminalBenchTask(t, task, taskName)
+				taskName = strings.TrimPrefix(task.ID, "terminal-bench/")
+				assertTerminalBenchAgentTask(t, task, taskName)
 			}
-			taskName := strings.TrimSuffix(strings.TrimPrefix(task.ID, "terminal-bench/"), "/agent")
 			if taskName == "regex-log" {
 				cpuLimit := task.Resources[0].Limits[corev1.ResourceCPU]
 				memoryLimit := task.Resources[0].Limits[corev1.ResourceMemory]

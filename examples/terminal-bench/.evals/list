@@ -157,14 +157,6 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
       printf "      \"id\": \"terminal-bench/%s\",\n", names[i]
       printf "      \"spec\": \"terminal-bench/%s\",\n", names[i]
       printf "      \"image\": \"%s\",\n", images[i]
-      printf "      \"command\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"oracle\", \"%s\"],\n", names[i], workdirs[i]
-      printf "      \"timeoutSeconds\": %d,\n", timeouts[i]
-      printf "      \"resources\": [{\"type\": \"sandbox\", \"limits\": {\"cpu\": \"%d\", \"memory\": \"%s\"}}]\n", cpus_list[i], memory_list[i]
-      print "    },"
-      print "    {"
-      printf "      \"id\": \"terminal-bench/%s/agent\",\n", names[i]
-      printf "      \"spec\": \"terminal-bench/%s\",\n", names[i]
-      printf "      \"image\": \"%s\",\n", images[i]
       printf "      \"command\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"verify\", \"%s\"],\n", names[i], workdirs[i]
       printf "      \"timeoutSeconds\": %d,\n", timeouts[i]
       printf "      \"resources\": [{\"type\": \"sandbox\", \"limits\": {\"cpu\": \"%d\", \"memory\": \"%s\"}}],\n", cpus_list[i], memory_list[i]
@@ -177,6 +169,14 @@ find "${checkout_directory}" -maxdepth 1 -mindepth 1 -type d ! -name '.git' -exe
         printf "        \"instructionPath\": \"/workspace/out/instruction.md\"\n"
       }
       print "      }"
+      print "    },"
+      print "    {"
+      printf "      \"id\": \"terminal-bench/%s/oracle\",\n", names[i]
+      printf "      \"spec\": \"terminal-bench/%s\",\n", names[i]
+      printf "      \"image\": \"%s\",\n", images[i]
+      printf "      \"command\": [\"bash\", \"examples/terminal-bench/run-task.sh\", \"%s\", \"oracle\", \"%s\"],\n", names[i], workdirs[i]
+      printf "      \"timeoutSeconds\": %d,\n", timeouts[i]
+      printf "      \"resources\": [{\"type\": \"sandbox\", \"limits\": {\"cpu\": \"%d\", \"memory\": \"%s\"}}]\n", cpus_list[i], memory_list[i]
       print "    }" comma
     }
     print "  ]"
