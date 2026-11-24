@@ -640,6 +640,115 @@ spec:
 			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", candRunName, 30*time.Second)
 			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", baseRunName, 30*time.Second)
 		})
+
+		t.Run("MidExecutionSandboxDeleteRetriesInFreshSandbox", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			gitDirectory := "/git/docs-eval.git"
+			branchName := fmt.Sprintf("midexec-delete-%d", time.Now().UnixNano()%1000000)
+			workDirectory := fmt.Sprintf("/tmp/work-%s", branchName)
+
+			harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+				"sh", "-c", fmt.Sprintf(`
+					rm -rf %s &&
+					git clone %s %s &&
+					cd %s &&
+					sed -i '/def readme_comprehension_blind/a \    import time; time.sleep(10)' evals/docs_comprehension.py &&
+					git -c user.name=eval-runner-e2e -c user.email=e2e@example.com commit -am "slow blind task for mid-execution sandbox delete" &&
+					git push origin HEAD:%s &&
+					rm -rf %s
+				`, workDirectory, gitDirectory, workDirectory, workDirectory, branchName, workDirectory))
+
+			t.Cleanup(func() {
+				harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+					"git", "--git-dir="+gitDirectory, "branch", "-D", branchName)
+			})
+
+			slowCommit := strings.TrimSpace(harness.runCmd("kubectl", "exec", "-n", "eval-runner-sandbox", "deployment/git-server", "--",
+				"git", "--git-dir="+gitDirectory, "rev-parse", "refs/heads/"+branchName))
+			runName := fmt.Sprintf("midexec-delete-%s", slowCommit[:7])
+			taskID := "docs/readme_comprehension_blind"
+			sandboxName := discovery.TaskSandboxNameForRun(runName, taskID)
+
+			manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/docs-eval.git
+    commit: %s
+  model: mockllm/model
+  limit: 2
+  tasks:
+  - %s
+`, runName, slowCommit, taskID)
+
+			startTime := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+			harness.KubectlApplyContent(manifest)
+			t.Cleanup(func() {
+				harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+				harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+			})
+
+			// Wait until inspect eval is actively executing inside the task sandbox.
+			var executing bool
+			waitStart := time.Now()
+			for time.Since(waitStart) < 90*time.Second {
+				logsOutput, err := exec.Command("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", "--since-time="+startTime).Output()
+				if err == nil {
+					for _, line := range strings.Split(string(logsOutput), "\n") {
+						if strings.Contains(line, "Starting task step 3: inspect eval") && strings.Contains(line, runName) {
+							executing = true
+							break
+						}
+					}
+					if executing {
+						break
+					}
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+			if !executing {
+				t.Logf("Controller logs:\n%s", harness.runCmd("kubectl", "logs", "-n", "eval-runner", "deployment/eval-runner-controller", "--tail=100"))
+				t.Fatalf("timed out waiting for task %s in Run %s to begin inspect eval", taskID, runName)
+			}
+
+			// Delete the running task's Sandbox mid-execution.
+			harness.runCmd("kubectl", "delete", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--wait=false")
+
+			runCompleted := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 120*time.Second)
+			var task *v1alpha1.TaskStatus
+			for i := range runCompleted.Status.Tasks {
+				if runCompleted.Status.Tasks[i].ID == taskID {
+					task = &runCompleted.Status.Tasks[i]
+					break
+				}
+			}
+			if task == nil {
+				t.Fatalf("expected task %s in status.tasks: %+v", taskID, runCompleted.Status.Tasks)
+			}
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("task expected Completed, got %s (message: %s)", task.Phase, task.Message)
+			}
+			if task.Restarts < 1 {
+				t.Errorf("task expected restarts >= 1, got %d", task.Restarts)
+			}
+			if task.FailureAttempts < 1 {
+				t.Errorf("task expected failureAttempts >= 1, got %d", task.FailureAttempts)
+			}
+			if task.RestartReason == "" {
+				t.Errorf("task expected non-empty restartReason")
+			}
+			if task.Samples != 2 || task.SamplesDone != task.Samples {
+				t.Errorf("task expected samples=2 and samplesDone=2, got samples=%d, samplesDone=%d", task.Samples, task.SamplesDone)
+			}
+
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+		})
 	})
 
 	harness.runCmd("kubectl", "delete", "run", "--all", "-n", "eval-runner", "--ignore-not-found")

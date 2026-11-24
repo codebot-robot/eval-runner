@@ -13655,7 +13655,7 @@ func TestDecideAndApplyExecutionResults(t *testing.T) {
 		},
 	}
 
-	decisions := decideExecutionResults(status.Tasks, results)
+	decisions := decideExecutionResults(status.Tasks, results, false, discovery.MaxMessageBytes)
 	if len(decisions) != 2 {
 		t.Fatalf("len(decisions) = %d, want 2", len(decisions))
 	}
@@ -13697,5 +13697,183 @@ func TestDecideAndApplyExecutionResults(t *testing.T) {
 	}
 	if status.Summary == nil || status.Summary.TasksCompleted != 2 || status.Summary.TasksFailed != 1 {
 		t.Errorf("status.Summary = %+v, want 2 completed and 1 failed", status.Summary)
+	}
+
+	t.Run("MidExecutionInfrastructureFailureRetryAndExhaustion", func(t *testing.T) {
+		startedAt := metav1.NewTime(time.Date(2026, 11, 24, 11, 50, 0, 0, time.UTC))
+		longReason := "step inspect eval failed: " + strings.Repeat("x", 120)
+		retryStatus := &v1alpha1.RunStatus{
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:             "task-retry",
+					Phase:          v1alpha1.TaskPhaseRunning,
+					StartedAt:      &startedAt,
+					SamplesDone:    3,
+					LastProgressAt: &earlierProgress,
+				},
+				{
+					ID:              "task-exhausted",
+					Phase:           v1alpha1.TaskPhaseRunning,
+					Restarts:        2,
+					FailureAttempts: maxTaskAttempts - 1,
+					RestartReason:   "previous sandbox loss",
+					StartedAt:       &startedAt,
+				},
+				{
+					ID:        "task-cutoff",
+					Phase:     v1alpha1.TaskPhaseRunning,
+					StartedAt: &startedAt,
+				},
+			},
+		}
+
+		retryResults := map[string]taskExecutionResult{
+			"task-retry": {
+				taskID:                "task-retry",
+				phase:                 v1alpha1.TaskPhaseFailed,
+				message:               longReason,
+				finishedAt:            &finishedAt,
+				infrastructureFailure: true,
+			},
+			"task-exhausted": {
+				taskID:                "task-exhausted",
+				phase:                 v1alpha1.TaskPhaseFailed,
+				message:               "task sandbox deleted mid-execution",
+				finishedAt:            &finishedAt,
+				infrastructureFailure: true,
+			},
+			"task-cutoff": {
+				taskID:                "task-cutoff",
+				phase:                 v1alpha1.TaskPhaseFailed,
+				message:               "step inspect eval failed: transport is closing",
+				finishedAt:            &finishedAt,
+				infrastructureFailure: true,
+				cutOff:                true,
+			},
+		}
+
+		const maxReasonBytes = 64
+		retryDecisions := decideExecutionResults(retryStatus.Tasks, retryResults, false, maxReasonBytes)
+		if retryDecisions["task-retry"].action != executionResultActionRestart {
+			t.Fatalf("task-retry action = %q, want %q", retryDecisions["task-retry"].action, executionResultActionRestart)
+		}
+		if retryDecisions["task-exhausted"].action != executionResultActionApply {
+			t.Fatalf("task-exhausted action = %q, want %q", retryDecisions["task-exhausted"].action, executionResultActionApply)
+		}
+		if retryDecisions["task-cutoff"].action != executionResultActionApply {
+			t.Fatalf("task-cutoff action = %q, want %q", retryDecisions["task-cutoff"].action, executionResultActionApply)
+		}
+
+		applyExecutionResultDecisions(retryStatus, v1alpha1.RunSpec{Limit: &limit}, retryDecisions, applyTime)
+
+		restartedTask := retryStatus.Tasks[0]
+		if restartedTask.Phase != v1alpha1.TaskPhasePending || restartedTask.Restarts != 1 || restartedTask.FailureAttempts != 1 {
+			t.Errorf("restartedTask = %+v, want Pending with Restarts=1 FailureAttempts=1", restartedTask)
+		}
+		if restartedTask.RestartReason == "" || len(restartedTask.RestartReason) > maxReasonBytes {
+			t.Errorf("restartedTask.RestartReason len=%d (%q), want non-empty <= %d bytes", len(restartedTask.RestartReason), restartedTask.RestartReason, maxReasonBytes)
+		}
+		if restartedTask.StartedAt != nil || restartedTask.FinishedAt != nil || restartedTask.SamplesDone != 0 || restartedTask.LastProgressAt != nil || restartedTask.Message != "" {
+			t.Errorf("restartedTask did not reset execution fields: %+v", restartedTask)
+		}
+
+		exhaustedTask := retryStatus.Tasks[1]
+		if exhaustedTask.Phase != v1alpha1.TaskPhaseFailed || exhaustedTask.FailureAttempts != maxTaskAttempts || exhaustedTask.Restarts != 2 {
+			t.Errorf("exhaustedTask = %+v, want Failed with FailureAttempts=%d Restarts=2", exhaustedTask, maxTaskAttempts)
+		}
+		if !strings.Contains(exhaustedTask.Message, "failed after 3 attempts") || !strings.Contains(exhaustedTask.Message, "task sandbox deleted mid-execution") {
+			t.Errorf("exhaustedTask.Message = %q, want attempt count and reason", exhaustedTask.Message)
+		}
+
+		cutoffTask := retryStatus.Tasks[2]
+		if cutoffTask.Phase != v1alpha1.TaskPhaseFailed || cutoffTask.Restarts != 0 || cutoffTask.FailureAttempts != 0 {
+			t.Errorf("cutoffTask = %+v, want Failed without retry/attempt increment", cutoffTask)
+		}
+
+		deadlineDecisions := decideExecutionResults(
+			[]v1alpha1.TaskStatus{{ID: "task-retry", Phase: v1alpha1.TaskPhaseRunning}},
+			map[string]taskExecutionResult{"task-retry": retryResults["task-retry"]},
+			true,
+			maxReasonBytes,
+		)
+		if deadlineDecisions["task-retry"].action != executionResultActionApply {
+			t.Errorf("deadlineExceeded decision action = %q, want %q", deadlineDecisions["task-retry"].action, executionResultActionApply)
+		}
+	})
+}
+
+func TestReconcileRunningTask_MidExecutionSandboxDeletedRetries(t *testing.T) {
+	scheme := setupScheme(t)
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{{ID: "task-1", Spec: "eval.py@task1"}},
+	}
+
+	runName := "test-run-midexec-delete"
+	sandboxName := discovery.TaskSandboxNameForRun(runName, "task-1")
+	startedAt := metav1.Now()
+	isController := true
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: runName, Namespace: "eval-runner"},
+		Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: "https://example.com/repo.git", Commit: "abc123"}, Model: "mockllm/model"},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Tasks: []v1alpha1.TaskStatus{{ID: "task-1", Phase: v1alpha1.TaskPhaseRunning, StartedAt: &startedAt}},
+		},
+	}
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sandboxName, Namespace: "eval-runner-sandbox", UID: "sb-uid-1",
+			Labels:      map[string]string{discovery.LabelRunName: runName, discovery.LabelRunNamespace: "eval-runner", discovery.LabelRole: discovery.RoleSample},
+			Annotations: map[string]string{discovery.AnnotationTaskID: "task-1", discovery.AnnotationTaskAttempt: "0", discovery.AnnotationControllerInstance: "ctrl-1"},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sandboxName, Namespace: "eval-runner-sandbox", UID: "pod-uid-1",
+			OwnerReferences: []metav1.OwnerReference{{UID: sandbox.UID, Controller: &isController}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run, sandbox, pod).WithStatusSubresource(run, sandbox, pod).Build()
+	fakeSandboxClient := &sandboxclient.FakeClient{
+		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+			if len(cfg.Command) > 0 && cfg.Command[0] == "inspect" {
+				// Simulate Sandbox deleted mid-execution and sandboxd terminating inspect with SIGTERM (143).
+				_ = fakeClient.Delete(ctx, sandbox)
+				return &sandboxclient.ExecuteResult{ExitCode: 143}, nil
+			}
+			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+		},
+	}
+
+	reconciler := &RunReconciler{
+		Client:           fakeClient,
+		APIReader:        fakeClient,
+		Scheme:           scheme,
+		SandboxClient:    fakeSandboxClient,
+		SandboxNamespace: "eval-runner-sandbox",
+		InstanceID:       "ctrl-1",
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	_, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}})
+	if err != nil {
+		t.Fatalf("Reconcile error: %v", err)
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := fakeClient.Get(t.Context(), types.NamespacedName{Namespace: "eval-runner", Name: runName}, &updatedRun); err != nil {
+		t.Fatalf("Get updated run error: %v", err)
+	}
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhasePending || task.Restarts != 1 || task.FailureAttempts != 1 {
+		t.Errorf("task = %+v, want Pending with Restarts=1 FailureAttempts=1", task)
+	}
+	if !strings.Contains(task.RestartReason, "task sandbox deleted mid-execution") {
+		t.Errorf("task.RestartReason = %q, want to mention task sandbox deleted mid-execution", task.RestartReason)
 	}
 }

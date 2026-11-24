@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path"
@@ -31,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -703,8 +705,11 @@ func readFileWithTimeout(ctx context.Context, client sandboxclient.Client, path 
 }
 
 type sandboxAgentExecutor struct {
-	client sandboxclient.Client
-	cwd    string
+	client         sandboxclient.Client
+	cwd            string
+	parentContext  context.Context
+	cancel         context.CancelFunc
+	transportError error
 }
 
 func (executor *sandboxAgentExecutor) Execute(ctx context.Context, command string) (agent.ExecuteResult, error) {
@@ -713,6 +718,14 @@ func (executor *sandboxAgentExecutor) Execute(ctx context.Context, command strin
 		Cwd:     executor.cwd,
 	})
 	if err != nil {
+		if isSandboxTransportError(executor.parentContext, ctx, err) {
+			if executor.transportError == nil {
+				executor.transportError = err
+			}
+			if executor.cancel != nil {
+				executor.cancel()
+			}
+		}
 		if result != nil {
 			return agent.ExecuteResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, err
 		}
@@ -2517,8 +2530,13 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 	// Execute ready tasks, decide outcomes, and apply status updates before cleanup.
 	taskResults := r.executeReadyTasks(ctx, run, readyTasks)
-	executionDecisions := decideExecutionResults(run.Status.Tasks, taskResults)
 	deadlineExceeded := r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline)
+	executionDecisions := decideExecutionResults(run.Status.Tasks, taskResults, deadlineExceeded, maxMessageBytes)
+	for _, task := range run.Status.Tasks {
+		if decision, ok := executionDecisions[task.ID]; ok && decision.action == executionResultActionRestart {
+			logger.Info("restarting task in fresh sandbox after mid-execution failure", "task", task.ID, "run", run.Name, "reason", decision.restartReason)
+		}
+	}
 
 	if err := r.applyExecutionResultStatus(ctx, req.NamespacedName, run.Spec, executionDecisions, taskResults, deadlineExceeded); err != nil {
 		return ctrl.Result{}, err
@@ -3008,6 +3026,29 @@ func (r *RunReconciler) observeTaskPod(ctx context.Context, taskID string, sandb
 	return &pod, true
 }
 
+type boundedRetryOutcome struct {
+	shouldRetry    bool
+	restartReason  string
+	failureMessage string
+}
+
+// evaluateBoundedRetry applies the single bounded-retry rule for infrastructure failures:
+// up to maxTaskAttempts total attempts (1 initial run plus maxTaskAttempts-1 retries).
+func evaluateBoundedRetry(failureAttempts int, reason string, maxMessageBytes int) boundedRetryOutcome {
+	truncatedReason := truncateMessage(reason, maxMessageBytes)
+	attempts := failureAttempts + 1
+	if attempts >= maxTaskAttempts {
+		return boundedRetryOutcome{
+			shouldRetry:    false,
+			failureMessage: truncateMessage(fmt.Sprintf("failed after %d attempts: %s", attempts, truncatedReason), maxMessageBytes),
+		}
+	}
+	return boundedRetryOutcome{
+		shouldRetry:   true,
+		restartReason: truncatedReason,
+	}
+}
+
 // decideInfrastructureFailure decides whether an infrastructure failure retries in a fresh sandbox
 // or fails the task terminally once maxTaskAttempts have been exhausted.
 func decideInfrastructureFailure(
@@ -3018,12 +3059,11 @@ func decideInfrastructureFailure(
 	unmarkServicePortalPod bool,
 	maxMessageBytes int,
 ) runningTaskDecision {
-	reason = truncateMessage(reason, maxMessageBytes)
-	attempts := task.FailureAttempts + 1
-	if attempts >= maxTaskAttempts {
+	outcome := evaluateBoundedRetry(task.FailureAttempts, reason, maxMessageBytes)
+	if !outcome.shouldRetry {
 		return runningTaskDecision{
 			action:                 runningTaskActionFail,
-			message:                truncateMessage(fmt.Sprintf("failed after %d attempts: %s", attempts, reason), maxMessageBytes),
+			message:                outcome.failureMessage,
 			countsAsFailure:        true,
 			sandbox:                sandbox,
 			pod:                    pod,
@@ -3032,7 +3072,7 @@ func decideInfrastructureFailure(
 	}
 	return runningTaskDecision{
 		action:                 runningTaskActionRestart,
-		restartReason:          reason,
+		restartReason:          outcome.restartReason,
 		countsAsFailure:        true,
 		sandbox:                sandbox,
 		pod:                    pod,
@@ -3164,17 +3204,22 @@ func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDec
 	case runningTaskActionRescue:
 		applyRescuedTaskStatus(task, decision.rescued)
 	case runningTaskActionRestart:
-		task.Phase = v1alpha1.TaskPhasePending
-		task.Restarts++
-		if decision.countsAsFailure {
-			task.FailureAttempts++
-		}
-		task.RestartReason = decision.restartReason
-		task.Message = ""
-		task.StartedAt = nil
-		task.SamplesDone = 0
-		task.LastProgressAt = nil
+		resetTaskForRestart(task, decision.restartReason, decision.countsAsFailure)
 	}
+}
+
+func resetTaskForRestart(task *v1alpha1.TaskStatus, restartReason string, countsAsFailure bool) {
+	task.Phase = v1alpha1.TaskPhasePending
+	task.Restarts++
+	if countsAsFailure {
+		task.FailureAttempts++
+	}
+	task.RestartReason = restartReason
+	task.Message = ""
+	task.StartedAt = nil
+	task.FinishedAt = nil
+	task.SamplesDone = 0
+	task.LastProgressAt = nil
 }
 
 func applyRescuedTaskStatus(task *v1alpha1.TaskStatus, rescued *rescuedTaskInfo) {
@@ -3308,12 +3353,15 @@ type readyTaskItem struct {
 type executionResultAction string
 
 const (
-	executionResultActionApply executionResultAction = "apply"
+	executionResultActionApply   executionResultAction = "apply"
+	executionResultActionRestart executionResultAction = "restart"
 )
 
 type executionResultDecision struct {
-	action executionResultAction
-	result taskExecutionResult
+	action          executionResultAction
+	result          taskExecutionResult
+	restartReason   string
+	countsAsFailure bool
 }
 
 func (r *RunReconciler) executeReadyTasks(
@@ -3347,6 +3395,8 @@ func (r *RunReconciler) executeReadyTasks(
 func decideExecutionResults(
 	tasks []v1alpha1.TaskStatus,
 	taskResults map[string]taskExecutionResult,
+	deadlineExceeded bool,
+	maxMessageBytes int,
 ) map[string]executionResultDecision {
 	decisions := make(map[string]executionResultDecision, len(taskResults))
 	for _, task := range tasks {
@@ -3354,12 +3404,35 @@ func decideExecutionResults(
 		if !ok {
 			continue
 		}
-		decisions[task.ID] = decideExecutionResult(task, result)
+		decisions[task.ID] = decideExecutionResult(task, result, deadlineExceeded, maxMessageBytes)
 	}
 	return decisions
 }
 
-func decideExecutionResult(task v1alpha1.TaskStatus, result taskExecutionResult) executionResultDecision {
+func decideExecutionResult(
+	task v1alpha1.TaskStatus,
+	result taskExecutionResult,
+	deadlineExceeded bool,
+	maxMessageBytes int,
+) executionResultDecision {
+	if result.phase == v1alpha1.TaskPhaseFailed && result.infrastructureFailure && !result.cutOff && !deadlineExceeded {
+		outcome := evaluateBoundedRetry(task.FailureAttempts, result.message, maxMessageBytes)
+		if outcome.shouldRetry {
+			return executionResultDecision{
+				action:          executionResultActionRestart,
+				result:          result,
+				restartReason:   outcome.restartReason,
+				countsAsFailure: true,
+			}
+		}
+		exhaustedResult := result
+		exhaustedResult.message = outcome.failureMessage
+		return executionResultDecision{
+			action:          executionResultActionApply,
+			result:          exhaustedResult,
+			countsAsFailure: true,
+		}
+	}
 	return executionResultDecision{
 		action: executionResultActionApply,
 		result: result,
@@ -3412,6 +3485,11 @@ func applyExecutionResultDecision(
 	switch decision.action {
 	case executionResultActionApply:
 		applyTaskExecutionResult(task, runSpec, decision.result, now)
+		if decision.countsAsFailure {
+			task.FailureAttempts++
+		}
+	case executionResultActionRestart:
+		resetTaskForRestart(task, decision.restartReason, decision.countsAsFailure)
 	}
 }
 
@@ -3645,30 +3723,133 @@ func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generatio
 }
 
 type taskExecutionResult struct {
-	taskID          string
-	cohort          string
-	phase           v1alpha1.TaskPhase
-	samples         int
-	successes       int
-	meanScore       *float64
-	successRate     *float64
-	successRateCI   *v1alpha1.ConfidenceInterval
-	successRateSD   *float64
-	tokens          *v1alpha1.TaskTokens
-	latency         *v1alpha1.TaskLatency
-	costUSD         *float64
-	costSource      v1alpha1.CostSource
-	possibleSamples int
-	samplesDone     int
-	samplesPlanned  int
-	message         string
-	logPath         string
-	logHash         string
-	sampleRange     *v1alpha1.SampleRange
-	timeoutSeconds  int
-	resources       *v1alpha1.TaskResources
-	finishedAt      *metav1.Time
-	cutOff          bool
+	taskID                string
+	cohort                string
+	phase                 v1alpha1.TaskPhase
+	samples               int
+	successes             int
+	meanScore             *float64
+	successRate           *float64
+	successRateCI         *v1alpha1.ConfidenceInterval
+	successRateSD         *float64
+	tokens                *v1alpha1.TaskTokens
+	latency               *v1alpha1.TaskLatency
+	costUSD               *float64
+	costSource            v1alpha1.CostSource
+	possibleSamples       int
+	samplesDone           int
+	samplesPlanned        int
+	message               string
+	logPath               string
+	logHash               string
+	sampleRange           *v1alpha1.SampleRange
+	timeoutSeconds        int
+	resources             *v1alpha1.TaskResources
+	finishedAt            *metav1.Time
+	cutOff                bool
+	infrastructureFailure bool
+	sandboxStepFailure    bool
+}
+
+func isSandboxTransportError(parentContext, stepContext context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if parentContext != nil && parentContext.Err() != nil {
+		return false
+	}
+	if isStepTimeout(stepContext, err) {
+		return false
+	}
+	var limitError *discovery.LimitError
+	if errors.As(err, &limitError) {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.Unavailable:
+		return true
+	case codes.Canceled:
+		return stepContext == nil || stepContext.Err() == nil
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	var netOpError *net.OpError
+	if errors.As(err, &netOpError) {
+		return true
+	}
+	lowerMessage := strings.ToLower(err.Error())
+	return strings.Contains(lowerMessage, "graceful_stop") ||
+		strings.Contains(lowerMessage, "transport is closing") ||
+		strings.Contains(lowerMessage, "connection reset by peer") ||
+		strings.Contains(lowerMessage, "connection refused") ||
+		strings.Contains(lowerMessage, "broken pipe")
+}
+
+func (r *RunReconciler) observeMidExecutionSandboxLoss(
+	ctx context.Context,
+	sandbox *sandboxv1beta1.Sandbox,
+	pod *corev1.Pod,
+) string {
+	reader := r.uncachedReader()
+	if reader == nil || sandbox == nil || pod == nil {
+		return ""
+	}
+	lookupContext, lookupCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer lookupCancel()
+
+	var liveSandbox sandboxv1beta1.Sandbox
+	sandboxKey := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
+	if err := reader.Get(lookupContext, sandboxKey, &liveSandbox); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "task sandbox deleted mid-execution"
+		}
+		return ""
+	}
+	if liveSandbox.DeletionTimestamp != nil {
+		return "task sandbox terminating mid-execution"
+	}
+	if sandbox.UID != "" && liveSandbox.UID != sandbox.UID {
+		return "task sandbox replaced mid-execution"
+	}
+	finishedCondition := meta.FindStatusCondition(liveSandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	if finishedCondition != nil && finishedCondition.Status == metav1.ConditionTrue {
+		return fmt.Sprintf("task sandbox finished mid-execution: %s", finishedCondition.Message)
+	}
+
+	var livePod corev1.Pod
+	podKey := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
+	if err := reader.Get(lookupContext, podKey, &livePod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "task pod deleted mid-execution"
+		}
+		return ""
+	}
+	if livePod.DeletionTimestamp != nil {
+		return "task pod terminating mid-execution"
+	}
+	if pod.UID != "" && livePod.UID != pod.UID {
+		return "task pod replaced mid-execution"
+	}
+	if livePod.Status.Phase == corev1.PodFailed {
+		return taskPodFailureMessage(&livePod)
+	}
+	if livePod.Status.Phase == corev1.PodSucceeded {
+		return "task pod succeeded unexpectedly mid-execution"
+	}
+	for _, containerStatus := range livePod.Status.ContainerStatuses {
+		if containerStatus.State.Terminated != nil {
+			return taskPodFailureMessage(&livePod)
+		}
+	}
+	return ""
 }
 
 func (r *RunReconciler) handleStepExecutionFailure(
@@ -3689,10 +3870,11 @@ func (r *RunReconciler) handleStepExecutionFailure(
 		message := fmt.Sprintf("step %s failed: sandbox did not report completion", stepName)
 		logger.Error(errors.New(message), fmt.Sprintf("Task step %s timed out", stepName), "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     message,
-			sampleRange: sampleRange,
+			taskID:             taskID,
+			phase:              v1alpha1.TaskPhaseFailed,
+			message:            message,
+			sampleRange:        sampleRange,
+			sandboxStepFailure: true,
 		}, true
 	}
 	if status.Code(stepError) == codes.Unauthenticated {
@@ -3733,10 +3915,12 @@ func (r *RunReconciler) handleStepExecutionFailure(
 	}
 	logger.Error(errors.New(message), fmt.Sprintf("Task step %s failed", stepName), "task", taskID, "exitCode", exitCode, "stderr", tail)
 	return taskExecutionResult{
-		taskID:      taskID,
-		phase:       v1alpha1.TaskPhaseFailed,
-		message:     message,
-		sampleRange: sampleRange,
+		taskID:                taskID,
+		phase:                 v1alpha1.TaskPhaseFailed,
+		message:               message,
+		sampleRange:           sampleRange,
+		infrastructureFailure: isSandboxTransportError(ctx, stepContext, stepError),
+		sandboxStepFailure:    true,
 	}, true
 }
 
@@ -3757,19 +3941,22 @@ func (r *RunReconciler) handleStepReadFailure(
 		message := fmt.Sprintf("step read %s failed: sandbox did not report completion", stepName)
 		logger.Error(errors.New(message), fmt.Sprintf("Task step read %s timed out", stepName), "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     message,
-			sampleRange: sampleRange,
+			taskID:             taskID,
+			phase:              v1alpha1.TaskPhaseFailed,
+			message:            message,
+			sampleRange:        sampleRange,
+			sandboxStepFailure: true,
 		}, true
 	}
 	message := fmt.Sprintf("failed to read %s: %v", stepName, readError)
 	logger.Error(readError, fmt.Sprintf("Task step read %s failed", stepName), "task", taskID)
 	return taskExecutionResult{
-		taskID:      taskID,
-		phase:       v1alpha1.TaskPhaseFailed,
-		message:     message,
-		sampleRange: sampleRange,
+		taskID:                taskID,
+		phase:                 v1alpha1.TaskPhaseFailed,
+		message:               message,
+		sampleRange:           sampleRange,
+		infrastructureFailure: isSandboxTransportError(ctx, readContext, readError),
+		sandboxStepFailure:    true,
 	}, true
 }
 
@@ -3790,6 +3977,18 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 		if res.phase == v1alpha1.TaskPhaseFailed && r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline) {
 			res.cutOff = true
+			res.infrastructureFailure = false
+			return
+		}
+		if res.phase == v1alpha1.TaskPhaseFailed && res.sandboxStepFailure && !res.infrastructureFailure && ctx.Err() == nil {
+			if lossReason := r.observeMidExecutionSandboxLoss(ctx, sb, pod); lossReason != "" {
+				res.infrastructureFailure = true
+				if res.message != "" {
+					res.message = fmt.Sprintf("%s (%s)", lossReason, res.message)
+				} else {
+					res.message = lossReason
+				}
+			}
 		}
 	}()
 
@@ -3946,19 +4145,22 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 			msg := "step list /out failed: sandbox did not report completion"
 			logger.Error(errors.New(msg), "Task step list /out timed out", "task", taskID)
 			return taskExecutionResult{
-				taskID:      taskID,
-				phase:       v1alpha1.TaskPhaseFailed,
-				message:     msg,
-				sampleRange: effRange,
+				taskID:             taskID,
+				phase:              v1alpha1.TaskPhaseFailed,
+				message:            msg,
+				sampleRange:        effRange,
+				sandboxStepFailure: true,
 			}
 		}
 		msg := fmt.Sprintf("failed to list /out: %v", lsErr)
 		logger.Error(lsErr, "Task step list /out failed", "task", taskID)
 		return taskExecutionResult{
-			taskID:      taskID,
-			phase:       v1alpha1.TaskPhaseFailed,
-			message:     msg,
-			sampleRange: effRange,
+			taskID:                taskID,
+			phase:                 v1alpha1.TaskPhaseFailed,
+			message:               msg,
+			sampleRange:           effRange,
+			infrastructureFailure: isSandboxTransportError(ctx, lsCtx, lsErr),
+			sandboxStepFailure:    true,
 		}
 	}
 
@@ -4290,11 +4492,23 @@ func (r *RunReconciler) executeAgentPhase(
 		agentTimeout = time.Duration(*targetTask.Agent.TimeoutSeconds) * time.Second
 	}
 	agentContext, agentCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, agentTimeout)
-	executor := &sandboxAgentExecutor{client: sbClient, cwd: cwd}
+	executor := &sandboxAgentExecutor{
+		client:        sbClient,
+		cwd:           cwd,
+		parentContext: ctx,
+		cancel:        agentCancel,
+	}
 	agentResult, agentError := agent.Run(agentContext, agentModel, executor, agent.Options{
 		Instruction: string(instructionBytes),
 	})
 	agentCancel()
+
+	if executor.transportError != nil {
+		failedResult := fail(fmt.Sprintf("sandbox lost during agent loop: %v", executor.transportError))
+		failedResult.infrastructureFailure = true
+		failedResult.sandboxStepFailure = true
+		return "", nil, failedResult
+	}
 
 	if agentResult == nil || agentResult.StopReason == agent.StopReasonModelError {
 		errorMessage := "model error"
