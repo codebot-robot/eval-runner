@@ -177,16 +177,6 @@ run_cmd() {
   "$@"
 }
 
-run_cmd_stdin() {
-  local stdin_data="$1"
-  shift
-  echo "    $ $*"
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    return 0
-  fi
-  printf '%s' "${stdin_data}" | "$@"
-}
-
 wait_for_effective_settings() {
   local bucket="$1"
   local since_time="$2"
@@ -315,101 +305,57 @@ fi
 
 # Step 4: eval-runner-config ConfigMap
 step "ConfigMap eval-runner/eval-runner-config"
-CONFIGMAP_CHANGED="false"
+SERVICE_PORTAL_DEFAULT_ADDR="service-portal-controller.service-portal-system.svc:8443"
+CONFIGURE_ARGS=(--no-restart --set "sandboxdImage=${DEFAULT_SANDBOXD_IMAGE}")
+if [[ "${SKIP_SERVICE_PORTAL}" == "true" ]]; then
+  CURRENT_SP_ADDR="$(kubectl -n eval-runner get configmap eval-runner-config -o jsonpath='{.data.servicePortalControllerAddress}' 2>/dev/null || echo "")"
+  if [[ "${CURRENT_SP_ADDR}" == "${SERVICE_PORTAL_DEFAULT_ADDR}" ]]; then
+    CONFIGURE_ARGS+=(
+      --unset servicePortalControllerAddress
+      --unset servicePortalControllerCAFile
+      --unset servicePortalTokenFile
+    )
+  fi
+else
+  CONFIGURE_ARGS+=(
+    --set-default "servicePortalControllerAddress=${SERVICE_PORTAL_DEFAULT_ADDR}"
+    --set-default "servicePortalControllerCAFile=/etc/service-portal/tls.crt"
+    --set-default "servicePortalTokenFile=/var/run/secrets/service-portal/token"
+  )
+fi
+for item in "${SET_ITEMS[@]+"${SET_ITEMS[@]}"}"; do
+  CONFIGURE_ARGS+=(--set "${item}")
+done
+if [[ "${DRY_RUN}" == "true" ]]; then
+  CONFIGURE_ARGS+=(--dry-run)
+fi
 
-EXISTING_RAW="$(kubectl -n eval-runner get configmap eval-runner-config -o json 2>/dev/null || echo "")"
-MERGE_RESULT="$(python3 -c '
-import json, sys
+CONFIGURE_OUT="$(mktemp)"
+trap 'rm -f "${CONFIGURE_OUT}"' EXIT
+"${REPO_ROOT}/dev/tasks/configure" "${CONFIGURE_ARGS[@]}" | tee "${CONFIGURE_OUT}"
 
-existing_raw = sys.argv[1].strip()
-default_sandboxd_image = sys.argv[2]
-skip_service_portal = (sys.argv[3].lower() == "true")
-set_items = sys.argv[4:]
+CONTROLLER_CONFIG_RESTART="false"
+WEBHOOK_CONFIG_RESTART="false"
+if grep -q "restart required: eval-runner-controller" "${CONFIGURE_OUT}"; then
+  CONTROLLER_CONFIG_RESTART="true"
+fi
+if grep -q "restart required: eval-runner-webhook" "${CONFIGURE_OUT}"; then
+  WEBHOOK_CONFIG_RESTART="true"
+fi
 
-data = {}
-if existing_raw:
-    try:
-        data = json.loads(existing_raw).get("data") or {}
-    except Exception:
-        data = {}
-
-user_overrides = {}
-for item in set_items:
-    if "=" in item:
-        k, v = item.split("=", 1)
-        user_overrides[k.strip()] = v
-
-merged = dict(data)
-
-service_portal_keys = ("servicePortalControllerAddress", "servicePortalControllerCAFile", "servicePortalTokenFile")
-service_portal_defaults = {
-    "servicePortalControllerAddress": "service-portal-controller.service-portal-system.svc:8443",
-    "servicePortalControllerCAFile": "/etc/service-portal/tls.crt",
-    "servicePortalTokenFile": "/var/run/secrets/service-portal/token",
-}
-if skip_service_portal:
-    if merged.get("servicePortalControllerAddress") == service_portal_defaults["servicePortalControllerAddress"]:
-        for k in service_portal_keys:
-            if k not in user_overrides:
-                merged.pop(k, None)
-else:
-    for k, v in service_portal_defaults.items():
-        if k not in merged:
-            merged[k] = v
-
-if "sandboxdImage" not in user_overrides:
-    merged["sandboxdImage"] = default_sandboxd_image
-
-merged.update(user_overrides)
-
-changed = (merged != data)
-manifest = {
-    "apiVersion": "v1",
-    "kind": "ConfigMap",
-    "metadata": {"name": "eval-runner-config", "namespace": "eval-runner"},
-    "data": merged,
-}
-print("CHANGED" if changed else "UNCHANGED")
-print(json.dumps(manifest))
-' "${EXISTING_RAW}" "${DEFAULT_SANDBOXD_IMAGE}" "${SKIP_SERVICE_PORTAL}" "${SET_ITEMS[@]+"${SET_ITEMS[@]}"}")"
-
-STATUS="$(echo "${MERGE_RESULT}" | head -n 1)"
-MANIFEST="$(echo "${MERGE_RESULT}" | tail -n +2)"
-
-ARTIFACT_BUCKET="$(python3 -c '
-import json, sys
-data = json.loads(sys.argv[1]).get("data") or {}
-print(data.get("artifactBucket", ""))
-' "${MANIFEST}")"
-
+ARTIFACT_BUCKET="$(kubectl -n eval-runner get configmap eval-runner-config -o jsonpath='{.data.artifactBucket}' 2>/dev/null || echo "")"
+if [[ "${DRY_RUN}" == "true" ]]; then
+  for item in "${SET_ITEMS[@]+"${SET_ITEMS[@]}"}"; do
+    if [[ "${item}" == artifactBucket=* ]]; then
+      ARTIFACT_BUCKET="${item#artifactBucket=}"
+    fi
+  done
+fi
 if [[ -n "${ARTIFACT_BUCKET}" ]]; then
   echo "    Artifact bucket: gs://${ARTIFACT_BUCKET}"
   echo "    Note: The controller and UI use Application Default Credentials (ADC) for bucket access."
   echo "    On non-GKE clusters, ensure the node service account (or equivalent IAM provider) has"
   echo "    roles/storage.objectAdmin granted on bucket gs://${ARTIFACT_BUCKET}."
-fi
-
-if [[ "${DRY_RUN}" == "true" ]]; then
-  run_cmd_stdin "${MANIFEST}" kubectl apply -f -
-  python3 -c '
-import json, sys
-data = json.loads(sys.argv[1]).get("data") or {}
-for k, v in sorted(data.items()):
-    print(f"    {k}: {v}")
-' "${MANIFEST}"
-else
-  if [[ "${STATUS}" == "CHANGED" ]]; then
-    CONFIGMAP_CHANGED="true"
-    printf '%s' "${MANIFEST}" | kubectl apply -f -
-    python3 -c '
-import json, sys
-data = json.loads(sys.argv[1]).get("data") or {}
-for k, v in sorted(data.items()):
-    print(f"    {k}: {v}")
-' "${MANIFEST}"
-  else
-    echo "    configmap eval-runner/eval-runner-config already up to date"
-  fi
 fi
 
 # Step 5: Check model credentials
@@ -572,9 +518,10 @@ else
   fi
 
   CONTROLLER_NEEDS_RESTART=false
-  if [[ "${CONFIGMAP_CHANGED}" == "true" || "${SERVICE_PORTAL_CERTS_GENERATED}" == "true" ]]; then
+  if [[ "${CONTROLLER_CONFIG_RESTART}" == "true" || "${SERVICE_PORTAL_CERTS_GENERATED}" == "true" ]]; then
     CONTROLLER_NEEDS_RESTART=true
   fi
+  WEBHOOK_NEEDS_RESTART="${WEBHOOK_CONFIG_RESTART}"
 
   if [[ "${DRY_RUN}" == "true" ]]; then
     run_cmd "${REPO_ROOT}/dev/tasks/deploy" --dry-run "${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}"
@@ -582,8 +529,13 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         run_cmd kubectl -n eval-runner rollout restart "deployment/${d}"
       done
-    elif [[ "${CONTROLLER_NEEDS_RESTART}" == "true" ]]; then
-      run_cmd kubectl -n eval-runner rollout restart deployment/eval-runner-controller
+    else
+      if [[ "${CONTROLLER_NEEDS_RESTART}" == "true" ]]; then
+        run_cmd kubectl -n eval-runner rollout restart deployment/eval-runner-controller
+      fi
+      if [[ "${WEBHOOK_NEEDS_RESTART}" == "true" ]]; then
+        run_cmd kubectl -n eval-runner rollout restart deployment/eval-runner-webhook
+      fi
     fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       run_cmd kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s
@@ -595,8 +547,13 @@ else
       for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
         kubectl -n eval-runner rollout restart "deployment/${d}"
       done
-    elif [[ "${CONTROLLER_NEEDS_RESTART}" == "true" ]]; then
-      kubectl -n eval-runner rollout restart deployment/eval-runner-controller
+    else
+      if [[ "${CONTROLLER_NEEDS_RESTART}" == "true" ]]; then
+        kubectl -n eval-runner rollout restart deployment/eval-runner-controller
+      fi
+      if [[ "${WEBHOOK_NEEDS_RESTART}" == "true" ]]; then
+        kubectl -n eval-runner rollout restart deployment/eval-runner-webhook
+      fi
     fi
     for d in eval-runner-controller eval-runner-ui eval-runner-webhook; do
       kubectl -n eval-runner rollout status "deployment/${d}" --timeout=300s

@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Manage the eval-runner-config ConfigMap for an eval-runner cluster.
+
+Merges desired keys into eval-runner/eval-runner-config (preserving unspecified
+keys), applies only when changed, and restarts deployments when restart-only
+keys change.
+
+Examples:
+
+  ./dev/tasks/configure --set defaultModel=google/gemini-2.5-flash
+  ./dev/tasks/configure --set maxParallelTasks=8 --set uiBaseURL=https://evals.example.com
+  ./dev/tasks/configure --unset defaultModel --dry-run
+
+Only the Python standard library is used.
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
+
+TASKS_DIRECTORY = Path(__file__).resolve().parent
+if str(TASKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(TASKS_DIRECTORY))
+
+from task_helpers import Runner
+
+DEFAULT_NAMESPACE = "eval-runner"
+DEFAULT_CONFIGMAP = "eval-runner-config"
+
+CONTROLLER_DEPLOYMENT = "eval-runner-controller"
+WEBHOOK_DEPLOYMENT = "eval-runner-webhook"
+
+# Keys read once at startup that require restarting their deployment to take effect.
+RESTART_ONLY_KEYS: Dict[str, Tuple[str, ...]] = {
+    "servicePortalControllerAddress": (CONTROLLER_DEPLOYMENT,),
+    "servicePortalControllerCAFile": (CONTROLLER_DEPLOYMENT,),
+    "servicePortalTokenFile": (CONTROLLER_DEPLOYMENT,),
+    "allowedCloneHosts": (WEBHOOK_DEPLOYMENT,),
+    "defaultBatchSize": (WEBHOOK_DEPLOYMENT,),
+    "defaultBudgetUSD": (WEBHOOK_DEPLOYMENT,),
+    "defaultCohort": (WEBHOOK_DEPLOYMENT,),
+    "defaultLimit": (WEBHOOK_DEPLOYMENT,),
+    "defaultMaxSamplesPerTask": (WEBHOOK_DEPLOYMENT,),
+    "defaultModel": (WEBHOOK_DEPLOYMENT,),
+    "githubAppSecret": (WEBHOOK_DEPLOYMENT,),
+    "githubWebhookSecret": (WEBHOOK_DEPLOYMENT,),
+    "webhookRepositories": (WEBHOOK_DEPLOYMENT,),
+}
+
+
+class RecordOperationAction(argparse.Action):
+    """Records --set, --set-default, and --unset operations in CLI order."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        operations = getattr(namespace, "operations", None)
+        if operations is None:
+            operations = []
+            setattr(namespace, "operations", operations)
+        operations.append((self.dest, values))
+
+
+def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__.split("Examples:", 1)[1] if "Examples:" in __doc__ else None,
+    )
+    parser.add_argument(
+        "--set",
+        dest="set",
+        action=RecordOperationAction,
+        metavar="KEY=VALUE",
+        help="set a ConfigMap key (repeatable)",
+    )
+    parser.add_argument(
+        "--set-default",
+        dest="set_default",
+        action=RecordOperationAction,
+        metavar="KEY=VALUE",
+        help="set a ConfigMap key only if not already present (repeatable)",
+    )
+    parser.add_argument(
+        "--unset",
+        dest="unset",
+        action=RecordOperationAction,
+        metavar="KEY",
+        help="remove a ConfigMap key if present (repeatable)",
+    )
+    restart_group = parser.add_mutually_exclusive_group()
+    restart_group.add_argument(
+        "--restart",
+        dest="restart",
+        action="store_true",
+        default=True,
+        help="automatically restart deployments when restart-only keys change (default)",
+    )
+    restart_group.add_argument(
+        "--no-restart",
+        dest="restart",
+        action="store_false",
+        help="do not restart deployments even when restart-only keys change",
+    )
+    parser.add_argument(
+        "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help=f"target Kubernetes namespace (default: {DEFAULT_NAMESPACE})",
+    )
+    parser.add_argument(
+        "--configmap",
+        default=DEFAULT_CONFIGMAP,
+        help=f"target ConfigMap name (default: {DEFAULT_CONFIGMAP})",
+    )
+    parser.add_argument("--kubeconfig", help="path to kubeconfig file (optional)")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print mutating commands without executing them",
+    )
+
+    arguments = parser.parse_args(argv)
+    if not hasattr(arguments, "operations"):
+        arguments.operations = []
+
+    for operation, raw_value in arguments.operations:
+        if operation in ("set", "set_default"):
+            flag_name = "--set" if operation == "set" else "--set-default"
+            if "=" not in raw_value or not raw_value.split("=", 1)[0].strip():
+                parser.error(f"{flag_name} expects KEY=VALUE, got {raw_value!r}")
+        elif operation == "unset":
+            if not raw_value.strip() or "=" in raw_value:
+                parser.error(f"--unset expects KEY, got {raw_value!r}")
+
+    if arguments.kubeconfig:
+        arguments.kubeconfig = Path(arguments.kubeconfig).expanduser()
+    return arguments
+
+
+def merge_config_data(
+    existing_data: Dict[str, str],
+    operations: List[Tuple[str, str]],
+) -> Tuple[Dict[str, str], List[str], List[str]]:
+    """Apply ordered set/set_default/unset operations to a copy of existing_data.
+
+    Returns (merged_data, updated_keys, removed_keys).
+    """
+    merged_data = dict(existing_data)
+    for operation, raw_value in operations:
+        if operation == "set":
+            key, value = raw_value.split("=", 1)
+            merged_data[key.strip()] = value
+        elif operation == "set_default":
+            key, value = raw_value.split("=", 1)
+            key = key.strip()
+            if key not in merged_data:
+                merged_data[key] = value
+        elif operation == "unset":
+            merged_data.pop(raw_value.strip(), None)
+
+    updated_keys = sorted(
+        key for key, value in merged_data.items() if existing_data.get(key) != value
+    )
+    removed_keys = sorted(key for key in existing_data if key not in merged_data)
+    return merged_data, updated_keys, removed_keys
+
+
+def deployments_needing_restart(changed_keys: Iterable[str]) -> Dict[str, List[str]]:
+    """Map deployment names to sorted changed restart-only keys requiring a restart."""
+    targets: Dict[str, List[str]] = {}
+    for key in sorted(set(changed_keys)):
+        for deployment in RESTART_ONLY_KEYS.get(key, ()):
+            targets.setdefault(deployment, []).append(key)
+    return targets
+
+
+def verify_kubectl_context(runner: Runner, dry_run: bool) -> str:
+    """Verify and print the active kubectl context before mutating the cluster."""
+    result = runner.run(
+        ["kubectl", "config", "current-context"],
+        check=False,
+        capture=True,
+        quiet=True,
+        mutating=False,
+    )
+    context = result.stdout.strip() if result.returncode == 0 else ""
+    if not context:
+        if dry_run:
+            print("    context: <none> (dry-run)")
+            return ""
+        raise SystemExit(
+            "error: no active kubectl context; configure KUBECONFIG or run "
+            "`kubectl config use-context <context>` first"
+        )
+    print(f"    context: {context}")
+    return context
+
+
+def read_existing_configmap(
+    runner: Runner,
+    namespace: str,
+    configmap: str,
+    dry_run: bool,
+) -> Dict[str, str]:
+    """Read existing ConfigMap data, returning an empty dict if NotFound."""
+    result = runner.run(
+        ["kubectl", "-n", namespace, "get", "configmap", configmap, "-o", "json"],
+        check=False,
+        capture=True,
+        quiet=True,
+        mutating=False,
+    )
+    if result.returncode == 0:
+        parsed = json.loads(result.stdout) if result.stdout.strip() else {}
+        return dict(parsed.get("data") or {})
+
+    stderr_lower = result.stderr.lower()
+    if "notfound" in stderr_lower or "not found" in stderr_lower:
+        return {}
+
+    if dry_run:
+        print(f"    note: could not read {namespace}/{configmap} in dry-run mode; assuming empty")
+        return {}
+
+    sys.stderr.write(result.stderr)
+    raise SystemExit(f"error: failed to read configmap {namespace}/{configmap}")
+
+
+def deployment_exists(runner: Runner, namespace: str, deployment: str) -> bool:
+    """Return True if deployment exists in namespace; fail on non-NotFound errors."""
+    result = runner.run(
+        ["kubectl", "-n", namespace, "get", "deployment", deployment, "-o", "name"],
+        check=False,
+        capture=True,
+        quiet=True,
+        mutating=False,
+    )
+    if result.returncode == 0:
+        return True
+    stderr_lower = result.stderr.lower()
+    if "notfound" in stderr_lower or "not found" in stderr_lower:
+        return False
+    sys.stderr.write(result.stderr)
+    raise SystemExit(f"error: failed to inspect deployment {namespace}/{deployment}")
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    arguments = parse_arguments(argv)
+    runner = Runner(dry_run=arguments.dry_run, kubeconfig=arguments.kubeconfig)
+    if arguments.dry_run:
+        print("dry run: mutating commands are printed, not executed")
+
+    verify_kubectl_context(runner, dry_run=arguments.dry_run)
+    existing_data = read_existing_configmap(
+        runner,
+        arguments.namespace,
+        arguments.configmap,
+        dry_run=arguments.dry_run,
+    )
+
+    merged_data, updated_keys, removed_keys = merge_config_data(
+        existing_data,
+        arguments.operations,
+    )
+    if not updated_keys and not removed_keys:
+        print(f"    configmap {arguments.namespace}/{arguments.configmap} already up to date")
+        return
+
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": arguments.configmap,
+            "namespace": arguments.namespace,
+        },
+        "data": merged_data,
+    }
+    runner.run(
+        ["kubectl", "apply", "-f", "-"],
+        stdin=json.dumps(manifest, indent=2) + "\n",
+        quiet=not arguments.dry_run,
+        mutating=True,
+    )
+    if not arguments.dry_run:
+        print(f"    applied configmap {arguments.namespace}/{arguments.configmap}")
+    for key in updated_keys:
+        print(f"    updated: {key}={merged_data[key]}")
+    for key in removed_keys:
+        print(f"    removed: {key}")
+
+    restart_targets = deployments_needing_restart(updated_keys + removed_keys)
+    if not restart_targets:
+        print("    no deployment restart required (changes reload at runtime)")
+        return
+
+    for deployment in sorted(restart_targets):
+        trigger_keys = ", ".join(restart_targets[deployment])
+        if arguments.restart:
+            print(f"    restarting deployment/{deployment} (restart-only keys: {trigger_keys})")
+            if not arguments.dry_run and not deployment_exists(runner, arguments.namespace, deployment):
+                print(
+                    f"    deployment/{deployment} not found in {arguments.namespace}; skipping restart"
+                )
+                continue
+            runner.run(
+                ["kubectl", "-n", arguments.namespace, "rollout", "restart", f"deployment/{deployment}"]
+            )
+            runner.run(
+                [
+                    "kubectl", "-n", arguments.namespace, "rollout", "status",
+                    f"deployment/{deployment}", "--timeout=300s",
+                ]
+            )
+        else:
+            print(f"    restart required: {deployment} (keys: {trigger_keys})")
+
+
+if __name__ == "__main__":
+    main()
