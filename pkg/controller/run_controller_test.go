@@ -15,6 +15,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -5244,6 +5245,41 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		if agentRecord.Steps[1].Text != "Done" {
 			t.Errorf("expected step 1 text 'Done', got %q", agentRecord.Steps[1].Text)
 		}
+
+		// Verify stored results.json is enriched with agent trajectory and usage
+		storedResultsBytes, err := sink.Load(t.Context(), task0.LogPath)
+		if err != nil {
+			t.Fatalf("failed to load results artifact from sink at %s: %v", task0.LogPath, err)
+		}
+		parsedSamples, err := artifacts.ParseResultsSamples(storedResultsBytes)
+		if err != nil {
+			t.Fatalf("failed to parse enriched results.json: %v", err)
+		}
+		if len(parsedSamples) != 1 {
+			t.Fatalf("expected 1 parsed sample, got %d", len(parsedSamples))
+		}
+		parsedSample := parsedSamples[0]
+		if parsedSample.Input != "instruction prompt" {
+			t.Errorf("expected enriched Input %q, got %q", "instruction prompt", parsedSample.Input)
+		}
+		if parsedSample.Output != "Done" {
+			t.Errorf("expected enriched Output %q, got %q", "Done", parsedSample.Output)
+		}
+		if parsedSample.Latency == nil || *parsedSample.Latency < 0 {
+			t.Errorf("expected non-nil non-negative Latency, got %v", parsedSample.Latency)
+		}
+		if parsedSample.InputTokens != 250 || parsedSample.OutputTokens != 50 || parsedSample.TotalTokens != 300 {
+			t.Errorf("expected enriched tokens 250 in / 50 out / 300 total, got %d / %d / %d", parsedSample.InputTokens, parsedSample.OutputTokens, parsedSample.TotalTokens)
+		}
+		expectedTranscript := []artifacts.InspectTranscriptRow{
+			{Kind: "user", Content: "instruction prompt"},
+			{Kind: "tool_call", Content: "echo solved"},
+			{Kind: "tool", Content: "echo output"},
+			{Kind: "assistant", Content: "Done"},
+		}
+		if !reflect.DeepEqual(parsedSample.Transcript, expectedTranscript) {
+			t.Errorf("enriched transcript mismatch:\ngot:  %+v\nwant: %+v", parsedSample.Transcript, expectedTranscript)
+		}
 	})
 
 	t.Run("TaskAgent_InvalidOrMissingModelCredentials_RejectsFast", func(t *testing.T) {
@@ -5330,7 +5366,7 @@ func TestExecuteAgentPhase(t *testing.T) {
 		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
 		badTask := task
 		badTask.Agent = &v1alpha1.ManifestTaskAgent{InstructionPath: "/etc/passwd"}
-		_, _, failed := reconciler.executeAgentPhase(ctx, run, "task", nil, badTask, "repo", 60, nil, nil)
+		_, failed := reconciler.executeAgentPhase(ctx, run, "task", nil, badTask, "repo", 60, nil, nil)
 		if failed == nil || !strings.Contains(failed.message, "must be an absolute path inside /workspace") {
 			t.Errorf("expected failure for instruction outside workspace, got %v", failed)
 		}
@@ -5352,12 +5388,54 @@ func TestExecuteAgentPhase(t *testing.T) {
 			AgentModel: &timingOutModel{},
 		}
 		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
-		loopEndingMessage, _, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, timedOutTask, "repo", 60, nil, nil)
+		outcome, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, timedOutTask, "repo", 60, nil, nil)
 		if failed != nil {
 			t.Fatalf("expected timeout to proceed to verify, got failedResult: %v", failed)
 		}
-		if loopEndingMessage != "agent loop stopped: timeout" {
-			t.Errorf("expected timeout loop message, got %q", loopEndingMessage)
+		if outcome.loopEndingMessage != "agent loop stopped: timeout" {
+			t.Errorf("expected timeout loop message, got %q", outcome.loopEndingMessage)
+		}
+	})
+
+	t.Run("captures instruction and duration using reconciler clock", func(t *testing.T) {
+		instructionText := "Solve the task.\n```scripted-bash\necho hi\n```"
+		fakeClient := &sandboxclient.FakeClient{
+			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+				return []byte(instructionText), nil
+			},
+			ExecFn: func(call int, execContext context.Context, config sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "hi\n"}, nil
+			},
+		}
+
+		baseTime := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+		currentTime := baseTime
+		agentModel := &clockAdvancingModel{
+			delegate: agent.NewScriptedModel(),
+			advance: func() {
+				currentTime = currentTime.Add(3500 * time.Millisecond)
+			},
+		}
+		reconciler := &RunReconciler{
+			AgentModel: agentModel,
+			Now: func() time.Time {
+				return currentTime
+			},
+		}
+		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
+		outcome, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, task, "repo", 60, nil, nil)
+		if failed != nil {
+			t.Fatalf("expected success, got failedResult: %v", failed)
+		}
+		if outcome.instruction != instructionText {
+			t.Errorf("expected instruction %q, got %q", instructionText, outcome.instruction)
+		}
+		expectedDuration := 7 * time.Second
+		if outcome.duration != expectedDuration {
+			t.Errorf("expected duration %v, got %v", expectedDuration, outcome.duration)
+		}
+		if outcome.result == nil {
+			t.Fatal("expected non-nil agent result")
 		}
 	})
 
@@ -5384,7 +5462,7 @@ func TestExecuteAgentPhase(t *testing.T) {
 			AgentModel: agent.NewScriptedModel(),
 		}
 		run := &v1alpha1.Run{Spec: v1alpha1.RunSpec{Model: "mockllm/model"}}
-		_, _, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, prepareTask, "repo", 500, nil, nil)
+		_, failed := reconciler.executeAgentPhase(ctx, run, "task", fakeClient, prepareTask, "repo", 500, nil, nil)
 		if failed == nil {
 			t.Fatalf("expected prepare timeout to fail the task, got nil")
 		}
@@ -5393,6 +5471,228 @@ func TestExecuteAgentPhase(t *testing.T) {
 		}
 		if observedTimeout < 490*time.Second || observedTimeout > 510*time.Second {
 			t.Errorf("expected prepare timeout around 500s, got %v", observedTimeout)
+		}
+	})
+}
+
+type clockAdvancingModel struct {
+	delegate agent.Model
+	advance  func()
+}
+
+func (model *clockAdvancingModel) Generate(ctx context.Context, request agent.Request) (*agent.Response, error) {
+	model.advance()
+	return model.delegate.Generate(ctx, request)
+}
+
+func TestEnrichResultsWithAgent(t *testing.T) {
+	t.Run("populates missing fields and round-trips through ParseResultsSamples", func(t *testing.T) {
+		rawResults := []byte(`{
+			"schemaVersion": 1,
+			"samples": [
+				{
+					"id": "fix-bug",
+					"passed": true,
+					"score": 1.0,
+					"message": "all tests passed"
+				}
+			]
+		}`)
+		instruction := "Fix the failing unit test."
+		agentDuration := 12500 * time.Millisecond
+		agentResult := &agent.Result{
+			StopReason:   agent.StopReasonCompleted,
+			InputTokens:  1200,
+			OutputTokens: 350,
+			Steps: []agent.Step{
+				{
+					Text: "Let me run the test suite first.",
+					ToolCalls: []agent.ToolCall{
+						{ID: "call-1", Command: "go test ./..."},
+					},
+					ToolResults: []agent.ToolResult{
+						{ID: "call-1", Command: "go test ./...", Output: "FAIL: TestFoo", ExitCode: 1},
+					},
+				},
+				{
+					ToolCalls: []agent.ToolCall{
+						{ID: "call-2", Command: "sed -i 's/bad/good/' foo.go"},
+						{ID: "call-3", Command: "false"},
+					},
+					ToolResults: []agent.ToolResult{
+						{ID: "call-2", Command: "sed -i 's/bad/good/' foo.go", Output: "", ExitCode: 0},
+						{ID: "call-3", Command: "false", Output: "", ExitCode: 2},
+					},
+				},
+				{
+					Text: "Fixed the bug and verified all tests pass.",
+				},
+			},
+		}
+
+		enrichedBytes, err := enrichResultsWithAgent(rawResults, instruction, agentDuration, agentResult)
+		if err != nil {
+			t.Fatalf("enrichResultsWithAgent failed: %v", err)
+		}
+
+		parsedSamples, err := artifacts.ParseResultsSamples(enrichedBytes)
+		if err != nil {
+			t.Fatalf("ParseResultsSamples failed on enriched bytes: %v", err)
+		}
+
+		expectedScore := 1.0
+		expectedLatency := 12.5
+		expected := []artifacts.ParsedInspectSample{
+			{
+				ID:           "fix-bug",
+				Status:       "pass",
+				Score:        &expectedScore,
+				HasScore:     true,
+				ScoreStr:     "1.00",
+				Input:        instruction,
+				Explanation:  "all tests passed",
+				Output:       "Fixed the bug and verified all tests pass.",
+				Latency:      &expectedLatency,
+				TotalTokens:  1550,
+				InputTokens:  1200,
+				OutputTokens: 350,
+				Transcript: []artifacts.InspectTranscriptRow{
+					{Kind: "user", Content: instruction},
+					{Kind: "assistant", Content: "Let me run the test suite first."},
+					{Kind: "tool_call", Content: "go test ./..."},
+					{Kind: "tool", Content: "exit 1\nFAIL: TestFoo"},
+					{Kind: "tool_call", Content: "sed -i 's/bad/good/' foo.go"},
+					{Kind: "tool_call", Content: "false"},
+					{Kind: "tool", Content: ""},
+					{Kind: "tool", Content: "exit 2"},
+					{Kind: "assistant", Content: "Fixed the bug and verified all tests pass."},
+				},
+			},
+		}
+
+		if !reflect.DeepEqual(parsedSamples, expected) {
+			t.Errorf("round-tripped sample mismatch:\ngot:  %+v\nwant: %+v", parsedSamples, expected)
+		}
+	})
+
+	t.Run("preserves fields already set by verifier", func(t *testing.T) {
+		rawResults := []byte(`{
+			"schemaVersion": 1,
+			"samples": [
+				{
+					"id": "verifier-populated",
+					"passed": true,
+					"score": 1.0,
+					"input": "verifier input",
+					"output": "verifier output",
+					"latencySeconds": 4.25,
+					"inputTokens": 99,
+					"outputTokens": 11,
+					"transcript": [
+						{"kind": "user", "content": "verifier transcript row"}
+					]
+				}
+			]
+		}`)
+		agentResult := &agent.Result{
+			StopReason:   agent.StopReasonCompleted,
+			InputTokens:  5000,
+			OutputTokens: 1000,
+			Steps: []agent.Step{
+				{Text: "agent final output"},
+			},
+		}
+
+		enrichedBytes, err := enrichResultsWithAgent(rawResults, "agent instruction", 30*time.Second, agentResult)
+		if err != nil {
+			t.Fatalf("enrichResultsWithAgent failed: %v", err)
+		}
+
+		parsedSamples, err := artifacts.ParseResultsSamples(enrichedBytes)
+		if err != nil {
+			t.Fatalf("ParseResultsSamples failed: %v", err)
+		}
+		if len(parsedSamples) != 1 {
+			t.Fatalf("expected 1 sample, got %d", len(parsedSamples))
+		}
+		sample := parsedSamples[0]
+		if sample.Input != "verifier input" {
+			t.Errorf("expected verifier Input preserved, got %q", sample.Input)
+		}
+		if sample.Output != "verifier output" {
+			t.Errorf("expected verifier Output preserved, got %q", sample.Output)
+		}
+		if sample.Latency == nil || *sample.Latency != 4.25 {
+			t.Errorf("expected verifier Latency 4.25 preserved, got %v", sample.Latency)
+		}
+		if sample.InputTokens != 99 || sample.OutputTokens != 11 || sample.TotalTokens != 110 {
+			t.Errorf("expected verifier tokens 99/11/110 preserved, got %d/%d/%d", sample.InputTokens, sample.OutputTokens, sample.TotalTokens)
+		}
+		expectedTranscript := []artifacts.InspectTranscriptRow{
+			{Kind: "user", Content: "verifier transcript row"},
+		}
+		if !reflect.DeepEqual(sample.Transcript, expectedTranscript) {
+			t.Errorf("expected verifier Transcript preserved:\ngot:  %+v\nwant: %+v", sample.Transcript, expectedTranscript)
+		}
+	})
+
+	t.Run("uses last non-empty step text as output", func(t *testing.T) {
+		rawResults := []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`)
+		agentResult := &agent.Result{
+			StopReason: agent.StopReasonMaxSteps,
+			Steps: []agent.Step{
+				{Text: "first step text"},
+				{Text: "second step text", ToolCalls: []agent.ToolCall{{Command: "ls"}}},
+				{ToolCalls: []agent.ToolCall{{Command: "pwd"}}},
+			},
+		}
+
+		enrichedBytes, err := enrichResultsWithAgent(rawResults, "inspect repo", time.Second, agentResult)
+		if err != nil {
+			t.Fatalf("enrichResultsWithAgent failed: %v", err)
+		}
+		parsedSamples, err := artifacts.ParseResultsSamples(enrichedBytes)
+		if err != nil {
+			t.Fatalf("ParseResultsSamples failed: %v", err)
+		}
+		if parsedSamples[0].Output != "second step text" {
+			t.Errorf("expected last non-empty step text %q, got %q", "second step text", parsedSamples[0].Output)
+		}
+	})
+
+	t.Run("leaves multi-sample results untouched", func(t *testing.T) {
+		rawResults := []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}, {"id": "s2", "passed": false}]}`)
+		agentResult := &agent.Result{
+			StopReason:   agent.StopReasonCompleted,
+			InputTokens:  100,
+			OutputTokens: 50,
+			Steps:        []agent.Step{{Text: "done"}},
+		}
+
+		enrichedBytes, err := enrichResultsWithAgent(rawResults, "do two things", 5*time.Second, agentResult)
+		if err != nil {
+			t.Fatalf("enrichResultsWithAgent failed: %v", err)
+		}
+		if !bytes.Equal(enrichedBytes, rawResults) {
+			t.Errorf("expected multi-sample results to be untouched:\ngot:  %s\nwant: %s", string(enrichedBytes), string(rawResults))
+		}
+	})
+
+	t.Run("nil agent result returns original bytes", func(t *testing.T) {
+		rawResults := []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`)
+		enrichedBytes, err := enrichResultsWithAgent(rawResults, "instruction", time.Second, nil)
+		if err != nil {
+			t.Fatalf("enrichResultsWithAgent failed: %v", err)
+		}
+		if !bytes.Equal(enrichedBytes, rawResults) {
+			t.Errorf("expected original bytes unchanged when agentResult is nil")
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		_, err := enrichResultsWithAgent([]byte(`{invalid`), "instruction", time.Second, &agent.Result{})
+		if err == nil {
+			t.Fatal("expected error for invalid JSON, got nil")
 		}
 	})
 }
@@ -9881,15 +10181,16 @@ func TestRunController_AgentExecution_OversizedAgentRecordUnaffected(t *testing.
 				return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true, "score": 1.0}]}`), nil
 			}
 			if path == "/out/inst.md" || path == "out/inst.md" {
-				return []byte("```scripted-bash\necho 'long step output text to generate a large agent record in agent.json with lots of steps'\n```"), nil
+				return []byte("```scripted-bash\ntrue\ntrue\ntrue\ntrue\ntrue\n```"), nil
 			}
 			return nil, fmt.Errorf("file not found: %s", path)
 		},
 	}
 
 	fakeGCSClient := fakes.NewFakeStorageClient()
-	// Cap limit of 80 bytes: results.json (74 bytes) fits, but agent.json (>300 bytes) will exceed it
-	capLimit := int64(80)
+	// Cap limit between enriched results.json (~580 bytes) and agent.json (>900 bytes)
+	// so agent.json is refused while enriched results.json still uploads.
+	capLimit := int64(750)
 	gcsSink, err := gcs.New(t.Context(), "gs://my-bucket",
 		gcs.WithStorageClient(fakeGCSClient),
 		gcs.WithMaxUploadBytes(capLimit),
@@ -9958,6 +10259,12 @@ func TestRunController_AgentExecution_OversizedAgentRecordUnaffected(t *testing.
 	task := updatedRun.Status.Tasks[0]
 	if task.Phase != v1alpha1.TaskPhaseCompleted {
 		t.Errorf("expected task Phase Completed despite agent record refusal, got %s (message: %s)", task.Phase, task.Message)
+	}
+	if _, exists := fakeGCSClient.GetObject("my-bucket", "runs/abcdef123456/task-agent-oversized/agent.json"); exists {
+		t.Errorf("expected oversized agent.json to be refused and not uploaded to GCS")
+	}
+	if _, exists := fakeGCSClient.GetObject("my-bucket", "runs/abcdef123456/task-agent-oversized/results.json"); !exists {
+		t.Errorf("expected enriched results.json to be uploaded to GCS")
 	}
 }
 

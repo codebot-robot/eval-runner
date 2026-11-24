@@ -4223,6 +4223,13 @@ func (r *RunReconciler) agentModelForRun(run *v1alpha1.Run) (agent.Model, error)
 	return r.NewAgentModel(run)
 }
 
+type agentPhaseOutcome struct {
+	loopEndingMessage string
+	instruction       string
+	duration          time.Duration
+	result            *agent.Result
+}
+
 func (r *RunReconciler) executeAgentPhase(
 	ctx context.Context,
 	run *v1alpha1.Run,
@@ -4233,7 +4240,7 @@ func (r *RunReconciler) executeAgentPhase(
 	effectiveTimeoutSeconds int,
 	effectiveResources *v1alpha1.TaskResources,
 	effRange *v1alpha1.SampleRange,
-) (string, *agent.Result, *taskExecutionResult) {
+) (agentPhaseOutcome, *taskExecutionResult) {
 	fail := func(message string) *taskExecutionResult {
 		return &taskExecutionResult{
 			taskID:         taskID,
@@ -4247,7 +4254,7 @@ func (r *RunReconciler) executeAgentPhase(
 
 	agentModel, err := r.agentModelForRun(run)
 	if err != nil {
-		return "", nil, fail(err.Error())
+		return agentPhaseOutcome{}, fail(err.Error())
 	}
 
 	if len(targetTask.Agent.PrepareCommand) > 0 {
@@ -4264,13 +4271,13 @@ func (r *RunReconciler) executeAgentPhase(
 		if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "agent prepare command", prepareContext, prepareResult, prepareError, taskID, effRange); failed {
 			failedResult.timeoutSeconds = effectiveTimeoutSeconds
 			failedResult.resources = effectiveResources
-			return "", nil, &failedResult
+			return agentPhaseOutcome{}, &failedResult
 		}
 	}
 
 	cleanedPath := path.Clean(targetTask.Agent.InstructionPath)
 	if !strings.HasPrefix(cleanedPath, "/workspace/") && cleanedPath != "/workspace" {
-		return "", nil, fail(fmt.Sprintf("instructionPath %q must be an absolute path inside /workspace", targetTask.Agent.InstructionPath))
+		return agentPhaseOutcome{}, fail(fmt.Sprintf("instructionPath %q must be an absolute path inside /workspace", targetTask.Agent.InstructionPath))
 	}
 	cleanPath := strings.TrimPrefix(cleanedPath, "/workspace")
 	readInstructionContext, readInstructionCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
@@ -4279,22 +4286,34 @@ func (r *RunReconciler) executeAgentPhase(
 	if failedResult, failed := r.handleStepReadFailure(ctx, run.Name, "agent instruction file", readInstructionContext, readInstructionError, taskID, effRange); failed {
 		failedResult.timeoutSeconds = effectiveTimeoutSeconds
 		failedResult.resources = effectiveResources
-		return "", nil, &failedResult
+		return agentPhaseOutcome{}, &failedResult
 	}
 	if len(instructionBytes) > MaxInstructionBytes {
-		return "", nil, fail(fmt.Sprintf("agent instruction file %s exceeds %d bytes (%d bytes)", targetTask.Agent.InstructionPath, MaxInstructionBytes, len(instructionBytes)))
+		return agentPhaseOutcome{}, fail(fmt.Sprintf("agent instruction file %s exceeds %d bytes (%d bytes)", targetTask.Agent.InstructionPath, MaxInstructionBytes, len(instructionBytes)))
 	}
 
+	instruction := string(instructionBytes)
 	agentTimeout := r.executionStepTimeout()
 	if targetTask.Agent.TimeoutSeconds != nil && *targetTask.Agent.TimeoutSeconds > 0 {
 		agentTimeout = time.Duration(*targetTask.Agent.TimeoutSeconds) * time.Second
 	}
 	agentContext, agentCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, agentTimeout)
 	executor := &sandboxAgentExecutor{client: sbClient, cwd: cwd}
+	agentStartTime := r.now()
 	agentResult, agentError := agent.Run(agentContext, agentModel, executor, agent.Options{
-		Instruction: string(instructionBytes),
+		Instruction: instruction,
 	})
+	agentDuration := r.now().Sub(agentStartTime)
+	if agentDuration < 0 {
+		agentDuration = 0
+	}
 	agentCancel()
+
+	outcome := agentPhaseOutcome{
+		instruction: instruction,
+		duration:    agentDuration,
+		result:      agentResult,
+	}
 
 	if agentResult == nil || agentResult.StopReason == agent.StopReasonModelError {
 		errorMessage := "model error"
@@ -4302,17 +4321,100 @@ func (r *RunReconciler) executeAgentPhase(
 			errorMessage = agentError.Error()
 		}
 		failedResult := fail(fmt.Sprintf("agent model error: %s", truncateMessage(errorMessage, r.maxMessageBytes())))
-		return "", agentResult, failedResult
+		return outcome, failedResult
 	}
 
-	loopEndingMessage := ""
 	switch agentResult.StopReason {
 	case agent.StopReasonMaxSteps:
-		loopEndingMessage = "agent loop stopped: step bound reached"
+		outcome.loopEndingMessage = "agent loop stopped: step bound reached"
 	case agent.StopReasonContextDone:
-		loopEndingMessage = "agent loop stopped: timeout"
+		outcome.loopEndingMessage = "agent loop stopped: timeout"
 	}
-	return loopEndingMessage, agentResult, nil
+	return outcome, nil
+}
+
+func enrichResultsWithAgent(resultsBytes []byte, instruction string, agentDuration time.Duration, agentResult *agent.Result) ([]byte, error) {
+	if agentResult == nil {
+		return resultsBytes, nil
+	}
+
+	var resultsFile artifacts.ResultsFile
+	if err := json.Unmarshal(resultsBytes, &resultsFile); err != nil {
+		return nil, err
+	}
+
+	if len(resultsFile.Samples) != 1 {
+		return resultsBytes, nil
+	}
+
+	sample := &resultsFile.Samples[0]
+	if sample.Input == "" {
+		sample.Input = instruction
+	}
+	if sample.Output == "" {
+		for i := len(agentResult.Steps) - 1; i >= 0; i-- {
+			if agentResult.Steps[i].Text != "" {
+				sample.Output = agentResult.Steps[i].Text
+				break
+			}
+		}
+	}
+	if sample.LatencySeconds == nil {
+		latencySeconds := agentDuration.Seconds()
+		sample.LatencySeconds = &latencySeconds
+	}
+	if sample.InputTokens == 0 {
+		sample.InputTokens = agentResult.InputTokens
+	}
+	if sample.OutputTokens == 0 {
+		sample.OutputTokens = agentResult.OutputTokens
+	}
+	if len(sample.Transcript) == 0 {
+		sample.Transcript = buildAgentTranscript(instruction, agentResult.Steps)
+	}
+
+	return json.Marshal(resultsFile)
+}
+
+func buildAgentTranscript(instruction string, steps []agent.Step) []artifacts.SampleTranscriptRow {
+	var transcript []artifacts.SampleTranscriptRow
+	if instruction != "" {
+		transcript = append(transcript, artifacts.SampleTranscriptRow{
+			Kind:    "user",
+			Content: instruction,
+		})
+	}
+	for _, step := range steps {
+		if step.Text != "" {
+			transcript = append(transcript, artifacts.SampleTranscriptRow{
+				Kind:    "assistant",
+				Content: step.Text,
+			})
+		}
+		for _, toolCall := range step.ToolCalls {
+			transcript = append(transcript, artifacts.SampleTranscriptRow{
+				Kind:    "tool_call",
+				Content: toolCall.Command,
+			})
+		}
+		for _, toolResult := range step.ToolResults {
+			transcript = append(transcript, artifacts.SampleTranscriptRow{
+				Kind:    "tool",
+				Content: formatAgentToolResult(toolResult),
+			})
+		}
+	}
+	return transcript
+}
+
+func formatAgentToolResult(toolResult agent.ToolResult) string {
+	if toolResult.ExitCode == 0 {
+		return toolResult.Output
+	}
+	if toolResult.Output == "" {
+		return fmt.Sprintf("exit %d", toolResult.ExitCode)
+	}
+	return fmt.Sprintf("exit %d\n%s", toolResult.ExitCode, toolResult.Output)
 }
 
 func (r *RunReconciler) storeAgentArtifact(
@@ -4353,15 +4455,14 @@ func (r *RunReconciler) executeSandboxTask(
 ) (result taskExecutionResult) {
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
 
-	var loopEndingMessage string
-	var agentResult *agent.Result
+	var agentOutcome agentPhaseOutcome
 	var tokensAndCost *taskTokensAndCost
 	defer func() {
-		if loopEndingMessage != "" {
+		if agentOutcome.loopEndingMessage != "" {
 			if result.message == "" {
-				result.message = loopEndingMessage
+				result.message = agentOutcome.loopEndingMessage
 			} else {
-				result.message = fmt.Sprintf("%s; %s", loopEndingMessage, result.message)
+				result.message = fmt.Sprintf("%s; %s", agentOutcome.loopEndingMessage, result.message)
 			}
 		}
 	}()
@@ -4415,11 +4516,11 @@ func (r *RunReconciler) executeSandboxTask(
 	if targetTask.Agent != nil {
 		effectiveTimeoutSeconds := r.effectiveTaskCommandTimeoutSeconds(targetTask, run.Status.ExecutionDeadline)
 		var failedResult *taskExecutionResult
-		loopEndingMessage, agentResult, failedResult = r.executeAgentPhase(ctx, run, taskID, sbClient, targetTask, cwd, effectiveTimeoutSeconds, effectiveResources, effRange)
-		if agentResult != nil {
-			r.storeAgentArtifact(ctx, logger, run, taskID, agentResult)
+		agentOutcome, failedResult = r.executeAgentPhase(ctx, run, taskID, sbClient, targetTask, cwd, effectiveTimeoutSeconds, effectiveResources, effRange)
+		if agentOutcome.result != nil {
+			r.storeAgentArtifact(ctx, logger, run, taskID, agentOutcome.result)
 		}
-		tokensAndCost = r.computeAgentTokensAndCost(run.Spec.Model, agentResult)
+		tokensAndCost = r.computeAgentTokensAndCost(run.Spec.Model, agentOutcome.result)
 		if failedResult != nil {
 			applyTokensAndCost(failedResult, tokensAndCost)
 			return *failedResult
@@ -4532,8 +4633,17 @@ func (r *RunReconciler) executeSandboxTask(
 		CostSource:        metaCostSource,
 		PossibleSamples:   aggregates.Samples,
 	}
+	resultsToStore := resultsBytes
+	if agentOutcome.result != nil {
+		enrichedResults, enrichErr := enrichResultsWithAgent(resultsBytes, agentOutcome.instruction, agentOutcome.duration, agentOutcome.result)
+		if enrichErr != nil {
+			logger.Error(enrichErr, "Failed to enrich results with agent trajectory, storing original results", "task", taskID)
+		} else {
+			resultsToStore = enrichedResults
+		}
+	}
 	sinkContext, sinkCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.artifactSinkTimeout())
-	storedArtifact, storeErr := artifacts.StoreArtifactWithTimeout(sinkContext, r.artifactSink(), meta, "results.json", resultsBytes)
+	storedArtifact, storeErr := artifacts.StoreArtifactWithTimeout(sinkContext, r.artifactSink(), meta, "results.json", resultsToStore)
 	sinkCancel()
 	if storeErr != nil {
 		message := fmt.Sprintf("failed to store artifact: %v", storeErr)
