@@ -14,13 +14,13 @@ The task manifest in `examples/terminal-bench/.evals/list` is generated dynamica
 - The working directory from the last `WORKDIR` directive in `environment/Dockerfile` (defaulting to `/app`)
 
 For each task, two entries are emitted:
-- **Oracle entry (`terminal-bench/<name>`)**: Runs the one-shot `oracle` phase (`run-task.sh <name> oracle <workdir>`), which prepares the environment, runs the reference solution, and verifies.
-- **Agent-mode entry (`terminal-bench/<name>/agent`)**: Configured with an `agent` block:
+- **Agent-mode entry (`terminal-bench/<name>`)**: Configured with an `agent` block:
   - `agent.prepareCommand`: `["bash", "examples/terminal-bench/run-task.sh", "<name>", "prepare", "<workdir>"]`, which fetches tests and writes the prompt to `/workspace/out/instruction.md`.
   - `agent.instructionPath`: `"/workspace/out/instruction.md"`.
   - `agent.timeoutSeconds`: the task's declared `agent.timeout_sec` (capped at 7200 seconds).
   - `command`: `["bash", "examples/terminal-bench/run-task.sh", "<name>", "verify", "<workdir>"]`, which runs verification after the agent loop ends.
   - The reference solution is never installed and `/solution` is never present in the sandbox.
+- **Oracle entry (`terminal-bench/<name>/oracle`)**: Runs the one-shot `oracle` phase (`run-task.sh <name> oracle <workdir>`), which prepares the environment, runs the reference solution, and verifies.
 
 The declared `cpus` and `memory` from `task.toml` are emitted in the `sandbox` resource entry (`resources: [{"type": "sandbox", "limits": {"cpu": "<cpus>", "memory": "<memory>"}}]`) and applied as container limits on the sandbox task pod.
 
@@ -71,7 +71,7 @@ Tasks execute under default sandbox container resource limits (500m CPU, 512Mi m
 
 ### Oracle Mode
 
-To evaluate the `terminal-bench/regex-log` task in oracle mode against this repository on your cluster, specify a valid 7–64 character git commit hash for `spec.repo.commit`:
+To evaluate the `terminal-bench/regex-log` task in oracle mode against this repository on your cluster, select `terminal-bench/regex-log/oracle` and specify a valid 7–64 character git commit hash for `spec.repo.commit`:
 
 ```yaml
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
@@ -84,7 +84,7 @@ spec:
     url: https://github.com/gke-labs/eval-runner.git
     commit: 0123456789abcdef0123456789abcdef01234567
   tasks:
-  - terminal-bench/regex-log
+  - terminal-bench/regex-log/oracle
 ```
 
 Apply the Run manifest:
@@ -101,7 +101,7 @@ kubectl get run terminal-bench-regex-log-run -n eval-runner -o yaml
 
 ### Agent Mode
 
-To run a task in agent mode where a model drives the sandbox, select the agent-mode task ID (e.g. `terminal-bench/regex-log/agent`) in `spec.tasks` and specify `spec.model`:
+To run a task in agent mode where a model drives the sandbox, select the bare task ID (e.g. `terminal-bench/regex-log`) in `spec.tasks` and specify `spec.model`:
 
 ```yaml
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
@@ -115,17 +115,17 @@ spec:
     commit: 0123456789abcdef0123456789abcdef01234567
   model: mockllm/model
   tasks:
-  - terminal-bench/regex-log/agent
+  - terminal-bench/regex-log
 ```
 
 #### Task Selection
 
-How a Run chooses between oracle and agent mode relies on existing task selection via `spec.tasks`:
-- Listing `terminal-bench/<name>` runs the oracle entry.
-- Listing `terminal-bench/<name>/agent` runs the agent-mode entry.
-- If `spec.tasks` is omitted, the Run executes all discovered tasks (both oracle and agent).
+How a Run chooses between agent and oracle mode relies on existing task selection via `spec.tasks`:
+- Listing `terminal-bench/<name>` runs the agent-mode entry.
+- Listing `terminal-bench/<name>/oracle` runs the oracle entry.
+- If `spec.tasks` is omitted, the Run executes all discovered tasks (both agent and oracle).
 
-Running only one kind across the suite requires listing the desired task IDs explicitly in `spec.tasks`. A filtering switch (such as a glob pattern like `terminal-bench/*/agent` or an execution mode selector on the Run) does not exist today.
+Running only one kind across the suite requires listing the desired task IDs explicitly in `spec.tasks`. A filtering switch (such as a glob pattern like `terminal-bench/*/oracle` or an execution mode selector on the Run) does not exist today.
 
 #### Real Models vs Mock Model
 

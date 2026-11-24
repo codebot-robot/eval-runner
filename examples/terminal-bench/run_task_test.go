@@ -875,12 +875,18 @@ func TestEvalsList_OffersOracleAndAgentModes(t *testing.T) {
 		tasksByID[task.ID] = task
 	}
 
-	taskOneOracle := tasksByID["terminal-bench/task-one"]
+	taskOneOracle, ok := tasksByID["terminal-bench/task-one/oracle"]
+	if !ok {
+		t.Fatalf("missing terminal-bench/task-one/oracle task")
+	}
 	if taskOneOracle.Agent != nil || taskOneOracle.Command[3] != "oracle" {
 		t.Errorf("task-one oracle unexpected agent=%v command=%v", taskOneOracle.Agent, taskOneOracle.Command)
 	}
 
-	taskOneAgent := tasksByID["terminal-bench/task-one/agent"]
+	taskOneAgent, ok := tasksByID["terminal-bench/task-one"]
+	if !ok {
+		t.Fatalf("missing terminal-bench/task-one task")
+	}
 	if taskOneAgent.Command[3] != "verify" {
 		t.Errorf("task-one agent command = %v, want verify", taskOneAgent.Command)
 	}
@@ -888,7 +894,10 @@ func TestEvalsList_OffersOracleAndAgentModes(t *testing.T) {
 		t.Errorf("task-one agent unexpected agent block: %+v", taskOneAgent.Agent)
 	}
 
-	taskTwoAgent := tasksByID["terminal-bench/task-two/agent"]
+	taskTwoAgent, ok := tasksByID["terminal-bench/task-two"]
+	if !ok {
+		t.Fatalf("missing terminal-bench/task-two task")
+	}
 	if taskTwoAgent.Agent == nil || taskTwoAgent.Agent.TimeoutSeconds != nil {
 		t.Errorf("task-two agent expected nil timeoutSeconds, got %+v", taskTwoAgent.Agent)
 	}
