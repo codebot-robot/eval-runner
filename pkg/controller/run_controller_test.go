@@ -3555,17 +3555,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var executedCommand []string
-		var executedCwd string
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				executedCommand = cfg.Command
-				executedCwd = cfg.Cwd
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
-			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
 					return []byte(`{"schemaVersion": 1, "samples": [{"id": "sample-1", "passed": true, "score": 1.0, "message": ""}]}`), nil
@@ -3625,17 +3615,37 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Fatalf("failed to create pod: %v", err)
 		}
 
-		// Turn 2: execute task
-		_, err = reconciler.Reconcile(t.Context(), req)
+		// Turn 2: start async task command
+		startResult, err := reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
-
-		if len(executedCommand) != 2 || executedCommand[0] != "run-eval" || executedCommand[1] != "--all" {
-			t.Errorf("Expected executed command [run-eval --all], got %v", executedCommand)
+		if startResult.RequeueAfter != DefaultPollProgressInterval {
+			t.Errorf("Expected RequeueAfter %v, got %v", DefaultPollProgressInterval, startResult.RequeueAfter)
 		}
-		if executedCwd != "repo" {
-			t.Errorf("Expected working directory 'repo', got %q", executedCwd)
+		if len(fakeClient.StartAsyncCalls) != 1 {
+			t.Fatalf("Expected 1 StartAsync call, got %d", len(fakeClient.StartAsyncCalls))
+		}
+		startedCall := fakeClient.StartAsyncCalls[0]
+		if startedCall.ExecutionID != "attempt-0" {
+			t.Errorf("Expected executionID 'attempt-0', got %q", startedCall.ExecutionID)
+		}
+		if len(startedCall.Config.Command) != 2 || startedCall.Config.Command[0] != "run-eval" || startedCall.Config.Command[1] != "--all" {
+			t.Errorf("Expected executed command [run-eval --all], got %v", startedCall.Config.Command)
+		}
+		if startedCall.Config.Cwd != "repo" {
+			t.Errorf("Expected working directory 'repo', got %q", startedCall.Config.Cwd)
+		}
+
+		// Turn 3: mark async task completed and poll to finalize
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 0,
+			Stdout:   "task finished",
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -3649,6 +3659,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		task := updatedRun.Status.Tasks[0]
 		if task.Phase != v1alpha1.TaskPhaseCompleted {
 			t.Errorf("Expected task Completed, got %s (msg: %s)", task.Phase, task.Message)
+		}
+		if task.ExecutionID != "" {
+			t.Errorf("Expected ExecutionID cleared on completion, got %q", task.ExecutionID)
 		}
 		if task.Samples != 1 {
 			t.Errorf("Expected 1 sample, got %d", task.Samples)
@@ -3669,10 +3682,10 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Errorf("Expected non-empty logPath")
 		}
 
-		// Turn 3: marks Run as Completed
+		// Turn 4: marks Run as Completed
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {
-			t.Fatalf("turn 3 error: %v", err)
+			t.Fatalf("turn 4 error: %v", err)
 		}
 		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
 			t.Fatalf("get run error: %v", err)
@@ -3709,14 +3722,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 42, Stderr: "fatal: test suite crashed"}, nil
-			},
-		}
+		fakeClient := sandboxclient.NewFakeClient()
 
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
@@ -3753,10 +3759,21 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		// Turn 2: execute task
+		// Turn 2: start async task
 		_, err := reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		// Turn 3: poll async task returning non-zero exit code
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 42,
+			Stderr:   "fatal: test suite crashed",
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -3764,6 +3781,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		task := updatedRun.Status.Tasks[0]
 		if task.Phase != v1alpha1.TaskPhaseFailed {
 			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		if task.ExecutionID != "" {
+			t.Errorf("Expected ExecutionID cleared on failure, got %q", task.ExecutionID)
 		}
 		if !strings.Contains(task.Message, "exit code 42") || !strings.Contains(task.Message, "fatal: test suite crashed") {
 			t.Errorf("Expected failure message with exit code and stderr tail, got %q", task.Message)
@@ -3798,9 +3818,6 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				return nil, fmt.Errorf("file %q not found (HTTP 404)", path)
 			},
@@ -3840,9 +3857,20 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
+		// Turn 2: start async task
 		_, err := reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		// Turn 3: poll async task completed, results file missing
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 0,
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -3884,9 +3912,6 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				return []byte(`{"schemaVersion": 99, "samples": [{"id": "s1", "passed": true}]}`), nil
 			},
@@ -3926,9 +3951,20 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
+		// Turn 2: start async task
 		_, err := reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		// Turn 3: poll async task completed, results schema invalid
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 0,
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4179,17 +4215,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var capturedCommandDeadline time.Time
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				if deadline, ok := ctx.Deadline(); ok {
-					capturedCommandDeadline = deadline
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
-			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
 					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
@@ -4198,6 +4224,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
+		currentTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 		sink := artifacts.NewInMemorySink()
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
@@ -4211,6 +4238,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			SandboxNamespace: "eval-runner-sandbox",
 			SandboxClient:    fakeClient,
 			ArtifactSink:     sink,
+			Now:              func() time.Time { return currentTime },
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -4239,19 +4267,33 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		launchTime := time.Now()
-		// Turn 2: execute task
+		// Turn 2: start async task
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
 
-		if capturedCommandDeadline.IsZero() {
-			t.Fatalf("Expected command context to have a deadline")
+		// Still within 600s timeout (599s elapsed) -> remains Running on poll
+		currentTime = currentTime.Add(599 * time.Second)
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
-		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
-		if remainingSeconds < 580 || remainingSeconds > 610 {
-			t.Errorf("Expected command deadline to be about 600s after launch, got %f seconds", remainingSeconds)
+		var midRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &midRun)
+		if midRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
+			t.Fatalf("Expected task to remain Running before 600s timeout, got %s", midRun.Status.Tasks[0].Phase)
+		}
+
+		// Turn 4: completes before timeout
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 0,
+			Stdout:   "task finished",
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 4 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4292,17 +4334,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var capturedCommandDeadline time.Time
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				if deadline, ok := ctx.Deadline(); ok {
-					capturedCommandDeadline = deadline
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
-			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
 					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
@@ -4311,6 +4343,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
+		currentTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 		sink := artifacts.NewInMemorySink()
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
@@ -4325,6 +4358,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			SandboxClient:        fakeClient,
 			ArtifactSink:         sink,
 			ExecutionStepTimeout: 2 * time.Minute,
+			Now:                  func() time.Time { return currentTime },
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -4353,19 +4387,33 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		launchTime := time.Now()
-		// Turn 2: execute task
+		// Turn 2: start async task
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
 
-		if capturedCommandDeadline.IsZero() {
-			t.Fatalf("Expected command context to have a deadline")
+		// Still within 120s default step timeout (119s elapsed) -> remains Running
+		currentTime = currentTime.Add(119 * time.Second)
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
-		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
-		if remainingSeconds < 110 || remainingSeconds > 130 {
-			t.Errorf("Expected command deadline to be about execution step timeout (120s) after launch, got %f seconds", remainingSeconds)
+		var midRun v1alpha1.Run
+		_ = cl.Get(t.Context(), req.NamespacedName, &midRun)
+		if midRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning {
+			t.Fatalf("Expected task to remain Running before 120s timeout, got %s", midRun.Status.Tasks[0].Phase)
+		}
+
+		// Turn 4: completes before timeout
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 0,
+			Stdout:   "task finished",
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 4 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4411,17 +4459,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var capturedCommandDeadline time.Time
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				if deadline, ok := ctx.Deadline(); ok {
-					capturedCommandDeadline = deadline
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
-			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
 					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
@@ -4472,19 +4510,21 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		launchTime := time.Now()
-		// Turn 2: execute task
+		// Turn 2: start async task
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
 
-		if capturedCommandDeadline.IsZero() {
-			t.Fatalf("Expected command context to have a deadline")
-		}
-		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
-		if remainingSeconds < 280 || remainingSeconds > 310 {
-			t.Errorf("Expected command deadline to be bounded by execution deadline (about 300s), got %f seconds", remainingSeconds)
+		// Turn 3: completes with effective timeout capped to 300s by execution deadline
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 0,
+			Stdout:   "task finished",
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4611,15 +4651,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				// Simulate context timeout
-				return nil, context.DeadlineExceeded
-			},
-		}
+		currentTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+		fakeClient := sandboxclient.NewFakeClient()
 
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
@@ -4632,6 +4665,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			Scheme:           scheme,
 			SandboxNamespace: "eval-runner-sandbox",
 			SandboxClient:    fakeClient,
+			Now:              func() time.Time { return currentTime },
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -4656,10 +4690,20 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		// Turn 2: execute task
+		// Turn 2: start async task
 		_, err := reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		// Turn 3: advance past task timeout (5s) -> fails cleanly without polling
+		currentTime = currentTime.Add(5 * time.Second)
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
+		}
+		if len(fakeClient.PollAsyncCalls) != 0 {
+			t.Errorf("Expected timeout check to fail before calling PollAsync, got %d poll calls", len(fakeClient.PollAsyncCalls))
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4667,6 +4711,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		task := updatedRun.Status.Tasks[0]
 		if task.Phase != v1alpha1.TaskPhaseFailed {
 			t.Errorf("Expected task Failed, got %s", task.Phase)
+		}
+		if task.ExecutionID != "" {
+			t.Errorf("Expected ExecutionID cleared on timeout, got %q", task.ExecutionID)
 		}
 		expectedTimeoutMessage := "step task command failed: sandbox did not report completion"
 		if task.Message != expectedTimeoutMessage {
@@ -4816,10 +4863,20 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			_ = cl.Create(t.Context(), pod)
 		}
 
-		// Turn 2: Tasks execute and complete
+		// Turn 2: Start async commands for both tasks
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		// Turn 3: Poll async tasks completed
+		fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+			State:    sandboxclient.AsyncTaskCompleted,
+			ExitCode: 0,
+		})
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -6529,10 +6586,7 @@ func TestReconcileExecutionDeadline_TaskCutOffDuringCommandExecution(t *testing.
 	}
 
 	fakeClient := &sandboxclient.FakeClient{
-		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-			}
+		PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
 			timeMutex.Lock()
 			currentTime = deadline
 			timeMutex.Unlock()
@@ -6587,10 +6641,16 @@ func TestReconcileExecutionDeadline_TaskCutOffDuringCommandExecution(t *testing.
 		t.Fatalf("Create pod error: %v", err)
 	}
 
-	// Turn 2: execute task command during which deadline expires (time reaches 12:30:00)
+	// Turn 2: start async task command
 	_, err = reconciler.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	// Turn 3: poll async task during which deadline expires (time reaches 12:30:00)
+	_, err = reconciler.Reconcile(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Turn 3 error: %v", err)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -14005,4 +14065,842 @@ func TestDecideAndApplyExecutionResults(t *testing.T) {
 	if status.Summary == nil || status.Summary.TasksCompleted != 2 || status.Summary.TasksFailed != 1 {
 		t.Errorf("status.Summary = %+v, want 2 completed and 1 failed", status.Summary)
 	}
+}
+
+func TestRunController_AsyncCommandSandboxTaskLifecycle(t *testing.T) {
+	scheme := setupScheme(t)
+	pollInterval := 3 * time.Second
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{
+				ID:        "terminal-bench/oracle",
+				Spec:      "terminal-bench/oracle",
+				Image:     "terminal-bench:v1",
+				Command:   []string{"bash", "run-task.sh", "oracle"},
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+			},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-async-lifecycle",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit123"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+		},
+	}
+
+	resultsJSON := []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true, "score": 1.0}]}`)
+	fakeClient := &sandboxclient.FakeClient{
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			if path == "/out/results.json" {
+				return resultsJSON, nil
+			}
+			return nil, fmt.Errorf("file %q not found", path)
+		},
+	}
+	artifactSink := artifacts.NewInMemorySink()
+
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           kubeClient,
+		Scheme:           scheme,
+		InstanceID:       "controller-instance-1",
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    fakeClient,
+		ArtifactSink:     artifactSink,
+		Config: ClusterConfig{
+			PollProgressInterval: pollInterval,
+		},
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+	// Turn 1: create sandbox and mark task Running (ExecutionID empty).
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("turn 1 reconcile error: %v", err)
+	}
+	var sandboxList sandboxv1beta1.SandboxList
+	if err := kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil {
+		t.Fatalf("list sandboxes error: %v", err)
+	}
+	if len(sandboxList.Items) != 1 {
+		t.Fatalf("expected 1 sandbox, got %d", len(sandboxList.Items))
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxList.Items[0].Name,
+			Namespace: "eval-runner-sandbox",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.244.1.10",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	if err := kubeClient.Create(t.Context(), pod); err != nil {
+		t.Fatalf("create pod error: %v", err)
+	}
+
+	// Turn 2: pod ready -> calls StartAsync, persists ExecutionID, requeues after pollInterval without blocking.
+	startResult, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("turn 2 reconcile error: %v", err)
+	}
+	if startResult.Requeue {
+		t.Errorf("expected non-immediate requeue after StartAsync, got Requeue=true")
+	}
+	if startResult.RequeueAfter != pollInterval {
+		t.Errorf("RequeueAfter = %v, want %v", startResult.RequeueAfter, pollInterval)
+	}
+	if len(fakeClient.StartAsyncCalls) != 1 {
+		t.Fatalf("expected 1 StartAsync call, got %d", len(fakeClient.StartAsyncCalls))
+	}
+	if fakeClient.StartAsyncCalls[0].ExecutionID != "attempt-0" {
+		t.Errorf("StartAsync executionID = %q, want %q", fakeClient.StartAsyncCalls[0].ExecutionID, "attempt-0")
+	}
+	if !reflect.DeepEqual(fakeClient.StartAsyncCalls[0].Config.Command, []string{"bash", "run-task.sh", "oracle"}) {
+		t.Errorf("StartAsync command = %v, want [bash run-task.sh oracle]", fakeClient.StartAsyncCalls[0].Config.Command)
+	}
+	if fakeClient.StartAsyncCalls[0].Config.Cwd != "repo" {
+		t.Errorf("StartAsync cwd = %q, want %q", fakeClient.StartAsyncCalls[0].Config.Cwd, "repo")
+	}
+	if len(fakeClient.PollAsyncCalls) != 0 {
+		t.Errorf("expected 0 PollAsync calls on start turn, got %d", len(fakeClient.PollAsyncCalls))
+	}
+
+	var updatedRun v1alpha1.Run
+	if err := kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("get run error: %v", err)
+	}
+	if task := updatedRun.Status.Tasks[0]; task.Phase != v1alpha1.TaskPhaseRunning || task.ExecutionID != "attempt-0" {
+		t.Fatalf("after start: task phase=%s executionID=%q, want Running / attempt-0", task.Phase, task.ExecutionID)
+	}
+
+	// Turn 3: PollAsync returns Running -> task remains Running, sandbox stays alive, requeues after pollInterval.
+	pollRunningResult, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("turn 3 reconcile error: %v", err)
+	}
+	if pollRunningResult.Requeue {
+		t.Errorf("expected non-immediate requeue while Running, got Requeue=true")
+	}
+	if pollRunningResult.RequeueAfter != pollInterval {
+		t.Errorf("RequeueAfter = %v, want %v", pollRunningResult.RequeueAfter, pollInterval)
+	}
+	if len(fakeClient.PollAsyncCalls) != 1 || fakeClient.PollAsyncCalls[0] != "attempt-0" {
+		t.Fatalf("PollAsyncCalls = %v, want [attempt-0]", fakeClient.PollAsyncCalls)
+	}
+	if err := kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil {
+		t.Fatalf("list sandboxes error: %v", err)
+	}
+	if len(sandboxList.Items) != 1 {
+		t.Fatalf("expected sandbox to remain while async task is running, got %d", len(sandboxList.Items))
+	}
+
+	// Turn 4: PollAsync returns Completed (exit 0) -> reads /out/results.json, stores artifact, marks Completed, deletes sandbox.
+	fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+		State:    sandboxclient.AsyncTaskCompleted,
+		ExitCode: 0,
+		Stdout:   "done",
+	})
+	completeResult, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("turn 4 reconcile error: %v", err)
+	}
+	if !completeResult.Requeue {
+		t.Errorf("expected immediate Requeue after task completion, got %+v", completeResult)
+	}
+	if err := kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("get run error: %v", err)
+	}
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Fatalf("task phase = %s, want Completed (message: %s)", task.Phase, task.Message)
+	}
+	if task.ExecutionID != "" {
+		t.Errorf("task ExecutionID = %q, want empty after completion", task.ExecutionID)
+	}
+	if task.Samples != 1 || task.Successes != 1 {
+		t.Errorf("task samples/successes = (%d, %d), want (1, 1)", task.Samples, task.Successes)
+	}
+	if task.LogPath == "" {
+		t.Errorf("expected non-empty LogPath after artifact storage")
+	}
+	if err := kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil {
+		t.Fatalf("list sandboxes error: %v", err)
+	}
+	if len(sandboxList.Items) != 0 {
+		t.Errorf("expected sandbox to be deleted after completion, got %d", len(sandboxList.Items))
+	}
+
+	// Turn 5: Run transitions to Completed.
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("turn 5 reconcile error: %v", err)
+	}
+	if err := kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun); err != nil {
+		t.Fatalf("get run error: %v", err)
+	}
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("run phase = %s, want Completed", updatedRun.Status.Phase)
+	}
+}
+
+func TestRunController_AsyncCommandSandboxTask_StartAlreadyExistsIdempotent(t *testing.T) {
+	scheme := setupScheme(t)
+	pollInterval := 4 * time.Second
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{
+				ID:        "task-idempotent",
+				Spec:      "eval.py@idempotent",
+				Image:     "custom-task-image:v1",
+				Command:   []string{"run-eval"},
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+			},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-async-idempotent",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+		},
+	}
+
+	fakeClient := &sandboxclient.FakeClient{
+		StartAsyncFn: func(ctx context.Context, executionID string, cfg sandboxclient.ProcessConfig) error {
+			return fmt.Errorf("async task %q already exists: %w", executionID, sandboxclient.ErrAsyncTaskAlreadyExists)
+		},
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			if path == "/out/results.json" {
+				return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true}]}`), nil
+			}
+			return nil, fmt.Errorf("not found: %s", path)
+		},
+	}
+	fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+		State:    sandboxclient.AsyncTaskCompleted,
+		ExitCode: 0,
+	})
+
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           kubeClient,
+		Scheme:           scheme,
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    fakeClient,
+		ArtifactSink:     artifacts.NewInMemorySink(),
+		Config: ClusterConfig{
+			PollProgressInterval: pollInterval,
+		},
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("turn 1 error: %v", err)
+	}
+	var sandboxList sandboxv1beta1.SandboxList
+	_ = kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox"))
+	_ = kubeClient.Create(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxList.Items[0].Name, Namespace: "eval-runner-sandbox"},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "10.244.1.11",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	})
+
+	// Turn 2: ErrAsyncTaskAlreadyExists treated as idempotent success, ExecutionID persisted.
+	startResult, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("turn 2 error: %v", err)
+	}
+	if startResult.RequeueAfter != pollInterval {
+		t.Errorf("RequeueAfter = %v, want %v", startResult.RequeueAfter, pollInterval)
+	}
+	var updatedRun v1alpha1.Run
+	_ = kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun)
+	if task := updatedRun.Status.Tasks[0]; task.Phase != v1alpha1.TaskPhaseRunning || task.ExecutionID != "attempt-0" {
+		t.Fatalf("after idempotent start: phase=%s executionID=%q, want Running / attempt-0", task.Phase, task.ExecutionID)
+	}
+
+	// Turn 3: PollAsync completes cleanly.
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("turn 3 error: %v", err)
+	}
+	_ = kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun)
+	if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseCompleted {
+		t.Errorf("expected Completed after poll, got %s (%s)", updatedRun.Status.Tasks[0].Phase, updatedRun.Status.Tasks[0].Message)
+	}
+}
+
+func TestRunController_AsyncCommandSandboxTask_NotFoundBoundedRetry(t *testing.T) {
+	scheme := setupScheme(t)
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{
+				ID:        "task-not-found",
+				Spec:      "eval.py@notfound",
+				Image:     "custom-task-image:v1",
+				Command:   []string{"run-eval"},
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+			},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-async-not-found",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+		},
+	}
+
+	fakeClient := &sandboxclient.FakeClient{
+		PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+			return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskNotFound}, nil
+		},
+	}
+
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	reconciler := &RunReconciler{
+		Client:           kubeClient,
+		Scheme:           scheme,
+		InstanceID:       "controller-instance-1",
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    fakeClient,
+	}
+	reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+	for attempt := 0; attempt < maxTaskAttempts; attempt++ {
+		// Create sandbox for this attempt.
+		if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+			t.Fatalf("attempt %d create sandbox error: %v", attempt, err)
+		}
+		var sandboxList sandboxv1beta1.SandboxList
+		if err := kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil {
+			t.Fatalf("attempt %d list sandboxes error: %v", attempt, err)
+		}
+		if len(sandboxList.Items) != 1 {
+			t.Fatalf("attempt %d expected 1 sandbox, got %d", attempt, len(sandboxList.Items))
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxList.Items[0].Name,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				PodIP:      fmt.Sprintf("10.244.1.%d", 20+attempt),
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			},
+		}
+		if err := kubeClient.Create(t.Context(), pod); err != nil {
+			t.Fatalf("attempt %d create pod error: %v", attempt, err)
+		}
+
+		// Start async execution for this attempt.
+		if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+			t.Fatalf("attempt %d start async error: %v", attempt, err)
+		}
+		expectedExecutionID := fmt.Sprintf("attempt-%d", attempt)
+		var midRun v1alpha1.Run
+		_ = kubeClient.Get(t.Context(), request.NamespacedName, &midRun)
+		if midRun.Status.Tasks[0].ExecutionID != expectedExecutionID {
+			t.Fatalf("attempt %d ExecutionID = %q, want %q", attempt, midRun.Status.Tasks[0].ExecutionID, expectedExecutionID)
+		}
+
+		// Poll returns AsyncTaskNotFound -> retry or terminal fail on final attempt.
+		if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+			t.Fatalf("attempt %d poll not found error: %v", attempt, err)
+		}
+
+		// Simulate pod deletion completing alongside sandbox deletion in fake cluster.
+		_ = kubeClient.Delete(t.Context(), pod)
+
+		var updatedRun v1alpha1.Run
+		_ = kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun)
+		task := updatedRun.Status.Tasks[0]
+		if task.ExecutionID != "" {
+			t.Errorf("attempt %d expected ExecutionID cleared, got %q", attempt, task.ExecutionID)
+		}
+		if task.FailureAttempts != attempt+1 {
+			t.Errorf("attempt %d FailureAttempts = %d, want %d", attempt, task.FailureAttempts, attempt+1)
+		}
+		if err := kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil {
+			t.Fatalf("attempt %d list sandboxes after cleanup error: %v", attempt, err)
+		}
+		if len(sandboxList.Items) != 0 {
+			t.Errorf("attempt %d expected sandbox deleted, got %d", attempt, len(sandboxList.Items))
+		}
+
+		if attempt < maxTaskAttempts-1 {
+			if task.Phase != v1alpha1.TaskPhasePending {
+				t.Fatalf("attempt %d expected Pending for retry, got %s", attempt, task.Phase)
+			}
+			if task.Restarts != attempt+1 {
+				t.Errorf("attempt %d Restarts = %d, want %d", attempt, task.Restarts, attempt+1)
+			}
+			if !strings.Contains(task.RestartReason, "not found in sandbox") {
+				t.Errorf("attempt %d RestartReason = %q, want substring 'not found in sandbox'", attempt, task.RestartReason)
+			}
+		} else {
+			if task.Phase != v1alpha1.TaskPhaseFailed {
+				t.Fatalf("final attempt expected Failed, got %s", task.Phase)
+			}
+			if !strings.Contains(task.Message, "failed after 3 attempts") || !strings.Contains(task.Message, "not found in sandbox") {
+				t.Errorf("final attempt Message = %q, want bounded failure message", task.Message)
+			}
+		}
+	}
+}
+
+func TestRunController_AsyncCommandSandboxTask_ControllerRestartResumesPolling(t *testing.T) {
+	scheme := setupScheme(t)
+	pollInterval := 2 * time.Second
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{
+				ID:        "terminal-bench/oracle",
+				Spec:      "terminal-bench/oracle",
+				Image:     "terminal-bench:v1",
+				Command:   []string{"bash", "run-task.sh", "oracle"},
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+			},
+		},
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-async-controller-restart",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "git://repo", Commit: "commit1"},
+			Model: "mockllm/model",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+		},
+	}
+
+	fakeClient := &sandboxclient.FakeClient{
+		ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
+			if path == "/out/results.json" {
+				return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true, "score": 1.0}]}`), nil
+			}
+			return nil, fmt.Errorf("file %q not found", path)
+		},
+	}
+	artifactSink := artifacts.NewInMemorySink()
+
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(run).
+		Build()
+
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+	// Controller instance 1 creates the sandbox and starts the async command.
+	firstReconciler := &RunReconciler{
+		Client:           kubeClient,
+		Scheme:           scheme,
+		InstanceID:       "controller-instance-1",
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    fakeClient,
+		ArtifactSink:     artifactSink,
+		Config:           ClusterConfig{PollProgressInterval: pollInterval},
+	}
+	firstReconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	if _, err := firstReconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("reconciler 1 turn 1 error: %v", err)
+	}
+	var sandboxList sandboxv1beta1.SandboxList
+	_ = kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox"))
+	if len(sandboxList.Items) != 1 {
+		t.Fatalf("expected 1 sandbox, got %d", len(sandboxList.Items))
+	}
+	originalSandboxName := sandboxList.Items[0].Name
+	if sandboxList.Items[0].Annotations[discovery.AnnotationControllerInstance] != "controller-instance-1" {
+		t.Fatalf("expected sandbox owned by controller-instance-1, got %q", sandboxList.Items[0].Annotations[discovery.AnnotationControllerInstance])
+	}
+	_ = kubeClient.Create(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: originalSandboxName, Namespace: "eval-runner-sandbox"},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "10.244.1.30",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	})
+	if _, err := firstReconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("reconciler 1 turn 2 (StartAsync) error: %v", err)
+	}
+	if len(fakeClient.StartAsyncCalls) != 1 {
+		t.Fatalf("expected 1 StartAsync call from reconciler 1, got %d", len(fakeClient.StartAsyncCalls))
+	}
+
+	// Simulate controller restart: brand new reconciler with a different InstanceID.
+	restartedReconciler := &RunReconciler{
+		Client:           kubeClient,
+		Scheme:           scheme,
+		InstanceID:       "controller-instance-2",
+		SandboxNamespace: "eval-runner-sandbox",
+		SandboxClient:    fakeClient,
+		ArtifactSink:     artifactSink,
+		Config:           ClusterConfig{PollProgressInterval: pollInterval},
+	}
+	restartedReconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+	// Reconciler 2 polls while task is still Running -> does NOT kill sandbox or call StartAsync again.
+	runningResult, err := restartedReconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("restarted reconciler poll running error: %v", err)
+	}
+	if runningResult.RequeueAfter != pollInterval {
+		t.Errorf("RequeueAfter = %v, want %v", runningResult.RequeueAfter, pollInterval)
+	}
+	if len(fakeClient.StartAsyncCalls) != 1 {
+		t.Errorf("expected no additional StartAsync calls after restart, got %d", len(fakeClient.StartAsyncCalls))
+	}
+	if len(fakeClient.PollAsyncCalls) != 1 || fakeClient.PollAsyncCalls[0] != "attempt-0" {
+		t.Fatalf("expected PollAsync(attempt-0) after restart, got %v", fakeClient.PollAsyncCalls)
+	}
+	_ = kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox"))
+	if len(sandboxList.Items) != 1 || sandboxList.Items[0].Name != originalSandboxName {
+		t.Fatalf("expected original sandbox %q to stay alive across controller restart, got %d sandboxes", originalSandboxName, len(sandboxList.Items))
+	}
+	var midRun v1alpha1.Run
+	_ = kubeClient.Get(t.Context(), request.NamespacedName, &midRun)
+	if midRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning || midRun.Status.Tasks[0].Restarts != 0 || midRun.Status.Tasks[0].ExecutionID != "attempt-0" {
+		t.Fatalf("unexpected task status after restart poll: %+v", midRun.Status.Tasks[0])
+	}
+
+	// Complete the async task; reconciler 2 finalizes cleanly and deletes the sandbox.
+	fakeClient.SetAsyncTaskStatus("attempt-0", sandboxclient.AsyncTaskStatus{
+		State:    sandboxclient.AsyncTaskCompleted,
+		ExitCode: 0,
+	})
+	if _, err := restartedReconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("restarted reconciler poll completed error: %v", err)
+	}
+	var updatedRun v1alpha1.Run
+	_ = kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun)
+	task := updatedRun.Status.Tasks[0]
+	if task.Phase != v1alpha1.TaskPhaseCompleted {
+		t.Fatalf("expected task Completed after restart resume, got %s (%s)", task.Phase, task.Message)
+	}
+	if task.Restarts != 0 {
+		t.Errorf("expected Restarts == 0 when resuming async task, got %d", task.Restarts)
+	}
+	if task.ExecutionID != "" {
+		t.Errorf("expected ExecutionID cleared on completion, got %q", task.ExecutionID)
+	}
+	_ = kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox"))
+	if len(sandboxList.Items) != 0 {
+		t.Errorf("expected sandbox deleted on completion, got %d", len(sandboxList.Items))
+	}
+
+	// Final reconcile marks Run Completed.
+	if _, err := restartedReconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("restarted reconciler finalize run error: %v", err)
+	}
+	_ = kubeClient.Get(t.Context(), request.NamespacedName, &updatedRun)
+	if updatedRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+		t.Errorf("expected Run Completed, got %s", updatedRun.Status.Phase)
+	}
+}
+
+func TestDecideAsyncCommandTask(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC))
+	manifestTask := v1alpha1.ManifestTask{
+		ID:        "task-1",
+		Command:   []string{"run-eval"},
+		Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}},
+	}
+	sandbox := sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "run-task-1"}}
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "run-task-1", UID: "pod-uid-1"}}
+	runSpec := v1alpha1.RunSpec{}
+
+	testCases := []struct {
+		name               string
+		observation        asyncCommandObservation
+		wantAction         asyncCommandAction
+		wantExecutionID    string
+		wantResultPhase    v1alpha1.TaskPhase
+		wantMessageContain string
+		wantInfraAction    runningTaskAction
+	}{
+		{
+			name: "execution deadline exceeded cuts off",
+			observation: asyncCommandObservation{
+				task:                 v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0"},
+				manifestTask:         manifestTask,
+				sandbox:              sandbox,
+				pod:                  pod,
+				executionDeadlineHit: true,
+			},
+			wantAction: asyncCommandActionDeadlineCutOff,
+		},
+		{
+			name: "validation error fails terminally",
+			observation: asyncCommandObservation{
+				task:            v1alpha1.TaskStatus{ID: "task-1"},
+				manifestTask:    manifestTask,
+				sandbox:         sandbox,
+				pod:             pod,
+				validationError: errors.New("invalid timeoutSeconds 0"),
+			},
+			wantAction:         asyncCommandActionFinalize,
+			wantResultPhase:    v1alpha1.TaskPhaseFailed,
+			wantMessageContain: "invalid timeoutSeconds 0",
+		},
+		{
+			name: "task timeout fails with standard step timeout message",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0"},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				taskTimedOut: true,
+			},
+			wantAction:         asyncCommandActionFinalize,
+			wantResultPhase:    v1alpha1.TaskPhaseFailed,
+			wantMessageContain: "step task command failed: sandbox did not report completion",
+		},
+		{
+			name: "start succeeded persists executionID",
+			observation: asyncCommandObservation{
+				task:                    v1alpha1.TaskStatus{ID: "task-1", Restarts: 1},
+				manifestTask:            manifestTask,
+				sandbox:                 sandbox,
+				pod:                     pod,
+				startedExecutionID:      "attempt-1",
+				effectiveTimeoutSeconds: 120,
+			},
+			wantAction:      asyncCommandActionStarted,
+			wantExecutionID: "attempt-1",
+		},
+		{
+			name: "start error fails terminally with bounded message",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1"},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				startError:   errors.New("permission denied"),
+			},
+			wantAction:         asyncCommandActionFinalize,
+			wantResultPhase:    v1alpha1.TaskPhaseFailed,
+			wantMessageContain: "step task command failed: permission denied",
+		},
+		{
+			name: "poll running keeps running",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0"},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				pollStatus:   &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskRunning},
+			},
+			wantAction: asyncCommandActionRunning,
+		},
+		{
+			name: "poll completed exit 0 finalizes result",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0"},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				pollStatus:   &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0},
+				finalizedResult: &taskExecutionResult{
+					taskID:    "task-1",
+					phase:     v1alpha1.TaskPhaseCompleted,
+					samples:   2,
+					successes: 2,
+				},
+			},
+			wantAction:      asyncCommandActionFinalize,
+			wantResultPhase: v1alpha1.TaskPhaseCompleted,
+		},
+		{
+			name: "poll completed non-zero fails with stderr tail",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0"},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				pollStatus: &sandboxclient.AsyncTaskStatus{
+					State:    sandboxclient.AsyncTaskCompleted,
+					ExitCode: 7,
+					Stderr:   "boom: test failed\n",
+				},
+			},
+			wantAction:         asyncCommandActionFinalize,
+			wantResultPhase:    v1alpha1.TaskPhaseFailed,
+			wantMessageContain: "step task command failed with exit code 7: boom: test failed",
+		},
+		{
+			name: "poll not found retries below max attempts",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0", FailureAttempts: 0},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				pollStatus:   &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskNotFound},
+			},
+			wantAction:      asyncCommandActionInfraFailure,
+			wantInfraAction: runningTaskActionRestart,
+		},
+		{
+			name: "poll not found fails at max attempts",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-2", FailureAttempts: 2},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				pollStatus:   &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskNotFound},
+			},
+			wantAction:      asyncCommandActionInfraFailure,
+			wantInfraAction: runningTaskActionFail,
+		},
+		{
+			name: "poll unauthenticated fails terminally",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0"},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				pollError:    status.Error(codes.Unauthenticated, "bad token"),
+			},
+			wantAction:         asyncCommandActionFinalize,
+			wantResultPhase:    v1alpha1.TaskPhaseFailed,
+			wantMessageContain: "unauthenticated",
+		},
+		{
+			name: "poll transport error routes through infrastructure retry",
+			observation: asyncCommandObservation{
+				task:         v1alpha1.TaskStatus{ID: "task-1", ExecutionID: "attempt-0", FailureAttempts: 0},
+				manifestTask: manifestTask,
+				sandbox:      sandbox,
+				pod:          pod,
+				pollError:    errors.New("connection refused"),
+			},
+			wantAction:      asyncCommandActionInfraFailure,
+			wantInfraAction: runningTaskActionRestart,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			decision := decideAsyncCommandTask(testCase.observation, runSpec, now, discovery.MaxStderrLines, discovery.MaxMessageBytes)
+			if decision.action != testCase.wantAction {
+				t.Fatalf("action = %q, want %q", decision.action, testCase.wantAction)
+			}
+			if testCase.wantExecutionID != "" && decision.executionID != testCase.wantExecutionID {
+				t.Errorf("executionID = %q, want %q", decision.executionID, testCase.wantExecutionID)
+			}
+			if testCase.wantResultPhase != "" {
+				if decision.executionResult == nil {
+					t.Fatalf("expected executionResult, got nil")
+				}
+				if decision.executionResult.phase != testCase.wantResultPhase {
+					t.Errorf("executionResult.phase = %q, want %q", decision.executionResult.phase, testCase.wantResultPhase)
+				}
+				if testCase.wantMessageContain != "" && !strings.Contains(decision.executionResult.message, testCase.wantMessageContain) {
+					t.Errorf("executionResult.message = %q, want substring %q", decision.executionResult.message, testCase.wantMessageContain)
+				}
+			}
+			if testCase.wantInfraAction != "" {
+				if decision.infrastructureDecision == nil {
+					t.Fatalf("expected infrastructureDecision, got nil")
+				}
+				if decision.infrastructureDecision.action != testCase.wantInfraAction {
+					t.Errorf("infrastructureDecision.action = %q, want %q", decision.infrastructureDecision.action, testCase.wantInfraAction)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyRunningTaskDecision_ClearsExecutionID(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC))
+
+	t.Run("restart clears executionID", func(t *testing.T) {
+		task := v1alpha1.TaskStatus{
+			ID:          "task-1",
+			Phase:       v1alpha1.TaskPhaseRunning,
+			ExecutionID: "attempt-0",
+		}
+		applyRunningTaskDecision(&task, runningTaskDecision{
+			action:          runningTaskActionRestart,
+			restartReason:   "task pod failed",
+			countsAsFailure: true,
+		}, now)
+		if task.ExecutionID != "" {
+			t.Errorf("ExecutionID = %q, want empty", task.ExecutionID)
+		}
+		if task.Phase != v1alpha1.TaskPhasePending || task.Restarts != 1 || task.FailureAttempts != 1 {
+			t.Errorf("unexpected task state after restart: %+v", task)
+		}
+	})
+
+	t.Run("fail clears executionID", func(t *testing.T) {
+		task := v1alpha1.TaskStatus{
+			ID:          "task-1",
+			Phase:       v1alpha1.TaskPhaseRunning,
+			ExecutionID: "attempt-2",
+		}
+		applyRunningTaskDecision(&task, runningTaskDecision{
+			action:          runningTaskActionFail,
+			message:         "failed after 3 attempts",
+			countsAsFailure: true,
+		}, now)
+		if task.ExecutionID != "" {
+			t.Errorf("ExecutionID = %q, want empty", task.ExecutionID)
+		}
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Errorf("Phase = %q, want Failed", task.Phase)
+		}
+	})
 }
