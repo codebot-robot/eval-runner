@@ -348,6 +348,10 @@ spec:
                       description: CostUSD is the estimated task evaluation cost in
                         USD from model prices.
                       type: number
+                    executionID:
+                      description: ExecutionID identifies the active asynchronous
+                        command execution in the task's sandbox.
+                      type: string
                     failureAttempts:
                       description: |-
                         FailureAttempts records the number of attempts that failed due to infrastructure issues.
