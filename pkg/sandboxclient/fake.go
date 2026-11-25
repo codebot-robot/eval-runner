@@ -17,12 +17,19 @@ package sandboxclient
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/gke-labs/eval-runner/pkg/discovery"
 	"google.golang.org/grpc/keepalive"
 )
+
+// AsyncStartCall records the arguments of a StartAsync call on FakeClient.
+type AsyncStartCall struct {
+	ExecutionID string
+	Config      ProcessConfig
+}
 
 // FakeClient is a test fake implementing Client and Factory.
 type FakeClient struct {
@@ -32,6 +39,12 @@ type FakeClient struct {
 	ExecFn     func(call int, ctx context.Context, cfg ProcessConfig) (*ExecuteResult, error)
 	CloseFn    func() error
 	CloseCalls int
+
+	StartAsyncCalls []AsyncStartCall
+	StartAsyncFn    func(ctx context.Context, executionID string, cfg ProcessConfig) error
+	PollAsyncCalls  []string
+	PollAsyncFn     func(ctx context.Context, executionID string) (*AsyncTaskStatus, error)
+	asyncTasks      map[string]*AsyncTaskStatus
 
 	// Step-based convenience defaults
 	ListExit   int
@@ -243,4 +256,82 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 	}
 
 	return &ExecuteResult{ExitCode: 0}, nil
+}
+
+// StartAsync records the call and delegates to StartAsyncFn or marks the task as running in memory.
+func (f *FakeClient) StartAsync(ctx context.Context, executionID string, cfg ProcessConfig) error {
+	if err := validateExecutionID(executionID); err != nil {
+		return err
+	}
+	if len(cfg.Command) == 0 {
+		return fmt.Errorf("command is required")
+	}
+
+	f.mu.Lock()
+	f.StartAsyncCalls = append(f.StartAsyncCalls, AsyncStartCall{
+		ExecutionID: executionID,
+		Config:      cfg,
+	})
+	startFn := f.StartAsyncFn
+	if startFn == nil {
+		if f.asyncTasks == nil {
+			f.asyncTasks = make(map[string]*AsyncTaskStatus)
+		}
+		if _, exists := f.asyncTasks[executionID]; exists {
+			f.mu.Unlock()
+			return fmt.Errorf("async task %q already exists: %w", executionID, ErrAsyncTaskAlreadyExists)
+		}
+		f.asyncTasks[executionID] = &AsyncTaskStatus{State: AsyncTaskRunning}
+		f.mu.Unlock()
+		return nil
+	}
+	f.mu.Unlock()
+
+	return startFn(ctx, executionID, cfg)
+}
+
+// PollAsync records the call and delegates to PollAsyncFn or returns the in-memory task status.
+func (f *FakeClient) PollAsync(ctx context.Context, executionID string) (*AsyncTaskStatus, error) {
+	if err := validateExecutionID(executionID); err != nil {
+		return nil, err
+	}
+
+	f.mu.Lock()
+	f.PollAsyncCalls = append(f.PollAsyncCalls, executionID)
+	pollFn := f.PollAsyncFn
+	if pollFn == nil {
+		taskStatus, exists := f.asyncTasks[executionID]
+		if !exists {
+			f.mu.Unlock()
+			return &AsyncTaskStatus{State: AsyncTaskNotFound}, nil
+		}
+		statusCopy := *taskStatus
+		stdoutLimit := f.StdoutLimit
+		stderrLimit := f.StderrLimit
+		f.mu.Unlock()
+
+		if statusCopy.State == AsyncTaskCompleted {
+			if stdoutLimit > 0 && int64(len(statusCopy.Stdout)) > stdoutLimit {
+				statusCopy.Stdout = statusCopy.Stdout[:stdoutLimit]
+			}
+			if stderrLimit > 0 && int64(len(statusCopy.Stderr)) > stderrLimit {
+				statusCopy.Stderr = statusCopy.Stderr[:stderrLimit]
+			}
+		}
+		return &statusCopy, nil
+	}
+	f.mu.Unlock()
+
+	return pollFn(ctx, executionID)
+}
+
+// SetAsyncTaskStatus sets the in-memory status returned by PollAsync for executionID.
+func (f *FakeClient) SetAsyncTaskStatus(executionID string, taskStatus AsyncTaskStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.asyncTasks == nil {
+		f.asyncTasks = make(map[string]*AsyncTaskStatus)
+	}
+	statusCopy := taskStatus
+	f.asyncTasks[executionID] = &statusCopy
 }
