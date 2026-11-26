@@ -285,6 +285,9 @@ type RunReconciler struct {
 	cachedGCPTokenSource oauth2.TokenSource
 	cachedGCPWIFProvider string
 
+	gcpProjectPoolMu         sync.Mutex
+	inFlightGCPProjectLeases map[string]struct{}
+
 	boundPodsMu            sync.RWMutex
 	boundServicePortalPods map[types.UID]bool
 
@@ -2062,18 +2065,106 @@ func taskRequiresGCPProject(task v1alpha1.ManifestTask) bool {
 	return false
 }
 
-func (r *RunReconciler) validateGCPProjectConfig() (string, string, error) {
+type gcpProjectConfig struct {
+	pool             []string
+	parentFolderID   string
+	billingAccountID string
+}
+
+func (r *RunReconciler) validateGCPProjectConfig() (gcpProjectConfig, error) {
 	if r.ServicePortalClient == nil {
-		return "", "", errors.New("gcp-project resource requires service portal to be configured")
+		return gcpProjectConfig{}, errors.New("gcp-project resource requires service portal to be configured")
 	}
 	r.cfgMu.RLock()
+	pool := append([]string(nil), r.Config.GCPProjectPool...)
 	parentFolderID := strings.TrimSpace(r.Config.GCPProjectParentFolderID)
 	billingAccountID := strings.TrimSpace(r.Config.GCPProjectBillingAccountID)
 	r.cfgMu.RUnlock()
-	if parentFolderID == "" || billingAccountID == "" {
-		return "", "", errors.New("gcp-project resource requires gcpProjectParentFolderID and gcpProjectBillingAccountID to be configured")
+	if len(pool) > 0 {
+		return gcpProjectConfig{pool: pool}, nil
 	}
-	return parentFolderID, billingAccountID, nil
+	if parentFolderID == "" || billingAccountID == "" {
+		return gcpProjectConfig{}, errors.New("gcp-project resource requires gcpProjectPool or both gcpProjectParentFolderID and gcpProjectBillingAccountID to be configured")
+	}
+	return gcpProjectConfig{
+		parentFolderID:   parentFolderID,
+		billingAccountID: billingAccountID,
+	}, nil
+}
+
+func (r *RunReconciler) isPooledGCPProject(projectID string) bool {
+	if projectID == "" {
+		return false
+	}
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	for _, pooledProject := range r.Config.GCPProjectPool {
+		if pooledProject == projectID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RunReconciler) leaseGCPProject(ctx context.Context, namespace string, pool []string) (string, bool, error) {
+	r.gcpProjectPoolMu.Lock()
+	defer r.gcpProjectPoolMu.Unlock()
+
+	var runList v1alpha1.RunList
+	var listOptions []client.ListOption
+	if namespace != "" {
+		listOptions = append(listOptions, client.InNamespace(namespace))
+	}
+	if err := r.uncachedReader().List(ctx, &runList, listOptions...); err != nil {
+		return "", false, fmt.Errorf("failed to list runs for gcp project pool leasing: %w", err)
+	}
+
+	inUseProjects := make(map[string]struct{}, len(r.inFlightGCPProjectLeases))
+	for projectID := range r.inFlightGCPProjectLeases {
+		inUseProjects[projectID] = struct{}{}
+	}
+	for i := range runList.Items {
+		existingRun := &runList.Items[i]
+		if existingRun.Status.Phase == v1alpha1.RunPhaseCompleted || existingRun.Status.Phase == v1alpha1.RunPhaseFailed {
+			continue
+		}
+		for _, existingTask := range existingRun.Status.Tasks {
+			if existingTask.Phase == v1alpha1.TaskPhaseRunning && existingTask.GCPProject != "" {
+				inUseProjects[existingTask.GCPProject] = struct{}{}
+			}
+		}
+	}
+
+	for _, candidateProject := range pool {
+		if _, busy := inUseProjects[candidateProject]; busy {
+			continue
+		}
+		if r.inFlightGCPProjectLeases == nil {
+			r.inFlightGCPProjectLeases = make(map[string]struct{})
+		}
+		r.inFlightGCPProjectLeases[candidateProject] = struct{}{}
+		return candidateProject, true, nil
+	}
+	return "", false, nil
+}
+
+func (r *RunReconciler) releaseInFlightGCPProjectLease(projectID string) {
+	if projectID == "" {
+		return
+	}
+	r.gcpProjectPoolMu.Lock()
+	defer r.gcpProjectPoolMu.Unlock()
+	delete(r.inFlightGCPProjectLeases, projectID)
+}
+
+func (r *RunReconciler) releaseInFlightGCPProjectLeases(outcomes map[string]pendingTaskStartOutcome) {
+	r.gcpProjectPoolMu.Lock()
+	defer r.gcpProjectPoolMu.Unlock()
+	for _, outcome := range outcomes {
+		if outcome.leasedGCPProject && outcome.gcpProject != "" {
+			delete(r.inFlightGCPProjectLeases, outcome.gcpProject)
+		}
+	}
 }
 
 func (r *RunReconciler) gcpTokenSource(ctx context.Context) (oauth2.TokenSource, error) {
@@ -2116,7 +2207,7 @@ func (r *RunReconciler) cleanupTaskGCPProject(ctx context.Context, runName, task
 }
 
 func (r *RunReconciler) deleteTaskGCPProject(ctx context.Context, runName, taskID, projectID string) error {
-	if projectID == "" {
+	if projectID == "" || r.isPooledGCPProject(projectID) {
 		return nil
 	}
 	provisioner, err := r.gcpProjectProvisioner(ctx)
@@ -2207,7 +2298,7 @@ func (r *RunReconciler) initializeTaskStatus(task v1alpha1.ManifestTask, effRang
 			return failTask(err.Error())
 		}
 		if taskRequiresGCPProject(task) {
-			if _, _, err := r.validateGCPProjectConfig(); err != nil {
+			if _, err := r.validateGCPProjectConfig(); err != nil {
 				return failTask(err.Error())
 			}
 		}
@@ -2458,6 +2549,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
 				applyPendingTaskStartOutcomes(status, startOutcomes, statusNow)
 			})
+			r.releaseInFlightGCPProjectLeases(startOutcomes)
 			if err != nil {
 				for taskID, outcome := range startOutcomes {
 					if outcome.createdGCPProject {
@@ -2643,6 +2735,7 @@ type pendingTaskDecision struct {
 
 type pendingTaskStartOutcome struct {
 	started           bool
+	waiting           bool
 	expectedRestarts  int
 	failureMessage    string
 	sandboxOnly       bool
@@ -2650,6 +2743,7 @@ type pendingTaskStartOutcome struct {
 	resources         *v1alpha1.TaskResources
 	gcpProject        string
 	createdGCPProject bool
+	leasedGCPProject  bool
 }
 
 func (r *RunReconciler) observePendingTasks(
@@ -2770,7 +2864,11 @@ func (r *RunReconciler) executePendingTaskDecisions(
 		if decision.action != pendingTaskActionStart {
 			continue
 		}
-		outcomes[decision.task.ID] = r.startPendingTask(ctx, run, manifest, decision.task, sandboxesByTask)
+		outcome := r.startPendingTask(ctx, run, manifest, decision.task, sandboxesByTask)
+		if outcome.waiting {
+			continue
+		}
+		outcomes[decision.task.ID] = outcome
 	}
 	return waitingForOldSandbox, outcomes
 }
@@ -2807,14 +2905,27 @@ func (r *RunReconciler) startPendingTask(
 
 	var gcpProject string
 	createdGCPProject := false
+	leasedGCPProject := false
 	if manifestTask != nil && taskRequiresGCPProject(*manifestTask) {
-		parentFolderID, billingAccountID, err := r.validateGCPProjectConfig()
+		gcpConfig, err := r.validateGCPProjectConfig()
 		if err != nil {
 			logger.Info("Rejecting gcp-project task launch", "task", taskID, "message", err.Error())
 			return pendingTaskStartOutcome{failureMessage: err.Error()}
 		}
 		if task.GCPProject != "" {
 			gcpProject = task.GCPProject
+		} else if len(gcpConfig.pool) > 0 {
+			projectID, leased, err := r.leaseGCPProject(ctx, run.Namespace, gcpConfig.pool)
+			if err != nil {
+				logger.Error(err, "Failed to lease pooled gcp project; leaving task pending", "task", taskID)
+				return pendingTaskStartOutcome{waiting: true}
+			}
+			if !leased {
+				logger.V(1).Info("All pooled gcp projects are busy; leaving task pending", "task", taskID)
+				return pendingTaskStartOutcome{waiting: true}
+			}
+			gcpProject = projectID
+			leasedGCPProject = true
 		} else {
 			provisioner, err := r.gcpProjectProvisioner(ctx)
 			if err != nil {
@@ -2826,7 +2937,7 @@ func (r *RunReconciler) startPendingTask(
 				return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to generate gcp project id: %v", err)}
 			}
 			createContext, createCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-			err = provisioner.CreateProject(createContext, parentFolderID, billingAccountID, projectID)
+			err = provisioner.CreateProject(createContext, gcpConfig.parentFolderID, gcpConfig.billingAccountID, projectID)
 			createCancel()
 			if err != nil {
 				logger.Error(err, "Failed to provision ephemeral gcp project", "task", taskID, "gcpProject", projectID)
@@ -2839,6 +2950,9 @@ func (r *RunReconciler) startPendingTask(
 	cleanupCreatedProject := func() {
 		if createdGCPProject {
 			r.cleanupTaskGCPProject(ctx, run.Name, taskID, gcpProject)
+		}
+		if leasedGCPProject {
+			r.releaseInFlightGCPProjectLease(gcpProject)
 		}
 	}
 
@@ -2871,6 +2985,7 @@ func (r *RunReconciler) startPendingTask(
 		expectedRestarts:  task.Restarts,
 		gcpProject:        gcpProject,
 		createdGCPProject: createdGCPProject,
+		leasedGCPProject:  leasedGCPProject,
 	}
 	if manifestTask != nil && isSandboxTask(*manifestTask) {
 		outcome.sandboxOnly = true

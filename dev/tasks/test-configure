@@ -292,6 +292,27 @@ class ConfigureCLITests(unittest.TestCase):
             calls,
         )
 
+    def test_gcp_project_pool_restarts_controller_only(self):
+        self.write_state({"artifactBucket": "bucket-a"})
+        result = self.run_configure(["--set", "gcpProjectPool=pool-a,pool-b"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.read_state_data(),
+            {
+                "artifactBucket": "bucket-a",
+                "gcpProjectPool": "pool-a,pool-b",
+            },
+        )
+        calls = self.read_calls()
+        self.assertIn(
+            ["-n", "eval-runner", "rollout", "restart", "deployment/eval-runner-controller"],
+            calls,
+        )
+        self.assertNotIn(
+            ["-n", "eval-runner", "rollout", "restart", "deployment/eval-runner-webhook"],
+            calls,
+        )
+
     def test_no_restart_flag_skips_rollout_and_prints_requirement(self):
         self.write_state({})
         result = self.run_configure(["--no-restart", "--set", "defaultModel=mockllm/model"])

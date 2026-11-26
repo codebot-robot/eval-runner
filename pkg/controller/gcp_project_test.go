@@ -696,3 +696,364 @@ func TestGCPProjectTask_FailClosedGuards(t *testing.T) {
 		})
 	}
 }
+
+func TestGCPProjectPool_LeaseReleaseAndContention(t *testing.T) {
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{{
+			ID:      "kube-agents/kind-cluster",
+			Command: []string{"/bin/sh", "-c", "true"},
+			Resources: []v1alpha1.ManifestResource{
+				{Type: v1alpha1.ResourceTypeSandbox},
+				{Type: v1alpha1.ResourceTypeGCPProject},
+			},
+		}},
+	}
+
+	t.Run("leases pooled project, injects portal credentials without leaking keys, and releases without DeleteProject", func(t *testing.T) {
+		scheme := setupScheme(t)
+		const realModelKey = "real-gemini-api-key"
+		const realAccessToken = "pool-oauth-access-token"
+
+		modelSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: DefaultModelCredentialsSecretName, Namespace: "eval-runner"},
+			Data:       map[string][]byte{"GEMINI_API_KEY": []byte(realModelKey)},
+		}
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-pool-complete", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: "git://repo", Commit: "c1"}, Model: "google/gemini-2.5-flash"},
+			Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseRunning},
+		}
+		fakeSandboxClient := &sandboxclient.FakeClient{
+			PollAsyncFn: func(_ context.Context, _ string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0}, nil
+			},
+			ReadFileFn: func(_ context.Context, path string) ([]byte, error) {
+				if path == "/out/results.json" {
+					return []byte(`{"schemaVersion": 1, "samples": [{"id": "s1", "passed": true, "score": 1.0}]}`), nil
+				}
+				return nil, fmt.Errorf("unexpected file %q", path)
+			},
+		}
+		provisioner := &fakeGCPProjectProvisioner{}
+		portalClient := &fakeServicePortalClient{}
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(modelSecret, run).WithStatusSubresource(run).Build()
+		reconciler := &RunReconciler{
+			Client:                kubeClient,
+			APIReader:             kubeClient,
+			Scheme:                scheme,
+			InstanceID:            "controller-1",
+			ControllerNamespace:   "eval-runner",
+			SandboxNamespace:      "eval-runner-sandbox",
+			SandboxClient:         fakeSandboxClient,
+			ArtifactSink:          artifacts.NewInMemorySink(),
+			ServicePortalClient:   portalClient,
+			GCPProjectProvisioner: provisioner,
+			GCPTokenSource:        oauth2.StaticTokenSource(&oauth2.Token{AccessToken: realAccessToken}),
+			Config: ClusterConfig{
+				GCPProjectPool: []string{"pool-proj-1", "pool-proj-2"},
+				ServicePortal: ServicePortalOptions{
+					AllowedHosts: append([]string(nil), DefaultServicePortalAllowedHosts...),
+				},
+			},
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+
+		// Turn 1: leases pool-proj-1 without CreateProject.
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+		if len(provisioner.created) != 0 {
+			t.Fatalf("expected no CreateProject calls when using pool, got %+v", provisioner.created)
+		}
+		var updatedRun v1alpha1.Run
+		if err := kubeClient.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("get run: %v", err)
+		}
+		if len(updatedRun.Status.Tasks) != 1 || updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning || updatedRun.Status.Tasks[0].GCPProject != "pool-proj-1" {
+			t.Fatalf("expected Running task with leased pool-proj-1, got %+v", updatedRun.Status.Tasks)
+		}
+
+		var sandboxList sandboxv1beta1.SandboxList
+		if err := kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil || len(sandboxList.Items) != 1 {
+			t.Fatalf("expected 1 sandbox, got %d (err=%v)", len(sandboxList.Items), err)
+		}
+		// Never inject real model API key into sandbox pod env.
+		for _, container := range sandboxList.Items[0].Spec.PodTemplate.Spec.Containers {
+			for _, environmentVariable := range container.Env {
+				if strings.Contains(environmentVariable.Value, realModelKey) || strings.Contains(environmentVariable.Value, realAccessToken) {
+					t.Fatalf("real secret leaked into sandbox pod env %s", environmentVariable.Name)
+				}
+			}
+		}
+		createScheduledReadySandboxPod(t, kubeClient, sandboxList.Items[0].Name, "pod-uid-pool-1", "10.244.1.30")
+
+		// Turn 2: binds service portal with both model and GCP rules and starts async task.
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+		if len(portalClient.binds) != 1 {
+			t.Fatalf("expected 1 service portal bind, got %d", len(portalClient.binds))
+		}
+		bind := portalClient.binds[0]
+		if err := bind.policy.Validate(); err != nil {
+			t.Fatalf("bound policy invalid: %v", err)
+		}
+		if string(bind.secrets["gemini-api-key"]) != realModelKey || string(bind.secrets["gcp-access-token"]) != realAccessToken {
+			t.Fatalf("expected both gemini-api-key and gcp-access-token in service portal secrets")
+		}
+		if len(fakeSandboxClient.StartAsyncCalls) != 1 || fakeSandboxClient.StartAsyncCalls[0].Config.Env["GOOGLE_CLOUD_PROJECT"] != "pool-proj-1" {
+			t.Fatalf("unexpected StartAsync env: %+v", fakeSandboxClient.StartAsyncCalls)
+		}
+		for key, value := range fakeSandboxClient.StartAsyncCalls[0].Config.Env {
+			if strings.Contains(value, realModelKey) || strings.Contains(value, realAccessToken) {
+				t.Fatalf("real secret leaked into StartAsync env[%q]", key)
+			}
+		}
+
+		// Turn 3: completes task, clears GCPProject, and never calls DeleteProject.
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
+		}
+		if len(provisioner.deleted) != 0 {
+			t.Fatalf("expected no DeleteProject calls for pooled project, got %v", provisioner.deleted)
+		}
+		if err := kubeClient.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("get completed run: %v", err)
+		}
+		if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseCompleted || updatedRun.Status.Tasks[0].GCPProject != "" {
+			t.Fatalf("expected Completed task with cleared GCPProject, got %+v", updatedRun.Status.Tasks[0])
+		}
+	})
+
+	t.Run("restart and deadline cutoff release pooled project without DeleteProject", func(t *testing.T) {
+		scheme := setupScheme(t)
+		now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+		pastDeadline := metav1.NewTime(now.Add(-time.Minute))
+		startedAt := metav1.NewTime(now.Add(-2 * time.Minute))
+
+		restartRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-pool-restart", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "mockllm/model"},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Tasks: []v1alpha1.TaskStatus{{
+					ID:         "kube-agents/kind-cluster",
+					Phase:      v1alpha1.TaskPhaseRunning,
+					StartedAt:  &startedAt,
+					GCPProject: "pool-proj-1",
+				}},
+			},
+		}
+		cutoffRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-pool-cutoff", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "mockllm/model"},
+			Status: v1alpha1.RunStatus{
+				Phase:             v1alpha1.RunPhaseRunning,
+				ExecutionDeadline: &pastDeadline,
+				Tasks: []v1alpha1.TaskStatus{{
+					ID:         "kube-agents/kind-cluster",
+					Phase:      v1alpha1.TaskPhaseRunning,
+					StartedAt:  &startedAt,
+					GCPProject: "pool-proj-2",
+				}},
+			},
+		}
+		provisioner := &fakeGCPProjectProvisioner{}
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(restartRun, cutoffRun).WithStatusSubresource(restartRun, cutoffRun).Build()
+		reconciler := &RunReconciler{
+			Client:                kubeClient,
+			APIReader:             kubeClient,
+			Scheme:                scheme,
+			InstanceID:            "controller-new",
+			SandboxNamespace:      "eval-runner-sandbox",
+			ArtifactSink:          artifacts.NewInMemorySink(),
+			ServicePortalClient:   &fakeServicePortalClient{},
+			GCPProjectProvisioner: provisioner,
+			Now:                   func() time.Time { return now },
+			Config: ClusterConfig{
+				GCPProjectPool:  []string{"pool-proj-1", "pool-proj-2"},
+				TaskGracePeriod: 10 * time.Second,
+			},
+		}
+		reconciler.SetCachedManifest(restartRun.Namespace, restartRun.Name, manifest)
+		reconciler.SetCachedManifest(cutoffRun.Namespace, cutoffRun.Name, manifest)
+
+		// Missing sandbox past grace period triggers task restart.
+		restartRequest := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: restartRun.Namespace, Name: restartRun.Name}}
+		if _, err := reconciler.Reconcile(t.Context(), restartRequest); err != nil {
+			t.Fatalf("restart reconcile error: %v", err)
+		}
+		var updatedRestart v1alpha1.Run
+		if err := kubeClient.Get(t.Context(), restartRequest.NamespacedName, &updatedRestart); err != nil {
+			t.Fatalf("get restart run: %v", err)
+		}
+		if updatedRestart.Status.Tasks[0].Phase != v1alpha1.TaskPhasePending || updatedRestart.Status.Tasks[0].GCPProject != "" {
+			t.Fatalf("expected restarted Pending task with cleared GCPProject, got %+v", updatedRestart.Status.Tasks[0])
+		}
+
+		// Exceeded execution deadline cuts off running task.
+		cutoffRequest := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cutoffRun.Namespace, Name: cutoffRun.Name}}
+		if _, err := reconciler.Reconcile(t.Context(), cutoffRequest); err != nil {
+			t.Fatalf("cutoff reconcile error: %v", err)
+		}
+		var updatedCutoff v1alpha1.Run
+		if err := kubeClient.Get(t.Context(), cutoffRequest.NamespacedName, &updatedCutoff); err != nil {
+			t.Fatalf("get cutoff run: %v", err)
+		}
+		if updatedCutoff.Status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed || updatedCutoff.Status.Tasks[0].GCPProject != "" {
+			t.Fatalf("expected cut-off Failed task with cleared GCPProject, got %+v", updatedCutoff.Status.Tasks[0])
+		}
+		if len(provisioner.deleted) != 0 {
+			t.Fatalf("expected no DeleteProject calls on restart or cutoff, got %v", provisioner.deleted)
+		}
+	})
+
+	t.Run("contention across runs leaves waiting task Pending and requeues until project is freed", func(t *testing.T) {
+		scheme := setupScheme(t)
+		activeRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-holder", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "mockllm/model"},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Tasks: []v1alpha1.TaskStatus{{
+					ID:         "kube-agents/kind-cluster",
+					Phase:      v1alpha1.TaskPhaseRunning,
+					GCPProject: "pool-proj-1",
+				}},
+			},
+		}
+		waitingRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-waiter", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "mockllm/model"},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Tasks: []v1alpha1.TaskStatus{{
+					ID:    "kube-agents/kind-cluster",
+					Phase: v1alpha1.TaskPhasePending,
+				}},
+			},
+		}
+		provisioner := &fakeGCPProjectProvisioner{}
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(activeRun, waitingRun).WithStatusSubresource(activeRun, waitingRun).Build()
+		reconciler := &RunReconciler{
+			Client:                kubeClient,
+			APIReader:             kubeClient,
+			Scheme:                scheme,
+			InstanceID:            "controller-1",
+			SandboxNamespace:      "eval-runner-sandbox",
+			ArtifactSink:          artifacts.NewInMemorySink(),
+			ServicePortalClient:   &fakeServicePortalClient{},
+			GCPProjectProvisioner: provisioner,
+			Config: ClusterConfig{
+				GCPProjectPool: []string{"pool-proj-1"},
+			},
+		}
+		reconciler.SetCachedManifest(waitingRun.Namespace, waitingRun.Name, manifest)
+
+		waitingRequest := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: waitingRun.Namespace, Name: waitingRun.Name}}
+		result, err := reconciler.Reconcile(t.Context(), waitingRequest)
+		if err != nil {
+			t.Fatalf("reconcile waiting run error: %v", err)
+		}
+		if result.RequeueAfter <= 0 {
+			t.Fatalf("expected positive RequeueAfter while pool is exhausted, got %+v", result)
+		}
+
+		var updatedWaiting v1alpha1.Run
+		if err := kubeClient.Get(t.Context(), waitingRequest.NamespacedName, &updatedWaiting); err != nil {
+			t.Fatalf("get waiting run: %v", err)
+		}
+		if updatedWaiting.Status.Tasks[0].Phase != v1alpha1.TaskPhasePending || updatedWaiting.Status.Tasks[0].GCPProject != "" {
+			t.Fatalf("expected waiting task to stay Pending with empty GCPProject, got %+v", updatedWaiting.Status.Tasks[0])
+		}
+		var sandboxList sandboxv1beta1.SandboxList
+		if err := kubeClient.List(t.Context(), &sandboxList, client.InNamespace("eval-runner-sandbox")); err != nil || len(sandboxList.Items) != 0 {
+			t.Fatalf("expected 0 sandboxes created while waiting, got %d (err=%v)", len(sandboxList.Items), err)
+		}
+
+		// Free the pooled project on run-holder; run-waiter can now lease pool-proj-1.
+		activeRun.Status.Phase = v1alpha1.RunPhaseCompleted
+		activeRun.Status.Tasks[0].Phase = v1alpha1.TaskPhaseCompleted
+		activeRun.Status.Tasks[0].GCPProject = ""
+		if err := kubeClient.Status().Update(t.Context(), activeRun); err != nil {
+			t.Fatalf("update active run status: %v", err)
+		}
+
+		if _, err := reconciler.Reconcile(t.Context(), waitingRequest); err != nil {
+			t.Fatalf("reconcile after release error: %v", err)
+		}
+		if err := kubeClient.Get(t.Context(), waitingRequest.NamespacedName, &updatedWaiting); err != nil {
+			t.Fatalf("get waiting run after release: %v", err)
+		}
+		if updatedWaiting.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning || updatedWaiting.Status.Tasks[0].GCPProject != "pool-proj-1" {
+			t.Fatalf("expected waiting task to lease pool-proj-1 once free, got %+v", updatedWaiting.Status.Tasks[0])
+		}
+		if len(provisioner.created) != 0 || len(provisioner.deleted) != 0 {
+			t.Fatalf("expected no CreateProject/DeleteProject calls, got created=%v deleted=%v", provisioner.created, provisioner.deleted)
+		}
+	})
+
+	t.Run("contention within same run never shares a pooled project across parallel tasks", func(t *testing.T) {
+		scheme := setupScheme(t)
+		twoTaskManifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID:      "kube-agents/task-1",
+					Command: []string{"/bin/sh", "-c", "true"},
+					Resources: []v1alpha1.ManifestResource{
+						{Type: v1alpha1.ResourceTypeSandbox},
+						{Type: v1alpha1.ResourceTypeGCPProject},
+					},
+				},
+				{
+					ID:      "kube-agents/task-2",
+					Command: []string{"/bin/sh", "-c", "true"},
+					Resources: []v1alpha1.ManifestResource{
+						{Type: v1alpha1.ResourceTypeSandbox},
+						{Type: v1alpha1.ResourceTypeGCPProject},
+					},
+				},
+			},
+		}
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-same-contention", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "mockllm/model"},
+			Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPhaseRunning},
+		}
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).WithStatusSubresource(run).Build()
+		reconciler := &RunReconciler{
+			Client:                kubeClient,
+			APIReader:             kubeClient,
+			Scheme:                scheme,
+			InstanceID:            "controller-1",
+			SandboxNamespace:      "eval-runner-sandbox",
+			ArtifactSink:          artifacts.NewInMemorySink(),
+			ServicePortalClient:   &fakeServicePortalClient{},
+			GCPProjectProvisioner: &fakeGCPProjectProvisioner{},
+			Config: ClusterConfig{
+				MaxParallelTasks: 2,
+				GCPProjectPool:   []string{"pool-proj-1"},
+			},
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, twoTaskManifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("reconcile error: %v", err)
+		}
+		var updatedRun v1alpha1.Run
+		if err := kubeClient.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("get run: %v", err)
+		}
+		if len(updatedRun.Status.Tasks) != 2 {
+			t.Fatalf("expected 2 tasks, got %+v", updatedRun.Status.Tasks)
+		}
+		if updatedRun.Status.Tasks[0].Phase != v1alpha1.TaskPhaseRunning || updatedRun.Status.Tasks[0].GCPProject != "pool-proj-1" {
+			t.Fatalf("expected task-1 Running with pool-proj-1, got %+v", updatedRun.Status.Tasks[0])
+		}
+		if updatedRun.Status.Tasks[1].Phase != v1alpha1.TaskPhasePending || updatedRun.Status.Tasks[1].GCPProject != "" {
+			t.Fatalf("expected task-2 Pending with empty GCPProject, got %+v", updatedRun.Status.Tasks[1])
+		}
+	})
+}

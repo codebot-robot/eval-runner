@@ -466,25 +466,22 @@ func (r *RunReconciler) prepareServicePortalBinding(
 ) (*portalsv1.EgressPolicy, map[string][]byte, *ServicePortalModelCredential, error) {
 	manifestTask := findManifestTask(manifest, taskID)
 	needsGCPAccessToken := manifestTask != nil && taskRequiresGCPProject(*manifestTask)
-	isSandbox := manifestTask != nil && isSandboxTask(*manifestTask)
 
 	var activeModelCredential *ServicePortalModelCredential
 	var secrets map[string][]byte
-	if !isSandbox {
-		credential, hasCredential, err := ModelCredentialForModel(run.Spec.Model, options.ModelBaseURL)
+	credential, hasCredential, err := ModelCredentialForModel(run.Spec.Model, options.ModelBaseURL)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if hasCredential {
+		secretValue, found, err := r.readControllerModelCredential(ctx, credential)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, &credential, err
 		}
-		if hasCredential {
-			secretValue, found, err := r.readControllerModelCredential(ctx, credential)
-			if err != nil {
-				return nil, nil, &credential, err
-			}
-			if found {
-				activeModelCredential = &credential
-				secrets = map[string][]byte{
-					credential.CredentialName: secretValue,
-				}
+		if found {
+			activeModelCredential = &credential
+			secrets = map[string][]byte{
+				credential.CredentialName: secretValue,
 			}
 		}
 	}
