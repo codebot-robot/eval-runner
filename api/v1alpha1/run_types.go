@@ -215,6 +215,10 @@ type TaskStatus struct {
 	// RestartReason records the reason why the last task restart occurred.
 	// +optional
 	RestartReason string `json:"restartReason,omitempty"`
+
+	// ExecutionID is the identifier of an in-flight asynchronous command running in the task sandbox.
+	// +optional
+	ExecutionID string `json:"executionID,omitempty"`
 }
 
 // TaskResources describes compute resource requirements and limits for a task container.

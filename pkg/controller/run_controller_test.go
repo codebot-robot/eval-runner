@@ -3555,16 +3555,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var executedCommand []string
-		var executedCwd string
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				executedCommand = cfg.Command
-				executedCwd = cfg.Cwd
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0, Stdout: "task finished"}, nil
 			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
@@ -3625,17 +3618,27 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Fatalf("failed to create pod: %v", err)
 		}
 
-		// Turn 2: execute task
+		// Turn 2: start async task command and persist ExecutionID
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
-
+		if len(fakeClient.StartAsyncCalls) != 1 {
+			t.Fatalf("Expected 1 StartAsync call, got %d", len(fakeClient.StartAsyncCalls))
+		}
+		executedCommand := fakeClient.StartAsyncCalls[0].Config.Command
+		executedCwd := fakeClient.StartAsyncCalls[0].Config.Cwd
 		if len(executedCommand) != 2 || executedCommand[0] != "run-eval" || executedCommand[1] != "--all" {
 			t.Errorf("Expected executed command [run-eval --all], got %v", executedCommand)
 		}
 		if executedCwd != "repo" {
 			t.Errorf("Expected working directory 'repo', got %q", executedCwd)
+		}
+
+		// Turn 3: poll async task completion and finalize results
+		_, err = reconciler.Reconcile(t.Context(), req)
+		if err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -3649,6 +3652,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		task := updatedRun.Status.Tasks[0]
 		if task.Phase != v1alpha1.TaskPhaseCompleted {
 			t.Errorf("Expected task Completed, got %s (msg: %s)", task.Phase, task.Message)
+		}
+		if task.ExecutionID != "" {
+			t.Errorf("Expected ExecutionID cleared on completion, got %q", task.ExecutionID)
 		}
 		if task.Samples != 1 {
 			t.Errorf("Expected 1 sample, got %d", task.Samples)
@@ -3669,10 +3675,10 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			t.Errorf("Expected non-empty logPath")
 		}
 
-		// Turn 3: marks Run as Completed
+		// Turn 4: marks Run as Completed
 		_, err = reconciler.Reconcile(t.Context(), req)
 		if err != nil {
-			t.Fatalf("turn 3 error: %v", err)
+			t.Fatalf("turn 4 error: %v", err)
 		}
 		if err := cl.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
 			t.Fatalf("get run error: %v", err)
@@ -3710,11 +3716,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 42, Stderr: "fatal: test suite crashed"}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 42, Stderr: "fatal: test suite crashed"}, nil
 			},
 		}
 
@@ -3753,10 +3756,13 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		// Turn 2: execute task
-		_, err := reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		// Turn 2: start async task
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+		// Turn 3: poll non-zero exit
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -3798,8 +3804,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0}, nil
 			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				return nil, fmt.Errorf("file %q not found (HTTP 404)", path)
@@ -3840,9 +3846,11 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		_, err := reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -3884,8 +3892,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0}, nil
 			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				return []byte(`{"schemaVersion": 99, "samples": [{"id": "s1", "passed": true}]}`), nil
@@ -3926,9 +3934,11 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		_, err := reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4179,16 +4189,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var capturedCommandDeadline time.Time
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				if deadline, ok := ctx.Deadline(); ok {
-					capturedCommandDeadline = deadline
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0, Stdout: "task finished"}, nil
 			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
@@ -4239,19 +4242,13 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		launchTime := time.Now()
-		// Turn 2: execute task
-		_, err = reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		// Turn 2: start async task
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
-
-		if capturedCommandDeadline.IsZero() {
-			t.Fatalf("Expected command context to have a deadline")
-		}
-		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
-		if remainingSeconds < 580 || remainingSeconds > 610 {
-			t.Errorf("Expected command deadline to be about 600s after launch, got %f seconds", remainingSeconds)
+		// Turn 3: poll async completion
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4292,16 +4289,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var capturedCommandDeadline time.Time
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				if deadline, ok := ctx.Deadline(); ok {
-					capturedCommandDeadline = deadline
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0, Stdout: "task finished"}, nil
 			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
@@ -4353,19 +4343,13 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		launchTime := time.Now()
-		// Turn 2: execute task
-		_, err = reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		// Turn 2: start async task
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
-
-		if capturedCommandDeadline.IsZero() {
-			t.Fatalf("Expected command context to have a deadline")
-		}
-		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
-		if remainingSeconds < 110 || remainingSeconds > 130 {
-			t.Errorf("Expected command deadline to be about execution step timeout (120s) after launch, got %f seconds", remainingSeconds)
+		// Turn 3: poll async completion
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4411,16 +4395,9 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		var capturedCommandDeadline time.Time
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				if deadline, ok := ctx.Deadline(); ok {
-					capturedCommandDeadline = deadline
-				}
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0, Stdout: "task finished"}, nil
 			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
@@ -4472,19 +4449,13 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		launchTime := time.Now()
-		// Turn 2: execute task
-		_, err = reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		// Turn 2: start async task
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
 		}
-
-		if capturedCommandDeadline.IsZero() {
-			t.Fatalf("Expected command context to have a deadline")
-		}
-		remainingSeconds := capturedCommandDeadline.Sub(launchTime).Seconds()
-		if remainingSeconds < 280 || remainingSeconds > 310 {
-			t.Errorf("Expected command deadline to be bounded by execution deadline (about 300s), got %f seconds", remainingSeconds)
+		// Turn 3: poll async completion
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4611,15 +4582,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			},
 		}
 
-		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-				}
-				// Simulate context timeout
-				return nil, context.DeadlineExceeded
-			},
-		}
+		currentTime := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+		fakeClient := &sandboxclient.FakeClient{}
 
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
@@ -4632,6 +4596,7 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			Scheme:           scheme,
 			SandboxNamespace: "eval-runner-sandbox",
 			SandboxClient:    fakeClient,
+			Now:              func() time.Time { return currentTime },
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 
@@ -4656,10 +4621,15 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 		_ = cl.Create(t.Context(), pod)
 
-		// Turn 2: execute task
-		_, err := reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		// Turn 2: start async task
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		// Turn 3: advance past task timeout and reconcile
+		currentTime = currentTime.Add(6 * time.Second)
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -4709,8 +4679,8 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 		}
 
 		fakeClient := &sandboxclient.FakeClient{
-			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-				return &sandboxclient.ExecuteResult{ExitCode: 0, Stdout: "task finished"}, nil
+			PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
+				return &sandboxclient.AsyncTaskStatus{State: sandboxclient.AsyncTaskCompleted, ExitCode: 0, Stdout: "task finished"}, nil
 			},
 			ReadFileFn: func(ctx context.Context, path string) ([]byte, error) {
 				if path == "/out/results.json" {
@@ -4816,10 +4786,13 @@ func TestRunController_SandboxTaskExecution(t *testing.T) {
 			_ = cl.Create(t.Context(), pod)
 		}
 
-		// Turn 2: Tasks execute and complete
-		_, err = reconciler.Reconcile(t.Context(), req)
-		if err != nil {
+		// Turn 2: Start async tasks
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 2 error: %v", err)
+		}
+		// Turn 3: Poll async tasks to completion
+		if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 3 error: %v", err)
 		}
 
 		var updatedRun v1alpha1.Run
@@ -6529,10 +6502,7 @@ func TestReconcileExecutionDeadline_TaskCutOffDuringCommandExecution(t *testing.
 	}
 
 	fakeClient := &sandboxclient.FakeClient{
-		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 0 && cfg.Command[0] == "mkdir" {
-				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
-			}
+		PollAsyncFn: func(ctx context.Context, executionID string) (*sandboxclient.AsyncTaskStatus, error) {
 			timeMutex.Lock()
 			currentTime = deadline
 			timeMutex.Unlock()
@@ -6587,10 +6557,14 @@ func TestReconcileExecutionDeadline_TaskCutOffDuringCommandExecution(t *testing.
 		t.Fatalf("Create pod error: %v", err)
 	}
 
-	// Turn 2: execute task command during which deadline expires (time reaches 12:30:00)
-	_, err = reconciler.Reconcile(t.Context(), req)
-	if err != nil {
+	// Turn 2: start async task command and persist ExecutionID
+	if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
 		t.Fatalf("Turn 2 error: %v", err)
+	}
+
+	// Turn 3: poll async task during which deadline expires (time reaches 12:30:00)
+	if _, err = reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Turn 3 error: %v", err)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -6612,6 +6586,9 @@ func TestReconcileExecutionDeadline_TaskCutOffDuringCommandExecution(t *testing.
 	task := updatedRun.Status.Tasks[0]
 	if task.Phase != v1alpha1.TaskPhaseFailed {
 		t.Errorf("Expected task Phase Failed, got %s", task.Phase)
+	}
+	if task.ExecutionID != "" {
+		t.Errorf("Expected task ExecutionID cleared on deadline cutoff, got %q", task.ExecutionID)
 	}
 	expectedTaskMessage := "cut off by Run execution deadline after running for 3m0s"
 	if task.Message != expectedTaskMessage {
