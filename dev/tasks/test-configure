@@ -144,6 +144,17 @@ class MergeAndRestartUnitTests(unittest.TestCase):
         )
         self.assertEqual(
             configure.deployments_needing_restart(
+                ["gcpProjectParentFolderID", "gcpProjectBillingAccountID"]
+            ),
+            {
+                "eval-runner-controller": [
+                    "gcpProjectBillingAccountID",
+                    "gcpProjectParentFolderID",
+                ]
+            },
+        )
+        self.assertEqual(
+            configure.deployments_needing_restart(
                 ["defaultModel", "webhookRepositories", "servicePortalTokenFile"]
             ),
             {
@@ -242,6 +253,35 @@ class ConfigureCLITests(unittest.TestCase):
         self.write_state({"artifactBucket": "bucket-a"})
         result = self.run_configure(["--set", "servicePortalControllerAddress=sp.local:8443"])
         self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.read_calls()
+        self.assertIn(
+            ["-n", "eval-runner", "rollout", "restart", "deployment/eval-runner-controller"],
+            calls,
+        )
+        self.assertNotIn(
+            ["-n", "eval-runner", "rollout", "restart", "deployment/eval-runner-webhook"],
+            calls,
+        )
+
+    def test_gcp_project_folder_and_billing_restart_controller_only(self):
+        self.write_state({"artifactBucket": "bucket-a"})
+        result = self.run_configure(
+            [
+                "--set",
+                "gcpProjectParentFolderID=123456789012",
+                "--set",
+                "gcpProjectBillingAccountID=012345-6789AB-CDEF01",
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.read_state_data(),
+            {
+                "artifactBucket": "bucket-a",
+                "gcpProjectParentFolderID": "123456789012",
+                "gcpProjectBillingAccountID": "012345-6789AB-CDEF01",
+            },
+        )
         calls = self.read_calls()
         self.assertIn(
             ["-n", "eval-runner", "rollout", "restart", "deployment/eval-runner-controller"],
