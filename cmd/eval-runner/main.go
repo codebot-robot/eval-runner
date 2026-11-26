@@ -347,25 +347,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	var servicePortalClient *serviceportalclient.Client
-	var servicePortalBinder controller.ServicePortalClient
-	if clusterConfig.ServicePortal.ControllerAddress != "" {
-		setupLog.Info("Service Portal enabled", "controllerAddress", clusterConfig.ServicePortal.ControllerAddress, "caFile", clusterConfig.ServicePortal.CAFile, "tokenFile", clusterConfig.ServicePortal.TokenFile)
-		var servicePortalClientError error
-		servicePortalClient, servicePortalClientError = serviceportalclient.New(clusterConfig.ServicePortal.ClientOptions())
-		if servicePortalClientError != nil {
-			setupLog.Error(servicePortalClientError, "unable to create service portal client")
-			os.Exit(1)
-		}
-		servicePortalBinder = servicePortalClient
-		defer func() {
-			if closeErr := servicePortalClient.Close(); closeErr != nil {
-				setupLog.Error(closeErr, "error closing service portal client on shutdown")
-			}
-		}()
-	} else {
-		setupLog.Info("Service Portal disabled (no controller address configured)")
+	servicePortalClient, closeServicePortalClient, err := newServicePortalClient(clusterConfig.ServicePortal, setupLog)
+	if err != nil {
+		setupLog.Error(err, "unable to create service portal client")
+		os.Exit(1)
 	}
+	defer closeServicePortalClient()
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
@@ -432,7 +419,7 @@ func main() {
 		SampleRunnerImage:    sampleRunnerImage,
 		ArtifactSink:         reloadableSink,
 		ControllerVersion:    version.String(),
-		ServicePortalClient:  servicePortalBinder,
+		ServicePortalClient:  servicePortalClient,
 		InstanceID:           controller.NewProcessInstanceID(),
 	}
 
@@ -660,6 +647,24 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func newServicePortalClient(options controller.ServicePortalOptions, logger logr.Logger) (controller.ServicePortalClient, func(), error) {
+	if options.ControllerAddress == "" {
+		logger.Info("Service Portal disabled (no controller address configured)")
+		return nil, func() {}, nil
+	}
+	logger.Info("Service Portal enabled", "controllerAddress", options.ControllerAddress, "caFile", options.CAFile, "tokenFile", options.TokenFile)
+	servicePortalClient, err := serviceportalclient.New(options.ClientOptions())
+	if err != nil {
+		return nil, nil, err
+	}
+	closeClient := func() {
+		if closeErr := servicePortalClient.Close(); closeErr != nil {
+			logger.Error(closeErr, "error closing service portal client on shutdown")
+		}
+	}
+	return servicePortalClient, closeClient, nil
 }
 
 func newManagerOptions(scheme *runtime.Scheme, cacheOptions cache.Options, leaderElect bool, evalRunnerNamespace string, probeAddr string) ctrl.Options {

@@ -17,8 +17,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -377,5 +385,116 @@ func TestDefaultStartupBackoff(t *testing.T) {
 	}
 	if defaultStartupAttemptTimeout != 10*time.Second {
 		t.Errorf("defaultStartupAttemptTimeout = %v, want 10s", defaultStartupAttemptTimeout)
+	}
+}
+
+func writeTestCACertificateFile(t *testing.T, directory string) string {
+	t.Helper()
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate test key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IsCA:         true,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("failed to create test certificate: %v", err)
+	}
+
+	caFilePath := filepath.Join(directory, "ca.crt")
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER})
+	if err := os.WriteFile(caFilePath, certificatePEM, 0o600); err != nil {
+		t.Fatalf("failed to write test CA file: %v", err)
+	}
+	return caFilePath
+}
+
+func TestNewServicePortalClient_Disabled(t *testing.T) {
+	var logBuffer bytes.Buffer
+	logger := zap.New(zap.WriteTo(&logBuffer), zap.UseDevMode(true))
+
+	servicePortalClient, closeServicePortalClient, err := newServicePortalClient(controller.ServicePortalOptions{}, logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if servicePortalClient != nil {
+		t.Errorf("servicePortalClient = %#v, want untyped nil", servicePortalClient)
+	}
+	reconciler := &controller.RunReconciler{
+		ServicePortalClient: servicePortalClient,
+	}
+	if reconciler.ServicePortalClient != nil {
+		t.Errorf("reconciler.ServicePortalClient = %#v, want untyped nil", reconciler.ServicePortalClient)
+	}
+	if closeServicePortalClient == nil {
+		t.Fatalf("closeServicePortalClient = nil, want non-nil no-op function")
+	}
+	closeServicePortalClient()
+
+	if !strings.Contains(logBuffer.String(), "Service Portal disabled") {
+		t.Errorf("expected disabled log message, got: %s", logBuffer.String())
+	}
+}
+
+func TestNewServicePortalClient_Enabled(t *testing.T) {
+	directory := t.TempDir()
+	caFilePath := writeTestCACertificateFile(t, directory)
+	tokenFilePath := filepath.Join(directory, "token")
+	if err := os.WriteFile(tokenFilePath, []byte("test-token"), 0o600); err != nil {
+		t.Fatalf("failed to write test token file: %v", err)
+	}
+
+	var logBuffer bytes.Buffer
+	logger := zap.New(zap.WriteTo(&logBuffer), zap.UseDevMode(true))
+
+	servicePortalClient, closeServicePortalClient, err := newServicePortalClient(controller.ServicePortalOptions{
+		ControllerAddress: "127.0.0.1:8443",
+		CAFile:            caFilePath,
+		TokenFile:         tokenFilePath,
+	}, logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if servicePortalClient == nil {
+		t.Fatalf("servicePortalClient = nil, want non-nil client")
+	}
+	if closeServicePortalClient == nil {
+		t.Fatalf("closeServicePortalClient = nil, want non-nil cleanup function")
+	}
+
+	closeServicePortalClient()
+
+	logOutput := logBuffer.String()
+	if !strings.Contains(logOutput, "Service Portal enabled") {
+		t.Errorf("expected enabled log message, got: %s", logOutput)
+	}
+	if strings.Contains(logOutput, "error closing service portal client on shutdown") {
+		t.Errorf("unexpected close error in logs: %s", logOutput)
+	}
+}
+
+func TestNewServicePortalClient_InvalidOptions(t *testing.T) {
+	var logBuffer bytes.Buffer
+	logger := zap.New(zap.WriteTo(&logBuffer), zap.UseDevMode(true))
+
+	servicePortalClient, closeServicePortalClient, err := newServicePortalClient(controller.ServicePortalOptions{
+		ControllerAddress: "127.0.0.1:8443",
+		CAFile:            "/nonexistent/ca.crt",
+		TokenFile:         "/nonexistent/token",
+	}, logger)
+	if err == nil {
+		t.Fatalf("expected error for nonexistent CA file, got nil")
+	}
+	if servicePortalClient != nil {
+		t.Errorf("servicePortalClient = %#v, want nil", servicePortalClient)
+	}
+	if closeServicePortalClient != nil {
+		t.Errorf("closeServicePortalClient = non-nil, want nil on error")
 	}
 }
