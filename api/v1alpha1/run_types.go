@@ -335,7 +335,7 @@ type RunSpec struct {
 
 // ManifestResource describes a resource needed by an eval task.
 type ManifestResource struct {
-	// Type is the resource type (e.g., docker, kind, kubernetes-namespace, sandbox, gcp-project).
+	// Type is the resource type (e.g., docker, kind-cluster, kubernetes-namespace, sandbox, gcp-project).
 	Type string `json:"type"`
 
 	// Limits specifies the maximum resource limits for the task sandbox container.
@@ -350,6 +350,9 @@ const (
 
 	// ResourceTypeGCPProject indicates the task requires a leased GCP project from the controller pool.
 	ResourceTypeGCPProject = "gcp-project"
+
+	// ResourceTypeKindCluster indicates the task requires a Docker-in-Docker sidecar on a kind node for ephemeral kind clusters.
+	ResourceTypeKindCluster = "kind-cluster"
 )
 
 // ManifestImage describes a container image needed by eval tasks.
