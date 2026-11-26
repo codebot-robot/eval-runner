@@ -1243,3 +1243,148 @@ func TestBuildTaskSandbox_ServicePortalIntercept(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildTaskSandbox_KindCluster(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-kind",
+			Namespace: "eval-runner",
+		},
+	}
+	digest := AuthTokenDigest("auth-token-kind")
+
+	t.Run("kind-cluster enabled adds nodeSelector, dind sidecar, and DOCKER_HOST", func(t *testing.T) {
+		sandbox := BuildTaskSandbox(run, "kind-task", TaskSandboxConfig{
+			Namespace:       "eval-runner-sandbox",
+			Image:           "kube-agents-eval:v1",
+			AuthTokenDigest: digest,
+			SandboxTask:     true,
+			KindCluster:     true,
+		})
+
+		podSpec := sandbox.Spec.PodTemplate.Spec
+
+		expectedNodeSelector := map[string]string{
+			KindNodeSelectorLabel: "true",
+		}
+		if !reflect.DeepEqual(podSpec.NodeSelector, expectedNodeSelector) {
+			t.Errorf("NodeSelector = %v, want %v", podSpec.NodeSelector, expectedNodeSelector)
+		}
+
+		if len(podSpec.Containers) != 2 {
+			t.Fatalf("len(Containers) = %d, want 2", len(podSpec.Containers))
+		}
+
+		taskContainer := podSpec.Containers[0]
+		if taskContainer.Name != TaskContainerName {
+			t.Errorf("Containers[0].Name = %q, want %q", taskContainer.Name, TaskContainerName)
+		}
+		dockerHostFound := false
+		for _, environmentVariable := range taskContainer.Env {
+			if environmentVariable.Name == "DOCKER_HOST" {
+				dockerHostFound = true
+				if environmentVariable.Value != DockerInDockerHost {
+					t.Errorf("DOCKER_HOST = %q, want %q", environmentVariable.Value, DockerInDockerHost)
+				}
+			}
+		}
+		if !dockerHostFound {
+			t.Errorf("expected task container env to contain DOCKER_HOST=%q", DockerInDockerHost)
+		}
+
+		sidecarContainer := podSpec.Containers[1]
+		if sidecarContainer.Name != DockerInDockerContainerName {
+			t.Errorf("sidecar Name = %q, want %q", sidecarContainer.Name, DockerInDockerContainerName)
+		}
+		if sidecarContainer.Image != DockerInDockerImage {
+			t.Errorf("sidecar Image = %q, want %q", sidecarContainer.Image, DockerInDockerImage)
+		}
+		if sidecarContainer.SecurityContext == nil || sidecarContainer.SecurityContext.Privileged == nil || !*sidecarContainer.SecurityContext.Privileged {
+			t.Errorf("sidecar SecurityContext.Privileged = %v, want true", sidecarContainer.SecurityContext)
+		}
+
+		tlsCertDirFound := false
+		for _, environmentVariable := range sidecarContainer.Env {
+			if environmentVariable.Name == "DOCKER_TLS_CERTDIR" {
+				tlsCertDirFound = true
+				if environmentVariable.Value != "" {
+					t.Errorf("DOCKER_TLS_CERTDIR = %q, want empty string", environmentVariable.Value)
+				}
+			}
+		}
+		if !tlsCertDirFound {
+			t.Errorf("expected sidecar env to contain DOCKER_TLS_CERTDIR=\"\"")
+		}
+
+		dockerPortFound := false
+		for _, port := range sidecarContainer.Ports {
+			if port.ContainerPort == DockerInDockerPort && port.Protocol == corev1.ProtocolTCP {
+				dockerPortFound = true
+			}
+		}
+		if !dockerPortFound {
+			t.Errorf("expected sidecar Ports to expose TCP port %d, got %+v", DockerInDockerPort, sidecarContainer.Ports)
+		}
+
+		if sidecarContainer.ReadinessProbe == nil || sidecarContainer.ReadinessProbe.TCPSocket == nil || sidecarContainer.ReadinessProbe.TCPSocket.Port.IntVal != DockerInDockerPort {
+			t.Errorf("expected sidecar TCP readiness probe on port %d, got %+v", DockerInDockerPort, sidecarContainer.ReadinessProbe)
+		}
+
+		expectedCPURequest := resource.MustParse(DefaultDockerInDockerCPURequest)
+		expectedMemoryRequest := resource.MustParse(DefaultDockerInDockerMemoryRequest)
+		expectedCPULimit := resource.MustParse(DefaultDockerInDockerCPULimit)
+		expectedMemoryLimit := resource.MustParse(DefaultDockerInDockerMemoryLimit)
+
+		if sidecarContainer.Resources.Requests.Cpu().Cmp(expectedCPURequest) != 0 {
+			t.Errorf("sidecar CPU request = %v, want %v", sidecarContainer.Resources.Requests.Cpu(), expectedCPURequest)
+		}
+		if sidecarContainer.Resources.Requests.Memory().Cmp(expectedMemoryRequest) != 0 {
+			t.Errorf("sidecar Memory request = %v, want %v", sidecarContainer.Resources.Requests.Memory(), expectedMemoryRequest)
+		}
+		if sidecarContainer.Resources.Limits.Cpu().Cmp(expectedCPULimit) != 0 {
+			t.Errorf("sidecar CPU limit = %v, want %v", sidecarContainer.Resources.Limits.Cpu(), expectedCPULimit)
+		}
+		if sidecarContainer.Resources.Limits.Memory().Cmp(expectedMemoryLimit) != 0 {
+			t.Errorf("sidecar Memory limit = %v, want %v", sidecarContainer.Resources.Limits.Memory(), expectedMemoryLimit)
+		}
+	})
+
+	t.Run("non-kind sandbox leaves nodeSelector, dind sidecar, DOCKER_HOST, and security contexts unchanged", func(t *testing.T) {
+		for _, sandboxTask := range []bool{false, true} {
+			sandbox := BuildTaskSandbox(run, "regular-task", TaskSandboxConfig{
+				Namespace:       "eval-runner-sandbox",
+				Image:           "regular-eval:v1",
+				AuthTokenDigest: digest,
+				SandboxTask:     sandboxTask,
+				KindCluster:     false,
+			})
+
+			podSpec := sandbox.Spec.PodTemplate.Spec
+			if len(podSpec.NodeSelector) != 0 {
+				t.Errorf("SandboxTask=%v: expected empty NodeSelector, got %v", sandboxTask, podSpec.NodeSelector)
+			}
+			if len(podSpec.Containers) != 1 {
+				t.Fatalf("SandboxTask=%v: len(Containers) = %d, want 1", sandboxTask, len(podSpec.Containers))
+			}
+			for _, environmentVariable := range podSpec.Containers[0].Env {
+				if environmentVariable.Name == "DOCKER_HOST" {
+					t.Errorf("SandboxTask=%v: expected DOCKER_HOST to be absent on non-kind sandbox", sandboxTask)
+				}
+			}
+			if !sandboxTask {
+				if podSpec.SecurityContext == nil || podSpec.SecurityContext.RunAsNonRoot == nil || !*podSpec.SecurityContext.RunAsNonRoot {
+					t.Errorf("expected non-sandbox task pod SecurityContext.RunAsNonRoot to remain true")
+				}
+				taskSecurityContext := podSpec.Containers[0].SecurityContext
+				if taskSecurityContext == nil || taskSecurityContext.AllowPrivilegeEscalation == nil || *taskSecurityContext.AllowPrivilegeEscalation {
+					t.Errorf("expected non-sandbox task container AllowPrivilegeEscalation to remain false")
+				}
+			} else {
+				taskSecurityContext := podSpec.Containers[0].SecurityContext
+				if taskSecurityContext == nil || taskSecurityContext.Privileged != nil {
+					t.Errorf("expected non-kind sandbox task container Privileged to remain nil, got %+v", taskSecurityContext)
+				}
+			}
+		}
+	})
+}

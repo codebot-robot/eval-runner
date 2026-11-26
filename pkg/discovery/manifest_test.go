@@ -507,6 +507,102 @@ func TestValidateManifest(t *testing.T) {
 			},
 			expectError: true,
 		},
+		{
+			name: "standalone kind-cluster resource passes validation without image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-kind-cluster",
+						Spec:      "test.py@eval",
+						Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeKindCluster}},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "sandbox and kind-cluster resources with image pass validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:    "task-sandbox-kind-cluster",
+						Spec:  "test.py@eval",
+						Image: "eval-image:v1",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}},
+							{Type: v1alpha1.ResourceTypeKindCluster},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "sandbox, kind-cluster, and gcp-project resources with image pass validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:    "task-sandbox-kind-gcp",
+						Spec:  "test.py@eval",
+						Image: "eval-image:v1",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeSandbox},
+							{Type: v1alpha1.ResourceTypeKindCluster},
+							{Type: v1alpha1.ResourceTypeGCPProject},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "sandbox and kind-cluster resources without image fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:   "task-sandbox-kind-no-image",
+						Spec: "test.py@eval",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeSandbox},
+							{Type: v1alpha1.ResourceTypeKindCluster},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "standalone kind-cluster resource with limits fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:   "task-kind-cluster-with-limits",
+						Spec: "test.py@eval",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "sandbox and kind-cluster with limits on kind-cluster fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:    "task-sandbox-kind-cluster-limits",
+						Spec:  "test.py@eval",
+						Image: "eval-image:v1",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeSandbox},
+							{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")}},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -800,6 +896,32 @@ func TestValidateTaskResources_RejectionPaths(t *testing.T) {
 			expectedValue: "1Gi",
 		},
 		{
+			name: "kind-cluster resource with limits",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-kind-limits",
+				Spec:      "eval.py@task",
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}},
+			},
+			expectedTask:  "task-kind-limits",
+			expectedField: "limits",
+			expectedValue: "1",
+		},
+		{
+			name: "sandbox and kind-cluster with limits on kind-cluster",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-sandbox-kind-limits",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")}},
+				},
+			},
+			expectedTask:  "task-sandbox-kind-limits",
+			expectedField: "limits",
+			expectedValue: "2Gi",
+		},
+		{
 			name: "zero cpu",
 			task: v1alpha1.ManifestTask{
 				ID:        "task-zero-cpu",
@@ -957,6 +1079,39 @@ func TestValidateTaskResources_Valid(t *testing.T) {
 				Image: "image:v1",
 				Resources: []v1alpha1.ManifestResource{
 					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}},
+					{Type: v1alpha1.ResourceTypeGCPProject},
+				},
+			},
+		},
+		{
+			name: "standalone kind-cluster resource",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-kind-only",
+				Spec:      "eval.py@task",
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeKindCluster}},
+			},
+		},
+		{
+			name: "sandbox with limits combined with kind-cluster",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-sandbox-and-kind",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}},
+					{Type: v1alpha1.ResourceTypeKindCluster},
+				},
+			},
+		},
+		{
+			name: "sandbox with limits combined with kind-cluster and gcp-project",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-sandbox-kind-gcp",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}},
+					{Type: v1alpha1.ResourceTypeKindCluster},
 					{Type: v1alpha1.ResourceTypeGCPProject},
 				},
 			},

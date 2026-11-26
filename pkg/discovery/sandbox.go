@@ -108,6 +108,33 @@ const (
 	// it swaps the placeholder for authentic credentials on egress. Without a service portal, the
 	// upstream provider promptly rejects the placeholder with an authentication error.
 	PlaceholderModelCredential = "placeholder-model-credential"
+
+	// KindNodeSelectorLabel is the node label selecting dedicated nodes for kind-cluster tasks.
+	KindNodeSelectorLabel = "eval-runner.gke-labs.dev/kind"
+
+	// DockerInDockerContainerName is the sidecar container name providing Docker for kind-cluster tasks.
+	DockerInDockerContainerName = "dind"
+
+	// DockerInDockerImage is the pinned Docker-in-Docker sidecar image for kind-cluster tasks.
+	DockerInDockerImage = "docker:27-dind"
+
+	// DockerInDockerPort is the plaintext Docker daemon TCP port exposed by the dind sidecar on loopback.
+	DockerInDockerPort int32 = 2375
+
+	// DockerInDockerHost is the DOCKER_HOST value injected into kind-cluster task containers.
+	DockerInDockerHost = "tcp://127.0.0.1:2375"
+
+	// DefaultDockerInDockerCPURequest is the default CPU request for the dind sidecar container.
+	DefaultDockerInDockerCPURequest = "500m"
+
+	// DefaultDockerInDockerMemoryRequest is the default memory request for the dind sidecar container.
+	DefaultDockerInDockerMemoryRequest = "1Gi"
+
+	// DefaultDockerInDockerCPULimit is the default CPU limit for the dind sidecar container.
+	DefaultDockerInDockerCPULimit = "2"
+
+	// DefaultDockerInDockerMemoryLimit is the default memory limit for the dind sidecar container.
+	DefaultDockerInDockerMemoryLimit = "4Gi"
 )
 
 // PlaceholderModelCredentialEnvironmentVariables is the table of model credential environment
@@ -245,6 +272,7 @@ type TaskSandboxConfig struct {
 	CloneRepo              bool
 	StepTimeoutSeconds     int
 	SandboxTask            bool
+	KindCluster            bool
 	Limits                 corev1.ResourceList
 	ServicePortalIntercept bool
 }
@@ -525,8 +553,14 @@ fi
 	if cfg.ServicePortalIntercept {
 		taskEnvironmentVariables = append(taskEnvironmentVariables, ServicePortalCAEnvironmentVariables()...)
 	}
+	if cfg.KindCluster {
+		taskEnvironmentVariables = append(taskEnvironmentVariables, corev1.EnvVar{
+			Name:  "DOCKER_HOST",
+			Value: DockerInDockerHost,
+		})
+	}
 
-	return &sandboxv1beta1.Sandbox{
+	sandbox := &sandboxv1beta1.Sandbox{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: sandboxv1beta1.GroupVersion.String(),
 			Kind:       "Sandbox",
@@ -657,6 +691,65 @@ fi
 						},
 					},
 				},
+			},
+		},
+	}
+
+	if cfg.KindCluster {
+		sandbox.Spec.PodTemplate.Spec.NodeSelector = map[string]string{
+			KindNodeSelectorLabel: "true",
+		}
+		sandbox.Spec.PodTemplate.Spec.Containers = append(
+			sandbox.Spec.PodTemplate.Spec.Containers,
+			buildDockerInDockerSidecarContainer(),
+		)
+	}
+
+	return sandbox
+}
+
+// buildDockerInDockerSidecarContainer returns the privileged Docker-in-Docker sidecar
+// container attached to task sandboxes declaring the kind-cluster resource.
+func buildDockerInDockerSidecarContainer() corev1.Container {
+	return corev1.Container{
+		Name:  DockerInDockerContainerName,
+		Image: DockerInDockerImage,
+		Env: []corev1.EnvVar{
+			{
+				Name:  "DOCKER_TLS_CERTDIR",
+				Value: "",
+			},
+		},
+		Ports: []corev1.ContainerPort{
+			{
+				Name:          "docker",
+				ContainerPort: DockerInDockerPort,
+				Protocol:      corev1.ProtocolTCP,
+			},
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt32(DockerInDockerPort),
+				},
+			},
+			InitialDelaySeconds: 1,
+			PeriodSeconds:       1,
+			TimeoutSeconds:      2,
+			SuccessThreshold:    1,
+			FailureThreshold:    3,
+		},
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr.To(true),
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(DefaultDockerInDockerCPURequest),
+				corev1.ResourceMemory: resource.MustParse(DefaultDockerInDockerMemoryRequest),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(DefaultDockerInDockerCPULimit),
+				corev1.ResourceMemory: resource.MustParse(DefaultDockerInDockerMemoryLimit),
 			},
 		},
 	}
