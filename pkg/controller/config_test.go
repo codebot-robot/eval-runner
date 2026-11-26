@@ -537,17 +537,18 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	sandboxEgressHosts := fs.String("sandbox-egress-hosts", "", "sandbox egress hosts")
 	gcpProjectParentFolderID := fs.String("gcp-project-parent-folder-id", "", "gcp project parent folder id")
 	gcpProjectBillingAccountID := fs.String("gcp-project-billing-account-id", "", "gcp project billing account id")
+	gcpProjectPool := fs.String("gcp-project-pool", "", "gcp project pool")
 	servicePortalAddress := fs.String("service-portal-controller-address", "", "service portal controller address")
 	servicePortalCA := fs.String("service-portal-controller-ca-file", "", "service portal controller ca file")
 	servicePortalToken := fs.String("service-portal-token-file", "", "service portal token file")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--gcp-project-parent-folder-id=123456789012", "--gcp-project-billing-account-id=012345-6789AB-CDEF01", "--service-portal-controller-address=127.0.0.1:8443"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--gcp-project-parent-folder-id=123456789012", "--gcp-project-billing-account-id=012345-6789AB-CDEF01", "--gcp-project-pool=proj-a,proj-b", "--service-portal-controller-address=127.0.0.1:8443"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *cacheDirectory, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *gcpProjectParentFolderID, *gcpProjectBillingAccountID, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *cacheDirectory, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *gcpProjectParentFolderID, *gcpProjectBillingAccountID, *gcpProjectPool, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -565,6 +566,12 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	}
 	if rawFlags.GCPProjectBillingAccountID != "012345-6789AB-CDEF01" {
 		t.Errorf("expected GCPProjectBillingAccountID %q, got %q", "012345-6789AB-CDEF01", rawFlags.GCPProjectBillingAccountID)
+	}
+	if !rawFlags.IsExplicit("gcp-project-pool") {
+		t.Errorf("expected gcp-project-pool to be explicit")
+	}
+	if rawFlags.GCPProjectPool != "proj-a,proj-b" {
+		t.Errorf("expected GCPProjectPool %q, got %q", "proj-a,proj-b", rawFlags.GCPProjectPool)
 	}
 	if !rawFlags.IsExplicit("service-portal-controller-address") {
 		t.Errorf("expected service-portal-controller-address to be explicit")
@@ -3483,6 +3490,86 @@ func TestResolveConfig_GCPProjectFolderAndBilling(t *testing.T) {
 			}
 			if cfg.GCPProjectParentFolderID != "" || cfg.GCPProjectBillingAccountID != "" {
 				t.Errorf("expected empty folder/billing for flag value %q, got (%q, %q)", value, cfg.GCPProjectParentFolderID, cfg.GCPProjectBillingAccountID)
+			}
+		}
+	})
+}
+
+func TestResolveConfig_GCPProjectPool(t *testing.T) {
+	t.Run("default is empty", func(t *testing.T) {
+		cfg, err := ResolveConfig(nil, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(cfg.GCPProjectPool) != 0 {
+			t.Errorf("expected empty GCPProjectPool default, got %v", cfg.GCPProjectPool)
+		}
+	})
+
+	t.Run("configmap trims, deduplicates, and passes strict config", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectPool: " proj-a , proj-b,proj-a, , proj-c ",
+			},
+		}
+		cfg, err := ResolveConfig(configMap, RawFlags{StrictConfig: true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"proj-a", "proj-b", "proj-c"}
+		if !reflect.DeepEqual(cfg.GCPProjectPool, want) {
+			t.Errorf("GCPProjectPool = %v, want %v", cfg.GCPProjectPool, want)
+		}
+	})
+
+	t.Run("configmap disabled sentinel clears pool", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectPool: ConfigSentinelDisabled,
+			},
+		}
+		cfg, err := ResolveConfig(configMap, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(cfg.GCPProjectPool) != 0 {
+			t.Errorf("expected empty pool for sentinel, got %v", cfg.GCPProjectPool)
+		}
+	})
+
+	t.Run("explicit flag overrides and clears configmap", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectPool: "cm-proj-1,cm-proj-2",
+			},
+		}
+		flags := RawFlags{
+			GCPProjectPool: " flag-proj-1 , flag-proj-2 , flag-proj-1 ",
+			Explicit:       map[string]bool{"gcp-project-pool": true},
+		}
+		cfg, err := ResolveConfig(configMap, flags)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"flag-proj-1", "flag-proj-2"}
+		if !reflect.DeepEqual(cfg.GCPProjectPool, want) {
+			t.Errorf("GCPProjectPool = %v, want %v", cfg.GCPProjectPool, want)
+		}
+
+		for _, clearValue := range []string{"", "   ", ConfigSentinelDisabled} {
+			clearFlags := RawFlags{
+				GCPProjectPool: clearValue,
+				Explicit:       map[string]bool{"gcp-project-pool": true},
+			}
+			clearedCfg, err := ResolveConfig(configMap, clearFlags)
+			if err != nil {
+				t.Fatalf("unexpected error for flag value %q: %v", clearValue, err)
+			}
+			if len(clearedCfg.GCPProjectPool) != 0 {
+				t.Errorf("expected empty pool for flag value %q, got %v", clearValue, clearedCfg.GCPProjectPool)
 			}
 		}
 	})

@@ -22,6 +22,7 @@ import (
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
+	"golang.org/x/oauth2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -371,7 +372,7 @@ func TestPrepareServicePortalBinding(t *testing.T) {
 		}
 	})
 
-	t.Run("sandbox-only task never receives model credential", func(t *testing.T) {
+	t.Run("sandbox task with real model receives model credential via service portal", func(t *testing.T) {
 		run := &v1alpha1.Run{
 			ObjectMeta: metav1.ObjectMeta{Name: "run-2", Namespace: "eval-runner"},
 			Spec:       v1alpha1.RunSpec{Model: "google/gemini-2.5-flash"},
@@ -390,11 +391,72 @@ func TestPrepareServicePortalBinding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if credential != nil || secrets != nil {
-			t.Fatalf("expected no credential for sandbox-only task, got credential=%+v secrets=%v", credential, secrets != nil)
+		if credential == nil || credential.Host != "generativelanguage.googleapis.com" {
+			t.Fatalf("expected gemini credential for sandbox task, got %+v", credential)
+		}
+		if got := string(secrets["gemini-api-key"]); got != "real-controller-gemini-key" {
+			t.Fatalf("expected controller model secret, got %q", got)
 		}
 		if err := policy.Validate(); err != nil {
 			t.Fatalf("generated policy invalid: %v", err)
+		}
+	})
+
+	t.Run("sandbox task with gcp-project emits both generativelanguage and wildcard googleapis rules without ties", func(t *testing.T) {
+		gcpReconciler := &RunReconciler{
+			Client:              fakeClient,
+			APIReader:           fakeClient,
+			ControllerNamespace: "eval-runner",
+			GCPTokenSource:      oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "gcp-oauth-token"}),
+		}
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-gcp-model", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "google/gemini-2.5-flash"},
+		}
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID: "kube-agents/kind-cluster",
+					Resources: []v1alpha1.ManifestResource{
+						{Type: v1alpha1.ResourceTypeSandbox},
+						{Type: v1alpha1.ResourceTypeGCPProject},
+					},
+				},
+			},
+		}
+		policy, secrets, credential, err := gcpReconciler.prepareServicePortalBinding(t.Context(), run, manifest, "kube-agents/kind-cluster", options)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("generated policy invalid: %v", err)
+		}
+		if credential == nil || credential.Host != "generativelanguage.googleapis.com" {
+			t.Fatalf("expected gemini credential, got %+v", credential)
+		}
+		if got := string(secrets["gemini-api-key"]); got != "real-controller-gemini-key" {
+			t.Fatalf("gemini-api-key secret = %q, want real-controller-gemini-key", got)
+		}
+		if got := string(secrets["gcp-access-token"]); got != "gcp-oauth-token" {
+			t.Fatalf("gcp-access-token secret = %q, want gcp-oauth-token", got)
+		}
+
+		modelRule := policy.Match(portalsv1.ProtocolHTTPS, "generativelanguage.googleapis.com", 443)
+		if modelRule == nil || modelRule.GetHttps() == nil || modelRule.GetHttps().GetEffects() == nil {
+			t.Fatalf("expected exact-host rule for generativelanguage.googleapis.com, got %v", modelRule)
+		}
+		modelHeaders := modelRule.GetHttps().GetEffects().GetReplaceHeaders()
+		if len(modelHeaders) != 1 || modelHeaders[0].Header != "x-goog-api-key" || modelHeaders[0].CredentialUri != "secret://gemini-api-key" {
+			t.Fatalf("expected exact-host generativelanguage.googleapis.com to inject gemini-api-key, got %+v", modelHeaders)
+		}
+
+		gcpRule := policy.Match(portalsv1.ProtocolHTTPS, "cloudresourcemanager.googleapis.com", 443)
+		if gcpRule == nil || gcpRule.GetHttps() == nil || gcpRule.GetHttps().GetEffects() == nil {
+			t.Fatalf("expected wildcard *.googleapis.com rule, got %v", gcpRule)
+		}
+		gcpHeaders := gcpRule.GetHttps().GetEffects().GetReplaceHeaders()
+		if len(gcpHeaders) != 1 || gcpHeaders[0].Header != "Authorization" || gcpHeaders[0].Prefix != "Bearer " || gcpHeaders[0].CredentialUri != "secret://gcp-access-token" {
+			t.Fatalf("expected *.googleapis.com to inject gcp-access-token, got %+v", gcpHeaders)
 		}
 	})
 
