@@ -127,6 +127,8 @@ func main() {
 	var pollProgressInterval time.Duration
 	var affinityMode string
 	var sandboxEgressHosts string
+	var gcpProjectParentFolderID string
+	var gcpProjectBillingAccountID string
 	var servicePortalControllerAddress string
 	var servicePortalCAFile string
 	var servicePortalTokenFile string
@@ -162,6 +164,8 @@ func main() {
 	var leaderElect bool
 	flag.BoolVar(&leaderElect, "leader-elect", true, "Enable leader election for controller manager. Enabling this will ensure only one instance of the controller is active.")
 	flag.StringVar(&sandboxEgressHosts, "sandbox-egress-hosts", "", "Comma-separated allow-list of FQDN hostnames for sandbox HTTPS egress")
+	flag.StringVar(&gcpProjectParentFolderID, "gcp-project-parent-folder-id", "", "GCP parent folder ID under which per-task ephemeral projects are created")
+	flag.StringVar(&gcpProjectBillingAccountID, "gcp-project-billing-account-id", "", "GCP billing account ID linked to per-task ephemeral projects")
 	flag.StringVar(&servicePortalControllerAddress, "service-portal-controller-address", "", "Address of the Service Portal Controller (host:port)")
 	flag.StringVar(&servicePortalCAFile, "service-portal-controller-ca-file", "", "Path to CA certificate file for verifying Service Portal Controller TLS certificate")
 	flag.StringVar(&servicePortalTokenFile, "service-portal-token-file", "", "Path to projected service account token file for authenticating with Service Portal Controller")
@@ -217,6 +221,8 @@ func main() {
 		pollProgressInterval,
 		affinityMode,
 		sandboxEgressHosts,
+		gcpProjectParentFolderID,
+		gcpProjectBillingAccountID,
 		servicePortalControllerAddress,
 		servicePortalCAFile,
 		servicePortalTokenFile,

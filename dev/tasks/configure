@@ -48,6 +48,8 @@ WEBHOOK_DEPLOYMENT = "eval-runner-webhook"
 
 # Keys read once at startup that require restarting their deployment to take effect.
 RESTART_ONLY_KEYS: Dict[str, Tuple[str, ...]] = {
+    "gcpProjectBillingAccountID": (CONTROLLER_DEPLOYMENT,),
+    "gcpProjectParentFolderID": (CONTROLLER_DEPLOYMENT,),
     "servicePortalControllerAddress": (CONTROLLER_DEPLOYMENT,),
     "servicePortalControllerCAFile": (CONTROLLER_DEPLOYMENT,),
     "servicePortalTokenFile": (CONTROLLER_DEPLOYMENT,),

@@ -219,6 +219,10 @@ type TaskStatus struct {
 	// ExecutionID is the identifier of an in-flight asynchronous command running in the task sandbox.
 	// +optional
 	ExecutionID string `json:"executionID,omitempty"`
+
+	// GCPProject records the leased GCP project ID currently assigned to this task while running.
+	// +optional
+	GCPProject string `json:"gcpProject,omitempty"`
 }
 
 // TaskResources describes compute resource requirements and limits for a task container.
@@ -331,7 +335,7 @@ type RunSpec struct {
 
 // ManifestResource describes a resource needed by an eval task.
 type ManifestResource struct {
-	// Type is the resource type (e.g., docker, kind, kubernetes-namespace, sandbox).
+	// Type is the resource type (e.g., docker, kind, kubernetes-namespace, sandbox, gcp-project).
 	Type string `json:"type"`
 
 	// Limits specifies the maximum resource limits for the task sandbox container.
@@ -343,6 +347,9 @@ type ManifestResource struct {
 const (
 	// ResourceTypeSandbox indicates the task runs in its own sandbox from image, harness inside, no cluster credentials.
 	ResourceTypeSandbox = "sandbox"
+
+	// ResourceTypeGCPProject indicates the task requires a leased GCP project from the controller pool.
+	ResourceTypeGCPProject = "gcp-project"
 )
 
 // ManifestImage describes a container image needed by eval tasks.

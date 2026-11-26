@@ -55,6 +55,10 @@ const (
 	ConfigMapKeyArtifactMaxUploadBytes = configkeys.ConfigMapKeyArtifactMaxUploadBytes
 	// ConfigMapKeyGCPWorkloadIdentityProvider is the ConfigMap key for the GCP Workload Identity Federation provider resource name.
 	ConfigMapKeyGCPWorkloadIdentityProvider = configkeys.ConfigMapKeyGCPWorkloadIdentityProvider
+	// ConfigMapKeyGCPProjectParentFolderID is the ConfigMap key for the GCP parent folder ID under which per-task projects are created.
+	ConfigMapKeyGCPProjectParentFolderID = configkeys.ConfigMapKeyGCPProjectParentFolderID
+	// ConfigMapKeyGCPProjectBillingAccountID is the ConfigMap key for the GCP billing account ID linked to per-task projects.
+	ConfigMapKeyGCPProjectBillingAccountID = configkeys.ConfigMapKeyGCPProjectBillingAccountID
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.
 	ConfigMapKeyDiscoveryDeadline = configkeys.ConfigMapKeyDiscoveryDeadline
 	// ConfigMapKeyExecutionDeadline is the ConfigMap key for sample execution deadline.
@@ -171,8 +175,10 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts:  {},
 	configkeys.ConfigMapKeyServicePortalModelBaseURL:      {},
 
-	// Workload Identity Federation
+	// Workload Identity Federation and ephemeral GCP project creation
 	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
+	configkeys.ConfigMapKeyGCPProjectParentFolderID:    {},
+	configkeys.ConfigMapKeyGCPProjectBillingAccountID:  {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -316,6 +322,12 @@ type ClusterConfig struct {
 	// GCPWorkloadIdentityProvider is the GCP Workload Identity Federation provider resource name.
 	GCPWorkloadIdentityProvider string
 
+	// GCPProjectParentFolderID is the GCP parent folder ID under which per-task ephemeral projects are created.
+	GCPProjectParentFolderID string
+
+	// GCPProjectBillingAccountID is the GCP billing account ID linked to per-task ephemeral projects.
+	GCPProjectBillingAccountID string
+
 	// ServicePortal configures settings for the Service Portal Controller and allowed egress hosts.
 	ServicePortal ServicePortalOptions
 }
@@ -351,6 +363,8 @@ type RawFlags struct {
 	CommandUsers                   string
 	AffinityMode                   string
 	SandboxEgressHosts             string
+	GCPProjectParentFolderID       string
+	GCPProjectBillingAccountID     string
 	ServicePortalControllerAddress string
 	ServicePortalCAFile            string
 	ServicePortalTokenFile         string
@@ -417,6 +431,8 @@ func FlagsFromFlagSet(
 	pollProgressInterval time.Duration,
 	affinityMode string,
 	sandboxEgressHosts string,
+	gcpProjectParentFolderID string,
+	gcpProjectBillingAccountID string,
 	servicePortalControllerAddress, servicePortalCAFile, servicePortalTokenFile string,
 ) RawFlags {
 	explicit := make(map[string]bool)
@@ -442,6 +458,8 @@ func FlagsFromFlagSet(
 		CommandUsers:                   commandUsers,
 		AffinityMode:                   affinityMode,
 		SandboxEgressHosts:             sandboxEgressHosts,
+		GCPProjectParentFolderID:       gcpProjectParentFolderID,
+		GCPProjectBillingAccountID:     gcpProjectBillingAccountID,
 		ServicePortalControllerAddress: servicePortalControllerAddress,
 		ServicePortalCAFile:            servicePortalCAFile,
 		ServicePortalTokenFile:         servicePortalTokenFile,
@@ -502,6 +520,26 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		// 1c. gcpWorkloadIdentityProvider
 		if val, ok := cm.Data[ConfigMapKeyGCPWorkloadIdentityProvider]; ok {
 			cfg.GCPWorkloadIdentityProvider = strings.TrimSpace(val)
+		}
+
+		// 1d. gcpProjectParentFolderID
+		if value, ok := cm.Data[ConfigMapKeyGCPProjectParentFolderID]; ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed == "" || strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+				cfg.GCPProjectParentFolderID = ""
+			} else {
+				cfg.GCPProjectParentFolderID = trimmed
+			}
+		}
+
+		// 1e. gcpProjectBillingAccountID
+		if value, ok := cm.Data[ConfigMapKeyGCPProjectBillingAccountID]; ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed == "" || strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+				cfg.GCPProjectBillingAccountID = ""
+			} else {
+				cfg.GCPProjectBillingAccountID = trimmed
+			}
 		}
 
 		// 2. discoveryDeadline
@@ -1011,6 +1049,22 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	if flags.IsExplicit("command-users") {
 		cfg.GitHub.CommandUsers = ParseUserList(flags.CommandUsers)
 	}
+	if flags.IsExplicit("gcp-project-parent-folder-id") {
+		trimmed := strings.TrimSpace(flags.GCPProjectParentFolderID)
+		if trimmed == "" || strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+			cfg.GCPProjectParentFolderID = ""
+		} else {
+			cfg.GCPProjectParentFolderID = trimmed
+		}
+	}
+	if flags.IsExplicit("gcp-project-billing-account-id") {
+		trimmed := strings.TrimSpace(flags.GCPProjectBillingAccountID)
+		if trimmed == "" || strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+			cfg.GCPProjectBillingAccountID = ""
+		} else {
+			cfg.GCPProjectBillingAccountID = trimmed
+		}
+	}
 	if flags.IsExplicit("service-portal-controller-address") {
 		cfg.ServicePortal.ControllerAddress = strings.TrimSpace(flags.ServicePortalControllerAddress)
 	}
@@ -1134,6 +1188,8 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"sandboxdImage", resolved.SandboxdImage,
 		"taskGracePeriod", resolved.TaskGracePeriod,
 		"sandboxEgressHosts", strings.Join(resolved.SandboxEgressHosts, ","),
+		"gcpProjectParentFolderID", resolved.GCPProjectParentFolderID,
+		"gcpProjectBillingAccountID", resolved.GCPProjectBillingAccountID,
 		"servicePortalModelBaseURL", resolved.ServicePortal.ModelBaseURL,
 		"headTopUpInterval", resolved.HeadTopUpInterval,
 		"headTargetCIHalfWidth", resolved.HeadTargetCIHalfWidth,

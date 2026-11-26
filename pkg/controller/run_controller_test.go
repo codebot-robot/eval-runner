@@ -13983,3 +13983,120 @@ func TestDecideAndApplyExecutionResults(t *testing.T) {
 		t.Errorf("status.Summary = %+v, want 2 completed and 1 failed", status.Summary)
 	}
 }
+
+func TestTaskStatusGCPProjectClearedOnLifecycleTransitions(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC))
+	startedAt := metav1.NewTime(now.Add(-2 * time.Minute))
+
+	t.Run("cleared on restart, fail, and rescue decisions", func(t *testing.T) {
+		restarted := v1alpha1.TaskStatus{
+			ID:         "task-restart",
+			Phase:      v1alpha1.TaskPhaseRunning,
+			StartedAt:  &startedAt,
+			GCPProject: "eval-proj-1",
+		}
+		applyRunningTaskDecision(&restarted, runningTaskDecision{
+			action:        runningTaskActionRestart,
+			restartReason: "sandbox lost",
+		}, now)
+		if restarted.Phase != v1alpha1.TaskPhasePending || restarted.GCPProject != "" {
+			t.Errorf("restarted task = (%q, %q), want (Pending, \"\")", restarted.Phase, restarted.GCPProject)
+		}
+
+		failed := v1alpha1.TaskStatus{
+			ID:         "task-fail",
+			Phase:      v1alpha1.TaskPhaseRunning,
+			StartedAt:  &startedAt,
+			GCPProject: "eval-proj-2",
+		}
+		applyRunningTaskDecision(&failed, runningTaskDecision{
+			action:  runningTaskActionFail,
+			message: "sandbox failed",
+		}, now)
+		if failed.Phase != v1alpha1.TaskPhaseFailed || failed.GCPProject != "" {
+			t.Errorf("failed task = (%q, %q), want (Failed, \"\")", failed.Phase, failed.GCPProject)
+		}
+
+		rescued := v1alpha1.TaskStatus{
+			ID:         "task-rescue",
+			Phase:      v1alpha1.TaskPhaseRunning,
+			StartedAt:  &startedAt,
+			GCPProject: "eval-proj-3",
+		}
+		applyRunningTaskDecision(&rescued, runningTaskDecision{
+			action:  runningTaskActionRescue,
+			rescued: &rescuedTaskInfo{},
+		}, now)
+		if rescued.Phase != v1alpha1.TaskPhaseCompleted || rescued.GCPProject != "" {
+			t.Errorf("rescued task = (%q, %q), want (Completed, \"\")", rescued.Phase, rescued.GCPProject)
+		}
+	})
+
+	t.Run("cleared when pending task fails to start", func(t *testing.T) {
+		status := &v1alpha1.RunStatus{
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-start-fail", Phase: v1alpha1.TaskPhasePending, GCPProject: "eval-proj-4"},
+			},
+		}
+		applyPendingTaskStartOutcomes(status, map[string]pendingTaskStartOutcome{
+			"task-start-fail": {started: false, failureMessage: "failed to start"},
+		}, now)
+		if status.Tasks[0].Phase != v1alpha1.TaskPhaseFailed || status.Tasks[0].GCPProject != "" {
+			t.Errorf("task = (%q, %q), want (Failed, \"\")", status.Tasks[0].Phase, status.Tasks[0].GCPProject)
+		}
+	})
+
+	t.Run("cleared when task finishes execution", func(t *testing.T) {
+		task := v1alpha1.TaskStatus{
+			ID:         "task-finish",
+			Phase:      v1alpha1.TaskPhaseRunning,
+			StartedAt:  &startedAt,
+			GCPProject: "eval-proj-5",
+		}
+		applyTaskExecutionResult(&task, v1alpha1.RunSpec{}, taskExecutionResult{
+			taskID:     "task-finish",
+			phase:      v1alpha1.TaskPhaseCompleted,
+			finishedAt: &now,
+		}, now)
+		if task.Phase != v1alpha1.TaskPhaseCompleted || task.GCPProject != "" {
+			t.Errorf("finished task = (%q, %q), want (Completed, \"\")", task.Phase, task.GCPProject)
+		}
+	})
+
+	t.Run("cleared when tasks are cut off by execution deadline", func(t *testing.T) {
+		reconciler := &RunReconciler{
+			Now: func() time.Time { return now.Time },
+		}
+		status := &v1alpha1.RunStatus{
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-cutoff-result", Phase: v1alpha1.TaskPhaseRunning, StartedAt: &startedAt, GCPProject: "eval-proj-6"},
+				{ID: "task-running", Phase: v1alpha1.TaskPhaseRunning, StartedAt: &startedAt, GCPProject: "eval-proj-7"},
+				{ID: "task-pending", Phase: v1alpha1.TaskPhasePending, GCPProject: "eval-proj-8"},
+			},
+		}
+		reconciler.markDeadlineCutOff(status, 1, map[string]taskExecutionResult{
+			"task-cutoff-result": {taskID: "task-cutoff-result", cutOff: true},
+		})
+		for _, task := range status.Tasks {
+			if task.Phase != v1alpha1.TaskPhaseFailed || task.GCPProject != "" {
+				t.Errorf("task %q = (%q, %q), want (Failed, \"\")", task.ID, task.Phase, task.GCPProject)
+			}
+		}
+	})
+
+	t.Run("tasks declaring gcp-project remain rejected at initialization", func(t *testing.T) {
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "task-gcp-only", Spec: "eval.py@1", Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeGCPProject}}},
+				{ID: "task-sandbox-and-gcp", Spec: "eval.py@2", Image: "img:v1", Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeSandbox}, {Type: v1alpha1.ResourceTypeGCPProject}}},
+			},
+		}
+		reconciler := &RunReconciler{}
+		tasks := reconciler.initializeTasks(v1alpha1.RunSpec{}, manifest)
+		for _, task := range tasks {
+			if task.Phase != v1alpha1.TaskPhaseFailed || task.Message != "resources not supported yet" {
+				t.Errorf("task %q = (%q, %q), want (Failed, \"resources not supported yet\")", task.ID, task.Phase, task.Message)
+			}
+		}
+	})
+}

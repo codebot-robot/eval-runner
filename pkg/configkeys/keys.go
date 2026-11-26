@@ -39,6 +39,10 @@ const (
 	ConfigMapKeyArtifactMaxUploadBytes = "artifactMaxUploadBytes"
 	// ConfigMapKeyGCPWorkloadIdentityProvider is the ConfigMap key for the GCP Workload Identity Federation provider resource name.
 	ConfigMapKeyGCPWorkloadIdentityProvider = "gcpWorkloadIdentityProvider"
+	// ConfigMapKeyGCPProjectParentFolderID is the ConfigMap key for the GCP parent folder ID under which per-task projects are created.
+	ConfigMapKeyGCPProjectParentFolderID = "gcpProjectParentFolderID"
+	// ConfigMapKeyGCPProjectBillingAccountID is the ConfigMap key for the GCP billing account ID linked to per-task projects.
+	ConfigMapKeyGCPProjectBillingAccountID = "gcpProjectBillingAccountID"
 	// DefaultWorkloadIdentityTokenFile is the contract path for the projected Kubernetes ServiceAccount token.
 	DefaultWorkloadIdentityTokenFile = "/var/run/secrets/eval-runner/gcp/token"
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.

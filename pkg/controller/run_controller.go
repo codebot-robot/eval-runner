@@ -2835,6 +2835,7 @@ func applyPendingTaskStartOutcomes(
 			task.Phase = v1alpha1.TaskPhaseFailed
 			task.Message = outcome.failureMessage
 			task.FinishedAt = &now
+			task.GCPProject = ""
 			continue
 		}
 		if task.Phase == v1alpha1.TaskPhasePending && task.Restarts == outcome.expectedRestarts {
@@ -3230,6 +3231,7 @@ func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDec
 		task.Message = decision.message
 		task.FinishedAt = &now
 		task.ExecutionID = ""
+		task.GCPProject = ""
 		if decision.countsAsFailure {
 			task.FailureAttempts++
 		}
@@ -3247,12 +3249,14 @@ func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDec
 		task.ExecutionID = ""
 		task.SamplesDone = 0
 		task.LastProgressAt = nil
+		task.GCPProject = ""
 	}
 }
 
 func applyRescuedTaskStatus(task *v1alpha1.TaskStatus, rescued *rescuedTaskInfo) {
 	task.Phase = v1alpha1.TaskPhaseCompleted
 	task.ExecutionID = ""
+	task.GCPProject = ""
 	if rescued.summary != nil && rescued.summary.FinishedAt != nil {
 		finishedAt := metav1.NewTime(*rescued.summary.FinishedAt)
 		task.FinishedAt = &finishedAt
@@ -3498,6 +3502,7 @@ func applyTaskExecutionResult(
 	task.Phase = result.phase
 	if result.phase == v1alpha1.TaskPhaseCompleted || result.phase == v1alpha1.TaskPhaseFailed || result.phase == v1alpha1.TaskPhaseSkipped {
 		task.ExecutionID = ""
+		task.GCPProject = ""
 	}
 	if result.cohort != "" {
 		task.Cohort = result.cohort
@@ -3672,6 +3677,7 @@ func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generatio
 		if res, ok := taskResults[task.ID]; ok && res.cutOff {
 			task.Phase = v1alpha1.TaskPhaseFailed
 			task.ExecutionID = ""
+			task.GCPProject = ""
 			if task.FinishedAt == nil {
 				task.FinishedAt = &now
 			}
@@ -3684,6 +3690,7 @@ func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generatio
 		} else if task.Phase == v1alpha1.TaskPhaseRunning {
 			task.Phase = v1alpha1.TaskPhaseFailed
 			task.ExecutionID = ""
+			task.GCPProject = ""
 			task.FinishedAt = &now
 			var elapsed time.Duration
 			if task.StartedAt != nil {
@@ -3694,6 +3701,7 @@ func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generatio
 		} else if task.Phase == v1alpha1.TaskPhasePending {
 			task.Phase = v1alpha1.TaskPhaseFailed
 			task.ExecutionID = ""
+			task.GCPProject = ""
 			task.FinishedAt = &now
 			task.Message = "cut off by Run execution deadline (not started)"
 			pendingCutOffCount++

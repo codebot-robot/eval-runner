@@ -535,22 +535,36 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	pollInterval := fs.Duration("poll-progress-interval", 10*time.Second, "poll progress interval")
 	affinityMode := fs.String("affinity-mode", configkeys.AffinityModeOrder, "affinity mode")
 	sandboxEgressHosts := fs.String("sandbox-egress-hosts", "", "sandbox egress hosts")
+	gcpProjectParentFolderID := fs.String("gcp-project-parent-folder-id", "", "gcp project parent folder id")
+	gcpProjectBillingAccountID := fs.String("gcp-project-billing-account-id", "", "gcp project billing account id")
 	servicePortalAddress := fs.String("service-portal-controller-address", "", "service portal controller address")
 	servicePortalCA := fs.String("service-portal-controller-ca-file", "", "service portal controller ca file")
 	servicePortalToken := fs.String("service-portal-token-file", "", "service portal token file")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--service-portal-controller-address=127.0.0.1:8443"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--gcp-project-parent-folder-id=123456789012", "--gcp-project-billing-account-id=012345-6789AB-CDEF01", "--service-portal-controller-address=127.0.0.1:8443"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *cacheDirectory, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *cacheDirectory, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *gcpProjectParentFolderID, *gcpProjectBillingAccountID, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
 	if !rawFlags.IsExplicit("sandbox-egress-hosts") {
 		t.Errorf("expected sandbox-egress-hosts to be explicit")
+	}
+	if !rawFlags.IsExplicit("gcp-project-parent-folder-id") {
+		t.Errorf("expected gcp-project-parent-folder-id to be explicit")
+	}
+	if rawFlags.GCPProjectParentFolderID != "123456789012" {
+		t.Errorf("expected GCPProjectParentFolderID %q, got %q", "123456789012", rawFlags.GCPProjectParentFolderID)
+	}
+	if !rawFlags.IsExplicit("gcp-project-billing-account-id") {
+		t.Errorf("expected gcp-project-billing-account-id to be explicit")
+	}
+	if rawFlags.GCPProjectBillingAccountID != "012345-6789AB-CDEF01" {
+		t.Errorf("expected GCPProjectBillingAccountID %q, got %q", "012345-6789AB-CDEF01", rawFlags.GCPProjectBillingAccountID)
 	}
 	if !rawFlags.IsExplicit("service-portal-controller-address") {
 		t.Errorf("expected service-portal-controller-address to be explicit")
@@ -3368,4 +3382,108 @@ func TestConfigReloader_GCSRebuiltOnReloadRetainsCacheDirectory(t *testing.T) {
 	if gcsSink.CacheDirectory() != "/tmp/custom-artifact-cache" {
 		t.Errorf("expected CacheDirectory %q, got %q", "/tmp/custom-artifact-cache", gcsSink.CacheDirectory())
 	}
+}
+
+func TestResolveConfig_GCPProjectFolderAndBilling(t *testing.T) {
+	t.Run("defaults are empty", func(t *testing.T) {
+		cfg, err := ResolveConfig(nil, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.GCPProjectParentFolderID != "" || cfg.GCPProjectBillingAccountID != "" {
+			t.Errorf("expected empty folder/billing defaults, got (%q, %q)", cfg.GCPProjectParentFolderID, cfg.GCPProjectBillingAccountID)
+		}
+	})
+
+	t.Run("configmap trims values and passes strict config", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectParentFolderID:   " 123456789012 ",
+				ConfigMapKeyGCPProjectBillingAccountID: " 012345-6789AB-CDEF01 ",
+			},
+		}
+		cfg, err := ResolveConfig(configMap, RawFlags{StrictConfig: true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.GCPProjectParentFolderID != "123456789012" {
+			t.Errorf("GCPProjectParentFolderID = %q, want %q", cfg.GCPProjectParentFolderID, "123456789012")
+		}
+		if cfg.GCPProjectBillingAccountID != "012345-6789AB-CDEF01" {
+			t.Errorf("GCPProjectBillingAccountID = %q, want %q", cfg.GCPProjectBillingAccountID, "012345-6789AB-CDEF01")
+		}
+	})
+
+	t.Run("configmap disabled sentinel clears values", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectParentFolderID:   ConfigSentinelDisabled,
+				ConfigMapKeyGCPProjectBillingAccountID: ConfigSentinelDisabled,
+			},
+		}
+		cfg, err := ResolveConfig(configMap, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.GCPProjectParentFolderID != "" || cfg.GCPProjectBillingAccountID != "" {
+			t.Errorf("expected empty folder/billing for sentinel, got (%q, %q)", cfg.GCPProjectParentFolderID, cfg.GCPProjectBillingAccountID)
+		}
+	})
+
+	t.Run("explicit flags override configmap", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectParentFolderID:   "cm-folder-id",
+				ConfigMapKeyGCPProjectBillingAccountID: "cm-billing-id",
+			},
+		}
+		flags := RawFlags{
+			GCPProjectParentFolderID:   " flag-folder-id ",
+			GCPProjectBillingAccountID: " flag-billing-id ",
+			Explicit: map[string]bool{
+				"gcp-project-parent-folder-id":   true,
+				"gcp-project-billing-account-id": true,
+			},
+		}
+		cfg, err := ResolveConfig(configMap, flags)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.GCPProjectParentFolderID != "flag-folder-id" {
+			t.Errorf("GCPProjectParentFolderID = %q, want %q", cfg.GCPProjectParentFolderID, "flag-folder-id")
+		}
+		if cfg.GCPProjectBillingAccountID != "flag-billing-id" {
+			t.Errorf("GCPProjectBillingAccountID = %q, want %q", cfg.GCPProjectBillingAccountID, "flag-billing-id")
+		}
+	})
+
+	t.Run("explicit empty or sentinel flags clear configmap values", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectParentFolderID:   "cm-folder-id",
+				ConfigMapKeyGCPProjectBillingAccountID: "cm-billing-id",
+			},
+		}
+		for _, value := range []string{"", "   ", ConfigSentinelDisabled} {
+			flags := RawFlags{
+				GCPProjectParentFolderID:   value,
+				GCPProjectBillingAccountID: value,
+				Explicit: map[string]bool{
+					"gcp-project-parent-folder-id":   true,
+					"gcp-project-billing-account-id": true,
+				},
+			}
+			cfg, err := ResolveConfig(configMap, flags)
+			if err != nil {
+				t.Fatalf("unexpected error for flag value %q: %v", value, err)
+			}
+			if cfg.GCPProjectParentFolderID != "" || cfg.GCPProjectBillingAccountID != "" {
+				t.Errorf("expected empty folder/billing for flag value %q, got (%q, %q)", value, cfg.GCPProjectParentFolderID, cfg.GCPProjectBillingAccountID)
+			}
+		}
+	})
 }

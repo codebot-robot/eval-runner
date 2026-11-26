@@ -362,6 +362,10 @@ spec:
                         terminal phase (Completed, Failed).
                       format: date-time
                       type: string
+                    gcpProject:
+                      description: GCPProject records the leased GCP project ID currently
+                        assigned to this task while running.
+                      type: string
                     id:
                       description: ID is the unique identifier of the task (e.g. docs/readme_comprehension).
                       type: string
