@@ -44,8 +44,8 @@ import (
 	"github.com/gke-labs/eval-runner/pkg/sandboxclient"
 	"github.com/gke-labs/eval-runner/pkg/stats"
 	"github.com/gke-labs/eval-runner/pkg/version"
-	serviceportalclient "github.com/gke-labs/service-portals/pkg/client"
 	"github.com/go-logr/logr"
+	"golang.org/x/oauth2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -268,10 +268,22 @@ type RunReconciler struct {
 	GitHubClient github.Client
 
 	// ServicePortalClient binds egress policies to sandbox pods via the Service Portal Controller.
-	ServicePortalClient *serviceportalclient.Client
+	ServicePortalClient ServicePortalClient
+
+	// GCPProjectProvisioner provisions and deletes ephemeral per-task GCP projects.
+	// If nil, defaults to RESTGCPProjectProvisioner using GCPTokenSource or controller ADC/WIF credentials.
+	GCPProjectProvisioner GCPProjectProvisioner
+
+	// GCPTokenSource supplies OAuth2 tokens for GCP project provisioning and service portal injection.
+	// If nil, defaults to NewGCPTokenSource using Config.GCPWorkloadIdentityProvider or ADC.
+	GCPTokenSource oauth2.TokenSource
 
 	// InstanceID uniquely identifies this controller process/instance.
 	InstanceID string
+
+	gcpTokenSourceMu     sync.Mutex
+	cachedGCPTokenSource oauth2.TokenSource
+	cachedGCPWIFProvider string
 
 	boundPodsMu            sync.RWMutex
 	boundServicePortalPods map[types.UID]bool
@@ -705,12 +717,14 @@ func readFileWithTimeout(ctx context.Context, client sandboxclient.Client, path 
 type sandboxAgentExecutor struct {
 	client sandboxclient.Client
 	cwd    string
+	env    map[string]string
 }
 
 func (executor *sandboxAgentExecutor) Execute(ctx context.Context, command string) (agent.ExecuteResult, error) {
 	result, err := executeSandboxWithTimeout(ctx, executor.client, sandboxclient.ProcessConfig{
 		Command: []string{"bash", "-c", command},
 		Cwd:     executor.cwd,
+		Env:     executor.env,
 	})
 	if err != nil {
 		if result != nil {
@@ -1014,6 +1028,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 				return ctrl.Result{}, err
 			}
+			if err := r.deleteAllGCPProjectsForRun(ctx, &run); err != nil {
+				return ctrl.Result{}, err
+			}
 			controllerutil.RemoveFinalizer(&run, v1alpha1.FinalizerDiscoverySandbox)
 			if err := r.Update(ctx, &run); err != nil {
 				return ctrl.Result{}, err
@@ -1031,6 +1048,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		r.evictCachedManifest(run.Namespace + "/" + run.Name)
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete leftover sandboxes for terminal run", "sandbox", sandboxName)
+		}
+		if err := r.deleteAllGCPProjectsForRun(ctx, &run); err != nil {
+			logger.Error(err, "failed to delete leftover gcp projects for terminal run", "run", run.Name)
 		}
 		if err := r.reportBranchHeadTerminal(ctx, &run); err != nil {
 			logger.Error(err, "failed to report branch-head check run for terminal run", "run", run.Name)
@@ -2018,18 +2038,133 @@ func (r *RunReconciler) deleteAllSandboxesForRun(ctx context.Context, runNamespa
 	return nil
 }
 
-// isSandboxOnlyTask returns true if all resources declared by the task are of type sandbox.
-// A task mixing sandbox with another resource type also stays Failed.
-func isSandboxOnlyTask(task v1alpha1.ManifestTask) bool {
-	if len(task.Resources) == 0 {
-		return false
-	}
+// isSandboxTask returns true if the task declares sandbox and optionally gcp-project (and no other resource types).
+func isSandboxTask(task v1alpha1.ManifestTask) bool {
+	hasSandbox := false
 	for _, resource := range task.Resources {
-		if resource.Type != v1alpha1.ResourceTypeSandbox {
+		switch resource.Type {
+		case v1alpha1.ResourceTypeSandbox:
+			hasSandbox = true
+		case v1alpha1.ResourceTypeGCPProject:
+		default:
 			return false
 		}
 	}
-	return true
+	return hasSandbox
+}
+
+func taskRequiresGCPProject(task v1alpha1.ManifestTask) bool {
+	for _, resource := range task.Resources {
+		if resource.Type == v1alpha1.ResourceTypeGCPProject {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RunReconciler) validateGCPProjectConfig() (string, string, error) {
+	if r.ServicePortalClient == nil {
+		return "", "", errors.New("gcp-project resource requires service portal to be configured")
+	}
+	r.cfgMu.RLock()
+	parentFolderID := strings.TrimSpace(r.Config.GCPProjectParentFolderID)
+	billingAccountID := strings.TrimSpace(r.Config.GCPProjectBillingAccountID)
+	r.cfgMu.RUnlock()
+	if parentFolderID == "" || billingAccountID == "" {
+		return "", "", errors.New("gcp-project resource requires gcpProjectParentFolderID and gcpProjectBillingAccountID to be configured")
+	}
+	return parentFolderID, billingAccountID, nil
+}
+
+func (r *RunReconciler) gcpTokenSource(ctx context.Context) (oauth2.TokenSource, error) {
+	if r.GCPTokenSource != nil {
+		return r.GCPTokenSource, nil
+	}
+	r.cfgMu.RLock()
+	provider := strings.TrimSpace(r.Config.GCPWorkloadIdentityProvider)
+	r.cfgMu.RUnlock()
+
+	r.gcpTokenSourceMu.Lock()
+	defer r.gcpTokenSourceMu.Unlock()
+	if r.cachedGCPTokenSource != nil && r.cachedGCPWIFProvider == provider {
+		return r.cachedGCPTokenSource, nil
+	}
+	tokenSource, err := NewGCPTokenSource(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	r.cachedGCPTokenSource = tokenSource
+	r.cachedGCPWIFProvider = provider
+	return tokenSource, nil
+}
+
+func (r *RunReconciler) gcpProjectProvisioner(ctx context.Context) (GCPProjectProvisioner, error) {
+	if r.GCPProjectProvisioner != nil {
+		return r.GCPProjectProvisioner, nil
+	}
+	tokenSource, err := r.gcpTokenSource(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &RESTGCPProjectProvisioner{TokenSource: tokenSource}, nil
+}
+
+func (r *RunReconciler) cleanupTaskGCPProject(ctx context.Context, runName, taskID, projectID string) {
+	if err := r.deleteTaskGCPProject(ctx, runName, taskID, projectID); err != nil {
+		log.FromContext(ctx).V(1).Info("best-effort gcp project cleanup failed", "run", runName, "task", taskID, "gcpProject", projectID, "error", err)
+	}
+}
+
+func (r *RunReconciler) deleteTaskGCPProject(ctx context.Context, runName, taskID, projectID string) error {
+	if projectID == "" {
+		return nil
+	}
+	provisioner, err := r.gcpProjectProvisioner(ctx)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to create gcp project provisioner for cleanup", "run", runName, "task", taskID, "gcpProject", projectID)
+		return err
+	}
+	if err := provisioner.DeleteProject(ctx, projectID); err != nil {
+		log.FromContext(ctx).Error(err, "failed to delete ephemeral gcp project", "run", runName, "task", taskID, "gcpProject", projectID)
+		return err
+	}
+	return nil
+}
+
+func (r *RunReconciler) deleteAllGCPProjectsForRun(ctx context.Context, run *v1alpha1.Run) error {
+	var firstErr error
+	for _, task := range run.Status.Tasks {
+		if task.GCPProject == "" {
+			continue
+		}
+		if err := r.deleteTaskGCPProject(ctx, run.Name, task.ID, task.GCPProject); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func collectTaskGCPProjects(tasks []v1alpha1.TaskStatus) map[string]string {
+	var projects map[string]string
+	for _, task := range tasks {
+		if task.GCPProject == "" {
+			continue
+		}
+		if projects == nil {
+			projects = make(map[string]string)
+		}
+		projects[task.ID] = task.GCPProject
+	}
+	return projects
+}
+
+func taskGCPProject(run *v1alpha1.Run, taskID string) string {
+	for _, task := range run.Status.Tasks {
+		if task.ID == taskID {
+			return task.GCPProject
+		}
+	}
+	return ""
 }
 
 // validateTaskTimeoutSeconds validates that the task's timeoutSeconds is within the allowed range [1, 7200].
@@ -2040,6 +2175,54 @@ func validateTaskTimeoutSeconds(task v1alpha1.ManifestTask) error {
 		}
 	}
 	return nil
+}
+
+func (r *RunReconciler) initializeTaskStatus(task v1alpha1.ManifestTask, effRange *v1alpha1.SampleRange, planned int) v1alpha1.TaskStatus {
+	cohort := task.Cohort
+	if cohort == "" {
+		cohort = v1alpha1.DefaultCohort
+	}
+	failTask := func(message string) v1alpha1.TaskStatus {
+		return v1alpha1.TaskStatus{
+			ID:             task.ID,
+			Cohort:         cohort,
+			Phase:          v1alpha1.TaskPhaseFailed,
+			Message:        message,
+			SampleRange:    effRange,
+			SamplesPlanned: planned,
+		}
+	}
+	if err := discovery.ValidateTaskAgent(task); err != nil {
+		return failTask(err.Error())
+	}
+	if len(task.Resources) > 0 && !isSandboxTask(task) {
+		return failTask("resources not supported yet")
+	}
+	var taskResources *v1alpha1.TaskResources
+	if isSandboxTask(task) {
+		if err := validateTaskTimeoutSeconds(task); err != nil {
+			return failTask(err.Error())
+		}
+		if err := discovery.ValidateTaskResources(task); err != nil {
+			return failTask(err.Error())
+		}
+		if taskRequiresGCPProject(task) {
+			if _, _, err := r.validateGCPProjectConfig(); err != nil {
+				return failTask(err.Error())
+			}
+		}
+		taskResources = &v1alpha1.TaskResources{
+			Limits: discovery.TaskResourceLimits(task),
+		}
+	}
+	return v1alpha1.TaskStatus{
+		ID:             task.ID,
+		Cohort:         cohort,
+		Phase:          v1alpha1.TaskPhasePending,
+		SampleRange:    effRange,
+		SamplesPlanned: planned,
+		Resources:      taskResources,
+	}
 }
 
 func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha1.Manifest) []v1alpha1.TaskStatus {
@@ -2056,14 +2239,10 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 	if len(spec.Tasks) > 0 {
 		for _, taskID := range spec.Tasks {
 			task, exists := manifestMap[taskID]
-			cohort := task.Cohort
-			if cohort == "" {
-				cohort = v1alpha1.DefaultCohort
-			}
 			if !exists {
 				statuses = append(statuses, v1alpha1.TaskStatus{
 					ID:             taskID,
-					Cohort:         cohort,
+					Cohort:         v1alpha1.DefaultCohort,
 					Phase:          v1alpha1.TaskPhaseFailed,
 					Message:        "task not found in manifest",
 					SampleRange:    effRange,
@@ -2071,142 +2250,11 @@ func (r *RunReconciler) initializeTasks(spec v1alpha1.RunSpec, manifest *v1alpha
 				})
 				continue
 			}
-
-			if err := discovery.ValidateTaskAgent(task); err != nil {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:             taskID,
-					Cohort:         cohort,
-					Phase:          v1alpha1.TaskPhaseFailed,
-					Message:        err.Error(),
-					SampleRange:    effRange,
-					SamplesPlanned: planned,
-				})
-				continue
-			}
-
-			if len(task.Resources) > 0 && !isSandboxOnlyTask(task) {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:             taskID,
-					Cohort:         cohort,
-					Phase:          v1alpha1.TaskPhaseFailed,
-					Message:        "resources not supported yet",
-					SampleRange:    effRange,
-					SamplesPlanned: planned,
-				})
-				continue
-			}
-
-			if isSandboxOnlyTask(task) {
-				if err := validateTaskTimeoutSeconds(task); err != nil {
-					statuses = append(statuses, v1alpha1.TaskStatus{
-						ID:             taskID,
-						Cohort:         cohort,
-						Phase:          v1alpha1.TaskPhaseFailed,
-						Message:        err.Error(),
-						SampleRange:    effRange,
-						SamplesPlanned: planned,
-					})
-					continue
-				}
-				if err := discovery.ValidateTaskResources(task); err != nil {
-					statuses = append(statuses, v1alpha1.TaskStatus{
-						ID:             taskID,
-						Cohort:         cohort,
-						Phase:          v1alpha1.TaskPhaseFailed,
-						Message:        err.Error(),
-						SampleRange:    effRange,
-						SamplesPlanned: planned,
-					})
-					continue
-				}
-			}
-
-			var taskResources *v1alpha1.TaskResources
-			if isSandboxOnlyTask(task) {
-				taskResources = &v1alpha1.TaskResources{
-					Limits: discovery.TaskResourceLimits(task),
-				}
-			}
-
-			statuses = append(statuses, v1alpha1.TaskStatus{
-				ID:             taskID,
-				Cohort:         cohort,
-				Phase:          v1alpha1.TaskPhasePending,
-				SampleRange:    effRange,
-				SamplesPlanned: planned,
-				Resources:      taskResources,
-			})
+			statuses = append(statuses, r.initializeTaskStatus(task, effRange, planned))
 		}
 	} else if manifest != nil {
 		for _, task := range manifest.Tasks {
-			cohort := task.Cohort
-			if cohort == "" {
-				cohort = v1alpha1.DefaultCohort
-			}
-			if err := discovery.ValidateTaskAgent(task); err != nil {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:             task.ID,
-					Cohort:         cohort,
-					Phase:          v1alpha1.TaskPhaseFailed,
-					Message:        err.Error(),
-					SampleRange:    effRange,
-					SamplesPlanned: planned,
-				})
-				continue
-			}
-
-			if len(task.Resources) > 0 && !isSandboxOnlyTask(task) {
-				statuses = append(statuses, v1alpha1.TaskStatus{
-					ID:             task.ID,
-					Cohort:         cohort,
-					Phase:          v1alpha1.TaskPhaseFailed,
-					Message:        "resources not supported yet",
-					SampleRange:    effRange,
-					SamplesPlanned: planned,
-				})
-				continue
-			}
-
-			if isSandboxOnlyTask(task) {
-				if err := validateTaskTimeoutSeconds(task); err != nil {
-					statuses = append(statuses, v1alpha1.TaskStatus{
-						ID:             task.ID,
-						Cohort:         cohort,
-						Phase:          v1alpha1.TaskPhaseFailed,
-						Message:        err.Error(),
-						SampleRange:    effRange,
-						SamplesPlanned: planned,
-					})
-					continue
-				}
-				if err := discovery.ValidateTaskResources(task); err != nil {
-					statuses = append(statuses, v1alpha1.TaskStatus{
-						ID:             task.ID,
-						Cohort:         cohort,
-						Phase:          v1alpha1.TaskPhaseFailed,
-						Message:        err.Error(),
-						SampleRange:    effRange,
-						SamplesPlanned: planned,
-					})
-					continue
-				}
-			}
-
-			var taskResources *v1alpha1.TaskResources
-			if isSandboxOnlyTask(task) {
-				taskResources = &v1alpha1.TaskResources{
-					Limits: discovery.TaskResourceLimits(task),
-				}
-			}
-
-			statuses = append(statuses, v1alpha1.TaskStatus{
-				ID:             task.ID,
-				Cohort:         cohort,
-				Phase:          v1alpha1.TaskPhasePending,
-				SampleRange:    effRange,
-				SamplesPlanned: planned,
-				Resources:      taskResources,
-			})
+			statuses = append(statuses, r.initializeTaskStatus(task, effRange, planned))
 		}
 	}
 	return statuses
@@ -2217,11 +2265,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 
 	// 1. Check execution deadline
 	if r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline) {
-		r.evictCachedManifest(run.Namespace + "/" + run.Name)
-		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
-			logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
-		}
-		logger.Info("Execution deadline exceeded", "run", run.Name)
+		r.cleanupExecutionDeadlineExceeded(ctx, run)
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
 			r.markDeadlineCutOff(status, generation, nil)
 		})
@@ -2251,6 +2295,9 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		r.evictCachedManifest(run.Namespace + "/" + run.Name)
 		if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 			logger.Error(err, "failed to delete sandboxes on run completion", "run", run.Name)
+		}
+		if err := r.deleteAllGCPProjectsForRun(ctx, run); err != nil {
+			logger.Error(err, "failed to delete gcp projects on run completion", "run", run.Name)
 		}
 		if completedCount > 0 {
 			logger.Info("Tasks finished with at least one completed; marking Run as Completed", "run", run.Name, "completed", completedCount)
@@ -2412,6 +2459,11 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				applyPendingTaskStartOutcomes(status, startOutcomes, statusNow)
 			})
 			if err != nil {
+				for taskID, outcome := range startOutcomes {
+					if outcome.createdGCPProject {
+						r.cleanupTaskGCPProject(ctx, run.Name, taskID, outcome.gcpProject)
+					}
+				}
 				return ctrl.Result{}, err
 			}
 			applyPendingTaskStartOutcomes(&run.Status, startOutcomes, statusNow)
@@ -2514,6 +2566,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 
 	if hasStatusUpdates {
+		gcpProjectsByTask := collectTaskGCPProjects(run.Status.Tasks)
 		statusNow := metav1.NewTime(r.now())
 		err := r.updateRunStatus(ctx, req.NamespacedName, func(status *v1alpha1.RunStatus, generation int64) {
 			applyRunningTaskDecisions(status, decisions, statusNow)
@@ -2522,7 +2575,7 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 			return ctrl.Result{}, err
 		}
 		applyRunningTaskDecisions(&run.Status, decisions, statusNow)
-		r.cleanupDecidedTaskSandboxes(ctx, run, decisions, sandboxesByTask)
+		r.cleanupDecidedTaskSandboxes(ctx, run, decisions, sandboxesByTask, gcpProjectsByTask)
 	}
 
 	if len(readyTasks) == 0 && len(asyncTaskResults) == 0 {
@@ -2589,12 +2642,14 @@ type pendingTaskDecision struct {
 }
 
 type pendingTaskStartOutcome struct {
-	started          bool
-	expectedRestarts int
-	failureMessage   string
-	sandboxOnly      bool
-	timeoutSeconds   int
-	resources        *v1alpha1.TaskResources
+	started           bool
+	expectedRestarts  int
+	failureMessage    string
+	sandboxOnly       bool
+	timeoutSeconds    int
+	resources         *v1alpha1.TaskResources
+	gcpProject        string
+	createdGCPProject bool
 }
 
 func (r *RunReconciler) observePendingTasks(
@@ -2750,32 +2805,74 @@ func (r *RunReconciler) startPendingTask(
 		}
 	}
 
+	var gcpProject string
+	createdGCPProject := false
+	if manifestTask != nil && taskRequiresGCPProject(*manifestTask) {
+		parentFolderID, billingAccountID, err := r.validateGCPProjectConfig()
+		if err != nil {
+			logger.Info("Rejecting gcp-project task launch", "task", taskID, "message", err.Error())
+			return pendingTaskStartOutcome{failureMessage: err.Error()}
+		}
+		if task.GCPProject != "" {
+			gcpProject = task.GCPProject
+		} else {
+			provisioner, err := r.gcpProjectProvisioner(ctx)
+			if err != nil {
+				logger.Error(err, "Failed to create gcp project provisioner", "task", taskID)
+				return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to initialize gcp project provisioner: %v", err)}
+			}
+			projectID, err := generateGCPProjectID()
+			if err != nil {
+				return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to generate gcp project id: %v", err)}
+			}
+			createContext, createCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+			err = provisioner.CreateProject(createContext, parentFolderID, billingAccountID, projectID)
+			createCancel()
+			if err != nil {
+				logger.Error(err, "Failed to provision ephemeral gcp project", "task", taskID, "gcpProject", projectID)
+				return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to provision gcp project: %v", err)}
+			}
+			gcpProject = projectID
+			createdGCPProject = true
+		}
+	}
+	cleanupCreatedProject := func() {
+		if createdGCPProject {
+			r.cleanupTaskGCPProject(ctx, run.Name, taskID, gcpProject)
+		}
+	}
+
 	sandboxName := discovery.TaskSandboxNameForRun(run.Name, taskID)
 	sandboxKey := types.NamespacedName{Namespace: r.sandboxNamespace(), Name: sandboxName}
 	token, err := r.ensureTaskAuthToken(ctx, run, taskID, sandboxKey)
 	if err != nil {
+		cleanupCreatedProject()
 		logger.Error(err, "Failed to ensure task auth token", "task", taskID)
 		return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to ensure task auth token: %v", err)}
 	}
 
 	// Create server cert Secret before Sandbox so it exists when pod starts.
 	if _, err := r.pki().EnsureServerCertSecret(ctx, sandboxName, r.executionDeadline()+time.Hour); err != nil {
+		cleanupCreatedProject()
 		logger.Error(err, "Failed to ensure task server cert secret", "task", taskID)
 		return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to ensure server cert secret: %v", err)}
 	}
 
 	desiredSandbox := r.buildPendingTaskSandbox(run, task, manifestTask, sandboxName, token)
 	if err := r.Create(ctx, desiredSandbox); err != nil && !apierrors.IsAlreadyExists(err) {
+		cleanupCreatedProject()
 		logger.Error(err, "Failed to create task sandbox", "task", taskID)
 		return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to create sandbox: %v", err)}
 	}
 
 	sandboxesByTask[taskID] = *desiredSandbox
 	outcome := pendingTaskStartOutcome{
-		started:          true,
-		expectedRestarts: task.Restarts,
+		started:           true,
+		expectedRestarts:  task.Restarts,
+		gcpProject:        gcpProject,
+		createdGCPProject: createdGCPProject,
 	}
-	if manifestTask != nil && isSandboxOnlyTask(*manifestTask) {
+	if manifestTask != nil && isSandboxTask(*manifestTask) {
 		outcome.sandboxOnly = true
 		outcome.timeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(*manifestTask, run.Status.ExecutionDeadline)
 		outcome.resources = &v1alpha1.TaskResources{
@@ -2793,12 +2890,12 @@ func (r *RunReconciler) buildPendingTaskSandbox(
 	token string,
 ) *sandboxv1beta1.Sandbox {
 	taskImage := ""
-	isSandboxTask := false
+	sandboxTask := false
 	var taskLimits corev1.ResourceList
 	if manifestTask != nil {
 		taskImage = manifestTask.Image
-		isSandboxTask = isSandboxOnlyTask(*manifestTask)
-		if isSandboxTask {
+		sandboxTask = isSandboxTask(*manifestTask)
+		if sandboxTask {
 			taskLimits = discovery.TaskResourceLimits(*manifestTask)
 		}
 	}
@@ -2812,9 +2909,9 @@ func (r *RunReconciler) buildPendingTaskSandbox(
 		ServerCertSecret:       pki.ServerSecretName(sandboxName),
 		CAConfigMap:            pki.DefaultCAConfigMapName,
 		SandboxdImage:          r.sandboxdImage(),
-		CloneRepo:              isSandboxTask && run.Spec.Repo.URL != "",
+		CloneRepo:              sandboxTask && run.Spec.Repo.URL != "",
 		StepTimeoutSeconds:     int(r.executionStepTimeout().Seconds()),
-		SandboxTask:            isSandboxTask,
+		SandboxTask:            sandboxTask,
 		Limits:                 taskLimits,
 		ServicePortalIntercept: r.ServicePortalClient != nil,
 	})
@@ -2844,6 +2941,9 @@ func applyPendingTaskStartOutcomes(
 			if outcome.sandboxOnly {
 				task.TimeoutSeconds = outcome.timeoutSeconds
 				task.Resources = outcome.resources.DeepCopy()
+			}
+			if outcome.gcpProject != "" {
+				task.GCPProject = outcome.gcpProject
 			}
 		}
 	}
@@ -3343,6 +3443,7 @@ func (r *RunReconciler) cleanupDecidedTaskSandboxes(
 	run *v1alpha1.Run,
 	decisions map[string]runningTaskDecision,
 	sandboxesByTask map[string]sandboxv1beta1.Sandbox,
+	gcpProjectsByTask map[string]string,
 ) {
 	logger := log.FromContext(ctx)
 	for _, task := range run.Status.Tasks {
@@ -3361,6 +3462,9 @@ func (r *RunReconciler) cleanupDecidedTaskSandboxes(
 			}
 		}
 		r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, task.ID, sandboxKey)
+		if projectID := gcpProjectsByTask[task.ID]; projectID != "" {
+			r.cleanupTaskGCPProject(ctx, run.Name, task.ID, projectID)
+		}
 	}
 }
 
@@ -3571,6 +3675,9 @@ func (r *RunReconciler) cleanupExecutionDeadlineExceeded(ctx context.Context, ru
 	if err := r.deleteAllSandboxesForRun(ctx, run.Namespace, run.Name); err != nil {
 		logger.Error(err, "failed to delete sandboxes on execution deadline", "run", run.Name)
 	}
+	if err := r.deleteAllGCPProjectsForRun(ctx, run); err != nil {
+		logger.Error(err, "failed to delete gcp projects on execution deadline", "run", run.Name)
+	}
 	logger.Info("Execution deadline exceeded", "run", run.Name)
 }
 
@@ -3591,6 +3698,9 @@ func (r *RunReconciler) cleanupExecutedTaskSandboxes(
 				logger.Error(err, "failed to delete task sandbox after execution", "task", task.ID)
 			}
 			r.cleanupTaskAuthToken(ctx, run.Namespace, run.Name, task.ID, sandboxKey)
+		}
+		if task.GCPProject != "" {
+			r.cleanupTaskGCPProject(ctx, run.Name, task.ID, task.GCPProject)
 		}
 	}
 }
@@ -3927,7 +4037,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		}
 	}()
 
-	if isSandboxOnlyTask(*targetTask) {
+	if isSandboxTask(*targetTask) {
 		return r.executeSandboxTask(ctx, run, taskID, sbClient, *targetTask, effRange, startTime)
 	}
 
@@ -4321,6 +4431,7 @@ func (r *RunReconciler) executeAgentPhase(
 		return agentPhaseOutcome{}, fail(err.Error())
 	}
 
+	taskEnv := gcpProjectTaskEnv(taskGCPProject(run, taskID))
 	if len(targetTask.Agent.PrepareCommand) > 0 {
 		prepareTimeout := r.executionStepTimeout()
 		if targetTask.TimeoutSeconds != nil && *targetTask.TimeoutSeconds > 0 {
@@ -4330,6 +4441,7 @@ func (r *RunReconciler) executeAgentPhase(
 		prepareResult, prepareError := executeSandboxWithTimeout(prepareContext, sbClient, sandboxclient.ProcessConfig{
 			Command: targetTask.Agent.PrepareCommand,
 			Cwd:     cwd,
+			Env:     taskEnv,
 		})
 		prepareCancel()
 		if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "agent prepare command", prepareContext, prepareResult, prepareError, taskID, effRange); failed {
@@ -4362,7 +4474,7 @@ func (r *RunReconciler) executeAgentPhase(
 		agentTimeout = time.Duration(*targetTask.Agent.TimeoutSeconds) * time.Second
 	}
 	agentContext, agentCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, agentTimeout)
-	executor := &sandboxAgentExecutor{client: sbClient, cwd: cwd}
+	executor := &sandboxAgentExecutor{client: sbClient, cwd: cwd, env: taskEnv}
 	agentStartTime := r.now()
 	agentResult, agentError := agent.Run(agentContext, agentModel, executor, agent.Options{
 		Instruction: instruction,
@@ -4602,6 +4714,7 @@ func (r *RunReconciler) executeSandboxTask(
 	commandResult, commandErr := executeSandboxWithTimeout(commandContext, sbClient, sandboxclient.ProcessConfig{
 		Command: targetTask.Command,
 		Cwd:     cwd,
+		Env:     gcpProjectTaskEnv(taskGCPProject(run, taskID)),
 	})
 	commandCancel()
 	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
@@ -4755,7 +4868,7 @@ func (r *RunReconciler) finalizeSandboxTaskResult(ctx context.Context, run *v1al
 }
 
 func isCommandOnlySandboxTask(task *v1alpha1.ManifestTask) bool {
-	return task != nil && isSandboxOnlyTask(*task) && len(task.Command) > 0 && task.Agent == nil
+	return task != nil && isSandboxTask(*task) && len(task.Command) > 0 && task.Agent == nil
 }
 
 func asyncTaskExecutionID(runName string, task v1alpha1.TaskStatus) string {
@@ -4887,7 +5000,11 @@ func (r *RunReconciler) reconcileAsyncSandboxTask(ctx context.Context, run *v1al
 		}
 		executionID := asyncTaskExecutionID(run.Name, task)
 		startContext, startCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-		startErr := sandboxClient.StartAsync(startContext, executionID, sandboxclient.ProcessConfig{Command: targetTask.Command, Cwd: cwd})
+		startErr := sandboxClient.StartAsync(startContext, executionID, sandboxclient.ProcessConfig{
+			Command: targetTask.Command,
+			Cwd:     cwd,
+			Env:     gcpProjectTaskEnv(task.GCPProject),
+		})
 		startCancel()
 		if startErr != nil && !errors.Is(startErr, sandboxclient.ErrAsyncTaskAlreadyExists) {
 			return handleRPCError(fmt.Sprintf("failed to start async task %q", executionID), startErr)
