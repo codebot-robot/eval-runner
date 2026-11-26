@@ -2451,13 +2451,33 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 	}
 
 	var readyTasks []readyTaskItem
-	hasStatusUpdates := false
-	waitingInGracePeriod := false
+	var asyncTaskResults map[string]taskExecutionResult
+	hasStatusUpdates, waitingInGracePeriod, waitingForPod, pollingAsync := false, false, false, false
 	var minGraceRemaining time.Duration
 	for _, task := range run.Status.Tasks {
 		decision, ok := decisions[task.ID]
 		if !ok {
 			continue
+		}
+		if decision.action == runningTaskActionExecute {
+			if manifestTask := findManifestTask(manifest, task.ID); isCommandOnlySandboxTask(manifestTask) {
+				asyncDecision, asyncResult := r.reconcileAsyncSandboxTask(ctx, run, task, *manifestTask, decision.sandbox, decision.pod, maxMessageBytes)
+				if asyncResult != nil {
+					if asyncTaskResults == nil {
+						asyncTaskResults = make(map[string]taskExecutionResult)
+					}
+					asyncTaskResults[task.ID] = *asyncResult
+					delete(decisions, task.ID)
+					continue
+				}
+				if asyncDecision == nil {
+					pollingAsync = true
+					delete(decisions, task.ID)
+					continue
+				}
+				decision = *asyncDecision
+				decisions[task.ID] = decision
+			}
 		}
 		switch decision.action {
 		case runningTaskActionWait:
@@ -2467,6 +2487,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				if minGraceRemaining == 0 || decision.graceRemaining < minGraceRemaining {
 					minGraceRemaining = decision.graceRemaining
 				}
+			} else {
+				waitingForPod = true
 			}
 		case runningTaskActionExecute:
 			readyTasks = append(readyTasks, readyTaskItem{
@@ -2474,6 +2496,8 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 				sandbox: *decision.sandbox,
 				pod:     *decision.pod,
 			})
+		case runningTaskActionRecordExecution:
+			hasStatusUpdates = true
 		case runningTaskActionRescue:
 			logger.Info("restart rescue", "task", task.ID, "run", run.Name, "samples", rescuedSampleCount(task, decision.rescued))
 			hasStatusUpdates = true
@@ -2501,22 +2525,35 @@ func (r *RunReconciler) reconcileRunning(ctx context.Context, req reconcile.Requ
 		r.cleanupDecidedTaskSandboxes(ctx, run, decisions, sandboxesByTask)
 	}
 
-	if len(readyTasks) == 0 {
+	if len(readyTasks) == 0 && len(asyncTaskResults) == 0 {
 		if hasStatusUpdates {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		if waitingForOldSandbox {
 			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 		}
+		if pollingAsync && !waitingInGracePeriod && !waitingForPod {
+			return ctrl.Result{RequeueAfter: r.pollProgressInterval()}, nil
+		}
 		requeueAfter := 1 * time.Second
 		if waitingInGracePeriod && minGraceRemaining > 0 && minGraceRemaining < requeueAfter {
 			requeueAfter = minGraceRemaining
+		}
+		if pollingAsync && r.pollProgressInterval() < requeueAfter {
+			requeueAfter = r.pollProgressInterval()
 		}
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	// Execute ready tasks, decide outcomes, and apply status updates before cleanup.
-	taskResults := r.executeReadyTasks(ctx, run, readyTasks)
+	taskResults := asyncTaskResults
+	if len(readyTasks) > 0 {
+		syncResults := r.executeReadyTasks(ctx, run, readyTasks)
+		for taskID, result := range taskResults {
+			syncResults[taskID] = result
+		}
+		taskResults = syncResults
+	}
 	executionDecisions := decideExecutionResults(run.Status.Tasks, taskResults)
 	deadlineExceeded := r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline)
 
@@ -2827,6 +2864,7 @@ const (
 	runningTaskActionWait              runningTaskAction = "wait"
 	runningTaskActionBindServicePortal runningTaskAction = "bind-service-portal"
 	runningTaskActionExecute           runningTaskAction = "execute"
+	runningTaskActionRecordExecution   runningTaskAction = "record-execution"
 	runningTaskActionRestart           runningTaskAction = "restart"
 	runningTaskActionRescue            runningTaskAction = "rescue"
 	runningTaskActionFail              runningTaskAction = "fail"
@@ -2845,6 +2883,7 @@ type runningTaskObservation struct {
 
 type runningTaskDecision struct {
 	action                 runningTaskAction
+	executionID            string
 	message                string
 	restartReason          string
 	countsAsFailure        bool
@@ -2873,6 +2912,10 @@ func isOldTaskSandbox(sandbox *sandboxv1beta1.Sandbox, controllerInstance string
 }
 
 func (decision runningTaskDecision) updatesStatus() bool {
+	return decision.cleansUpSandbox() || decision.action == runningTaskActionRecordExecution
+}
+
+func (decision runningTaskDecision) cleansUpSandbox() bool {
 	switch decision.action {
 	case runningTaskActionFail, runningTaskActionRescue, runningTaskActionRestart:
 		return true
@@ -2921,7 +2964,7 @@ func (r *RunReconciler) observeRunningTask(
 	}
 
 	observation.sandbox = sandbox
-	if sandbox.Annotations[discovery.AnnotationControllerInstance] != r.InstanceID {
+	if task.ExecutionID == "" && sandbox.Annotations[discovery.AnnotationControllerInstance] != r.InstanceID {
 		observation.sandboxDirty = true
 		rescued, probeErr := r.probeTaskRescue(ctx, run, task)
 		if probeErr != nil {
@@ -3180,10 +3223,13 @@ func applyRunningTaskDecisions(status *v1alpha1.RunStatus, decisions map[string]
 
 func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDecision, now metav1.Time) {
 	switch decision.action {
+	case runningTaskActionRecordExecution:
+		task.ExecutionID = decision.executionID
 	case runningTaskActionFail:
 		task.Phase = v1alpha1.TaskPhaseFailed
 		task.Message = decision.message
 		task.FinishedAt = &now
+		task.ExecutionID = ""
 		if decision.countsAsFailure {
 			task.FailureAttempts++
 		}
@@ -3198,6 +3244,7 @@ func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDec
 		task.RestartReason = decision.restartReason
 		task.Message = ""
 		task.StartedAt = nil
+		task.ExecutionID = ""
 		task.SamplesDone = 0
 		task.LastProgressAt = nil
 	}
@@ -3205,6 +3252,7 @@ func applyRunningTaskDecision(task *v1alpha1.TaskStatus, decision runningTaskDec
 
 func applyRescuedTaskStatus(task *v1alpha1.TaskStatus, rescued *rescuedTaskInfo) {
 	task.Phase = v1alpha1.TaskPhaseCompleted
+	task.ExecutionID = ""
 	if rescued.summary != nil && rescued.summary.FinishedAt != nil {
 		finishedAt := metav1.NewTime(*rescued.summary.FinishedAt)
 		task.FinishedAt = &finishedAt
@@ -3295,7 +3343,7 @@ func (r *RunReconciler) cleanupDecidedTaskSandboxes(
 	logger := log.FromContext(ctx)
 	for _, task := range run.Status.Tasks {
 		decision, ok := decisions[task.ID]
-		if !ok || !decision.updatesStatus() {
+		if !ok || !decision.cleansUpSandbox() {
 			continue
 		}
 		if decision.unmarkServicePortalPod && decision.pod != nil {
@@ -3448,6 +3496,9 @@ func applyTaskExecutionResult(
 	now metav1.Time,
 ) {
 	task.Phase = result.phase
+	if result.phase == v1alpha1.TaskPhaseCompleted || result.phase == v1alpha1.TaskPhaseFailed || result.phase == v1alpha1.TaskPhaseSkipped {
+		task.ExecutionID = ""
+	}
 	if result.cohort != "" {
 		task.Cohort = result.cohort
 	} else if task.Cohort == "" {
@@ -3620,6 +3671,7 @@ func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generatio
 		task := &status.Tasks[i]
 		if res, ok := taskResults[task.ID]; ok && res.cutOff {
 			task.Phase = v1alpha1.TaskPhaseFailed
+			task.ExecutionID = ""
 			if task.FinishedAt == nil {
 				task.FinishedAt = &now
 			}
@@ -3631,6 +3683,7 @@ func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generatio
 			runningCutOffCount++
 		} else if task.Phase == v1alpha1.TaskPhaseRunning {
 			task.Phase = v1alpha1.TaskPhaseFailed
+			task.ExecutionID = ""
 			task.FinishedAt = &now
 			var elapsed time.Duration
 			if task.StartedAt != nil {
@@ -3640,6 +3693,7 @@ func (r *RunReconciler) markDeadlineCutOff(status *v1alpha1.RunStatus, generatio
 			runningCutOffCount++
 		} else if task.Phase == v1alpha1.TaskPhasePending {
 			task.Phase = v1alpha1.TaskPhaseFailed
+			task.ExecutionID = ""
 			task.FinishedAt = &now
 			task.Message = "cut off by Run execution deadline (not started)"
 			pendingCutOffCount++
@@ -3850,40 +3904,13 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		defer cancel()
 	}
 
-	sbKey := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
-	authToken, tokenErr := r.ensureTaskAuthToken(execCtx, run, taskID, sbKey)
-	if tokenErr != nil {
+	sbClient, err := r.newTaskSandboxClient(execCtx, run, taskID, sb, pod)
+	if err != nil {
 		return taskExecutionResult{
 			taskID:      taskID,
 			phase:       v1alpha1.TaskPhaseFailed,
-			message:     fmt.Sprintf("failed to get task auth token: %v", tokenErr),
+			message:     err.Error(),
 			sampleRange: effRange,
-		}
-	}
-
-	var sbClient sandboxclient.Client
-	var err error
-	if r.SandboxClient != nil {
-		sbClient = r.SandboxClient
-	} else {
-		var opts []sandboxclient.Option
-		if authToken != "" {
-			opts = append(opts, sandboxclient.WithAuthToken(authToken))
-		}
-		if tlsConfig := r.pki().ClientTLSConfig(sb.Name, sb.Namespace); tlsConfig != nil {
-			opts = append(opts, sandboxclient.WithTLSConfig(tlsConfig))
-		}
-		factory := r.ClientFactory
-		if factory == nil {
-			factory = sandboxclient.DefaultFactory()
-		}
-		sbClient, err = factory.NewClient(pod.Status.PodIP, opts...)
-	}
-	if err != nil {
-		return taskExecutionResult{
-			taskID:  taskID,
-			phase:   v1alpha1.TaskPhaseFailed,
-			message: fmt.Sprintf("failed to create sandbox client: %v", err),
 		}
 	}
 	defer func() {
@@ -4576,6 +4603,12 @@ func (r *RunReconciler) executeSandboxTask(
 		return failedResult
 	}
 
+	return r.finalizeSandboxTaskResult(ctx, run, taskID, sbClient, effRange, startTime, effectiveTimeoutSeconds, effectiveResources, agentOutcome, tokensAndCost)
+}
+
+func (r *RunReconciler) finalizeSandboxTaskResult(ctx context.Context, run *v1alpha1.Run, taskID string, sbClient sandboxclient.Client, effRange *v1alpha1.SampleRange, startTime time.Time, effectiveTimeoutSeconds int, effectiveResources *v1alpha1.TaskResources, agentOutcome agentPhaseOutcome, tokensAndCost *taskTokensAndCost) taskExecutionResult {
+	logger := log.FromContext(ctx).WithValues("task", taskID, "run", run.Name)
+
 	// Step 2: Read /out/results.json via sandboxd ReadFile
 	readContext, readCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
 	resultsBytes, readErr := readFileWithTimeout(readContext, sbClient, "/out/results.json")
@@ -4711,6 +4744,179 @@ func (r *RunReconciler) executeSandboxTask(
 	}
 	applyTokensAndCost(&completedResult, tokensAndCost)
 	return completedResult
+}
+
+func isCommandOnlySandboxTask(task *v1alpha1.ManifestTask) bool {
+	return task != nil && isSandboxOnlyTask(*task) && len(task.Command) > 0 && task.Agent == nil
+}
+
+func asyncTaskExecutionID(runName string, task v1alpha1.TaskStatus) string {
+	return fmt.Sprintf("%s-attempt-%d", discovery.TaskSandboxNameForRun(runName, task.ID), task.Restarts)
+}
+
+func (r *RunReconciler) newTaskSandboxClient(ctx context.Context, run *v1alpha1.Run, taskID string, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (sandboxclient.Client, error) {
+	authToken, err := r.ensureTaskAuthToken(ctx, run, taskID, types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get task auth token: %w", err)
+	}
+	if r.SandboxClient != nil {
+		return r.SandboxClient, nil
+	}
+	var options []sandboxclient.Option
+	if authToken != "" {
+		options = append(options, sandboxclient.WithAuthToken(authToken))
+	}
+	if tlsConfig := r.pki().ClientTLSConfig(sandbox.Name, sandbox.Namespace); tlsConfig != nil {
+		options = append(options, sandboxclient.WithTLSConfig(tlsConfig))
+	}
+	factory := r.ClientFactory
+	if factory == nil {
+		factory = sandboxclient.DefaultFactory()
+	}
+	sandboxClient, err := factory.NewClient(pod.Status.PodIP, options...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sandbox client: %w", err)
+	}
+	return sandboxClient, nil
+}
+
+func (r *RunReconciler) reconcileAsyncSandboxTask(ctx context.Context, run *v1alpha1.Run, task v1alpha1.TaskStatus, targetTask v1alpha1.ManifestTask, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, maxMessageBytes int) (*runningTaskDecision, *taskExecutionResult) {
+	logger := log.FromContext(ctx).WithValues("task", task.ID, "run", run.Name)
+	effectiveRange := EffectiveSampleRange(run.Spec)
+	cohort := targetTask.Cohort
+	if cohort == "" {
+		cohort = v1alpha1.DefaultCohort
+	}
+	effectiveTimeoutSeconds := task.TimeoutSeconds
+	if effectiveTimeoutSeconds <= 0 {
+		effectiveTimeoutSeconds = r.effectiveTaskCommandTimeoutSeconds(targetTask, run.Status.ExecutionDeadline)
+	}
+	var effectiveResources *v1alpha1.TaskResources
+
+	finishResult := func(result taskExecutionResult) (*runningTaskDecision, *taskExecutionResult) {
+		result.taskID, result.cohort = task.ID, cohort
+		if result.timeoutSeconds == 0 {
+			result.timeoutSeconds = effectiveTimeoutSeconds
+		}
+		if result.resources == nil {
+			result.resources = effectiveResources
+		}
+		if result.sampleRange == nil {
+			result.sampleRange = effectiveRange
+		}
+		if result.finishedAt == nil {
+			finishedAt := metav1.NewTime(r.now())
+			result.finishedAt = &finishedAt
+		}
+		if result.phase == v1alpha1.TaskPhaseFailed && r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline) {
+			result.cutOff = true
+		}
+		r.unmarkServicePortalPodBound(pod.UID)
+		return nil, &result
+	}
+	infraFailure := func(reason string) (*runningTaskDecision, *taskExecutionResult) {
+		decision := decideInfrastructureFailure(task, reason, sandbox, pod, true, maxMessageBytes)
+		return &decision, nil
+	}
+	handleRPCError := func(reason string, rpcError error) (*runningTaskDecision, *taskExecutionResult) {
+		if r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline) {
+			return finishResult(taskExecutionResult{phase: v1alpha1.TaskPhaseFailed, cutOff: true})
+		}
+		if status.Code(rpcError) == codes.Unauthenticated {
+			return finishResult(taskExecutionResult{phase: v1alpha1.TaskPhaseFailed, message: fmt.Sprintf("step task command failed: unauthenticated: %v", rpcError)})
+		}
+		logger.Error(rpcError, reason)
+		return infraFailure(fmt.Sprintf("%s: %v", reason, rpcError))
+	}
+
+	if task.ExecutionID == "" {
+		if err := validateTaskTimeoutSeconds(targetTask); err != nil {
+			return finishResult(taskExecutionResult{phase: v1alpha1.TaskPhaseFailed, message: err.Error()})
+		}
+		if err := discovery.ValidateTaskResources(targetTask); err != nil {
+			return finishResult(taskExecutionResult{phase: v1alpha1.TaskPhaseFailed, message: err.Error()})
+		}
+	}
+	effectiveResources = &v1alpha1.TaskResources{Limits: discovery.TaskResourceLimits(targetTask)}
+
+	if task.ExecutionID != "" {
+		if r.isExecutionDeadlineExceeded(run.Status.ExecutionDeadline) {
+			return finishResult(taskExecutionResult{phase: v1alpha1.TaskPhaseFailed, cutOff: true})
+		}
+		taskTimeout := r.executionStepTimeout()
+		if task.TimeoutSeconds > 0 {
+			taskTimeout = time.Duration(task.TimeoutSeconds) * time.Second
+		} else if targetTask.TimeoutSeconds != nil {
+			taskTimeout = time.Duration(*targetTask.TimeoutSeconds) * time.Second
+		}
+		if task.StartedAt != nil && !r.now().Before(task.StartedAt.Time.Add(taskTimeout)) {
+			return finishResult(taskExecutionResult{phase: v1alpha1.TaskPhaseFailed, message: "step task command failed: sandbox did not report completion"})
+		}
+	}
+
+	clientContext, clientCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	sandboxClient, err := r.newTaskSandboxClient(clientContext, run, task.ID, sandbox, pod)
+	clientCancel()
+	if err != nil {
+		return handleRPCError("failed to connect to task sandbox", err)
+	}
+	defer func() {
+		if closeErr := sandboxClient.Close(); closeErr != nil {
+			logger.Error(closeErr, "failed to close sandbox client")
+		}
+	}()
+
+	if task.ExecutionID == "" {
+		mkdirContext, mkdirCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+		if _, mkdirErr := executeSandboxWithTimeout(mkdirContext, sandboxClient, sandboxclient.ProcessConfig{Command: []string{"mkdir", "-p", "/workspace/out"}}); mkdirErr != nil {
+			logger.V(1).Info("mkdir /workspace/out returned error", "error", mkdirErr)
+		}
+		mkdirCancel()
+
+		cwd := "repo"
+		if run.Spec.Repo.URL == "" {
+			cwd = "/workspace"
+		}
+		executionID := asyncTaskExecutionID(run.Name, task)
+		startContext, startCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+		startErr := sandboxClient.StartAsync(startContext, executionID, sandboxclient.ProcessConfig{Command: targetTask.Command, Cwd: cwd})
+		startCancel()
+		if startErr != nil && !errors.Is(startErr, sandboxclient.ErrAsyncTaskAlreadyExists) {
+			return handleRPCError(fmt.Sprintf("failed to start async task %q", executionID), startErr)
+		}
+		logger.Info("Started async task command", "executionID", executionID, "command", targetTask.Command, "cwd", cwd, "timeoutSeconds", effectiveTimeoutSeconds)
+		return &runningTaskDecision{action: runningTaskActionRecordExecution, executionID: executionID, sandbox: sandbox, pod: pod}, nil
+	}
+
+	pollContext, pollCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
+	pollStatus, pollErr := sandboxClient.PollAsync(pollContext, task.ExecutionID)
+	pollCancel()
+	if pollErr != nil {
+		return handleRPCError(fmt.Sprintf("failed to poll async task %q", task.ExecutionID), pollErr)
+	}
+	if pollStatus == nil {
+		return infraFailure(fmt.Sprintf("empty poll status for async task %q", task.ExecutionID))
+	}
+
+	switch pollStatus.State {
+	case sandboxclient.AsyncTaskRunning:
+		return nil, nil
+	case sandboxclient.AsyncTaskCompleted:
+		if pollStatus.ExitCode != 0 {
+			execResult := &sandboxclient.ExecuteResult{ExitCode: pollStatus.ExitCode, Stdout: pollStatus.Stdout, Stderr: pollStatus.Stderr}
+			failedResult, _ := r.handleStepExecutionFailure(ctx, run.Name, "task command", nil, execResult, nil, task.ID, effectiveRange)
+			return finishResult(failedResult)
+		}
+		startTime := r.now()
+		if task.StartedAt != nil {
+			startTime = task.StartedAt.Time
+		}
+		return finishResult(r.finalizeSandboxTaskResult(ctx, run, task.ID, sandboxClient, effectiveRange, startTime, effectiveTimeoutSeconds, effectiveResources, agentPhaseOutcome{}, nil))
+	case sandboxclient.AsyncTaskNotFound:
+		return infraFailure(fmt.Sprintf("async task %q not found in sandbox", task.ExecutionID))
+	default:
+		return infraFailure(fmt.Sprintf("unexpected async task state %q for %q", pollStatus.State, task.ExecutionID))
+	}
 }
 
 func (r *RunReconciler) pollTaskProgress(
