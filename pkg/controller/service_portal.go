@@ -37,7 +37,17 @@ const (
 	DefaultModelCredentialsSecretName = "model-credentials"
 
 	servicePortalCredentialURIScheme = "secret://"
+
+	gcpAccessTokenHost           = "*.googleapis.com"
+	gcpAccessTokenHeader         = "Authorization"
+	gcpAccessTokenPrefix         = "Bearer "
+	gcpAccessTokenCredentialName = "gcp-access-token"
 )
+
+// ServicePortalClient binds egress policies and companion secrets to sandbox pods.
+type ServicePortalClient interface {
+	Bind(ctx context.Context, podUID string, policy *portalsv1.EgressPolicy, secrets map[string][]byte) error
+}
 
 // DefaultServicePortalAllowedHosts defines the default allowed hostnames for task sandboxes behind the service portal:
 // - Model APIs (*.googleapis.com)
@@ -248,8 +258,37 @@ func BuildServicePortalEgressPolicyWithCredential(
 	options ServicePortalOptions,
 	modelCredential *ServicePortalModelCredential,
 ) *portalsv1.EgressPolicy {
+	return BuildServicePortalEgressPolicyWithCredentials(options, modelCredential, false)
+}
+
+// BuildServicePortalEgressPolicyWithCredentials constructs an EgressPolicy proto for the given service portal options,
+// optional exact-host model credential rule, and optional *.googleapis.com GCP OAuth2 Bearer credential rule.
+func BuildServicePortalEgressPolicyWithCredentials(
+	options ServicePortalOptions,
+	modelCredential *ServicePortalModelCredential,
+	includeGCPAccessToken bool,
+) *portalsv1.EgressPolicy {
 	httpHosts := append([]string(nil), options.AllowedHTTPHosts...)
 	httpsHosts := append([]string(nil), options.AllowedHosts...)
+
+	var gcpCredentialRule *portalsv1.EgressRule
+	if includeGCPAccessToken {
+		httpsHosts = filterOutHostname(httpsHosts, gcpAccessTokenHost)
+		gcpCredentialRule = &portalsv1.EgressRule{
+			Https: &portalsv1.HttpsRule{
+				Hostnames: []string{gcpAccessTokenHost},
+				Effects: &portalsv1.HttpRuleEffects{
+					ReplaceHeaders: []*portalsv1.CredentialHeader{
+						{
+							Header:        gcpAccessTokenHeader,
+							Prefix:        gcpAccessTokenPrefix,
+							CredentialUri: servicePortalCredentialURIScheme + gcpAccessTokenCredentialName,
+						},
+					},
+				},
+			},
+		}
+	}
 
 	var credentialRule *portalsv1.EgressRule
 	if modelCredential != nil {
@@ -303,7 +342,7 @@ func BuildServicePortalEgressPolicyWithCredential(
 		}
 	}
 
-	if len(httpHosts) == 0 && len(httpsHosts) == 0 && credentialRule == nil {
+	if len(httpHosts) == 0 && len(httpsHosts) == 0 && gcpCredentialRule == nil && credentialRule == nil {
 		return &portalsv1.EgressPolicy{}
 	}
 	var rules []*portalsv1.EgressRule
@@ -320,6 +359,9 @@ func BuildServicePortalEgressPolicyWithCredential(
 				Hostnames: httpsHosts,
 			},
 		})
+	}
+	if gcpCredentialRule != nil {
+		rules = append(rules, gcpCredentialRule)
 	}
 	if credentialRule != nil {
 		rules = append(rules, credentialRule)
@@ -396,6 +438,25 @@ func (r *RunReconciler) readControllerModelCredential(
 	return []byte(trimmed), true, nil
 }
 
+func (r *RunReconciler) mintGCPAccessToken(ctx context.Context) ([]byte, error) {
+	tokenSource, err := r.gcpTokenSource(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gcp token source for host %q header %q: %w", gcpAccessTokenHost, gcpAccessTokenHeader, err)
+	}
+	token, err := tokenSource.Token()
+	if err != nil {
+		return nil, fmt.Errorf("failed to mint gcp access token for host %q header %q: %w", gcpAccessTokenHost, gcpAccessTokenHeader, err)
+	}
+	trimmed := strings.TrimSpace(token.AccessToken)
+	if trimmed == "" {
+		return nil, fmt.Errorf("failed to mint gcp access token for host %q header %q: token is empty", gcpAccessTokenHost, gcpAccessTokenHeader)
+	}
+	if !isValidHTTPHeaderValue(trimmed) {
+		return nil, fmt.Errorf("invalid gcp access token for host %q header %q: value contains invalid HTTP header characters", gcpAccessTokenHost, gcpAccessTokenHeader)
+	}
+	return []byte(trimmed), nil
+}
+
 func (r *RunReconciler) prepareServicePortalBinding(
 	ctx context.Context,
 	run *v1alpha1.Run,
@@ -404,28 +465,43 @@ func (r *RunReconciler) prepareServicePortalBinding(
 	options ServicePortalOptions,
 ) (*portalsv1.EgressPolicy, map[string][]byte, *ServicePortalModelCredential, error) {
 	manifestTask := findManifestTask(manifest, taskID)
-	if manifestTask != nil && isSandboxOnlyTask(*manifestTask) {
-		return BuildServicePortalEgressPolicy(options), nil, nil, nil
+	needsGCPAccessToken := manifestTask != nil && taskRequiresGCPProject(*manifestTask)
+	isSandbox := manifestTask != nil && isSandboxTask(*manifestTask)
+
+	var activeModelCredential *ServicePortalModelCredential
+	var secrets map[string][]byte
+	if !isSandbox {
+		credential, hasCredential, err := ModelCredentialForModel(run.Spec.Model, options.ModelBaseURL)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if hasCredential {
+			secretValue, found, err := r.readControllerModelCredential(ctx, credential)
+			if err != nil {
+				return nil, nil, &credential, err
+			}
+			if found {
+				activeModelCredential = &credential
+				secrets = map[string][]byte{
+					credential.CredentialName: secretValue,
+				}
+			}
+		}
 	}
-	credential, hasCredential, err := ModelCredentialForModel(run.Spec.Model, options.ModelBaseURL)
-	if err != nil {
-		return nil, nil, nil, err
+
+	if needsGCPAccessToken {
+		accessToken, err := r.mintGCPAccessToken(ctx)
+		if err != nil {
+			return nil, nil, activeModelCredential, err
+		}
+		if secrets == nil {
+			secrets = make(map[string][]byte, 1)
+		}
+		secrets[gcpAccessTokenCredentialName] = accessToken
 	}
-	if !hasCredential {
-		return BuildServicePortalEgressPolicy(options), nil, nil, nil
-	}
-	secretValue, found, err := r.readControllerModelCredential(ctx, credential)
-	if err != nil {
-		return nil, nil, &credential, err
-	}
-	if !found {
-		return BuildServicePortalEgressPolicy(options), nil, nil, nil
-	}
-	policy := BuildServicePortalEgressPolicyWithCredential(options, &credential)
-	secrets := map[string][]byte{
-		credential.CredentialName: secretValue,
-	}
-	return policy, secrets, &credential, nil
+
+	policy := BuildServicePortalEgressPolicyWithCredentials(options, activeModelCredential, needsGCPAccessToken)
+	return policy, secrets, activeModelCredential, nil
 }
 
 func (r *RunReconciler) servicePortalPolicy() *portalsv1.EgressPolicy {

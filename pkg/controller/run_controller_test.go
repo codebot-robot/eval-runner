@@ -14084,7 +14084,7 @@ func TestTaskStatusGCPProjectClearedOnLifecycleTransitions(t *testing.T) {
 		}
 	})
 
-	t.Run("tasks declaring gcp-project remain rejected at initialization", func(t *testing.T) {
+	t.Run("tasks declaring gcp-project without sandbox remain rejected and with sandbox fail closed without config", func(t *testing.T) {
 		manifest := &v1alpha1.Manifest{
 			Tasks: []v1alpha1.ManifestTask{
 				{ID: "task-gcp-only", Spec: "eval.py@1", Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeGCPProject}}},
@@ -14093,10 +14093,11 @@ func TestTaskStatusGCPProjectClearedOnLifecycleTransitions(t *testing.T) {
 		}
 		reconciler := &RunReconciler{}
 		tasks := reconciler.initializeTasks(v1alpha1.RunSpec{}, manifest)
-		for _, task := range tasks {
-			if task.Phase != v1alpha1.TaskPhaseFailed || task.Message != "resources not supported yet" {
-				t.Errorf("task %q = (%q, %q), want (Failed, \"resources not supported yet\")", task.ID, task.Phase, task.Message)
-			}
+		if tasks[0].Phase != v1alpha1.TaskPhaseFailed || tasks[0].Message != "resources not supported yet" {
+			t.Errorf("task %q = (%q, %q), want (Failed, \"resources not supported yet\")", tasks[0].ID, tasks[0].Phase, tasks[0].Message)
+		}
+		if tasks[1].Phase != v1alpha1.TaskPhaseFailed || !strings.Contains(tasks[1].Message, "service portal") {
+			t.Errorf("task %q = (%q, %q), want (Failed, message mentioning service portal)", tasks[1].ID, tasks[1].Phase, tasks[1].Message)
 		}
 	})
 }

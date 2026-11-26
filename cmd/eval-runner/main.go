@@ -348,6 +348,7 @@ func main() {
 	}
 
 	var servicePortalClient *serviceportalclient.Client
+	var servicePortalBinder controller.ServicePortalClient
 	if clusterConfig.ServicePortal.ControllerAddress != "" {
 		setupLog.Info("Service Portal enabled", "controllerAddress", clusterConfig.ServicePortal.ControllerAddress, "caFile", clusterConfig.ServicePortal.CAFile, "tokenFile", clusterConfig.ServicePortal.TokenFile)
 		var servicePortalClientError error
@@ -356,6 +357,7 @@ func main() {
 			setupLog.Error(servicePortalClientError, "unable to create service portal client")
 			os.Exit(1)
 		}
+		servicePortalBinder = servicePortalClient
 		defer func() {
 			if closeErr := servicePortalClient.Close(); closeErr != nil {
 				setupLog.Error(closeErr, "error closing service portal client on shutdown")
@@ -430,7 +432,7 @@ func main() {
 		SampleRunnerImage:    sampleRunnerImage,
 		ArtifactSink:         reloadableSink,
 		ControllerVersion:    version.String(),
-		ServicePortalClient:  servicePortalClient,
+		ServicePortalClient:  servicePortalBinder,
 		InstanceID:           controller.NewProcessInstanceID(),
 	}
 
