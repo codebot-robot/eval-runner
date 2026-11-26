@@ -429,6 +429,84 @@ func TestValidateManifest(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "standalone gcp-project resource passes validation without image",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:        "task-gcp-project",
+						Spec:      "test.py@eval",
+						Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeGCPProject}},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "sandbox and gcp-project resources with image pass validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:    "task-sandbox-gcp-project",
+						Spec:  "test.py@eval",
+						Image: "eval-image:v1",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+							{Type: v1alpha1.ResourceTypeGCPProject},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "sandbox and gcp-project resources without image fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:   "task-sandbox-gcp-project-no-image",
+						Spec: "test.py@eval",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeSandbox},
+							{Type: v1alpha1.ResourceTypeGCPProject},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "standalone gcp-project resource with limits fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:   "task-gcp-project-with-limits",
+						Spec: "test.py@eval",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeGCPProject, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "sandbox and gcp-project with limits on gcp-project fails validation",
+			manifest: &v1alpha1.Manifest{
+				Tasks: []v1alpha1.ManifestTask{
+					{
+						ID:    "task-sandbox-gcp-project-limits",
+						Spec:  "test.py@eval",
+						Image: "eval-image:v1",
+						Resources: []v1alpha1.ManifestResource{
+							{Type: v1alpha1.ResourceTypeSandbox},
+							{Type: v1alpha1.ResourceTypeGCPProject, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -696,6 +774,32 @@ func TestValidateTaskResources_RejectionPaths(t *testing.T) {
 			expectedValue: "1",
 		},
 		{
+			name: "gcp-project resource with limits",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-gcp-limits",
+				Spec:      "eval.py@task",
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeGCPProject, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}},
+			},
+			expectedTask:  "task-gcp-limits",
+			expectedField: "limits",
+			expectedValue: "1",
+		},
+		{
+			name: "sandbox and gcp-project with limits on gcp-project",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-sandbox-gcp-limits",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+					{Type: v1alpha1.ResourceTypeGCPProject, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}},
+				},
+			},
+			expectedTask:  "task-sandbox-gcp-limits",
+			expectedField: "limits",
+			expectedValue: "1Gi",
+		},
+		{
 			name: "zero cpu",
 			task: v1alpha1.ManifestTask{
 				ID:        "task-zero-cpu",
@@ -835,6 +939,26 @@ func TestValidateTaskResources_Valid(t *testing.T) {
 			task: v1alpha1.ManifestTask{
 				ID:   "task-no-resources",
 				Spec: "eval.py@task",
+			},
+		},
+		{
+			name: "standalone gcp-project resource",
+			task: v1alpha1.ManifestTask{
+				ID:        "task-gcp-only",
+				Spec:      "eval.py@task",
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeGCPProject}},
+			},
+		},
+		{
+			name: "sandbox with limits combined with gcp-project",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-sandbox-and-gcp",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}},
+					{Type: v1alpha1.ResourceTypeGCPProject},
+				},
 			},
 		},
 	}

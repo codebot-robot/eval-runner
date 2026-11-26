@@ -80,6 +80,7 @@ func ParseManifest(data []byte) (*v1alpha1.Manifest, error) {
 // - Each task's Workdir (if set) must be relative and not contain '..'
 // - Each task specifying command requires a non-blank image
 // - Each task specifying sandbox resource requires a non-blank image
+// - Each task specifying gcp-project resource must not set limits (limits are only valid on sandbox)
 func ValidateManifest(m *v1alpha1.Manifest) error {
 	if m == nil {
 		return fmt.Errorf("manifest cannot be nil")
@@ -116,9 +117,12 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 			return fmt.Errorf("task %q specifies command without image: command requires a non-blank image", id)
 		}
 
-		for _, resource := range task.Resources {
-			if resource.Type == v1alpha1.ResourceTypeSandbox && strings.TrimSpace(task.Image) == "" {
+		for _, manifestResource := range task.Resources {
+			if manifestResource.Type == v1alpha1.ResourceTypeSandbox && strings.TrimSpace(task.Image) == "" {
 				return fmt.Errorf("task %q specifies sandbox resource without image: sandbox resource requires a non-blank image", id)
+			}
+			if manifestResource.Type == v1alpha1.ResourceTypeGCPProject && len(manifestResource.Limits) > 0 {
+				return fmt.Errorf("task %q has invalid limits %v on %s resource: limits are only valid on sandbox resources", id, manifestResource.Limits, v1alpha1.ResourceTypeGCPProject)
 			}
 		}
 
