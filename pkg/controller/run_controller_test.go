@@ -14101,3 +14101,207 @@ func TestTaskStatusGCPProjectClearedOnLifecycleTransitions(t *testing.T) {
 		}
 	})
 }
+
+func TestKindClusterTaskEligibilityAndSandboxConstruction(t *testing.T) {
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{
+				ID:      "task-sandbox-and-kind",
+				Spec:    "eval.py@1",
+				Image:   "kube-agents-eval:v1",
+				Command: []string{"./hack/kind-up.sh"},
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}},
+					{Type: v1alpha1.ResourceTypeKindCluster},
+				},
+			},
+			{
+				ID:      "task-kind-then-sandbox",
+				Spec:    "eval.py@2",
+				Image:   "kube-agents-eval:v1",
+				Command: []string{"./hack/kind-up.sh"},
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeKindCluster},
+					{Type: v1alpha1.ResourceTypeSandbox},
+				},
+			},
+			{
+				ID:        "task-kind-only",
+				Spec:      "eval.py@3",
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeKindCluster}},
+			},
+			{
+				ID:    "task-sandbox-kind-gcp",
+				Spec:  "eval.py@4",
+				Image: "kube-agents-eval:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+					{Type: v1alpha1.ResourceTypeKindCluster},
+					{Type: v1alpha1.ResourceTypeGCPProject},
+				},
+			},
+			{
+				ID:    "task-sandbox-kind-docker",
+				Spec:  "eval.py@5",
+				Image: "kube-agents-eval:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+					{Type: v1alpha1.ResourceTypeKindCluster},
+					{Type: "docker"},
+				},
+			},
+			{
+				ID:    "task-sandbox-kind-invalid-limits",
+				Spec:  "eval.py@6",
+				Image: "kube-agents-eval:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+				},
+			},
+			{
+				ID:      "task-sandbox-only",
+				Spec:    "eval.py@7",
+				Image:   "regular-eval:v1",
+				Command: []string{"./run.sh"},
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+				},
+			},
+		},
+	}
+
+	reconciler := &RunReconciler{}
+
+	t.Run("initializeTasks accepts sandbox + kind-cluster and rejects unsupported combinations", func(t *testing.T) {
+		tasks := reconciler.initializeTasks(v1alpha1.RunSpec{}, manifest)
+		if len(tasks) != len(manifest.Tasks) {
+			t.Fatalf("len(tasks) = %d, want %d", len(tasks), len(manifest.Tasks))
+		}
+
+		if tasks[0].Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("task-sandbox-and-kind phase = %q (%q), want Pending", tasks[0].Phase, tasks[0].Message)
+		}
+		if tasks[0].Resources == nil || tasks[0].Resources.Limits.Cpu().Cmp(resource.MustParse("2")) != 0 || tasks[0].Resources.Limits.Memory().Cmp(resource.MustParse("4Gi")) != 0 {
+			t.Errorf("task-sandbox-and-kind resources = %+v, want 2 CPU / 4Gi memory", tasks[0].Resources)
+		}
+
+		if tasks[1].Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("task-kind-then-sandbox phase = %q (%q), want Pending", tasks[1].Phase, tasks[1].Message)
+		}
+		if tasks[1].Resources == nil || tasks[1].Resources.Limits.Cpu().Cmp(resource.MustParse(v1alpha1.DefaultTaskCPULimit)) != 0 {
+			t.Errorf("task-kind-then-sandbox resources = %+v, want default sandbox limits", tasks[1].Resources)
+		}
+
+		if tasks[2].Phase != v1alpha1.TaskPhaseFailed || tasks[2].Message != "resources not supported yet" {
+			t.Errorf("task-kind-only = (%q, %q), want (Failed, \"resources not supported yet\")", tasks[2].Phase, tasks[2].Message)
+		}
+
+		if tasks[3].Phase != v1alpha1.TaskPhaseFailed || !strings.Contains(tasks[3].Message, "service portal") {
+			t.Errorf("task-sandbox-kind-gcp = (%q, %q), want (Failed, message mentioning service portal)", tasks[3].Phase, tasks[3].Message)
+		}
+
+		if tasks[4].Phase != v1alpha1.TaskPhaseFailed || tasks[4].Message != "resources not supported yet" {
+			t.Errorf("task-sandbox-kind-docker = (%q, %q), want (Failed, \"resources not supported yet\")", tasks[4].Phase, tasks[4].Message)
+		}
+
+		if tasks[5].Phase != v1alpha1.TaskPhaseFailed || !strings.Contains(tasks[5].Message, "limits are only valid on sandbox resources") {
+			t.Errorf("task-sandbox-kind-invalid-limits = (%q, %q), want Failed with limits error", tasks[5].Phase, tasks[5].Message)
+		}
+
+		if tasks[6].Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("task-sandbox-only phase = %q (%q), want Pending", tasks[6].Phase, tasks[6].Message)
+		}
+	})
+
+	t.Run("initializeTasks accepts sandbox + kind-cluster + gcp-project when GCP config is set", func(t *testing.T) {
+		configuredReconciler := &RunReconciler{
+			ServicePortalClient: &fakeServicePortalClient{},
+			Config: ClusterConfig{
+				GCPProjectParentFolderID:   "folders/123456",
+				GCPProjectBillingAccountID: "012345-6789AB-CDEF01",
+			},
+		}
+		tasks := configuredReconciler.initializeTasks(v1alpha1.RunSpec{
+			Tasks: []string{"task-sandbox-kind-gcp"},
+		}, manifest)
+		if len(tasks) != 1 {
+			t.Fatalf("len(tasks) = %d, want 1", len(tasks))
+		}
+		if tasks[0].Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("task-sandbox-kind-gcp phase = %q (%q), want Pending", tasks[0].Phase, tasks[0].Message)
+		}
+	})
+
+	t.Run("initializeTasks allow-list accepts sandbox + kind-cluster", func(t *testing.T) {
+		tasks := reconciler.initializeTasks(v1alpha1.RunSpec{
+			Tasks: []string{"task-sandbox-and-kind", "task-kind-only"},
+		}, manifest)
+		if len(tasks) != 2 {
+			t.Fatalf("len(tasks) = %d, want 2", len(tasks))
+		}
+		if tasks[0].Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("task-sandbox-and-kind phase = %q (%q), want Pending", tasks[0].Phase, tasks[0].Message)
+		}
+		if tasks[1].Phase != v1alpha1.TaskPhaseFailed || tasks[1].Message != "resources not supported yet" {
+			t.Errorf("task-kind-only = (%q, %q), want (Failed, \"resources not supported yet\")", tasks[1].Phase, tasks[1].Message)
+		}
+	})
+
+	t.Run("command-only sandbox + kind-cluster task is eligible for async execution", func(t *testing.T) {
+		if !isCommandOnlySandboxTask(&manifest.Tasks[0]) {
+			t.Errorf("expected task-sandbox-and-kind to be a command-only sandbox task")
+		}
+		if isCommandOnlySandboxTask(&manifest.Tasks[2]) {
+			t.Errorf("expected task-kind-only not to be a command-only sandbox task")
+		}
+	})
+
+	t.Run("buildPendingTaskSandbox configures kind nodeSelector, dind sidecar, and DOCKER_HOST only for kind-cluster tasks", func(t *testing.T) {
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-kind", Namespace: "eval-runner"},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{URL: "https://github.com/example/kube-agents.git", Commit: "abcdef1"},
+			},
+		}
+
+		kindSandbox := reconciler.buildPendingTaskSandbox(
+			run,
+			v1alpha1.TaskStatus{ID: manifest.Tasks[0].ID},
+			&manifest.Tasks[0],
+			"task-run-kind-sandbox",
+			"token-123",
+		)
+		kindPodSpec := kindSandbox.Spec.PodTemplate.Spec
+		if got := kindPodSpec.NodeSelector[discovery.KindNodeSelectorLabel]; got != "true" {
+			t.Errorf("kind sandbox nodeSelector[%q] = %q, want \"true\"", discovery.KindNodeSelectorLabel, got)
+		}
+		if len(kindPodSpec.Containers) != 2 || kindPodSpec.Containers[1].Name != discovery.DockerInDockerContainerName {
+			t.Fatalf("expected 2 containers with %q sidecar, got %d containers", discovery.DockerInDockerContainerName, len(kindPodSpec.Containers))
+		}
+		dockerHostFound := false
+		for _, environmentVariable := range kindPodSpec.Containers[0].Env {
+			if environmentVariable.Name == "DOCKER_HOST" && environmentVariable.Value == discovery.DockerInDockerHost {
+				dockerHostFound = true
+			}
+		}
+		if !dockerHostFound {
+			t.Errorf("expected DOCKER_HOST=%q in kind task container env", discovery.DockerInDockerHost)
+		}
+
+		regularSandbox := reconciler.buildPendingTaskSandbox(
+			run,
+			v1alpha1.TaskStatus{ID: manifest.Tasks[6].ID},
+			&manifest.Tasks[6],
+			"task-run-regular-sandbox",
+			"token-456",
+		)
+		regularPodSpec := regularSandbox.Spec.PodTemplate.Spec
+		if len(regularPodSpec.NodeSelector) != 0 {
+			t.Errorf("expected empty nodeSelector on non-kind sandbox, got %v", regularPodSpec.NodeSelector)
+		}
+		if len(regularPodSpec.Containers) != 1 {
+			t.Errorf("expected 1 container on non-kind sandbox, got %d", len(regularPodSpec.Containers))
+		}
+	})
+}
