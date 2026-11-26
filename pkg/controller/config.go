@@ -61,6 +61,8 @@ const (
 	ConfigMapKeyGCPProjectBillingAccountID = configkeys.ConfigMapKeyGCPProjectBillingAccountID
 	// ConfigMapKeyGCPProjectPool is the ConfigMap key for comma-separated pre-created GCP project IDs leased to gcp-project tasks.
 	ConfigMapKeyGCPProjectPool = configkeys.ConfigMapKeyGCPProjectPool
+	// ConfigMapKeyGCPProjectTaskRoles is the ConfigMap key for comma-separated project-level IAM roles granted to per-project task service accounts.
+	ConfigMapKeyGCPProjectTaskRoles = configkeys.ConfigMapKeyGCPProjectTaskRoles
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.
 	ConfigMapKeyDiscoveryDeadline = configkeys.ConfigMapKeyDiscoveryDeadline
 	// ConfigMapKeyExecutionDeadline is the ConfigMap key for sample execution deadline.
@@ -130,6 +132,10 @@ const (
 	DefaultHeadTargetCIHalfWidth = 0.05
 )
 
+// DefaultGCPProjectTaskRoles is the default list of project-level IAM roles granted to each
+// dynamically created project's eval-task service account.
+var DefaultGCPProjectTaskRoles = []string{"roles/editor"}
+
 // KnownConfigMapKeys is the set of all recognized keys in the eval-runner-config ConfigMap,
 // covering both eval-runner controller and eval-runner-webhook keys.
 var KnownConfigMapKeys = map[string]struct{}{
@@ -182,6 +188,7 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyGCPProjectParentFolderID:    {},
 	configkeys.ConfigMapKeyGCPProjectBillingAccountID:  {},
 	configkeys.ConfigMapKeyGCPProjectPool:              {},
+	configkeys.ConfigMapKeyGCPProjectTaskRoles:         {},
 }
 
 // UnknownConfigMapKeys returns a sorted list of unrecognised keys present in cm.Data.
@@ -334,6 +341,9 @@ type ClusterConfig struct {
 	// GCPProjectPool is an optional list of pre-created GCP project IDs leased exclusively to gcp-project tasks.
 	GCPProjectPool []string
 
+	// GCPProjectTaskRoles lists project-level IAM roles granted to each project's eval-task service account.
+	GCPProjectTaskRoles []string
+
 	// ServicePortal configures settings for the Service Portal Controller and allowed egress hosts.
 	ServicePortal ServicePortalOptions
 }
@@ -372,6 +382,7 @@ type RawFlags struct {
 	GCPProjectParentFolderID       string
 	GCPProjectBillingAccountID     string
 	GCPProjectPool                 string
+	GCPProjectTaskRoles            string
 	ServicePortalControllerAddress string
 	ServicePortalCAFile            string
 	ServicePortalTokenFile         string
@@ -414,6 +425,7 @@ func DefaultClusterConfig() ClusterConfig {
 		FullReconcileInterval:    syncer.DefaultFullReconcileInterval,
 
 		GCPWorkloadIdentityProvider: "",
+		GCPProjectTaskRoles:         append([]string(nil), DefaultGCPProjectTaskRoles...),
 		ServicePortal: ServicePortalOptions{
 			ControllerAddress: "",
 			CAFile:            "",
@@ -441,6 +453,7 @@ func FlagsFromFlagSet(
 	gcpProjectParentFolderID string,
 	gcpProjectBillingAccountID string,
 	gcpProjectPool string,
+	gcpProjectTaskRoles string,
 	servicePortalControllerAddress, servicePortalCAFile, servicePortalTokenFile string,
 ) RawFlags {
 	explicit := make(map[string]bool)
@@ -469,6 +482,7 @@ func FlagsFromFlagSet(
 		GCPProjectParentFolderID:       gcpProjectParentFolderID,
 		GCPProjectBillingAccountID:     gcpProjectBillingAccountID,
 		GCPProjectPool:                 gcpProjectPool,
+		GCPProjectTaskRoles:            gcpProjectTaskRoles,
 		ServicePortalControllerAddress: servicePortalControllerAddress,
 		ServicePortalCAFile:            servicePortalCAFile,
 		ServicePortalTokenFile:         servicePortalTokenFile,
@@ -553,7 +567,19 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 
 		// 1f. gcpProjectPool
 		if value, ok := cm.Data[ConfigMapKeyGCPProjectPool]; ok {
-			cfg.GCPProjectPool = parseGCPProjectPool(value)
+			cfg.GCPProjectPool = parseCommaSeparatedList(value)
+		}
+
+		// 1g. gcpProjectTaskRoles
+		if value, ok := cm.Data[ConfigMapKeyGCPProjectTaskRoles]; ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				if strings.EqualFold(trimmed, ConfigSentinelDisabled) {
+					cfg.GCPProjectTaskRoles = nil
+				} else if roles := parseCommaSeparatedList(value); len(roles) > 0 {
+					cfg.GCPProjectTaskRoles = roles
+				}
+			}
 		}
 
 		// 2. discoveryDeadline
@@ -1080,7 +1106,10 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 		}
 	}
 	if flags.IsExplicit("gcp-project-pool") {
-		cfg.GCPProjectPool = parseGCPProjectPool(flags.GCPProjectPool)
+		cfg.GCPProjectPool = parseCommaSeparatedList(flags.GCPProjectPool)
+	}
+	if flags.IsExplicit("gcp-project-task-roles") {
+		cfg.GCPProjectTaskRoles = parseCommaSeparatedList(flags.GCPProjectTaskRoles)
 	}
 	if flags.IsExplicit("service-portal-controller-address") {
 		cfg.ServicePortal.ControllerAddress = strings.TrimSpace(flags.ServicePortalControllerAddress)
@@ -1099,27 +1128,27 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 	return cfg, nil
 }
 
-// parseGCPProjectPool parses a comma-separated list of GCP project IDs,
-// trimming whitespace, dropping empty entries, and deduplicating in order.
-func parseGCPProjectPool(rawPool string) []string {
-	trimmed := strings.TrimSpace(rawPool)
+// parseCommaSeparatedList parses a comma-separated list, trimming whitespace,
+// dropping empty entries, returning nil on empty/sentinel values, and deduplicating in order.
+func parseCommaSeparatedList(rawValue string) []string {
+	trimmed := strings.TrimSpace(rawValue)
 	if trimmed == "" || strings.EqualFold(trimmed, ConfigSentinelDisabled) {
 		return nil
 	}
-	var projects []string
+	var items []string
 	seen := make(map[string]struct{})
 	for _, part := range strings.Split(trimmed, ",") {
-		projectID := strings.TrimSpace(part)
-		if projectID == "" {
+		item := strings.TrimSpace(part)
+		if item == "" {
 			continue
 		}
-		if _, duplicate := seen[projectID]; duplicate {
+		if _, duplicate := seen[item]; duplicate {
 			continue
 		}
-		seen[projectID] = struct{}{}
-		projects = append(projects, projectID)
+		seen[item] = struct{}{}
+		items = append(items, item)
 	}
-	return projects
+	return items
 }
 
 // ParseUserList parses a comma-separated list of GitHub usernames.
@@ -1231,6 +1260,7 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"gcpProjectParentFolderID", resolved.GCPProjectParentFolderID,
 		"gcpProjectBillingAccountID", resolved.GCPProjectBillingAccountID,
 		"gcpProjectPool", strings.Join(resolved.GCPProjectPool, ","),
+		"gcpProjectTaskRoles", strings.Join(resolved.GCPProjectTaskRoles, ","),
 		"servicePortalModelBaseURL", resolved.ServicePortal.ModelBaseURL,
 		"headTopUpInterval", resolved.HeadTopUpInterval,
 		"headTargetCIHalfWidth", resolved.HeadTargetCIHalfWidth,

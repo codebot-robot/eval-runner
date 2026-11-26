@@ -15,6 +15,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -402,16 +403,29 @@ func TestPrepareServicePortalBinding(t *testing.T) {
 		}
 	})
 
-	t.Run("sandbox task with gcp-project emits both generativelanguage and wildcard googleapis rules without ties", func(t *testing.T) {
+	t.Run("sandbox task with gcp-project emits both generativelanguage and wildcard googleapis rules using impersonated token", func(t *testing.T) {
+		const controllerToken = "controller-broad-oauth-token"
+		const impersonatedToken = "ya29.impersonated-pool-proj-1-token"
+		minter := &fakeGCPAccessTokenMinter{
+			tokensByProject: map[string]string{
+				"pool-proj-1": impersonatedToken,
+			},
+		}
 		gcpReconciler := &RunReconciler{
-			Client:              fakeClient,
-			APIReader:           fakeClient,
-			ControllerNamespace: "eval-runner",
-			GCPTokenSource:      oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "gcp-oauth-token"}),
+			Client:               fakeClient,
+			APIReader:            fakeClient,
+			ControllerNamespace:  "eval-runner",
+			GCPTokenSource:       oauth2.StaticTokenSource(&oauth2.Token{AccessToken: controllerToken}),
+			GCPAccessTokenMinter: minter,
 		}
 		run := &v1alpha1.Run{
 			ObjectMeta: metav1.ObjectMeta{Name: "run-gcp-model", Namespace: "eval-runner"},
 			Spec:       v1alpha1.RunSpec{Model: "google/gemini-2.5-flash"},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "kube-agents/kind-cluster", GCPProject: "pool-proj-1"},
+				},
+			},
 		}
 		manifest := &v1alpha1.Manifest{
 			Tasks: []v1alpha1.ManifestTask{
@@ -437,8 +451,14 @@ func TestPrepareServicePortalBinding(t *testing.T) {
 		if got := string(secrets["gemini-api-key"]); got != "real-controller-gemini-key" {
 			t.Fatalf("gemini-api-key secret = %q, want real-controller-gemini-key", got)
 		}
-		if got := string(secrets["gcp-access-token"]); got != "gcp-oauth-token" {
-			t.Fatalf("gcp-access-token secret = %q, want gcp-oauth-token", got)
+		if got := string(secrets["gcp-access-token"]); got != impersonatedToken {
+			t.Fatalf("gcp-access-token secret = %q, want impersonated token %q", got, impersonatedToken)
+		}
+		if got := string(secrets["gcp-access-token"]); got == controllerToken {
+			t.Fatalf("gcp-access-token must never use controller token")
+		}
+		if !reflect.DeepEqual(minter.requestedProjects, []string{"pool-proj-1"}) {
+			t.Fatalf("minter requestedProjects = %v, want [pool-proj-1]", minter.requestedProjects)
 		}
 
 		modelRule := policy.Match(portalsv1.ProtocolHTTPS, "generativelanguage.googleapis.com", 443)
@@ -457,6 +477,98 @@ func TestPrepareServicePortalBinding(t *testing.T) {
 		gcpHeaders := gcpRule.GetHttps().GetEffects().GetReplaceHeaders()
 		if len(gcpHeaders) != 1 || gcpHeaders[0].Header != "Authorization" || gcpHeaders[0].Prefix != "Bearer " || gcpHeaders[0].CredentialUri != "secret://gcp-access-token" {
 			t.Fatalf("expected *.googleapis.com to inject gcp-access-token, got %+v", gcpHeaders)
+		}
+	})
+
+	t.Run("gcp-project task fails closed when task GCPProject is empty", func(t *testing.T) {
+		minter := &fakeGCPAccessTokenMinter{
+			tokensByProject: map[string]string{
+				"pool-proj-1": "ya29.impersonated-token",
+			},
+		}
+		gcpReconciler := &RunReconciler{
+			Client:               fakeClient,
+			APIReader:            fakeClient,
+			ControllerNamespace:  "eval-runner",
+			GCPTokenSource:       oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "controller-broad-oauth-token"}),
+			GCPAccessTokenMinter: minter,
+		}
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-gcp-empty-project", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "mockllm/model"},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "kube-agents/kind-cluster", GCPProject: ""},
+				},
+			},
+		}
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID: "kube-agents/kind-cluster",
+					Resources: []v1alpha1.ManifestResource{
+						{Type: v1alpha1.ResourceTypeSandbox},
+						{Type: v1alpha1.ResourceTypeGCPProject},
+					},
+				},
+			},
+		}
+		policy, secrets, _, err := gcpReconciler.prepareServicePortalBinding(t.Context(), run, manifest, "kube-agents/kind-cluster", options)
+		if err == nil {
+			t.Fatal("expected error when task GCPProject is empty")
+		}
+		if policy != nil || secrets != nil {
+			t.Fatalf("expected nil policy and secrets on fail-closed error, got policy=%v secrets=%v", policy, secrets)
+		}
+		if len(minter.requestedProjects) != 0 {
+			t.Fatalf("expected minter not called when task GCPProject is empty, got %v", minter.requestedProjects)
+		}
+	})
+
+	t.Run("gcp-project task fails closed when impersonation fails and redacts tokens", func(t *testing.T) {
+		const leakedToken = "ya29.secret-impersonation-failure-token"
+		minter := &fakeGCPAccessTokenMinter{
+			mintErr: errors.New("iamcredentials denied request with token " + leakedToken),
+		}
+		gcpReconciler := &RunReconciler{
+			Client:               fakeClient,
+			APIReader:            fakeClient,
+			ControllerNamespace:  "eval-runner",
+			GCPTokenSource:       oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "controller-broad-oauth-token"}),
+			GCPAccessTokenMinter: minter,
+		}
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: "run-gcp-impersonation-fail", Namespace: "eval-runner"},
+			Spec:       v1alpha1.RunSpec{Model: "mockllm/model"},
+			Status: v1alpha1.RunStatus{
+				Tasks: []v1alpha1.TaskStatus{
+					{ID: "kube-agents/kind-cluster", GCPProject: "pool-proj-1"},
+				},
+			},
+		}
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{
+					ID: "kube-agents/kind-cluster",
+					Resources: []v1alpha1.ManifestResource{
+						{Type: v1alpha1.ResourceTypeSandbox},
+						{Type: v1alpha1.ResourceTypeGCPProject},
+					},
+				},
+			},
+		}
+		policy, secrets, _, err := gcpReconciler.prepareServicePortalBinding(t.Context(), run, manifest, "kube-agents/kind-cluster", options)
+		if err == nil {
+			t.Fatal("expected error when impersonation fails")
+		}
+		if policy != nil || secrets != nil {
+			t.Fatalf("expected nil policy and secrets on impersonation failure, got policy=%v secrets=%v", policy, secrets)
+		}
+		if strings.Contains(err.Error(), leakedToken) {
+			t.Fatalf("expected token redacted from impersonation error, got %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "[REDACTED]") {
+			t.Fatalf("expected [REDACTED] in impersonation error, got %q", err.Error())
 		}
 	})
 

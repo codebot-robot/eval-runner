@@ -130,6 +130,7 @@ func main() {
 	var gcpProjectParentFolderID string
 	var gcpProjectBillingAccountID string
 	var gcpProjectPool string
+	var gcpProjectTaskRoles string
 	var servicePortalControllerAddress string
 	var servicePortalCAFile string
 	var servicePortalTokenFile string
@@ -168,6 +169,7 @@ func main() {
 	flag.StringVar(&gcpProjectParentFolderID, "gcp-project-parent-folder-id", "", "GCP parent folder ID under which per-task ephemeral projects are created")
 	flag.StringVar(&gcpProjectBillingAccountID, "gcp-project-billing-account-id", "", "GCP billing account ID linked to per-task ephemeral projects")
 	flag.StringVar(&gcpProjectPool, "gcp-project-pool", "", "Comma-separated list of pre-created GCP project IDs leased exclusively to gcp-project tasks")
+	flag.StringVar(&gcpProjectTaskRoles, "gcp-project-task-roles", strings.Join(controller.DefaultGCPProjectTaskRoles, ","), "Comma-separated project-level IAM roles granted to per-project task service accounts")
 	flag.StringVar(&servicePortalControllerAddress, "service-portal-controller-address", "", "Address of the Service Portal Controller (host:port)")
 	flag.StringVar(&servicePortalCAFile, "service-portal-controller-ca-file", "", "Path to CA certificate file for verifying Service Portal Controller TLS certificate")
 	flag.StringVar(&servicePortalTokenFile, "service-portal-token-file", "", "Path to projected service account token file for authenticating with Service Portal Controller")
@@ -226,6 +228,7 @@ func main() {
 		gcpProjectParentFolderID,
 		gcpProjectBillingAccountID,
 		gcpProjectPool,
+		gcpProjectTaskRoles,
 		servicePortalControllerAddress,
 		servicePortalCAFile,
 		servicePortalTokenFile,

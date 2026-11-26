@@ -438,21 +438,25 @@ func (r *RunReconciler) readControllerModelCredential(
 	return []byte(trimmed), true, nil
 }
 
-func (r *RunReconciler) mintGCPAccessToken(ctx context.Context) ([]byte, error) {
-	tokenSource, err := r.gcpTokenSource(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gcp token source for host %q header %q: %w", gcpAccessTokenHost, gcpAccessTokenHeader, err)
+func (r *RunReconciler) mintGCPAccessToken(ctx context.Context, projectID string) ([]byte, error) {
+	trimmedProjectID := strings.TrimSpace(projectID)
+	if trimmedProjectID == "" {
+		return nil, fmt.Errorf("failed to mint gcp access token for host %q header %q: task has no assigned gcp project", gcpAccessTokenHost, gcpAccessTokenHeader)
 	}
-	token, err := tokenSource.Token()
+	minter, err := r.gcpAccessTokenMinter(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to mint gcp access token for host %q header %q: %w", gcpAccessTokenHost, gcpAccessTokenHeader, err)
+		return nil, fmt.Errorf("failed to create gcp access token minter for project %q host %q header %q: %s", trimmedProjectID, gcpAccessTokenHost, gcpAccessTokenHeader, redactGCPTokens(err.Error()))
 	}
-	trimmed := strings.TrimSpace(token.AccessToken)
+	accessToken, err := minter.MintAccessToken(ctx, trimmedProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to mint gcp access token for project %q host %q header %q: %s", trimmedProjectID, gcpAccessTokenHost, gcpAccessTokenHeader, redactGCPTokens(err.Error()))
+	}
+	trimmed := strings.TrimSpace(accessToken)
 	if trimmed == "" {
-		return nil, fmt.Errorf("failed to mint gcp access token for host %q header %q: token is empty", gcpAccessTokenHost, gcpAccessTokenHeader)
+		return nil, fmt.Errorf("failed to mint gcp access token for project %q host %q header %q: token is empty", trimmedProjectID, gcpAccessTokenHost, gcpAccessTokenHeader)
 	}
 	if !isValidHTTPHeaderValue(trimmed) {
-		return nil, fmt.Errorf("invalid gcp access token for host %q header %q: value contains invalid HTTP header characters", gcpAccessTokenHost, gcpAccessTokenHeader)
+		return nil, fmt.Errorf("invalid gcp access token for project %q host %q header %q: value contains invalid HTTP header characters", trimmedProjectID, gcpAccessTokenHost, gcpAccessTokenHeader)
 	}
 	return []byte(trimmed), nil
 }
@@ -487,7 +491,11 @@ func (r *RunReconciler) prepareServicePortalBinding(
 	}
 
 	if needsGCPAccessToken {
-		accessToken, err := r.mintGCPAccessToken(ctx)
+		projectID := strings.TrimSpace(taskGCPProject(run, taskID))
+		if projectID == "" {
+			return nil, nil, activeModelCredential, fmt.Errorf("failed to mint gcp access token for task %q: task has no assigned gcp project", taskID)
+		}
+		accessToken, err := r.mintGCPAccessToken(ctx, projectID)
 		if err != nil {
 			return nil, nil, activeModelCredential, err
 		}

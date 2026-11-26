@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -56,9 +57,10 @@ type createdGCPProjectCall struct {
 	parentFolderID   string
 	billingAccountID string
 	projectID        string
+	taskRoles        []string
 }
 
-func (provisioner *fakeGCPProjectProvisioner) CreateProject(_ context.Context, parentFolderID, billingAccountID, projectID string) error {
+func (provisioner *fakeGCPProjectProvisioner) CreateProject(_ context.Context, parentFolderID, billingAccountID, projectID string, taskRoles []string) error {
 	provisioner.mu.Lock()
 	defer provisioner.mu.Unlock()
 	if provisioner.createErr != nil {
@@ -68,6 +70,7 @@ func (provisioner *fakeGCPProjectProvisioner) CreateProject(_ context.Context, p
 		parentFolderID:   parentFolderID,
 		billingAccountID: billingAccountID,
 		projectID:        projectID,
+		taskRoles:        append([]string(nil), taskRoles...),
 	})
 	return nil
 }
@@ -81,6 +84,30 @@ func (provisioner *fakeGCPProjectProvisioner) DeleteProject(_ context.Context, p
 	}
 	provisioner.deleted = append(provisioner.deleted, projectID)
 	return nil
+}
+
+type fakeGCPAccessTokenMinter struct {
+	mu                sync.Mutex
+	requestedProjects []string
+	tokensByProject   map[string]string
+	defaultToken      string
+	mintErr           error
+}
+
+func (minter *fakeGCPAccessTokenMinter) MintAccessToken(_ context.Context, projectID string) (string, error) {
+	minter.mu.Lock()
+	defer minter.mu.Unlock()
+	minter.requestedProjects = append(minter.requestedProjects, projectID)
+	if minter.mintErr != nil {
+		return "", minter.mintErr
+	}
+	if token, ok := minter.tokensByProject[projectID]; ok {
+		return token, nil
+	}
+	if minter.defaultToken != "" {
+		return minter.defaultToken, nil
+	}
+	return "ya29.impersonated-" + projectID, nil
 }
 
 type recordedServicePortalBind struct {
@@ -139,6 +166,7 @@ func TestRESTGCPProjectProvisioner_CreatePollLinkAndDelete(t *testing.T) {
 	var mu sync.Mutex
 	var requests []string
 	var pollCount int
+	var savedPolicy gcpIAMPolicy
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if got := req.Header.Get("Authorization"); got != "Bearer "+accessToken {
@@ -160,22 +188,25 @@ func TestRESTGCPProjectProvisioner_CreatePollLinkAndDelete(t *testing.T) {
 				http.Error(w, fmt.Sprintf("unexpected create body %v", body), http.StatusBadRequest)
 				return
 			}
-			if body["projectId"] == "eval-billfail" {
+			switch body["projectId"] {
+			case "eval-billfail":
 				_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/cp.43", "done": true})
-				return
-			}
-			if body["projectId"] != "eval-deadbeef" {
+			case "eval-iamfail":
+				_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/cp.44", "done": true})
+			case "eval-conflict-sa":
+				_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/cp.45", "done": true})
+			case "eval-deadbeef":
+				_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/cp.42", "done": false})
+			default:
 				http.Error(w, fmt.Sprintf("unexpected create body %v", body), http.StatusBadRequest)
-				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/cp.42", "done": false})
 		case req.Method == http.MethodGet && req.URL.Path == "/v3/operations/cp.42":
 			mu.Lock()
 			pollCount++
 			done := pollCount >= 2
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/cp.42", "done": done})
-		case req.Method == http.MethodPut && req.URL.Path == "/v1/projects/eval-deadbeef/billingInfo":
+		case req.Method == http.MethodPut && (req.URL.Path == "/v1/projects/eval-deadbeef/billingInfo" || req.URL.Path == "/v1/projects/eval-iamfail/billingInfo" || req.URL.Path == "/v1/projects/eval-conflict-sa/billingInfo"):
 			var body map[string]string
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -188,10 +219,47 @@ func TestRESTGCPProjectProvisioner_CreatePollLinkAndDelete(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"billingEnabled": true})
 		case req.Method == http.MethodPut && req.URL.Path == "/v1/projects/eval-billfail/billingInfo":
 			http.Error(w, "billing quota exceeded", http.StatusForbidden)
-		case req.Method == http.MethodDelete && req.URL.Path == "/v3/projects/eval-deadbeef":
+		case req.Method == http.MethodPost && (req.URL.Path == "/v1/projects/eval-deadbeef/serviceAccounts" || req.URL.Path == "/v1/projects/eval-iamfail/serviceAccounts"):
+			var body struct {
+				AccountID      string            `json:"accountId"`
+				ServiceAccount map[string]string `json:"serviceAccount"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if body.AccountID != "eval-task" {
+				http.Error(w, fmt.Sprintf("unexpected accountId %q", body.AccountID), http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"email": "eval-task@project.iam.gserviceaccount.com"})
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/projects/eval-conflict-sa/serviceAccounts":
+			http.Error(w, `{"error":{"code":409,"status":"ALREADY_EXISTS"}}`, http.StatusConflict)
+		case req.Method == http.MethodPost && (req.URL.Path == "/v3/projects/eval-deadbeef:getIamPolicy" || req.URL.Path == "/v3/projects/eval-conflict-sa:getIamPolicy"):
+			_ = json.NewEncoder(w).Encode(gcpIAMPolicy{
+				Version: 1,
+				Etag:    "etag-v1",
+				Bindings: []gcpIAMBinding{
+					{Role: "roles/owner", Members: []string{"user:admin@example.com"}},
+					{Role: "roles/viewer", Members: []string{"user:auditor@example.com"}},
+				},
+			})
+		case req.Method == http.MethodPost && (req.URL.Path == "/v3/projects/eval-deadbeef:setIamPolicy" || req.URL.Path == "/v3/projects/eval-conflict-sa:setIamPolicy"):
+			var body struct {
+				Policy gcpIAMPolicy `json:"policy"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			savedPolicy = body.Policy
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(body.Policy)
+		case req.Method == http.MethodPost && req.URL.Path == "/v3/projects/eval-iamfail:getIamPolicy":
+			http.Error(w, "iam policy permission denied", http.StatusForbidden)
+		case req.Method == http.MethodDelete && (req.URL.Path == "/v3/projects/eval-deadbeef" || req.URL.Path == "/v3/projects/eval-billfail" || req.URL.Path == "/v3/projects/eval-iamfail"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/dp.42", "done": true})
-		case req.Method == http.MethodDelete && req.URL.Path == "/v3/projects/eval-billfail":
-			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/dp.43", "done": true})
 		case req.Method == http.MethodDelete && req.URL.Path == "/v3/projects/eval-missing":
 			http.Error(w, "not found", http.StatusNotFound)
 		case req.Method == http.MethodDelete && req.URL.Path == "/v3/projects/eval-deleting":
@@ -209,14 +277,34 @@ func TestRESTGCPProjectProvisioner_CreatePollLinkAndDelete(t *testing.T) {
 		HTTPClient:             server.Client(),
 		ResourceManagerBaseURL: server.URL,
 		CloudBillingBaseURL:    server.URL,
+		IAMBaseURL:             server.URL,
 		PollInterval:           time.Millisecond,
 	}
 
-	if err := provisioner.CreateProject(t.Context(), "123456", "012345-6789AB-CDEF01", "eval-deadbeef"); err != nil {
+	if err := provisioner.CreateProject(t.Context(), "123456", "012345-6789AB-CDEF01", "eval-deadbeef", []string{"roles/viewer", "roles/editor"}); err != nil {
 		t.Fatalf("CreateProject failed: %v", err)
 	}
-	if err := provisioner.CreateProject(t.Context(), "123456", "012345-6789AB-CDEF01", "eval-billfail"); err == nil {
+	wantPolicy := gcpIAMPolicy{
+		Version: 1,
+		Etag:    "etag-v1",
+		Bindings: []gcpIAMBinding{
+			{Role: "roles/owner", Members: []string{"user:admin@example.com"}},
+			{Role: "roles/viewer", Members: []string{"user:auditor@example.com", "serviceAccount:eval-task@eval-deadbeef.iam.gserviceaccount.com"}},
+			{Role: "roles/editor", Members: []string{"serviceAccount:eval-task@eval-deadbeef.iam.gserviceaccount.com"}},
+		},
+	}
+	if !reflect.DeepEqual(savedPolicy, wantPolicy) {
+		t.Fatalf("saved IAM policy = %+v, want %+v", savedPolicy, wantPolicy)
+	}
+
+	if err := provisioner.CreateProject(t.Context(), "123456", "012345-6789AB-CDEF01", "eval-conflict-sa", DefaultGCPProjectTaskRoles); err != nil {
+		t.Fatalf("CreateProject with 409 existing service account should succeed idempotently, got: %v", err)
+	}
+	if err := provisioner.CreateProject(t.Context(), "123456", "012345-6789AB-CDEF01", "eval-billfail", DefaultGCPProjectTaskRoles); err == nil {
 		t.Fatal("expected billing link failure")
+	}
+	if err := provisioner.CreateProject(t.Context(), "123456", "012345-6789AB-CDEF01", "eval-iamfail", DefaultGCPProjectTaskRoles); err == nil {
+		t.Fatal("expected IAM policy failure")
 	}
 	if err := provisioner.DeleteProject(t.Context(), "eval-deadbeef"); err != nil {
 		t.Fatalf("DeleteProject failed: %v", err)
@@ -240,9 +328,22 @@ func TestRESTGCPProjectProvisioner_CreatePollLinkAndDelete(t *testing.T) {
 		"GET /v3/operations/cp.42",
 		"GET /v3/operations/cp.42",
 		"PUT /v1/projects/eval-deadbeef/billingInfo",
+		"POST /v1/projects/eval-deadbeef/serviceAccounts",
+		"POST /v3/projects/eval-deadbeef:getIamPolicy",
+		"POST /v3/projects/eval-deadbeef:setIamPolicy",
+		"POST /v3/projects",
+		"PUT /v1/projects/eval-conflict-sa/billingInfo",
+		"POST /v1/projects/eval-conflict-sa/serviceAccounts",
+		"POST /v3/projects/eval-conflict-sa:getIamPolicy",
+		"POST /v3/projects/eval-conflict-sa:setIamPolicy",
 		"POST /v3/projects",
 		"PUT /v1/projects/eval-billfail/billingInfo",
 		"DELETE /v3/projects/eval-billfail",
+		"POST /v3/projects",
+		"PUT /v1/projects/eval-iamfail/billingInfo",
+		"POST /v1/projects/eval-iamfail/serviceAccounts",
+		"POST /v3/projects/eval-iamfail:getIamPolicy",
+		"DELETE /v3/projects/eval-iamfail",
 		"DELETE /v3/projects/eval-deadbeef",
 		"DELETE /v3/projects/eval-missing",
 		"DELETE /v3/projects/eval-deleting",
@@ -256,6 +357,106 @@ func TestRESTGCPProjectProvisioner_CreatePollLinkAndDelete(t *testing.T) {
 			t.Errorf("request[%d] = %q, want %q", i, requests[i], wantOrder[i])
 		}
 	}
+}
+
+func TestRESTGCPProjectProvisioner_MintAccessToken(t *testing.T) {
+	const controllerToken = "controller-wif-secret-token"
+	const impersonatedToken = "ya29.project-scoped-impersonated-token"
+	const leakedResponseToken = "ya29.leaked-in-error-body"
+
+	var receivedPath string
+	var receivedBody map[string][]string
+	var requestCount int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+		if got := req.Header.Get("Authorization"); got != "Bearer "+controllerToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		receivedPath = req.URL.Path
+		if err := json.NewDecoder(req.Body).Decode(&receivedBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		switch req.URL.Path {
+		case "/v1/projects/-/serviceAccounts/eval-task@eval-proj-1.iam.gserviceaccount.com:generateAccessToken":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"accessToken": impersonatedToken,
+				"expireTime":  "2026-11-26T23:59:59Z",
+			})
+		case "/v1/projects/-/serviceAccounts/eval-task@eval-proj-denied.iam.gserviceaccount.com:generateAccessToken":
+			http.Error(w, "denied for "+controllerToken+" and "+leakedResponseToken, http.StatusForbidden)
+		case "/v1/projects/-/serviceAccounts/eval-task@eval-proj-empty.iam.gserviceaccount.com:generateAccessToken":
+			_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "   "})
+		case "/v1/projects/-/serviceAccounts/eval-task@eval-proj-badheader.iam.gserviceaccount.com:generateAccessToken":
+			_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "ya29.bad\ntoken"})
+		default:
+			http.Error(w, "not found: "+req.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	provisioner := &RESTGCPProjectProvisioner{
+		TokenSource:           oauth2.StaticTokenSource(&oauth2.Token{AccessToken: controllerToken}),
+		HTTPClient:            server.Client(),
+		IAMCredentialsBaseURL: server.URL,
+	}
+
+	t.Run("mints project-scoped token with expected URL and scope body", func(t *testing.T) {
+		gotToken, err := provisioner.MintAccessToken(t.Context(), "eval-proj-1")
+		if err != nil {
+			t.Fatalf("MintAccessToken failed: %v", err)
+		}
+		if gotToken != impersonatedToken {
+			t.Fatalf("got token %q, want %q", gotToken, impersonatedToken)
+		}
+		wantPath := "/v1/projects/-/serviceAccounts/eval-task@eval-proj-1.iam.gserviceaccount.com:generateAccessToken"
+		if receivedPath != wantPath {
+			t.Errorf("request path = %q, want %q", receivedPath, wantPath)
+		}
+		wantBody := map[string][]string{"scope": {gcpCloudPlatformScope}}
+		if !reflect.DeepEqual(receivedBody, wantBody) {
+			t.Errorf("request body = %+v, want %+v", receivedBody, wantBody)
+		}
+	})
+
+	t.Run("empty projectID fails closed without calling IAM Credentials API", func(t *testing.T) {
+		beforeCount := requestCount
+		if _, err := provisioner.MintAccessToken(t.Context(), "   "); err == nil {
+			t.Fatal("expected error for empty projectID")
+		}
+		if requestCount != beforeCount {
+			t.Fatalf("expected no HTTP calls for empty projectID, got %d", requestCount-beforeCount)
+		}
+	})
+
+	t.Run("error response redacts controller token and OAuth tokens", func(t *testing.T) {
+		_, err := provisioner.MintAccessToken(t.Context(), "eval-proj-denied")
+		if err == nil {
+			t.Fatal("expected error for 403 response")
+		}
+		if strings.Contains(err.Error(), controllerToken) || strings.Contains(err.Error(), leakedResponseToken) {
+			t.Fatalf("expected tokens redacted from error, got: %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "[REDACTED]") {
+			t.Fatalf("expected [REDACTED] marker in error, got: %q", err.Error())
+		}
+	})
+
+	t.Run("empty and invalid header tokens fail closed without leaking token", func(t *testing.T) {
+		if _, err := provisioner.MintAccessToken(t.Context(), "eval-proj-empty"); err == nil {
+			t.Fatal("expected error for empty accessToken")
+		}
+		_, badErr := provisioner.MintAccessToken(t.Context(), "eval-proj-badheader")
+		if badErr == nil {
+			t.Fatal("expected error for token containing newline")
+		}
+		if strings.Contains(badErr.Error(), "ya29.bad") {
+			t.Fatalf("invalid token leaked into error: %q", badErr.Error())
+		}
+	})
 }
 
 func TestBuildServicePortalEgressPolicyWithCredentials_GCPAndExactModelRule(t *testing.T) {
@@ -294,10 +495,11 @@ func TestBuildServicePortalEgressPolicyWithCredentials_GCPAndExactModelRule(t *t
 }
 
 func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
+	const controllerAccessToken = "ya29.controller-broad-token-must-never-be-injected"
 	const realAccessToken = "ya29.real-short-lived-gcp-token-secret"
 	projectIDPattern := regexp.MustCompile(`^eval-[0-9a-f]{8}$`)
 
-	newFixture := func(t *testing.T, exitCode int) (*RunReconciler, client.Client, *fakeGCPProjectProvisioner, *fakeServicePortalClient, *sandboxclient.FakeClient, ctrl.Request) {
+	newFixture := func(t *testing.T, exitCode int) (*RunReconciler, client.Client, *fakeGCPProjectProvisioner, *fakeGCPAccessTokenMinter, *fakeServicePortalClient, *sandboxclient.FakeClient, ctrl.Request) {
 		t.Helper()
 		scheme := setupScheme(t)
 		manifest := &v1alpha1.Manifest{
@@ -329,6 +531,7 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 			},
 		}
 		provisioner := &fakeGCPProjectProvisioner{}
+		minter := &fakeGCPAccessTokenMinter{defaultToken: realAccessToken}
 		portalClient := &fakeServicePortalClient{}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).WithStatusSubresource(run).Build()
 		reconciler := &RunReconciler{
@@ -340,10 +543,12 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 			ArtifactSink:          artifacts.NewInMemorySink(),
 			ServicePortalClient:   portalClient,
 			GCPProjectProvisioner: provisioner,
-			GCPTokenSource:        oauth2.StaticTokenSource(&oauth2.Token{AccessToken: realAccessToken}),
+			GCPAccessTokenMinter:  minter,
+			GCPTokenSource:        oauth2.StaticTokenSource(&oauth2.Token{AccessToken: controllerAccessToken}),
 			Config: ClusterConfig{
 				GCPProjectParentFolderID:   "987654321",
 				GCPProjectBillingAccountID: "01ABCD-23EF45-67GH89",
+				GCPProjectTaskRoles:        []string{"roles/editor"},
 				ServicePortal: ServicePortalOptions{
 					AllowedHosts: append([]string(nil), DefaultServicePortalAllowedHosts...),
 				},
@@ -351,11 +556,11 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 		}
 		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name}}
-		return reconciler, kubeClient, provisioner, portalClient, fakeSandboxClient, req
+		return reconciler, kubeClient, provisioner, minter, portalClient, fakeSandboxClient, req
 	}
 
 	t.Run("completion creates project, injects portal credentials and placeholder env, and deletes project", func(t *testing.T) {
-		reconciler, kubeClient, provisioner, portalClient, fakeSandboxClient, req := newFixture(t, 0)
+		reconciler, kubeClient, provisioner, minter, portalClient, fakeSandboxClient, req := newFixture(t, 0)
 
 		// Turn 1: initializes task, provisions GCP project, persists TaskStatus.GCPProject, creates sandbox.
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
@@ -367,6 +572,9 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 		created := provisioner.created[0]
 		if created.parentFolderID != "987654321" || created.billingAccountID != "01ABCD-23EF45-67GH89" {
 			t.Fatalf("unexpected folder/billing args: %+v", created)
+		}
+		if !reflect.DeepEqual(created.taskRoles, []string{"roles/editor"}) {
+			t.Fatalf("created taskRoles = %v, want [roles/editor]", created.taskRoles)
 		}
 		if !projectIDPattern.MatchString(created.projectID) || len(created.projectID) > 30 {
 			t.Fatalf("invalid project ID %q", created.projectID)
@@ -409,7 +617,10 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 			t.Fatalf("unexpected ReplaceHeaders: %+v", headers)
 		}
 		if string(bind.secrets["gcp-access-token"]) != realAccessToken {
-			t.Fatalf("expected real access token in service portal secrets, got %q", string(bind.secrets["gcp-access-token"]))
+			t.Fatalf("expected impersonated access token in service portal secrets, got %q", string(bind.secrets["gcp-access-token"]))
+		}
+		if !reflect.DeepEqual(minter.requestedProjects, []string{created.projectID}) {
+			t.Fatalf("minter requestedProjects = %v, want [%q]", minter.requestedProjects, created.projectID)
 		}
 
 		if len(fakeSandboxClient.StartAsyncCalls) != 1 {
@@ -451,7 +662,7 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 	})
 
 	t.Run("task failure deletes ephemeral project", func(t *testing.T) {
-		reconciler, kubeClient, provisioner, _, _, req := newFixture(t, 1)
+		reconciler, kubeClient, provisioner, _, _, _, req := newFixture(t, 1)
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 1 error: %v", err)
 		}
@@ -470,7 +681,7 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 	})
 
 	t.Run("task restart deletes old project and provisions fresh project", func(t *testing.T) {
-		reconciler, kubeClient, provisioner, _, _, req := newFixture(t, 0)
+		reconciler, kubeClient, provisioner, _, _, _, req := newFixture(t, 0)
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 1 error: %v", err)
 		}
@@ -508,7 +719,7 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 	})
 
 	t.Run("execution deadline cutoff deletes ephemeral project", func(t *testing.T) {
-		reconciler, kubeClient, provisioner, _, _, req := newFixture(t, 0)
+		reconciler, kubeClient, provisioner, _, _, _, req := newFixture(t, 0)
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 1 error: %v", err)
 		}
@@ -533,7 +744,7 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 	})
 
 	t.Run("run deletion finalizer deletes ephemeral project and retries on transient delete error", func(t *testing.T) {
-		reconciler, kubeClient, provisioner, _, _, req := newFixture(t, 0)
+		reconciler, kubeClient, provisioner, _, _, _, req := newFixture(t, 0)
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 			t.Fatalf("turn 1 error: %v", err)
 		}
@@ -570,7 +781,7 @@ func TestGCPProjectTask_FullLifecycleServicePortalAndCleanup(t *testing.T) {
 	})
 
 	t.Run("service portal bind error redacts gcp access token", func(t *testing.T) {
-		reconciler, kubeClient, _, portalClient, _, req := newFixture(t, 0)
+		reconciler, kubeClient, _, _, portalClient, _, req := newFixture(t, 0)
 		portalClient.bindErr = errors.New("portal refused token " + realAccessToken)
 
 		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
@@ -712,7 +923,8 @@ func TestGCPProjectPool_LeaseReleaseAndContention(t *testing.T) {
 	t.Run("leases pooled project, injects portal credentials without leaking keys, and releases without DeleteProject", func(t *testing.T) {
 		scheme := setupScheme(t)
 		const realModelKey = "real-gemini-api-key"
-		const realAccessToken = "pool-oauth-access-token"
+		const controllerAccessToken = "controller-broad-oauth-token"
+		const realAccessToken = "ya29.pool-proj-1-impersonated-token"
 
 		modelSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: DefaultModelCredentialsSecretName, Namespace: "eval-runner"},
@@ -735,6 +947,9 @@ func TestGCPProjectPool_LeaseReleaseAndContention(t *testing.T) {
 			},
 		}
 		provisioner := &fakeGCPProjectProvisioner{}
+		minter := &fakeGCPAccessTokenMinter{
+			tokensByProject: map[string]string{"pool-proj-1": realAccessToken},
+		}
 		portalClient := &fakeServicePortalClient{}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(modelSecret, run).WithStatusSubresource(run).Build()
 		reconciler := &RunReconciler{
@@ -748,7 +963,8 @@ func TestGCPProjectPool_LeaseReleaseAndContention(t *testing.T) {
 			ArtifactSink:          artifacts.NewInMemorySink(),
 			ServicePortalClient:   portalClient,
 			GCPProjectProvisioner: provisioner,
-			GCPTokenSource:        oauth2.StaticTokenSource(&oauth2.Token{AccessToken: realAccessToken}),
+			GCPAccessTokenMinter:  minter,
+			GCPTokenSource:        oauth2.StaticTokenSource(&oauth2.Token{AccessToken: controllerAccessToken}),
 			Config: ClusterConfig{
 				GCPProjectPool: []string{"pool-proj-1", "pool-proj-2"},
 				ServicePortal: ServicePortalOptions{
@@ -801,6 +1017,12 @@ func TestGCPProjectPool_LeaseReleaseAndContention(t *testing.T) {
 		}
 		if string(bind.secrets["gemini-api-key"]) != realModelKey || string(bind.secrets["gcp-access-token"]) != realAccessToken {
 			t.Fatalf("expected both gemini-api-key and gcp-access-token in service portal secrets")
+		}
+		if string(bind.secrets["gcp-access-token"]) == controllerAccessToken {
+			t.Fatalf("pooled task must never receive controller access token")
+		}
+		if !reflect.DeepEqual(minter.requestedProjects, []string{"pool-proj-1"}) {
+			t.Fatalf("minter requestedProjects = %v, want [pool-proj-1]", minter.requestedProjects)
 		}
 		if len(fakeSandboxClient.StartAsyncCalls) != 1 || fakeSandboxClient.StartAsyncCalls[0].Config.Env["GOOGLE_CLOUD_PROJECT"] != "pool-proj-1" {
 			t.Fatalf("unexpected StartAsync env: %+v", fakeSandboxClient.StartAsyncCalls)
