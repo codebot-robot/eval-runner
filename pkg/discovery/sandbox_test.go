@@ -881,6 +881,36 @@ func TestRepoCheckoutScript(t *testing.T) {
 
 	fakeGitPath := filepath.Join(binDirectory, "git")
 	fakeGitScript := `#!/bin/sh
+if [ -n "$GIT_CALL_LOG" ]; then
+    echo "$*" >> "$GIT_CALL_LOG"
+fi
+if [ "$1" = "init" ]; then
+    target="$2"
+    mkdir -p "$target"
+    exit 0
+fi
+if [ "$1" = "-C" ] && [ "$3" = "fetch" ]; then
+    target="$2"
+    url="$7"
+    commit="$8"
+    if [ "$url" = "reject-shallow-fetch" ]; then
+        mkdir -p "$target/partial_state"
+        echo "error: Server does not allow request for unadvertised object $commit" >&2
+        exit 128
+    fi
+    if [ "$url" = "timeout-fetch" ]; then
+        exit 124
+    fi
+    if [ "$url" = "fail-clone" ] || [ "$url" = "fail-clone-retry" ] || [ "$url" = "retry-clone" ] || [ "$url" = "timeout-clone" ]; then
+        echo "error: Server does not allow request for unadvertised object $commit" >&2
+        exit 128
+    fi
+    if [ "$commit" = "fail-checkout" ] || [ "$commit" = "timeout-checkout" ]; then
+        echo "error: Server does not allow request for unadvertised object $commit" >&2
+        exit 128
+    fi
+    exit 0
+fi
 if [ "$1" = "clone" ]; then
     url="$3"
     target="$4"
@@ -912,6 +942,16 @@ if [ "$1" = "clone" ]; then
 fi
 if [ "$1" = "-C" ] && [ "$3" = "checkout" ]; then
     commit="$4"
+    if [ "$commit" = "--detach" ]; then
+        if [ "$REPO_COMMIT" = "fail-shallow-checkout" ]; then
+            echo "error: pathspec 'FETCH_HEAD' did not match any file(s) known to git" >&2
+            exit 1
+        fi
+        if [ "$REPO_COMMIT" = "timeout-shallow-checkout" ]; then
+            exit 124
+        fi
+        exit 0
+    fi
     if [ "$commit" = "fail-checkout" ]; then
         echo "error: pathspec 'fail-checkout' did not match any file(s) known to git" >&2
         exit 1
@@ -936,13 +976,66 @@ exit 0
 		expectedExitCode     int
 		expectedMessagePart  string
 		expectRepoDirCreated bool
+		expectedCallsContain []string
+		forbiddenCalls       []string
 	}{
 		{
-			name:                 "SuccessPath",
+			name:                 "ShallowFetchSuccess",
 			repositoryURL:        "https://example.com/valid/repo.git",
-			repositoryCommit:     "v1.0.0",
+			repositoryCommit:     "0123456789abcdef0123456789abcdef01234567",
 			expectedExitCode:     0,
 			expectRepoDirCreated: true,
+			expectedCallsContain: []string{
+				"fetch --depth 1 -- https://example.com/valid/repo.git 0123456789abcdef0123456789abcdef01234567",
+				"checkout --detach FETCH_HEAD",
+			},
+			forbiddenCalls: []string{"clone --"},
+		},
+		{
+			name:                 "ShallowFetchFallbackToFullClone",
+			repositoryURL:        "reject-shallow-fetch",
+			repositoryCommit:     "0123456789abcdef0123456789abcdef01234567",
+			expectedExitCode:     0,
+			expectRepoDirCreated: true,
+			expectedCallsContain: []string{
+				"fetch --depth 1 -- reject-shallow-fetch 0123456789abcdef0123456789abcdef01234567",
+				"clone -- reject-shallow-fetch",
+				"checkout 0123456789abcdef0123456789abcdef01234567",
+			},
+			forbiddenCalls: []string{"checkout --detach FETCH_HEAD"},
+		},
+		{
+			name:                "ShallowFetchTimeoutDoesNotFallbackToClone",
+			repositoryURL:       "timeout-fetch",
+			repositoryCommit:    "0123456789abcdef0123456789abcdef01234567",
+			expectedExitCode:    124,
+			expectedMessagePart: "step git clone failed: sandbox did not report completion",
+			forbiddenCalls:      []string{"clone --"},
+		},
+		{
+			name:                "ShallowCheckoutFailure",
+			repositoryURL:       "https://example.com/valid/repo.git",
+			repositoryCommit:    "fail-shallow-checkout",
+			expectedExitCode:    1,
+			expectedMessagePart: "step git checkout failed with exit code 1",
+			forbiddenCalls:      []string{"clone --"},
+		},
+		{
+			name:                "ShallowCheckoutTimeout",
+			repositoryURL:       "https://example.com/valid/repo.git",
+			repositoryCommit:    "timeout-shallow-checkout",
+			expectedExitCode:    124,
+			expectedMessagePart: "step git checkout failed: sandbox did not report completion",
+			forbiddenCalls:      []string{"clone --"},
+		},
+		{
+			name:                 "EmptyCommitUsesFullClone",
+			repositoryURL:        "https://example.com/valid/repo.git",
+			repositoryCommit:     "",
+			expectedExitCode:     0,
+			expectRepoDirCreated: true,
+			expectedCallsContain: []string{"clone -- https://example.com/valid/repo.git"},
+			forbiddenCalls:       []string{"fetch --depth 1"},
 		},
 		{
 			name:                 "RetrySuccess",
@@ -1008,12 +1101,14 @@ exit 0
 				t.Fatalf("failed to create workspace: %v", err)
 			}
 			terminationLogPath := filepath.Join(caseDirectory, "termination-log")
+			gitCallLogPath := filepath.Join(caseDirectory, "git-calls.log")
 
 			command := exec.Command("sh", "-c", checkoutScript)
 			envVars := append(os.Environ(),
 				"PATH="+binDirectory+":"+os.Getenv("PATH"),
 				"WORKSPACE_ROOT="+workspaceDirectory,
 				"TERMINATION_LOG="+terminationLogPath,
+				"GIT_CALL_LOG="+gitCallLogPath,
 				"REPO_URL="+tc.repositoryURL,
 				"REPO_COMMIT="+tc.repositoryCommit,
 			)
@@ -1050,6 +1145,19 @@ exit 0
 				}
 			}
 
+			callLogBytes, _ := os.ReadFile(gitCallLogPath)
+			callLog := string(callLogBytes)
+			for _, expectedCall := range tc.expectedCallsContain {
+				if !strings.Contains(callLog, expectedCall) {
+					t.Errorf("expected git calls to contain %q, got:\n%s", expectedCall, callLog)
+				}
+			}
+			for _, forbiddenCall := range tc.forbiddenCalls {
+				if strings.Contains(callLog, forbiddenCall) {
+					t.Errorf("did not expect git calls to contain %q, got:\n%s", forbiddenCall, callLog)
+				}
+			}
+
 			if tc.expectRepoDirCreated {
 				repoDirectory := filepath.Join(workspaceDirectory, "repo")
 				if info, statErr := os.Stat(repoDirectory); statErr != nil || !info.IsDir() {
@@ -1059,6 +1167,156 @@ exit 0
 				if _, statErr := os.Stat(partialStatePath); statErr == nil {
 					t.Errorf("expected partial clone to be cleaned up, but %q still exists", partialStatePath)
 				}
+			}
+		})
+	}
+}
+
+func TestRepoCheckoutScriptWithRealGit(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not found on PATH")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found on PATH")
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-run-real-git",
+			Namespace: "eval-runner",
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo: v1alpha1.RepoSpec{
+				URL:    "git://example.com/repo.git",
+				Commit: "test-commit",
+			},
+		},
+	}
+	sandbox := BuildTaskSandbox(run, "task-real-git", TaskSandboxConfig{
+		Namespace:       "eval-runner-sandbox",
+		AuthTokenDigest: AuthTokenDigest("dummy-token"),
+		CloneRepo:       true,
+	})
+	checkoutScript := sandbox.Spec.PodTemplate.Spec.InitContainers[1].Command[2]
+
+	runGit := func(t *testing.T, args ...string) string {
+		t.Helper()
+		command := exec.Command("git", args...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\noutput: %s", args, err, string(output))
+		}
+		return strings.TrimSpace(string(output))
+	}
+
+	sourceDirectory := t.TempDir()
+	workDirectory := filepath.Join(sourceDirectory, "work")
+	bareDirectory := filepath.Join(sourceDirectory, "origin.git")
+
+	runGit(t, "init", "-b", "main", workDirectory)
+	runGit(t, "-C", workDirectory, "config", "user.email", "test@example.com")
+	runGit(t, "-C", workDirectory, "config", "user.name", "Test")
+
+	if err := os.WriteFile(filepath.Join(workDirectory, "version.txt"), []byte("commit-1\n"), 0644); err != nil {
+		t.Fatalf("failed to write commit 1 file: %v", err)
+	}
+	runGit(t, "-C", workDirectory, "add", "version.txt")
+	runGit(t, "-C", workDirectory, "commit", "-m", "commit 1")
+	firstCommit := runGit(t, "-C", workDirectory, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(workDirectory, "version.txt"), []byte("commit-2\n"), 0644); err != nil {
+		t.Fatalf("failed to write commit 2 file: %v", err)
+	}
+	runGit(t, "-C", workDirectory, "commit", "-am", "commit 2")
+	secondCommit := runGit(t, "-C", workDirectory, "rev-parse", "HEAD")
+
+	runGit(t, "clone", "--bare", workDirectory, bareDirectory)
+
+	testCases := []struct {
+		name               string
+		allowAnySHA1InWant string
+		extraEnv           []string
+		targetCommit       string
+		expectedHead       string
+		expectedContent    string
+		expectedCommitList string
+		expectedShallow    string
+	}{
+		{
+			name:               "ShallowFetchSingleCommit",
+			allowAnySHA1InWant: "true",
+			targetCommit:       secondCommit,
+			expectedHead:       secondCommit,
+			expectedContent:    "commit-2\n",
+			expectedCommitList: "1",
+			expectedShallow:    "true",
+		},
+		{
+			name:               "FallbackToFullCloneWhenServerRejectsUnadvertisedSHA",
+			allowAnySHA1InWant: "false",
+			extraEnv:           []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.version", "GIT_CONFIG_VALUE_0=0"},
+			targetCommit:       firstCommit,
+			expectedHead:       firstCommit,
+			expectedContent:    "commit-1\n",
+			expectedCommitList: "1",
+			expectedShallow:    "false",
+		},
+		{
+			name:               "FallbackToFullCloneForShortSHA",
+			allowAnySHA1InWant: "true",
+			targetCommit:       firstCommit[:7],
+			expectedHead:       firstCommit,
+			expectedContent:    "commit-1\n",
+			expectedCommitList: "1",
+			expectedShallow:    "false",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runGit(t, "-C", bareDirectory, "config", "uploadpack.allowAnySHA1InWant", tc.allowAnySHA1InWant)
+
+			caseDirectory := t.TempDir()
+			workspaceDirectory := filepath.Join(caseDirectory, "workspace")
+			if err := os.MkdirAll(workspaceDirectory, 0755); err != nil {
+				t.Fatalf("failed to create workspace: %v", err)
+			}
+			terminationLogPath := filepath.Join(caseDirectory, "termination-log")
+
+			command := exec.Command("sh", "-c", checkoutScript)
+			command.Env = append(os.Environ(),
+				"WORKSPACE_ROOT="+workspaceDirectory,
+				"TERMINATION_LOG="+terminationLogPath,
+				"REPO_URL=file://"+bareDirectory,
+				"REPO_COMMIT="+tc.targetCommit,
+			)
+			command.Env = append(command.Env, tc.extraEnv...)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("checkout script failed: %v\noutput: %s", err, string(output))
+			}
+
+			repoDirectory := filepath.Join(workspaceDirectory, "repo")
+			headCommit := runGit(t, "-C", repoDirectory, "rev-parse", "HEAD")
+			if headCommit != tc.expectedHead {
+				t.Errorf("expected HEAD %s, got %s", tc.expectedHead, headCommit)
+			}
+
+			commitCount := runGit(t, "-C", repoDirectory, "rev-list", "--count", "HEAD")
+			if commitCount != tc.expectedCommitList {
+				t.Errorf("expected rev-list count %s, got %s", tc.expectedCommitList, commitCount)
+			}
+
+			contentBytes, err := os.ReadFile(filepath.Join(repoDirectory, "version.txt"))
+			if err != nil {
+				t.Fatalf("failed to read checked-out file: %v", err)
+			}
+			if string(contentBytes) != tc.expectedContent {
+				t.Errorf("expected file content %q, got %q", tc.expectedContent, string(contentBytes))
+			}
+
+			isShallow := runGit(t, "-C", repoDirectory, "rev-parse", "--is-shallow-repository")
+			if isShallow != tc.expectedShallow {
+				t.Errorf("expected --is-shallow-repository=%q, got %q", tc.expectedShallow, isShallow)
 			}
 		})
 	}

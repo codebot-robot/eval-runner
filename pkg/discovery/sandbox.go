@@ -468,8 +468,28 @@ seconds_remaining() {
     echo $((deadline - current_time))
 }
 
+shallow_fetched=0
 while :; do
     rm -rf "$repo_dir"
+    if [ -n "$REPO_COMMIT" ]; then
+        output=$($timeout_prefix git init "$repo_dir" 2>&1)
+        status=$?
+        if [ "$status" -eq 0 ]; then
+            output=$($timeout_prefix git -C "$repo_dir" fetch --depth 1 -- "$REPO_URL" "$REPO_COMMIT" 2>&1)
+            status=$?
+            if [ "$status" -eq 0 ]; then
+                shallow_fetched=1
+                break
+            fi
+            if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
+                break
+            fi
+        elif [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
+            break
+        fi
+        rm -rf "$repo_dir"
+    fi
+
     output=$($timeout_prefix git clone -- "$REPO_URL" "$repo_dir" 2>&1)
     status=$?
     if [ "$status" -eq 0 ] || [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
@@ -496,9 +516,14 @@ if [ "$status" -ne 0 ]; then
     exit "$status"
 fi
 
-if [ -n "$REPO_COMMIT" ]; then
-    output=$($timeout_prefix git -C "$repo_dir" checkout "$REPO_COMMIT" 2>&1)
-    status=$?
+if [ "$shallow_fetched" -eq 1 ] || [ -n "$REPO_COMMIT" ]; then
+    if [ "$shallow_fetched" -eq 1 ]; then
+        output=$($timeout_prefix git -C "$repo_dir" checkout --detach FETCH_HEAD 2>&1)
+        status=$?
+    else
+        output=$($timeout_prefix git -C "$repo_dir" checkout "$REPO_COMMIT" 2>&1)
+        status=$?
+    fi
     if [ "$status" -ne 0 ]; then
         if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
             echo "step git checkout failed: sandbox did not report completion" > "$termination_log" 2>/dev/null || true

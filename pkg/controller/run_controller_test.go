@@ -1115,10 +1115,19 @@ func TestReconcileTransientCloneFailureRetriesAndSucceeds(t *testing.T) {
 	cloneAttempts := 0
 	executor := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			switch gitCommandSubcommand(cfg.Command) {
+			case "fetch":
 				cloneAttempts++
 				if cloneAttempts <= 2 {
 					// Simulate transient connection failure for first 2 attempts
+					return &sandboxclient.ExecuteResult{
+						ExitCode: 128,
+						Stderr:   "fatal: unable to connect to git-server.eval-runner-sandbox.svc.cluster.local: Connection refused",
+					}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			case "clone":
+				if cloneAttempts <= 2 {
 					return &sandboxclient.ExecuteResult{
 						ExitCode: 128,
 						Stderr:   "fatal: unable to connect to git-server.eval-runner-sandbox.svc.cluster.local: Connection refused",
@@ -1230,8 +1239,14 @@ func TestReconcileTransientCloneFailureExhaustsRetries(t *testing.T) {
 	cloneAttempts := 0
 	executor := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			switch gitCommandSubcommand(cfg.Command) {
+			case "fetch":
 				cloneAttempts++
+				return &sandboxclient.ExecuteResult{
+					ExitCode: 128,
+					Stderr:   "fatal: unable to connect to git-server:\ngit-server: errno=Connection refused",
+				}, nil
+			case "clone":
 				return &sandboxclient.ExecuteResult{
 					ExitCode: 128,
 					Stderr:   "fatal: unable to connect to git-server:\ngit-server: errno=Connection refused",
@@ -1397,9 +1412,9 @@ func TestReconcileDiscovery_MissingEvalsListFails(t *testing.T) {
 		t.Errorf("Expected status message to contain stderr tail, got: %s", updatedRun.Status.Message)
 	}
 
-	// Assert the fake saw exactly the clone steps (clean, clone, checkout) and list step, and no scan step.
-	if len(fakeClient.Calls) != 4 {
-		t.Fatalf("Expected exactly 4 calls, got %d: %+v", len(fakeClient.Calls), fakeClient.Calls)
+	// Assert the fake saw exactly the repo setup steps (clean, init, shallow fetch, checkout) and list step, and no scan step.
+	if len(fakeClient.Calls) != 5 {
+		t.Fatalf("Expected exactly 5 calls, got %d: %+v", len(fakeClient.Calls), fakeClient.Calls)
 	}
 	for _, call := range fakeClient.Calls {
 		for _, arg := range call.Command {
@@ -1408,9 +1423,9 @@ func TestReconcileDiscovery_MissingEvalsListFails(t *testing.T) {
 			}
 		}
 	}
-	lastCall := fakeClient.Calls[3]
+	lastCall := fakeClient.Calls[4]
 	if len(lastCall.Command) < 3 || !strings.Contains(lastCall.Command[2], "./.evals/list") {
-		t.Errorf("Expected step 4 to be ./.evals/list, got: %v", lastCall.Command)
+		t.Errorf("Expected step 5 to be ./.evals/list, got: %v", lastCall.Command)
 	}
 }
 
@@ -1491,7 +1506,7 @@ func TestReconcileDiscoveringRunRecoversStaleSandboxEndpoint(t *testing.T) {
 
 	fakeClient := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			if subcommand := gitCommandSubcommand(cfg.Command); subcommand == "fetch" || subcommand == "clone" {
 				dialCount++
 				if dialCount == 1 {
 					// Pod is replaced with a new IP while Sandbox.status remains stale at 10.244.0.5
@@ -1598,7 +1613,7 @@ func TestReconcileDiscoveringRunUnchangedEndpointRequeuesWithoutCountingAttempt(
 	var dialCount int
 	fakeClient := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			if subcommand := gitCommandSubcommand(cfg.Command); subcommand == "fetch" || subcommand == "clone" {
 				dialCount++
 				return nil, status.Error(codes.Unavailable, `rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 10.244.0.5:9090: i/o timeout"`)
 			}
@@ -1706,7 +1721,7 @@ func TestReconcileDiscoveringRunNewPodIPUnavailableNoAlternation(t *testing.T) {
 	var dialedIPs []string
 	fakeClient := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			if subcommand := gitCommandSubcommand(cfg.Command); subcommand == "fetch" || subcommand == "clone" {
 				return nil, status.Error(codes.Unavailable, `rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 10.244.0.42:9090: connect: connection refused"`)
 			}
 			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
@@ -1827,7 +1842,7 @@ func TestReconcileDiscoveringRunUnchangedEndpointCapsUncountedRequeuesAndFails(t
 
 	fakeClient := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			if subcommand := gitCommandSubcommand(cfg.Command); subcommand == "fetch" || subcommand == "clone" {
 				return nil, status.Error(codes.Unavailable, `rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 10.244.0.5:9090: i/o timeout"`)
 			}
 			return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
@@ -2154,13 +2169,19 @@ func TestReconcileDiscoveringRunRebuildsClientWhenPodIPChangesOnSubsequentAttemp
 
 	fakeClient := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			switch gitCommandSubcommand(cfg.Command) {
+			case "fetch":
 				cloneAttempts++
 				if cloneAttempts == 1 {
 					// Attempt 1 fails at git level (non-Unavailable)
 					// Update pod IP in informer so before attempt 2 it re-resolves new IP
 					pod.Status.PodIP = "10.244.0.42"
 					_ = cl.Status().Update(ctx, pod)
+					return &sandboxclient.ExecuteResult{ExitCode: 128, Stderr: "fatal: early EOF"}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			case "clone":
+				if cloneAttempts == 1 {
 					return &sandboxclient.ExecuteResult{ExitCode: 128, Stderr: "fatal: early EOF"}, nil
 				}
 				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
@@ -2768,8 +2789,14 @@ func TestReconcileRetryLoopCutShortByDeadline(t *testing.T) {
 	cloneAttempts := 0
 	executor := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			switch gitCommandSubcommand(cfg.Command) {
+			case "fetch":
 				cloneAttempts++
+				return &sandboxclient.ExecuteResult{
+					ExitCode: 128,
+					Stderr:   "fatal: unable to connect to git-server: Connection refused",
+				}, nil
+			case "clone":
 				return &sandboxclient.ExecuteResult{
 					ExitCode: 128,
 					Stderr:   "fatal: unable to connect to git-server: Connection refused",
@@ -3396,12 +3423,12 @@ func TestReconcileUnauthenticatedFailsFastWithoutRetry(t *testing.T) {
 
 	cloneCount := 0
 	for _, call := range fakeClient.Calls {
-		if len(call.Command) > 1 && call.Command[1] == "clone" {
+		if subcommand := gitCommandSubcommand(call.Command); subcommand == "fetch" || subcommand == "clone" {
 			cloneCount++
 		}
 	}
 	if cloneCount != 1 {
-		t.Errorf("Expected exactly 1 clone call (no retries for Unauthenticated), got %d", cloneCount)
+		t.Errorf("Expected exactly 1 clone/fetch call (no retries for Unauthenticated), got %d", cloneCount)
 	}
 
 	var updatedRun v1alpha1.Run
@@ -12610,7 +12637,7 @@ func TestReconcile_HungGitCloneStepTimesOutAndFailsRun(t *testing.T) {
 	defer close(hungCh)
 	executor := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			if subcommand := gitCommandSubcommand(cfg.Command); subcommand == "fetch" || subcommand == "clone" {
 				<-hungCh
 				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 			}
@@ -12695,7 +12722,7 @@ func TestReconcile_HungGitCheckoutStepTimesOutAndFailsRun(t *testing.T) {
 	defer close(hungCh)
 	executor := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "checkout" {
+			if gitCommandSubcommand(cfg.Command) == "checkout" {
 				<-hungCh
 				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 			}
@@ -12842,7 +12869,7 @@ func TestReconcile_HungExecuteInTaskExecutionTimesOut(t *testing.T) {
 	defer close(hungCh)
 	executor := &sandboxclient.FakeClient{
 		ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
-			if len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
+			if subcommand := gitCommandSubcommand(cfg.Command); subcommand == "fetch" || subcommand == "clone" {
 				<-hungCh
 				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
 			}
@@ -14302,6 +14329,336 @@ func TestKindClusterTaskEligibilityAndSandboxConstruction(t *testing.T) {
 		}
 		if len(regularPodSpec.Containers) != 1 {
 			t.Errorf("expected 1 container on non-kind sandbox, got %d", len(regularPodSpec.Containers))
+		}
+	})
+}
+
+func gitCommandSubcommand(command []string) string {
+	if len(command) < 2 || command[0] != "git" {
+		return ""
+	}
+	if command[1] == "-C" {
+		if len(command) >= 4 {
+			return command[3]
+		}
+		return ""
+	}
+	return command[1]
+}
+
+func TestDiscoveryShallowFetchAndFallback(t *testing.T) {
+	validManifestJSON := `{"tasks":[{"id":"triage/lookup","spec":"runbook.py@lookup"}]}`
+
+	t.Run("ShallowFetchSuccessSkipsFullClone", func(t *testing.T) {
+		fakeClient := &sandboxclient.FakeClient{
+			ManifestBytes: []byte(validManifestJSON),
+		}
+		fixture := newDiscoveringRunFixture(t, fakeClient)
+
+		if _, err := fixture.reconciler.Reconcile(t.Context(), fixture.req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := fixture.client.Get(t.Context(), fixture.req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get run: %v", err)
+		}
+		if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+			t.Fatalf("Expected phase Discovered, got %s (message: %s)", updatedRun.Status.Phase, updatedRun.Status.Message)
+		}
+
+		expectedCommands := []string{
+			"rm -rf repo",
+			"git init repo",
+			"git -C repo fetch --depth 1 -- git://git-server/repo.git abc1234",
+			"git -C repo checkout --detach FETCH_HEAD",
+		}
+		if len(fakeClient.Calls) < len(expectedCommands) {
+			t.Fatalf("Expected at least %d calls, got %d: %+v", len(expectedCommands), len(fakeClient.Calls), fakeClient.Calls)
+		}
+		for i, expectedCommand := range expectedCommands {
+			gotCommand := strings.Join(fakeClient.Calls[i].Command, " ")
+			if gotCommand != expectedCommand {
+				t.Errorf("call %d = %q, want %q", i, gotCommand, expectedCommand)
+			}
+		}
+		for _, call := range fakeClient.Calls {
+			if gitCommandSubcommand(call.Command) == "clone" {
+				t.Errorf("did not expect git clone when shallow fetch succeeds, got call: %v", call.Command)
+			}
+		}
+	})
+
+	t.Run("ShallowFetchRejectedFallsBackToFullCloneAndCheckout", func(t *testing.T) {
+		fakeClient := &sandboxclient.FakeClient{
+			FetchExit:     128,
+			FetchStderr:   "error: Server does not allow request for unadvertised object abc1234",
+			ManifestBytes: []byte(validManifestJSON),
+		}
+		fixture := newDiscoveringRunFixture(t, fakeClient)
+
+		if _, err := fixture.reconciler.Reconcile(t.Context(), fixture.req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := fixture.client.Get(t.Context(), fixture.req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get run: %v", err)
+		}
+		if updatedRun.Status.Phase != v1alpha1.RunPhaseDiscovered {
+			t.Fatalf("Expected phase Discovered, got %s (message: %s)", updatedRun.Status.Phase, updatedRun.Status.Message)
+		}
+
+		expectedCommands := []string{
+			"rm -rf repo",
+			"git init repo",
+			"git -C repo fetch --depth 1 -- git://git-server/repo.git abc1234",
+			"rm -rf repo",
+			"git clone -- git://git-server/repo.git repo",
+			"git checkout abc1234",
+		}
+		if len(fakeClient.Calls) < len(expectedCommands) {
+			t.Fatalf("Expected at least %d calls, got %d: %+v", len(expectedCommands), len(fakeClient.Calls), fakeClient.Calls)
+		}
+		for i, expectedCommand := range expectedCommands {
+			gotCommand := strings.Join(fakeClient.Calls[i].Command, " ")
+			if gotCommand != expectedCommand {
+				t.Errorf("call %d = %q, want %q", i, gotCommand, expectedCommand)
+			}
+		}
+		if fakeClient.Calls[5].Cwd != "repo" {
+			t.Errorf("expected fallback checkout cwd \"repo\", got %q", fakeClient.Calls[5].Cwd)
+		}
+	})
+
+	t.Run("ShallowFetchTimeoutDoesNotFallBackToFullClone", func(t *testing.T) {
+		hungChannel := make(chan struct{})
+		defer close(hungChannel)
+
+		cloneCalled := false
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				switch gitCommandSubcommand(cfg.Command) {
+				case "fetch":
+					<-hungChannel
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				case "clone":
+					cloneCalled = true
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}
+		fixture := newDiscoveringRunFixture(t, fakeClient)
+		fixture.reconciler.DiscoveryStepTimeout = 50 * time.Millisecond
+
+		if _, err := fixture.reconciler.Reconcile(t.Context(), fixture.req); err != nil {
+			t.Fatalf("Reconcile error: %v", err)
+		}
+
+		if cloneCalled {
+			t.Errorf("expected shallow fetch timeout to fail immediately without falling back to full git clone")
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := fixture.client.Get(t.Context(), fixture.req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("Failed to get run: %v", err)
+		}
+		if updatedRun.Status.Phase != v1alpha1.RunPhaseFailed {
+			t.Fatalf("Expected phase Failed, got %s", updatedRun.Status.Phase)
+		}
+		expectedMessage := "step git clone failed: sandbox did not report completion"
+		if !strings.Contains(updatedRun.Status.Message, expectedMessage) {
+			t.Errorf("Expected message containing %q, got %q", expectedMessage, updatedRun.Status.Message)
+		}
+	})
+}
+
+func TestTaskSandboxShallowFetchAndFallback(t *testing.T) {
+	scheme := setupScheme(t)
+	validInspectLog := []byte(`{"status":"success","results":{"scores":[{"name":"accuracy","metrics":{"accuracy":{"name":"accuracy","value":1.0}}}]},"samples":[{"id":1,"scores":{"accuracy":{"value":"C"}}}]}`)
+
+	runTaskExecution := func(t *testing.T, runName string, fakeClient *sandboxclient.FakeClient) v1alpha1.TaskStatus {
+		t.Helper()
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       runName,
+				Namespace:  "eval-runner",
+				Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/gke-labs/kube-agents.git",
+					Commit: "0123456789abcdef0123456789abcdef01234567",
+				},
+				Model: "mockllm/test",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseRunning,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:    "task-shallow",
+						Phase: v1alpha1.TaskPhasePending,
+					},
+				},
+			},
+		}
+
+		manifest := &v1alpha1.Manifest{
+			Tasks: []v1alpha1.ManifestTask{
+				{ID: "task-shallow", Spec: "eval.py@task"},
+			},
+		}
+
+		kubeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(run).
+			WithStatusSubresource(run).
+			Build()
+
+		reconciler := &RunReconciler{
+			Client:               kubeClient,
+			Scheme:               scheme,
+			SandboxClient:        fakeClient,
+			SandboxNamespace:     "eval-runner-sandbox",
+			ExecutionStepTimeout: 50 * time.Millisecond,
+		}
+		reconciler.SetCachedManifest(run.Namespace, run.Name, manifest)
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "eval-runner", Name: runName}}
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+
+		taskSandboxName := discovery.TaskSandboxNameForRun(runName, "task-shallow")
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      taskSandboxName,
+				Namespace: "eval-runner-sandbox",
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.21",
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+		}
+		if err := kubeClient.Create(t.Context(), pod); err != nil {
+			t.Fatalf("failed to create task pod: %v", err)
+		}
+
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+
+		var updatedRun v1alpha1.Run
+		if err := kubeClient.Get(t.Context(), req.NamespacedName, &updatedRun); err != nil {
+			t.Fatalf("failed to get updated run: %v", err)
+		}
+		if len(updatedRun.Status.Tasks) != 1 {
+			t.Fatalf("expected 1 task status, got %d", len(updatedRun.Status.Tasks))
+		}
+		return updatedRun.Status.Tasks[0]
+	}
+
+	t.Run("ShallowFetchSuccessSkipsFullClone", func(t *testing.T) {
+		fakeClient := &sandboxclient.FakeClient{
+			InspectLog: validInspectLog,
+		}
+		task := runTaskExecution(t, "test-task-shallow-success", fakeClient)
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Fatalf("expected task Completed, got %s (message: %s)", task.Phase, task.Message)
+		}
+
+		expectedCommands := []string{
+			"mkdir -p /workspace/out",
+			"rm -rf repo",
+			"git init repo",
+			"git -C repo fetch --depth 1 -- https://github.com/gke-labs/kube-agents.git 0123456789abcdef0123456789abcdef01234567",
+			"git -C repo checkout --detach FETCH_HEAD",
+		}
+		if len(fakeClient.Calls) < len(expectedCommands) {
+			t.Fatalf("expected at least %d calls, got %d: %+v", len(expectedCommands), len(fakeClient.Calls), fakeClient.Calls)
+		}
+		for i, expectedCommand := range expectedCommands {
+			gotCommand := strings.Join(fakeClient.Calls[i].Command, " ")
+			if gotCommand != expectedCommand {
+				t.Errorf("call %d = %q, want %q", i, gotCommand, expectedCommand)
+			}
+		}
+		for _, call := range fakeClient.Calls {
+			if gitCommandSubcommand(call.Command) == "clone" {
+				t.Errorf("did not expect git clone when shallow fetch succeeds, got call: %v", call.Command)
+			}
+		}
+	})
+
+	t.Run("ShallowFetchRejectedFallsBackToFullClone", func(t *testing.T) {
+		fakeClient := &sandboxclient.FakeClient{
+			FetchExit:   128,
+			FetchStderr: "error: Server does not allow request for unadvertised object 0123456789abcdef0123456789abcdef01234567",
+			InspectLog:  validInspectLog,
+		}
+		task := runTaskExecution(t, "test-task-shallow-fallback", fakeClient)
+		if task.Phase != v1alpha1.TaskPhaseCompleted {
+			t.Fatalf("expected task Completed, got %s (message: %s)", task.Phase, task.Message)
+		}
+
+		expectedCommands := []string{
+			"mkdir -p /workspace/out",
+			"rm -rf repo",
+			"git init repo",
+			"git -C repo fetch --depth 1 -- https://github.com/gke-labs/kube-agents.git 0123456789abcdef0123456789abcdef01234567",
+			"rm -rf repo",
+			"git clone -- https://github.com/gke-labs/kube-agents.git repo",
+			"git checkout 0123456789abcdef0123456789abcdef01234567",
+		}
+		if len(fakeClient.Calls) < len(expectedCommands) {
+			t.Fatalf("expected at least %d calls, got %d: %+v", len(expectedCommands), len(fakeClient.Calls), fakeClient.Calls)
+		}
+		for i, expectedCommand := range expectedCommands {
+			gotCommand := strings.Join(fakeClient.Calls[i].Command, " ")
+			if gotCommand != expectedCommand {
+				t.Errorf("call %d = %q, want %q", i, gotCommand, expectedCommand)
+			}
+		}
+		if fakeClient.Calls[6].Cwd != "repo" {
+			t.Errorf("expected fallback checkout cwd \"repo\", got %q", fakeClient.Calls[6].Cwd)
+		}
+	})
+
+	t.Run("ShallowFetchTimeoutDoesNotFallBackToFullClone", func(t *testing.T) {
+		hungChannel := make(chan struct{})
+		defer close(hungChannel)
+
+		cloneCalled := false
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				switch gitCommandSubcommand(cfg.Command) {
+				case "fetch":
+					<-hungChannel
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				case "clone":
+					cloneCalled = true
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}
+		task := runTaskExecution(t, "test-task-shallow-timeout", fakeClient)
+		if cloneCalled {
+			t.Errorf("expected shallow fetch timeout to fail immediately without falling back to full git clone")
+		}
+		if task.Phase != v1alpha1.TaskPhaseFailed {
+			t.Fatalf("expected task Failed, got %s", task.Phase)
+		}
+		expectedMessage := "step git clone failed: sandbox did not report completion"
+		if !strings.Contains(task.Message, expectedMessage) {
+			t.Errorf("expected task message containing %q, got %q", expectedMessage, task.Message)
 		}
 	})
 }
