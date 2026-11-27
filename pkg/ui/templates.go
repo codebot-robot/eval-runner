@@ -637,6 +637,12 @@ const runsListTemplate = `
 </html>
 `
 
+const runDetailCSS = `
+.trend { font-size: 12px; font-weight: 600; margin-left: 6px; white-space: nowrap; }
+.trend.good { color: var(--good); }
+.trend.bad { color: var(--bad); }
+`
+
 const runDetailTemplate = `
 <!doctype html>
 <html lang="en">
@@ -647,7 +653,7 @@ const runDetailTemplate = `
   {{- if eq .Phase "Running" }}
   <meta http-equiv="refresh" content="15">
   {{- end }}
-  <style>` + baseCSS + `</style>
+  <style>` + baseCSS + runDetailCSS + `</style>
 </head>
 <body>{{ template "repo_header" . }}
 
@@ -776,7 +782,7 @@ const runDetailTemplate = `
                 </td>
                 <td><span class="chip {{ .PhaseChip }}"><span class="dot"></span>{{ .Phase }}</span></td>
                 {{ if or (eq $.Metric "all") (eq $.Metric "") (eq $.Metric "rate") }}
-                <td class="num">{{ .RateStr }}</td>
+                <td class="num" style="white-space:nowrap">{{ .RateStr }}{{ if .TrendText }} <span class="trend {{ .TrendClass }}"{{ if .TrendTitle }} title="{{ .TrendTitle }}"{{ end }}>{{ .TrendText }}</span>{{ end }}</td>
                 <td class="num" style="font-size:13px">{{ if .HasCI }}{{ .CILabel }}{{ else }}—{{ end }}</td>
                 <td>
                   {{ if .HasCI }}

@@ -243,6 +243,10 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
 .reason-panel { margin-top: 14px; padding: 10px 14px; background: var(--neutral-soft); border: 1px solid var(--line); border-left: 3px solid var(--neutral); border-radius: 6px; font-size: 14px; color: var(--ink-2); }
 .reason-panel .reason-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
 .reason-panel .reason-text { white-space: pre-line; line-height: 1.5; }
+
+.trend { font-size: 12px; font-weight: 600; margin-left: 6px; white-space: nowrap; }
+.trend.good { color: var(--good); }
+.trend.bad { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -262,7 +266,7 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
       <div class="card-header">
         <h1 class="card-title">
           <span class="mono">docs-eval-cand-05ce4d8</span>
-          <span class="chip good"><span class="dot"></span>Completed</span>
+          <span class="chip neutral"><span class="dot"></span>Completed</span>
         </h1>
         <div style="font-size:13px;color:var(--muted)"><a href="/runs">← Back to Runs</a></div>
       </div>
@@ -353,13 +357,13 @@ table.ci td.delta-cell .delta-strip { flex-direction: column; gap: 1px; margin: 
                 <td class="mono" style="font-weight:600">
                   <a href="/runs/eval-runner/docs-eval-cand-05ce4d8/tasks/triage%2Frunbook_lookup/samples">triage/runbook_lookup</a>
                 </td>
-                <td><span class="chip good"><span class="dot"></span>Completed</span></td>
+                <td><span class="chip neutral"><span class="dot"></span>Completed</span></td>
                 
-                <td class="num">0.84</td>
+                <td class="num" style="white-space:nowrap">84% <span class="trend good" title="Previous run docs-eval-base-05ce4d8: 61%">▲ &#43;23%</span></td>
                 <td class="num" style="font-size:13px">[0.71, 0.92]</td>
                 <td>
                   
-                  <div class="cibar-01" title="Rate: 0.84 [0.71, 0.92]">
+                  <div class="cibar-01" title="Rate: 84% [0.71, 0.92]">
                     <div class="axis"></div>
                     <div class="tick-0"></div>
                     <div class="tick-50"></div>

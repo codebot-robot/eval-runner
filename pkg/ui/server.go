@@ -1317,6 +1317,16 @@ func (s *Server) renderRunDetail(w http.ResponseWriter, r *http.Request, run *v1
 	metricFilter := parseMetricFilter(r)
 
 	// Prepare task rows
+	var priorTaskResults map[string]previousTaskResult
+	if len(run.Status.Tasks) > 0 {
+		var runList v1alpha1.RunList
+		if err := s.readerFor(ns).List(r.Context(), &runList, client.InNamespace(ns)); err != nil {
+			log.Printf("failed to list runs in namespace %s for task trends: %v", ns, err)
+		} else {
+			priorTaskResults = previousTaskResults(run, runList.Items, ref)
+		}
+	}
+
 	taskRows := make([]RunTaskRow, 0, len(run.Status.Tasks))
 	var totalCostUSD float64
 	var hasCost bool
@@ -1329,10 +1339,12 @@ func (s *Server) renderRunDetail(w http.ResponseWriter, r *http.Request, run *v1
 		leftPx, widthPx, dotPx, hasCI := CalculateRunBarGeometry(task.SuccessRate, task.MeanScore, task.SuccessRateCI, 240.0)
 
 		rateStr := "—"
-		if task.SuccessRate != nil {
-			rateStr = fmt.Sprintf("%.2f", *task.SuccessRate)
-		} else if task.MeanScore != nil {
-			rateStr = fmt.Sprintf("%.2f", *task.MeanScore)
+		var trendText, trendClass, trendTitle string
+		if rate := taskRate(task); rate != nil {
+			rateStr = formatPassRatePercent(*rate)
+			if previous, ok := priorTaskResults[task.ID]; ok {
+				trendText, trendClass, trendTitle = taskTrend(*rate, previous)
+			}
 		}
 
 		ciLabel := "—"
@@ -1433,6 +1445,9 @@ func (s *Server) renderRunDetail(w http.ResponseWriter, r *http.Request, run *v1
 			Phase:                task.Phase,
 			PhaseChip:            taskPhaseChipClass(task.Phase),
 			RateStr:              rateStr,
+			TrendText:            trendText,
+			TrendClass:           trendClass,
+			TrendTitle:           trendTitle,
 			HasCI:                hasCI,
 			CILeftPx:             leftPx,
 			CIWidthPx:            widthPx,

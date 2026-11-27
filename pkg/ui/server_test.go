@@ -257,8 +257,11 @@ func TestServerRunsList(t *testing.T) {
 	if !strings.Contains(body, "docs-eval-cand-05ce4d8") {
 		t.Errorf("expected body to contain candidate run name, got: %s", body)
 	}
-	if !strings.Contains(body, "chip good") {
-		t.Errorf("expected Completed phase chip to have 'chip good'")
+	if !strings.Contains(body, "chip neutral") {
+		t.Errorf("expected Completed phase chip to have 'chip neutral'")
+	}
+	if strings.Contains(body, "chip good") {
+		t.Errorf("expected Completed phase chip not to have 'chip good'")
 	}
 	if !strings.Contains(body, "/runs/eval-runner/docs-eval-base-05ce4d8") {
 		t.Errorf("expected link to run detail")
@@ -301,13 +304,22 @@ func TestServerRunDetail(t *testing.T) {
 	if !strings.Contains(body, "https://github.com/gke-labs/eval-runner.git") {
 		t.Errorf("expected repo URL in header")
 	}
+	if !strings.Contains(body, `<span class="chip neutral"><span class="dot"></span>Completed</span>`) {
+		t.Errorf("expected neutral Completed phase chip")
+	}
+	if strings.Contains(body, "chip good") {
+		t.Errorf("expected no 'chip good' on Completed run detail page")
+	}
 
 	// Check task row
 	if !strings.Contains(body, "triage/runbook_lookup") {
 		t.Errorf("expected task id in table")
 	}
-	if !strings.Contains(body, "0.84") {
-		t.Errorf("expected rate 0.84 in table")
+	if !strings.Contains(body, "84%") {
+		t.Errorf("expected pass percentage 84%% in table")
+	}
+	if !strings.Contains(html.UnescapeString(body), `<span class="trend good" title="Previous run docs-eval-base-05ce4d8: 61%">▲ +23%</span>`) {
+		t.Errorf("expected positive trend arrow '▲ +23%%' against prior run in table, got:\n%s", body)
 	}
 	if !strings.Contains(body, "wilson") {
 		t.Errorf("expected method 'wilson' in table")
@@ -8829,4 +8841,139 @@ func TestServerRepoRunDetail_ForkSourcedRun(t *testing.T) {
 			t.Errorf("expected Location /github.com/gke-labs/eval-runner/runs/pr-391-184dfbc, got %q", loc)
 		}
 	})
+}
+
+func TestServerRunDetail_NeutralCompletedAndTaskTrends(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	rate0 := 0.0
+	rate10 := 0.10
+	rate20 := 0.20
+	rate50 := 0.50
+	rate100 := 1.0
+
+	repoURL := "https://github.com/gke-labs/eval-runner.git"
+
+	previousRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-previous",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-20 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: repoURL, Commit: "1111111111111111111111111111111111111111"},
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "eval/zero-pass", Phase: v1alpha1.TaskPhaseCompleted, Samples: 5, Successes: 1, SuccessRate: &rate20},
+				{ID: "eval/improved", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 1, SuccessRate: &rate10},
+				{ID: "eval/unchanged", Phase: v1alpha1.TaskPhaseCompleted, Samples: 5, Successes: 5, SuccessRate: &rate100},
+			},
+		},
+	}
+
+	failedBetween := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-failed-between",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-15 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: repoURL, Commit: "2222222222222222222222222222222222222222"},
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseFailed,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "eval/improved", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 10, SuccessRate: &rate100},
+			},
+		},
+	}
+
+	otherRepoRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-other-repo",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-12 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: "https://github.com/other-org/other-repo.git", Commit: "3333333333333333333333333333333333333333"},
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "eval/improved", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 10, SuccessRate: &rate100},
+			},
+		},
+	}
+
+	currentRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-current",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{
+			Repo:  v1alpha1.RepoSpec{URL: repoURL, Commit: "4444444444444444444444444444444444444444"},
+			Model: "google/gemini-3.5-flash-lite",
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "eval/zero-pass", Phase: v1alpha1.TaskPhaseCompleted, Samples: 1, Successes: 0, SuccessRate: &rate0},
+				{ID: "eval/improved", Phase: v1alpha1.TaskPhaseCompleted, Samples: 10, Successes: 2, SuccessRate: &rate20},
+				{ID: "eval/unchanged", Phase: v1alpha1.TaskPhaseCompleted, Samples: 5, Successes: 5, SuccessRate: &rate100},
+				{ID: "eval/first-time", Phase: v1alpha1.TaskPhaseCompleted, Samples: 4, Successes: 2, SuccessRate: &rate50},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(previousRun, failedBetween, otherRepoRun, currentRun).
+		Build()
+	server := NewServer(Config{Client: fakeClient})
+
+	req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/run-current", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+	body := html.UnescapeString(w.Body.String())
+
+	if strings.Contains(body, "chip good") {
+		t.Errorf("expected no green 'chip good' for Completed run/tasks, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<span class="chip neutral"><span class="dot"></span>Completed</span>`) {
+		t.Errorf("expected neutral Completed chip, got:\n%s", body)
+	}
+	if !strings.Contains(body, `0% <span class="trend bad" title="Previous run run-previous: 20%">▼ -20%</span>`) {
+		t.Errorf("expected 0%% with red regression arrow '▼ -20%%', got:\n%s", body)
+	}
+	if !strings.Contains(body, `20% <span class="trend good" title="Previous run run-previous: 10%">▲ +10%</span>`) {
+		t.Errorf("expected 20%% with green improvement arrow '▲ +10%%', got:\n%s", body)
+	}
+	if !strings.Contains(body, `<td class="num" style="white-space:nowrap">100%</td>`) {
+		t.Errorf("expected unchanged task 100%% without trend span, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<td class="num" style="white-space:nowrap">50%</td>`) {
+		t.Errorf("expected first-time task 50%% without trend span, got:\n%s", body)
+	}
+
+	// Verify the earliest run (with no prior completed run) renders percentages with no trend indicators.
+	reqPrevious := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/run-previous", nil)
+	wPrevious := httptest.NewRecorder()
+	server.ServeHTTP(wPrevious, reqPrevious)
+	if wPrevious.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for previous run, got %d: %s", wPrevious.Code, wPrevious.Body.String())
+	}
+	previousBody := html.UnescapeString(wPrevious.Body.String())
+	if strings.Contains(previousBody, `class="trend `) {
+		t.Errorf("expected no trend indicator when there is no prior completed run, got:\n%s", previousBody)
+	}
 }

@@ -167,7 +167,10 @@ type RunTaskRow struct {
 	ID                   string
 	Phase                v1alpha1.TaskPhase
 	PhaseChip            string // good, bad, warn, neutral, pending
-	RateStr              string // e.g. "0.84"
+	RateStr              string // e.g. "84%"
+	TrendText            string // e.g. "▲ +10%" or "▼ -10%"
+	TrendClass           string // "good", "bad", or empty
+	TrendTitle           string // e.g. "Previous run run-1: 74%"
 	HasCI                bool
 	CILeftPx             float64
 	CIWidthPx            float64
@@ -2203,11 +2206,13 @@ func comparisonPhaseChipClass(phase v1alpha1.ComparisonPhase) string {
 func phaseChipClass(phase v1alpha1.RunPhase) string {
 	switch phase {
 	case v1alpha1.RunPhaseCompleted:
-		return "good"
+		return "neutral"
 	case v1alpha1.RunPhaseRunning:
 		return "pending"
-	case v1alpha1.RunPhasePending, v1alpha1.RunPhaseDiscovering, v1alpha1.RunPhaseDiscovered:
+	case v1alpha1.RunPhaseDiscovering, v1alpha1.RunPhaseDiscovered:
 		return "warn"
+	case v1alpha1.RunPhasePending:
+		return "neutral"
 	case v1alpha1.RunPhaseFailed:
 		return "bad"
 	default:
@@ -2218,7 +2223,7 @@ func phaseChipClass(phase v1alpha1.RunPhase) string {
 func taskPhaseChipClass(phase v1alpha1.TaskPhase) string {
 	switch phase {
 	case v1alpha1.TaskPhaseCompleted:
-		return "good"
+		return "neutral"
 	case v1alpha1.TaskPhaseRunning:
 		return "pending"
 	case v1alpha1.TaskPhasePending:
@@ -2228,6 +2233,134 @@ func taskPhaseChipClass(phase v1alpha1.TaskPhase) string {
 	default:
 		return "neutral"
 	}
+}
+
+type previousTaskResult struct {
+	runName string
+	rate    float64
+}
+
+// formatPassRatePercent formats a 0-1 pass rate as a whole-number percentage (e.g. "0%", "20%", "100%").
+func formatPassRatePercent(rate float64) string {
+	return fmt.Sprintf("%d%%", int(math.Round(rate*100)))
+}
+
+// taskTrend returns the trend text, CSS class ("good" or "bad"), and tooltip comparing
+// currentRate to a prior completed run's rate. Unchanged rates return empty strings.
+func taskTrend(currentRate float64, previous previousTaskResult) (text, class, title string) {
+	deltaPercent := int(math.Round((currentRate - previous.rate) * 100))
+	if deltaPercent == 0 {
+		return "", "", ""
+	}
+	previousPercent := formatPassRatePercent(previous.rate)
+	if previous.runName != "" {
+		title = fmt.Sprintf("Previous run %s: %s", previous.runName, previousPercent)
+	} else {
+		title = fmt.Sprintf("Previous run: %s", previousPercent)
+	}
+	if deltaPercent > 0 {
+		return fmt.Sprintf("▲ +%d%%", deltaPercent), "good", title
+	}
+	return fmt.Sprintf("▼ -%d%%", -deltaPercent), "bad", title
+}
+
+// previousTaskResults finds, for each scored task in currentRun, the rate from the most
+// recent prior completed Run belonging to the same repository.
+func previousTaskResults(currentRun *v1alpha1.Run, allRuns []v1alpha1.Run, repository RepoRef) map[string]previousTaskResult {
+	if currentRun == nil || len(currentRun.Status.Tasks) == 0 || len(allRuns) == 0 {
+		return nil
+	}
+
+	resolvedRepository := repository
+	if resolvedRepository.IsZero() {
+		if target, ok := targetRepoRef(currentRun); ok && !target.IsZero() {
+			resolvedRepository = target
+		} else if source, ok := runRepoRef(currentRun); ok && !source.IsZero() {
+			resolvedRepository = source
+		}
+	}
+	if resolvedRepository.IsZero() && currentRun.Spec.Repo.URL == "" {
+		return nil
+	}
+
+	neededTasks := make(map[string]struct{}, len(currentRun.Status.Tasks))
+	for _, task := range currentRun.Status.Tasks {
+		if taskRate(task) != nil {
+			neededTasks[task.ID] = struct{}{}
+		}
+	}
+	if len(neededTasks) == 0 {
+		return nil
+	}
+
+	var priorRuns []*v1alpha1.Run
+	for i := range allRuns {
+		candidateRun := &allRuns[i]
+		if candidateRun.Name == currentRun.Name && candidateRun.Namespace == currentRun.Namespace {
+			continue
+		}
+		if candidateRun.Status.Phase != v1alpha1.RunPhaseCompleted {
+			continue
+		}
+		if !isPriorRun(candidateRun, currentRun) {
+			continue
+		}
+		if !sameRunRepository(candidateRun, currentRun, resolvedRepository) {
+			continue
+		}
+		priorRuns = append(priorRuns, candidateRun)
+	}
+	if len(priorRuns) == 0 {
+		return nil
+	}
+
+	sort.Slice(priorRuns, func(i, j int) bool {
+		if !priorRuns[i].CreationTimestamp.Equal(&priorRuns[j].CreationTimestamp) {
+			return priorRuns[i].CreationTimestamp.After(priorRuns[j].CreationTimestamp.Time)
+		}
+		return priorRuns[i].Name < priorRuns[j].Name
+	})
+
+	results := make(map[string]previousTaskResult, len(neededTasks))
+	for _, priorRun := range priorRuns {
+		for _, task := range priorRun.Status.Tasks {
+			if _, needed := neededTasks[task.ID]; !needed {
+				continue
+			}
+			if _, found := results[task.ID]; found {
+				continue
+			}
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				continue
+			}
+			rate := taskRate(task)
+			if rate == nil {
+				continue
+			}
+			results[task.ID] = previousTaskResult{
+				runName: priorRun.Name,
+				rate:    *rate,
+			}
+		}
+		if len(results) == len(neededTasks) {
+			break
+		}
+	}
+	return results
+}
+
+func isPriorRun(candidateRun, currentRun *v1alpha1.Run) bool {
+	if candidateRun.CreationTimestamp.IsZero() || currentRun.CreationTimestamp.IsZero() {
+		return false
+	}
+	return candidateRun.CreationTimestamp.Before(&currentRun.CreationTimestamp)
+}
+
+func sameRunRepository(candidateRun, currentRun *v1alpha1.Run, resolvedRepository RepoRef) bool {
+	if !resolvedRepository.IsZero() {
+		return runBelongsToRepo(candidateRun, resolvedRepository)
+	}
+	return candidateRun.Spec.Repo.URL != "" && candidateRun.Spec.Repo.URL == currentRun.Spec.Repo.URL
 }
 
 func verdictChipClass(verdict v1alpha1.ComparisonVerdict) string {
