@@ -20,11 +20,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gke-labs/eval-runner/api/v1alpha1"
 	"github.com/gke-labs/eval-runner/pkg/forge"
@@ -40,36 +38,8 @@ type uiSmokeLogger interface {
 // it also verifies that the Run detail page links to task samples and that
 // both the samples list and sample transcript pages return 200 OK.
 func runUISmoke(t *testing.T, harness *Harness, runName string, requireSamples bool) {
-	// Port forward to the UI service on local port
-	cmd := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-ui", "18088:80")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start port-forward: %v", err)
-	}
-	defer func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	}()
-
-	// Wait for port-forward to be ready
-	baseURL := "http://127.0.0.1:18088"
-	ready := false
-	for i := 0; i < 30; i++ {
-		resp, err := http.Get(baseURL + "/healthz")
-		if err == nil && resp.StatusCode == http.StatusOK {
-			ready = true
-			resp.Body.Close()
-			break
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !ready {
-		t.Fatalf("eval-runner-ui port-forward failed to become ready")
-	}
+	baseURL, cleanupPortForward := harness.PortForwardUI(0)
+	defer cleanupPortForward()
 
 	// 1. Curl /healthz
 	resp, err := http.Get(baseURL + "/healthz")

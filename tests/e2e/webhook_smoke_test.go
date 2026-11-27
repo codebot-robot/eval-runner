@@ -107,11 +107,12 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 	candRunName := "pr-305-aaaaaaa"
 	baseRunName := "base-bbbbbbb"
 	compName := "pr-305"
+	push1RunName := "base-d111111"
+	push2RunName := "base-d222222"
 
 	t.Cleanup(func() {
-		harness.runCmd("kubectl", "delete", "run", candRunName, "-n", "eval-runner", "--ignore-not-found")
-		harness.runCmd("kubectl", "delete", "run", baseRunName, "-n", "eval-runner", "--ignore-not-found")
 		harness.runCmd("kubectl", "delete", "comparison", compName, "-n", "eval-runner", "--ignore-not-found")
+		harness.runCmd("kubectl", "delete", "run", candRunName, baseRunName, push1RunName, push2RunName, "-n", "eval-runner", "--ignore-not-found")
 	})
 
 	// 4. POST signed recorded webhook payload to /webhook
@@ -446,15 +447,8 @@ func runWebhookSmoke(t *testing.T, harness *Harness) {
 		t.Fatalf("push 2 returned status %d", respPush2.StatusCode)
 	}
 
-	push1RunName := "base-d111111"
-	push2RunName := "base-d222222"
 	harness.WaitForRunExists("eval-runner", push1RunName, 15*time.Second)
 	harness.WaitForRunExists("eval-runner", push2RunName, 15*time.Second)
-
-	t.Cleanup(func() {
-		harness.runCmd("kubectl", "delete", "run", push1RunName, "-n", "eval-runner", "--ignore-not-found")
-		harness.runCmd("kubectl", "delete", "run", push2RunName, "-n", "eval-runner", "--ignore-not-found")
-	})
 
 	// Patch status with completed task so that SVG points and table rows render
 	patchStatus := `{"status":{"phase":"Completed","tasks":[{"id":"smoke/task1","phase":"Completed","samples":10,"successes":8,"successRate":0.8,"successRateCI":{"lower":0.6,"upper":0.9,"confidence":0.95,"method":"wilson"}}]}}`
