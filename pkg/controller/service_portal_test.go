@@ -32,74 +32,80 @@ import (
 
 func TestBuildServicePortalEgressPolicy(t *testing.T) {
 	testCases := []struct {
-		name           string
-		options        ServicePortalOptions
-		wantHTTPHosts  []string
-		wantHTTPSHosts []string
+		name                    string
+		options                 ServicePortalOptions
+		wantHTTPHosts           []string
+		wantTLSPassthroughHosts []string
 	}{
 		{
-			name:           "empty hosts produces empty policy",
-			options:        ServicePortalOptions{},
-			wantHTTPHosts:  nil,
-			wantHTTPSHosts: nil,
+			name:                    "empty hosts produces empty policy",
+			options:                 ServicePortalOptions{},
+			wantHTTPHosts:           nil,
+			wantTLSPassthroughHosts: nil,
 		},
 		{
-			name: "only https hosts produces https rule only",
+			name: "only allowed hosts produces tls passthrough rule only",
 			options: ServicePortalOptions{
-				AllowedHosts: []string{"*.googleapis.com", "github.com"},
+				AllowedHosts: []string{"*.googleapis.com", "github.com", "proxy.golang.org"},
 			},
-			wantHTTPHosts:  nil,
-			wantHTTPSHosts: []string{"*.googleapis.com", "github.com"},
+			wantHTTPHosts:           nil,
+			wantTLSPassthroughHosts: []string{"*.googleapis.com", "github.com", "proxy.golang.org"},
 		},
 		{
 			name: "only http hosts produces http rule only",
 			options: ServicePortalOptions{
 				AllowedHTTPHosts: []string{"deb.debian.org", "archive.ubuntu.com"},
 			},
-			wantHTTPHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHTTPSHosts: nil,
+			wantHTTPHosts:           []string{"deb.debian.org", "archive.ubuntu.com"},
+			wantTLSPassthroughHosts: nil,
 		},
 		{
-			name: "both http and https hosts configure their respective rules",
+			name: "both http and allowed hosts configure their respective rules",
 			options: ServicePortalOptions{
-				AllowedHosts:     []string{"*.googleapis.com", "github.com"},
+				AllowedHosts:     []string{"*.googleapis.com", "github.com", "proxy.golang.org"},
 				AllowedHTTPHosts: []string{"deb.debian.org", "archive.ubuntu.com"},
 			},
-			wantHTTPHosts:  []string{"deb.debian.org", "archive.ubuntu.com"},
-			wantHTTPSHosts: []string{"*.googleapis.com", "github.com"},
+			wantHTTPHosts:           []string{"deb.debian.org", "archive.ubuntu.com"},
+			wantTLSPassthroughHosts: []string{"*.googleapis.com", "github.com", "proxy.golang.org"},
 		},
 		{
-			name: "defaults produce package mirrors for http and all default hosts for https",
+			name: "defaults produce package mirrors for http and all default hosts for tls passthrough",
 			options: ServicePortalOptions{
 				AllowedHosts:     DefaultServicePortalAllowedHosts,
 				AllowedHTTPHosts: DefaultServicePortalAllowedHTTPHosts,
 			},
-			wantHTTPHosts:  DefaultServicePortalAllowedHTTPHosts,
-			wantHTTPSHosts: DefaultServicePortalAllowedHosts,
+			wantHTTPHosts:           DefaultServicePortalAllowedHTTPHosts,
+			wantTLSPassthroughHosts: DefaultServicePortalAllowedHosts,
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			policy := BuildServicePortalEgressPolicy(tc.options)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			policy := BuildServicePortalEgressPolicy(testCase.options)
 			if err := policy.Validate(); err != nil {
 				t.Fatalf("policy failed validation: %v", err)
 			}
 			var gotHTTPHosts []string
-			var gotHTTPSHosts []string
+			var gotTLSPassthroughHosts []string
 			for _, rule := range policy.GetRules() {
 				if rule.GetHttp() != nil {
 					gotHTTPHosts = rule.GetHttp().GetHostnames()
 				}
 				if rule.GetHttps() != nil {
-					gotHTTPSHosts = rule.GetHttps().GetHostnames()
+					t.Errorf("unexpected HTTPS rule for plain allowed hosts: %v", rule.GetHttps())
+				}
+				if rule.GetTlsPassthrough() != nil {
+					gotTLSPassthroughHosts = rule.GetTlsPassthrough().GetHostnames()
+					if gotPorts := rule.GetTlsPassthrough().GetPorts().GetNumbers(); !reflect.DeepEqual(gotPorts, []int32{443}) {
+						t.Errorf("got TLS passthrough ports %v, want [443]", gotPorts)
+					}
 				}
 			}
-			if !reflect.DeepEqual(gotHTTPHosts, tc.wantHTTPHosts) {
-				t.Errorf("got HTTP hostnames %v, want %v", gotHTTPHosts, tc.wantHTTPHosts)
+			if !reflect.DeepEqual(gotHTTPHosts, testCase.wantHTTPHosts) {
+				t.Errorf("got HTTP hostnames %v, want %v", gotHTTPHosts, testCase.wantHTTPHosts)
 			}
-			if !reflect.DeepEqual(gotHTTPSHosts, tc.wantHTTPSHosts) {
-				t.Errorf("got HTTPS hostnames %v, want %v", gotHTTPSHosts, tc.wantHTTPSHosts)
+			if !reflect.DeepEqual(gotTLSPassthroughHosts, testCase.wantTLSPassthroughHosts) {
+				t.Errorf("got TLS passthrough hostnames %v, want %v", gotTLSPassthroughHosts, testCase.wantTLSPassthroughHosts)
 			}
 		})
 	}
@@ -250,10 +256,13 @@ func TestBuildServicePortalEgressPolicyWithCredential(t *testing.T) {
 			t.Fatalf("expected x-goog-api-key to remain absent, got %q", got)
 		}
 
-		// Another host (*.googleapis.com) -> forwarded without credential even if header is sent.
-		otherRule := policy.Match(portalsv1.ProtocolHTTPS, "storage.googleapis.com", 443)
-		if otherRule == nil {
-			t.Fatalf("expected policy to match storage.googleapis.com")
+		// Another host (*.googleapis.com) -> forwarded via TLS passthrough without decryption or credential replacement.
+		otherRule := policy.Match(portalsv1.ProtocolTLSPassthrough, "storage.googleapis.com", 443)
+		if otherRule == nil || otherRule.GetTlsPassthrough() == nil {
+			t.Fatalf("expected policy to match storage.googleapis.com with TlsPassthrough, got %v", otherRule)
+		}
+		if httpsRule := policy.Match(portalsv1.ProtocolHTTPS, "storage.googleapis.com", 443); httpsRule != nil {
+			t.Fatalf("expected storage.googleapis.com not to match HTTPS MITM, got %v", httpsRule)
 		}
 		otherHeaders := http.Header{"X-Goog-Api-Key": []string{"placeholder-model-credential"}}
 		if err := otherRule.ApplyEffects(otherHeaders, resolveSecret); err != nil {
@@ -308,6 +317,105 @@ func TestBuildServicePortalEgressPolicyWithCredential(t *testing.T) {
 		if otherRule == nil || otherRule.GetHttp().GetEffects() != nil {
 			t.Fatalf("expected plain HTTP rule without effects for other host")
 		}
+	})
+}
+
+func TestBuildServicePortalEgressPolicyWithCredentials(t *testing.T) {
+	geminiCredential, ok, err := ModelCredentialForModel("google/gemini-2.5-flash", "")
+	if err != nil || !ok {
+		t.Fatalf("ModelCredentialForModel failed: ok=%v err=%v", ok, err)
+	}
+
+	baseOptions := ServicePortalOptions{
+		AllowedHosts: []string{
+			"*.googleapis.com",
+			"generativelanguage.googleapis.com",
+			"proxy.golang.org",
+			"github.com",
+		},
+		AllowedHTTPHosts: []string{"deb.debian.org"},
+	}
+
+	assertTLSPassthrough := func(t *testing.T, policy *portalsv1.EgressPolicy, hostname string) {
+		t.Helper()
+		rule := policy.Match(portalsv1.ProtocolTLSPassthrough, hostname, 443)
+		if rule == nil || rule.GetTlsPassthrough() == nil {
+			t.Fatalf("expected %s to match TlsPassthrough on port 443, got %v", hostname, rule)
+		}
+		if httpsRule := policy.Match(portalsv1.ProtocolHTTPS, hostname, 443); httpsRule != nil {
+			t.Fatalf("expected %s not to match Https on port 443, got %v", hostname, httpsRule)
+		}
+	}
+
+	assertHTTPSCredential := func(t *testing.T, policy *portalsv1.EgressPolicy, hostname string, wantHeader string, wantPrefix string, wantCredentialURI string) {
+		t.Helper()
+		rule := policy.Match(portalsv1.ProtocolHTTPS, hostname, 443)
+		if rule == nil || rule.GetHttps() == nil || rule.GetHttps().GetEffects() == nil {
+			t.Fatalf("expected %s to match Https with ReplaceHeaders, got %v", hostname, rule)
+		}
+		if passthroughRule := policy.Match(portalsv1.ProtocolTLSPassthrough, hostname, 443); passthroughRule != nil {
+			t.Fatalf("expected %s not to match TlsPassthrough on port 443, got %v", hostname, passthroughRule)
+		}
+		replaceHeaders := rule.GetHttps().GetEffects().GetReplaceHeaders()
+		if len(replaceHeaders) != 1 ||
+			replaceHeaders[0].Header != wantHeader ||
+			replaceHeaders[0].Prefix != wantPrefix ||
+			replaceHeaders[0].CredentialUri != wantCredentialURI {
+			t.Fatalf("got ReplaceHeaders %+v for %s, want header=%q prefix=%q uri=%q",
+				replaceHeaders, hostname, wantHeader, wantPrefix, wantCredentialURI)
+		}
+	}
+
+	t.Run("plain only uses TlsPassthrough for all allowed hosts", func(t *testing.T) {
+		policy := BuildServicePortalEgressPolicyWithCredentials(baseOptions, nil, false)
+		if err := policy.Validate(); err != nil {
+			t.Errorf("policy.Validate() failed: %v", err)
+		}
+		assertTLSPassthrough(t, policy, "proxy.golang.org")
+		assertTLSPassthrough(t, policy, "github.com")
+		assertTLSPassthrough(t, policy, "storage.googleapis.com")
+		assertTLSPassthrough(t, policy, "generativelanguage.googleapis.com")
+	})
+
+	t.Run("model only uses Https for model host and TlsPassthrough for other hosts", func(t *testing.T) {
+		policy := BuildServicePortalEgressPolicyWithCredentials(baseOptions, &geminiCredential, false)
+		if err := policy.Validate(); err != nil {
+			t.Errorf("policy.Validate() failed: %v", err)
+		}
+		assertHTTPSCredential(t, policy, "generativelanguage.googleapis.com", "x-goog-api-key", "", "secret://gemini-api-key")
+		assertTLSPassthrough(t, policy, "proxy.golang.org")
+		assertTLSPassthrough(t, policy, "github.com")
+		assertTLSPassthrough(t, policy, "storage.googleapis.com")
+	})
+
+	t.Run("gcp only uses Https for wildcard googleapis and TlsPassthrough for other hosts", func(t *testing.T) {
+		options := ServicePortalOptions{
+			AllowedHosts: []string{
+				"*.googleapis.com",
+				"proxy.golang.org",
+				"github.com",
+			},
+			AllowedHTTPHosts: []string{"deb.debian.org"},
+		}
+		policy := BuildServicePortalEgressPolicyWithCredentials(options, nil, true)
+		if err := policy.Validate(); err != nil {
+			t.Errorf("policy.Validate() failed: %v", err)
+		}
+		assertHTTPSCredential(t, policy, "storage.googleapis.com", "Authorization", "Bearer ", "secret://gcp-access-token")
+		assertHTTPSCredential(t, policy, "cloudresourcemanager.googleapis.com", "Authorization", "Bearer ", "secret://gcp-access-token")
+		assertTLSPassthrough(t, policy, "proxy.golang.org")
+		assertTLSPassthrough(t, policy, "github.com")
+	})
+
+	t.Run("model and gcp uses Https for both credential rules and TlsPassthrough for plain hosts", func(t *testing.T) {
+		policy := BuildServicePortalEgressPolicyWithCredentials(baseOptions, &geminiCredential, true)
+		if err := policy.Validate(); err != nil {
+			t.Errorf("policy.Validate() failed: %v", err)
+		}
+		assertHTTPSCredential(t, policy, "generativelanguage.googleapis.com", "x-goog-api-key", "", "secret://gemini-api-key")
+		assertHTTPSCredential(t, policy, "storage.googleapis.com", "Authorization", "Bearer ", "secret://gcp-access-token")
+		assertTLSPassthrough(t, policy, "proxy.golang.org")
+		assertTLSPassthrough(t, policy, "github.com")
 	})
 }
 

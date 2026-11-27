@@ -42,6 +42,8 @@ const (
 	gcpAccessTokenHeader         = "Authorization"
 	gcpAccessTokenPrefix         = "Bearer "
 	gcpAccessTokenCredentialName = "gcp-access-token"
+
+	defaultTLSPassthroughPort int32 = 443
 )
 
 // ServicePortalClient binds egress policies and companion secrets to sandbox pods.
@@ -247,7 +249,7 @@ func (options ServicePortalOptions) Validate() error {
 }
 
 // BuildServicePortalEgressPolicy constructs an EgressPolicy proto for the given service portal options.
-// The HTTP rule is populated with options.AllowedHTTPHosts; the HTTPS rule is populated with options.AllowedHosts.
+// The HTTP rule is populated with options.AllowedHTTPHosts; the TLS passthrough rule is populated with options.AllowedHosts.
 func BuildServicePortalEgressPolicy(options ServicePortalOptions) *portalsv1.EgressPolicy {
 	return BuildServicePortalEgressPolicyWithCredential(options, nil)
 }
@@ -263,17 +265,18 @@ func BuildServicePortalEgressPolicyWithCredential(
 
 // BuildServicePortalEgressPolicyWithCredentials constructs an EgressPolicy proto for the given service portal options,
 // optional exact-host model credential rule, and optional *.googleapis.com GCP OAuth2 Bearer credential rule.
+// Plain AllowedHosts use TlsPassthrough on port 443; credential-injected rules use Https (or Http) with ReplaceHeaders.
 func BuildServicePortalEgressPolicyWithCredentials(
 	options ServicePortalOptions,
 	modelCredential *ServicePortalModelCredential,
 	includeGCPAccessToken bool,
 ) *portalsv1.EgressPolicy {
 	httpHosts := append([]string(nil), options.AllowedHTTPHosts...)
-	httpsHosts := append([]string(nil), options.AllowedHosts...)
+	tlsPassthroughHosts := append([]string(nil), options.AllowedHosts...)
 
 	var gcpCredentialRule *portalsv1.EgressRule
 	if includeGCPAccessToken {
-		httpsHosts = filterOutHostname(httpsHosts, gcpAccessTokenHost)
+		tlsPassthroughHosts = filterOutHostname(tlsPassthroughHosts, gcpAccessTokenHost)
 		gcpCredentialRule = &portalsv1.EgressRule{
 			Https: &portalsv1.HttpsRule{
 				Hostnames: []string{gcpAccessTokenHost},
@@ -299,15 +302,15 @@ func BuildServicePortalEgressPolicyWithCredentials(
 			if isHTTP {
 				effectivePort = 80
 			} else {
-				effectivePort = 443
+				effectivePort = defaultTLSPassthroughPort
 			}
 		}
 		// Remove exact duplicates on the same port from the plain allow lists so EgressPolicy.Validate() sees no ties.
 		if effectivePort == 80 {
 			httpHosts = filterOutHostname(httpHosts, credentialHost)
 		}
-		if effectivePort == 443 {
-			httpsHosts = filterOutHostname(httpsHosts, credentialHost)
+		if effectivePort == defaultTLSPassthroughPort {
+			tlsPassthroughHosts = filterOutHostname(tlsPassthroughHosts, credentialHost)
 		}
 
 		effects := &portalsv1.HttpRuleEffects{
@@ -342,7 +345,7 @@ func BuildServicePortalEgressPolicyWithCredentials(
 		}
 	}
 
-	if len(httpHosts) == 0 && len(httpsHosts) == 0 && gcpCredentialRule == nil && credentialRule == nil {
+	if len(httpHosts) == 0 && len(tlsPassthroughHosts) == 0 && gcpCredentialRule == nil && credentialRule == nil {
 		return &portalsv1.EgressPolicy{}
 	}
 	var rules []*portalsv1.EgressRule
@@ -353,10 +356,11 @@ func BuildServicePortalEgressPolicyWithCredentials(
 			},
 		})
 	}
-	if len(httpsHosts) > 0 {
+	if len(tlsPassthroughHosts) > 0 {
 		rules = append(rules, &portalsv1.EgressRule{
-			Https: &portalsv1.HttpsRule{
-				Hostnames: httpsHosts,
+			TlsPassthrough: &portalsv1.TlsPassthroughRule{
+				Hostnames: tlsPassthroughHosts,
+				Ports:     &portalsv1.Ports{Numbers: []int32{defaultTLSPassthroughPort}},
 			},
 		})
 	}
