@@ -14662,3 +14662,232 @@ func TestTaskSandboxShallowFetchAndFallback(t *testing.T) {
 		}
 	})
 }
+
+func TestReconcile_ControllerRestartInFlightTaskRunsInFreshSandbox(t *testing.T) {
+	scheme := setupScheme(t)
+	sink := artifacts.NewInMemorySink()
+
+	const (
+		runNamespace       = "eval-runner"
+		sandboxNamespace   = "eval-runner-sandbox"
+		runName            = "restart-inflight-run"
+		taskID             = "docs/readme_comprehension_blind"
+		previousInstanceID = "controller-instance-old"
+		currentInstanceID  = "controller-instance-new"
+	)
+
+	limit := 2
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       runName,
+			Namespace:  runNamespace,
+			Finalizers: []string{v1alpha1.FinalizerDiscoverySandbox},
+		},
+		Spec: v1alpha1.RunSpec{
+			Model: "mockllm/model",
+			Limit: &limit,
+			Repo: v1alpha1.RepoSpec{
+				URL:    "https://github.com/gke-labs/kube-agents.git",
+				Commit: "0123456789abcdef0123456789abcdef01234567",
+			},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseRunning,
+			Discovery: &v1alpha1.RunDiscoveryStatus{
+				TaskCount:         1,
+				EligibleTaskCount: 1,
+				TaskIDs:           []string{taskID},
+			},
+			Tasks: []v1alpha1.TaskStatus{
+				{
+					ID:             taskID,
+					Phase:          v1alpha1.TaskPhaseRunning,
+					SamplesPlanned: 2,
+				},
+			},
+		},
+	}
+
+	manifest := &v1alpha1.Manifest{
+		Tasks: []v1alpha1.ManifestTask{
+			{ID: taskID, Spec: "evals/docs_comprehension.py@readme_comprehension_blind"},
+		},
+	}
+
+	sandboxName := discovery.TaskSandboxNameForRun(runName, taskID)
+	dirtySandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNamespace,
+			UID:       "dirty-sandbox-uid",
+			Labels: map[string]string{
+				discovery.LabelRunName:      runName,
+				discovery.LabelRunNamespace: runNamespace,
+				discovery.LabelRole:         discovery.RoleSample,
+			},
+			Annotations: map[string]string{
+				discovery.AnnotationTaskID:             taskID,
+				discovery.AnnotationControllerInstance: previousInstanceID,
+				discovery.AnnotationTaskAttempt:        "0",
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			ServiceFQDN: sandboxName + "." + sandboxNamespace + ".svc.cluster.local",
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionTrue},
+			},
+		},
+	}
+	dirtyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNamespace,
+			UID:       "dirty-pod-uid",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.10",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run, dirtySandbox, dirtyPod).
+		WithStatusSubresource(run, dirtySandbox).
+		Build()
+
+	validInspectLog := `{
+		"version": 2,
+		"status": "success",
+		"eval": {"task": "readme_comprehension_blind", "model": "mockllm/model"},
+		"samples": [
+			{"id": "sample-1", "scores": {"match": {"value": "C"}}},
+			{"id": "sample-2", "scores": {"match": {"value": "C"}}}
+		],
+		"results": {"total_samples": 2, "completed_samples": 2, "scores": [{"name": "match", "metrics": {"accuracy": {"value": 1.0}}}]}
+	}`
+	fakeSandboxClient := &sandboxclient.FakeClient{
+		InspectLog: []byte(validInspectLog),
+	}
+
+	reconciler := &RunReconciler{
+		Client:           fakeKubeClient,
+		Scheme:           scheme,
+		ArtifactSink:     sink,
+		SandboxNamespace: sandboxNamespace,
+		InstanceID:       currentInstanceID,
+		SandboxClient:    fakeSandboxClient,
+	}
+	reconciler.SetCachedManifest(runNamespace, runName, manifest)
+
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: runNamespace, Name: runName}}
+
+	// 1. First reconcile after controller restart: dirty sandbox is deleted and task resets to Pending.
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("first Reconcile failed: %v", err)
+	}
+
+	var sandboxAfterFirst sandboxv1beta1.Sandbox
+	if err := fakeKubeClient.Get(t.Context(), types.NamespacedName{Namespace: sandboxNamespace, Name: sandboxName}, &sandboxAfterFirst); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected dirty sandbox to be deleted, got err=%v", err)
+	}
+	// Simulate pod garbage collection after sandbox deletion.
+	if err := fakeKubeClient.Delete(t.Context(), dirtyPod); err != nil {
+		t.Fatalf("failed to delete dirty pod: %v", err)
+	}
+
+	var runAfterFirst v1alpha1.Run
+	if err := fakeKubeClient.Get(t.Context(), request.NamespacedName, &runAfterFirst); err != nil {
+		t.Fatalf("failed to get Run after first reconcile: %v", err)
+	}
+	taskAfterFirst := runAfterFirst.Status.Tasks[0]
+	if taskAfterFirst.Phase != v1alpha1.TaskPhasePending {
+		t.Fatalf("expected task Pending after dirty sandbox deletion, got %s", taskAfterFirst.Phase)
+	}
+	if taskAfterFirst.Restarts != 1 {
+		t.Errorf("expected task Restarts=1, got %d", taskAfterFirst.Restarts)
+	}
+	if taskAfterFirst.FailureAttempts != 0 {
+		t.Errorf("expected task FailureAttempts=0, got %d", taskAfterFirst.FailureAttempts)
+	}
+	if taskAfterFirst.RestartReason != "controller restart" {
+		t.Errorf("expected task RestartReason %q, got %q", "controller restart", taskAfterFirst.RestartReason)
+	}
+
+	// 2. Second reconcile: creates a fresh sandbox tagged with the new controller InstanceID and attempt 1.
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("second Reconcile failed: %v", err)
+	}
+
+	var freshSandbox sandboxv1beta1.Sandbox
+	if err := fakeKubeClient.Get(t.Context(), types.NamespacedName{Namespace: sandboxNamespace, Name: sandboxName}, &freshSandbox); err != nil {
+		t.Fatalf("expected fresh sandbox to be created: %v", err)
+	}
+	if gotInstance := freshSandbox.Annotations[discovery.AnnotationControllerInstance]; gotInstance != currentInstanceID {
+		t.Errorf("fresh sandbox instance annotation = %q, want %q", gotInstance, currentInstanceID)
+	}
+	if gotAttempt := freshSandbox.Annotations[discovery.AnnotationTaskAttempt]; gotAttempt != "1" {
+		t.Errorf("fresh sandbox attempt annotation = %q, want %q", gotAttempt, "1")
+	}
+
+	// Mark the fresh sandbox Ready with a brand-new running Pod.
+	freshSandbox.Status.ServiceFQDN = sandboxName + "." + sandboxNamespace + ".svc.cluster.local"
+	freshSandbox.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+	if err := fakeKubeClient.Status().Update(t.Context(), &freshSandbox); err != nil {
+		t.Fatalf("failed to update fresh sandbox status: %v", err)
+	}
+	freshPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNamespace,
+			UID:       "fresh-pod-uid",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.20",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	if err := fakeKubeClient.Create(t.Context(), freshPod); err != nil {
+		t.Fatalf("failed to create fresh pod: %v", err)
+	}
+
+	// 3. Reconcile until the task completes in the fresh sandbox.
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+			t.Fatalf("reconcile %d failed: %v", attempt+3, err)
+		}
+		var currentRun v1alpha1.Run
+		if err := fakeKubeClient.Get(t.Context(), request.NamespacedName, &currentRun); err != nil {
+			t.Fatalf("failed to get Run: %v", err)
+		}
+		if currentRun.Status.Phase == v1alpha1.RunPhaseCompleted {
+			completedTask := currentRun.Status.Tasks[0]
+			if completedTask.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("expected task Completed, got %s", completedTask.Phase)
+			}
+			if completedTask.Restarts != 1 {
+				t.Errorf("expected Restarts=1, got %d", completedTask.Restarts)
+			}
+			if completedTask.FailureAttempts != 0 {
+				t.Errorf("expected FailureAttempts=0, got %d", completedTask.FailureAttempts)
+			}
+			if completedTask.RestartReason != "controller restart" {
+				t.Errorf("expected RestartReason %q, got %q", "controller restart", completedTask.RestartReason)
+			}
+			if completedTask.Samples != 2 || completedTask.SamplesDone != 2 {
+				t.Errorf("expected Samples=2 and SamplesDone=2, got Samples=%d SamplesDone=%d", completedTask.Samples, completedTask.SamplesDone)
+			}
+			return
+		}
+	}
+
+	var finalRun v1alpha1.Run
+	_ = fakeKubeClient.Get(t.Context(), request.NamespacedName, &finalRun)
+	t.Fatalf("expected Run to reach Completed in fresh sandbox, got phase=%s task=%+v", finalRun.Status.Phase, finalRun.Status.Tasks)
+}
