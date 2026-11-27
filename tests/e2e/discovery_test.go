@@ -47,9 +47,13 @@ func TestRunDiscovery(t *testing.T) {
 	commit := harness.GetGitServerCommit("eval-runner-sandbox", "support-agent.git")
 	t.Logf("Fixture repository commit: %s", commit)
 
-	t.Run("DiscoveredSuccess", func(t *testing.T) {
-		runName := "support-agent-success"
-		manifest := fmt.Sprintf(`
+	t.Run("Parallel", func(t *testing.T) {
+		t.Run("DiscoveredSuccess", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			runName := "support-agent-success"
+			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -61,115 +65,118 @@ spec:
     commit: %s
 `, runName, commit)
 
-		harness.KubectlApplyContent(manifest)
+			harness.KubectlApplyContent(manifest)
 
-		// Assert sandbox was created in eval-runner-sandbox
-		sandboxName := discovery.SandboxNameForRun(runName)
-		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+			// Assert sandbox was created in eval-runner-sandbox
+			sandboxName := discovery.SandboxNameForRun(runName)
+			harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
-		run := harness.WaitForRunPhase("eval-runner", runName, "Discovered", 90*time.Second)
+			run := harness.WaitForRunPhase("eval-runner", runName, "Discovered", 90*time.Second)
 
-		if run.Status.DiscoveryDeadline == nil {
-			t.Errorf("Expected status.discoveryDeadline to be populated")
-		}
-
-		if run.Status.Discovery == nil {
-			t.Fatalf("Expected status.discovery to be populated")
-		}
-		if run.Status.Discovery.TaskCount != 5 {
-			t.Fatalf("Expected 5 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
-		}
-		if run.Status.Discovery.EligibleTaskCount != 3 {
-			t.Fatalf("Expected 3 eligible tasks, got %d", run.Status.Discovery.EligibleTaskCount)
-		}
-		if len(run.Status.Discovery.TaskIDs) != 5 {
-			t.Fatalf("Expected 5 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
-		}
-		if run.Status.Discovery.ManifestPath == "" || run.Status.Discovery.ManifestHash == "" {
-			t.Fatalf("Expected ManifestPath and ManifestHash populated, got: %+v", run.Status.Discovery)
-		}
-		if !strings.HasPrefix(run.Status.Discovery.ManifestHash, "sha256:") {
-			t.Errorf("Expected ManifestHash to start with sha256:, got %s", run.Status.Discovery.ManifestHash)
-		}
-
-		expectedTasks := map[string]bool{
-			"triage/runbook_lookup":    false,
-			"triage/escalation_policy": false,
-			"triage/summary_quality":   false,
-			"triage/sandbox_eval":      false,
-			"triage/sandbox_root_eval": false,
-		}
-		for _, id := range run.Status.Discovery.TaskIDs {
-			if _, ok := expectedTasks[id]; !ok {
-				t.Errorf("Unexpected task id: %s", id)
-			} else {
-				expectedTasks[id] = true
+			if run.Status.DiscoveryDeadline == nil {
+				t.Errorf("Expected status.discoveryDeadline to be populated")
 			}
-		}
-		for taskID, found := range expectedTasks {
-			if !found {
-				t.Errorf("Expected task %q was not discovered", taskID)
+
+			if run.Status.Discovery == nil {
+				t.Fatalf("Expected status.discovery to be populated")
 			}
-		}
+			if run.Status.Discovery.TaskCount != 5 {
+				t.Fatalf("Expected 5 tasks in status.discovery.taskCount, got %d", run.Status.Discovery.TaskCount)
+			}
+			if run.Status.Discovery.EligibleTaskCount != 3 {
+				t.Fatalf("Expected 3 eligible tasks, got %d", run.Status.Discovery.EligibleTaskCount)
+			}
+			if len(run.Status.Discovery.TaskIDs) != 5 {
+				t.Fatalf("Expected 5 taskIDs in status.discovery, got %d", len(run.Status.Discovery.TaskIDs))
+			}
+			if run.Status.Discovery.ManifestPath == "" || run.Status.Discovery.ManifestHash == "" {
+				t.Fatalf("Expected ManifestPath and ManifestHash populated, got: %+v", run.Status.Discovery)
+			}
+			if !strings.HasPrefix(run.Status.Discovery.ManifestHash, "sha256:") {
+				t.Errorf("Expected ManifestHash to start with sha256:, got %s", run.Status.Discovery.ManifestHash)
+			}
 
-		// Assert /tmp/artifacts/runs/<commit>/manifest.json exists in kind
-		manifestPathSuffix := fmt.Sprintf("artifacts/runs/%s/manifest.json", commit)
-		findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", manifestPathSuffix)
-		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
-		foundFiles := harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd)
-		if strings.TrimSpace(foundFiles) == "" {
-			t.Fatalf("Expected %s to exist in kind node, but find returned empty", manifestPathSuffix)
-		}
-		firstFile := strings.Split(strings.TrimSpace(foundFiles), "\n")[0]
-		manifestContent := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
-		if strings.TrimSpace(manifestContent) == "" {
-			t.Fatalf("Expected %s to have content in kind node, got empty", firstFile)
-		}
-		var storedManifest v1alpha1.Manifest
-		if err := json.Unmarshal([]byte(manifestContent), &storedManifest); err != nil {
-			t.Fatalf("Failed to parse stored manifest JSON from kind node: %v", err)
-		}
-		if len(storedManifest.Tasks) != 5 {
-			t.Errorf("Expected 5 tasks in stored manifest, got %d", len(storedManifest.Tasks))
-		}
+			expectedTasks := map[string]bool{
+				"triage/runbook_lookup":    false,
+				"triage/escalation_policy": false,
+				"triage/summary_quality":   false,
+				"triage/sandbox_eval":      false,
+				"triage/sandbox_root_eval": false,
+			}
+			for _, id := range run.Status.Discovery.TaskIDs {
+				if _, ok := expectedTasks[id]; !ok {
+					t.Errorf("Unexpected task id: %s", id)
+				} else {
+					expectedTasks[id] = true
+				}
+			}
+			for taskID, found := range expectedTasks {
+				if !found {
+					t.Errorf("Expected task %q was not discovered", taskID)
+				}
+			}
 
-		// Assert sandbox was deleted from eval-runner-sandbox
-		out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(out) != "" {
-			t.Errorf("Expected sandbox %s to be deleted, but found:\n%s", sandboxName, out)
-		}
+			// Assert /tmp/artifacts/runs/<commit>/manifest.json exists in kind
+			manifestPathSuffix := fmt.Sprintf("artifacts/runs/%s/manifest.json", commit)
+			findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", manifestPathSuffix)
+			nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
+			foundFiles := harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd)
+			if strings.TrimSpace(foundFiles) == "" {
+				t.Fatalf("Expected %s to exist in kind node, but find returned empty", manifestPathSuffix)
+			}
+			firstFile := strings.Split(strings.TrimSpace(foundFiles), "\n")[0]
+			manifestContent := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
+			if strings.TrimSpace(manifestContent) == "" {
+				t.Fatalf("Expected %s to have content in kind node, got empty", firstFile)
+			}
+			var storedManifest v1alpha1.Manifest
+			if err := json.Unmarshal([]byte(manifestContent), &storedManifest); err != nil {
+				t.Fatalf("Failed to parse stored manifest JSON from kind node: %v", err)
+			}
+			if len(storedManifest.Tasks) != 5 {
+				t.Errorf("Expected 5 tasks in stored manifest, got %d", len(storedManifest.Tasks))
+			}
 
-		// Assert CA Secret exists in eval-runner
-		caSec := harness.runCmd("kubectl", "get", "secret", "sandbox-ca", "-n", "eval-runner", "--ignore-not-found")
-		if strings.TrimSpace(caSec) == "" {
-			t.Errorf("Expected sandbox-ca Secret in eval-runner, got empty")
-		}
+			// Assert sandbox was deleted from eval-runner-sandbox
+			out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(out) != "" {
+				t.Errorf("Expected sandbox %s to be deleted, but found:\n%s", sandboxName, out)
+			}
 
-		// Assert CA ConfigMap exists in eval-runner-sandbox
-		caCM := harness.runCmd("kubectl", "get", "configmap", "sandbox-ca", "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(caCM) == "" {
-			t.Errorf("Expected sandbox-ca ConfigMap in eval-runner-sandbox, got empty")
-		}
+			// Assert CA Secret exists in eval-runner
+			caSec := harness.runCmd("kubectl", "get", "secret", "sandbox-ca", "-n", "eval-runner", "--ignore-not-found")
+			if strings.TrimSpace(caSec) == "" {
+				t.Errorf("Expected sandbox-ca Secret in eval-runner, got empty")
+			}
 
-		// Assert server cert secret is deleted from eval-runner-sandbox
-		tlsSec := harness.runCmd("kubectl", "get", "secret", "sb-tls-"+sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(tlsSec) != "" {
-			t.Errorf("Expected server cert secret sb-tls-%s to be deleted, but found:\n%s", sandboxName, tlsSec)
-		}
+			// Assert CA ConfigMap exists in eval-runner-sandbox
+			caCM := harness.runCmd("kubectl", "get", "configmap", "sandbox-ca", "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(caCM) == "" {
+				t.Errorf("Expected sandbox-ca ConfigMap in eval-runner-sandbox, got empty")
+			}
 
-		// Delete Run and assert no sandbox remains
-		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
-		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+			// Assert server cert secret is deleted from eval-runner-sandbox
+			tlsSec := harness.runCmd("kubectl", "get", "secret", "sb-tls-"+sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(tlsSec) != "" {
+				t.Errorf("Expected server cert secret sb-tls-%s to be deleted, but found:\n%s", sandboxName, tlsSec)
+			}
 
-		out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(out) != "" {
-			t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
-		}
-	})
+			// Delete Run and assert no sandbox remains
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+			harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
 
-	t.Run("BadCommitFails", func(t *testing.T) {
-		runName := "support-agent-bad-commit"
-		manifest := fmt.Sprintf(`
+			out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(out) != "" {
+				t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
+			}
+		})
+
+		t.Run("BadCommitFails", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			runName := "support-agent-bad-commit"
+			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -181,48 +188,51 @@ spec:
     commit: "0000000000000000000000000000000000000000"
 `, runName)
 
-		harness.KubectlApplyContent(manifest)
+			harness.KubectlApplyContent(manifest)
 
-		// Assert sandbox was created in eval-runner-sandbox
-		sandboxName := discovery.SandboxNameForRun(runName)
-		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+			// Assert sandbox was created in eval-runner-sandbox
+			sandboxName := discovery.SandboxNameForRun(runName)
+			harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
-		run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 60*time.Second)
-		if run.Status.DiscoveryDeadline == nil {
-			t.Errorf("Expected status.discoveryDeadline to be populated")
-		}
-		if strings.TrimSpace(run.Status.Message) == "" {
-			t.Errorf("Expected non-empty failure message for bad commit")
-		}
-		if !strings.Contains(run.Status.Message, "checkout") {
-			t.Errorf("Expected failure message to name the checkout step, got: %s", run.Status.Message)
-		}
-		if strings.Contains(run.Status.Message, "attempts") {
-			t.Errorf("Expected bad commit to fail promptly without retries, got: %s", run.Status.Message)
-		}
+			run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 90*time.Second)
+			if run.Status.DiscoveryDeadline == nil {
+				t.Errorf("Expected status.discoveryDeadline to be populated")
+			}
+			if strings.TrimSpace(run.Status.Message) == "" {
+				t.Errorf("Expected non-empty failure message for bad commit")
+			}
+			if !strings.Contains(run.Status.Message, "checkout") {
+				t.Errorf("Expected failure message to name the checkout step, got: %s", run.Status.Message)
+			}
+			if strings.Contains(run.Status.Message, "attempts") {
+				t.Errorf("Expected bad commit to fail promptly without retries, got: %s", run.Status.Message)
+			}
 
-		// Assert sandbox was deleted from eval-runner-sandbox
-		out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(out) != "" {
-			t.Errorf("Expected sandbox %s to be deleted on failure, but found:\n%s", sandboxName, out)
-		}
+			// Assert sandbox was deleted from eval-runner-sandbox
+			out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(out) != "" {
+				t.Errorf("Expected sandbox %s to be deleted on failure, but found:\n%s", sandboxName, out)
+			}
 
-		// Delete Run and assert no sandbox remains
-		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
-		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+			// Delete Run and assert no sandbox remains
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+			harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
 
-		out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(out) != "" {
-			t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
-		}
-	})
+			out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(out) != "" {
+				t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
+			}
+		})
 
-	t.Run("MissingEvalsListFails", func(t *testing.T) {
-		noEvalsCommit := harness.GetGitServerCommit("eval-runner-sandbox", "no-evals.git")
-		t.Logf("Fixture repository without .evals/list commit: %s", noEvalsCommit)
+		t.Run("MissingEvalsListFails", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
 
-		runName := "support-agent-missing-evals"
-		manifest := fmt.Sprintf(`
+			noEvalsCommit := harness.GetGitServerCommit("eval-runner-sandbox", "no-evals.git")
+			t.Logf("Fixture repository without .evals/list commit: %s", noEvalsCommit)
+
+			runName := "support-agent-missing-evals"
+			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -234,45 +244,48 @@ spec:
     commit: %s
 `, runName, noEvalsCommit)
 
-		harness.KubectlApplyContent(manifest)
+			harness.KubectlApplyContent(manifest)
 
-		// Assert sandbox was created in eval-runner-sandbox
-		sandboxName := discovery.SandboxNameForRun(runName)
-		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+			// Assert sandbox was created in eval-runner-sandbox
+			sandboxName := discovery.SandboxNameForRun(runName)
+			harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
-		run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 60*time.Second)
-		if run.Status.DiscoveryDeadline == nil {
-			t.Errorf("Expected status.discoveryDeadline to be populated")
-		}
-		if !strings.Contains(run.Status.Message, ".evals/list not found or not executable; see docs/concept/functionality.md §2.3") {
-			t.Errorf("Expected failure message to report .evals/list not found or not executable, got: %s", run.Status.Message)
-		}
-		if strings.Contains(run.Status.Message, "attempts") {
-			t.Errorf("Expected missing .evals/list to fail promptly without retries, got: %s", run.Status.Message)
-		}
+			run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 90*time.Second)
+			if run.Status.DiscoveryDeadline == nil {
+				t.Errorf("Expected status.discoveryDeadline to be populated")
+			}
+			if !strings.Contains(run.Status.Message, ".evals/list not found or not executable; see docs/concept/functionality.md §2.3") {
+				t.Errorf("Expected failure message to report .evals/list not found or not executable, got: %s", run.Status.Message)
+			}
+			if strings.Contains(run.Status.Message, "attempts") {
+				t.Errorf("Expected missing .evals/list to fail promptly without retries, got: %s", run.Status.Message)
+			}
 
-		// Assert sandbox was deleted from eval-runner-sandbox
-		out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(out) != "" {
-			t.Errorf("Expected sandbox %s to be deleted on failure, but found:\n%s", sandboxName, out)
-		}
+			// Assert sandbox was deleted from eval-runner-sandbox
+			out := harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(out) != "" {
+				t.Errorf("Expected sandbox %s to be deleted on failure, but found:\n%s", sandboxName, out)
+			}
 
-		// Delete Run and assert no sandbox remains
-		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
-		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+			// Delete Run and assert no sandbox remains
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+			harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
 
-		out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
-		if strings.TrimSpace(out) != "" {
-			t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
-		}
-	})
+			out = harness.runCmd("kubectl", "get", "sandbox", sandboxName, "-n", "eval-runner-sandbox", "--ignore-not-found")
+			if strings.TrimSpace(out) != "" {
+				t.Errorf("Expected no sandbox %s in eval-runner-sandbox after Run deletion, but found:\n%s", sandboxName, out)
+			}
+		})
 
-	t.Run("DocsNoManifestFallback", func(t *testing.T) {
-		docsNoManifestCommit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-no-manifest.git")
-		t.Logf("Fixture repository docs-no-manifest commit: %s", docsNoManifestCommit)
+		t.Run("DocsNoManifestFallback", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
 
-		runName := "docs-no-manifest-fails"
-		manifest := fmt.Sprintf(`
+			docsNoManifestCommit := harness.GetGitServerCommit("eval-runner-sandbox", "docs-no-manifest.git")
+			t.Logf("Fixture repository docs-no-manifest commit: %s", docsNoManifestCommit)
+
+			runName := "docs-no-manifest-fails"
+			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -284,32 +297,35 @@ spec:
     commit: %s
 `, runName, docsNoManifestCommit)
 
-		harness.KubectlApplyContent(manifest)
+			harness.KubectlApplyContent(manifest)
 
-		// Assert sandbox was created in eval-runner-sandbox
-		sandboxName := discovery.SandboxNameForRun(runName)
-		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+			// Assert sandbox was created in eval-runner-sandbox
+			sandboxName := discovery.SandboxNameForRun(runName)
+			harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
-		run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 60*time.Second)
+			run := harness.WaitForRunPhase("eval-runner", runName, "Failed", 90*time.Second)
 
-		if run.Status.DiscoveryDeadline == nil {
-			t.Errorf("Expected status.discoveryDeadline to be populated")
-		}
-		if !strings.Contains(run.Status.Message, ".evals/list not found or not executable; see docs/concept/functionality.md §2.3") {
-			t.Errorf("Expected failure message to report .evals/list not found or not executable, got: %s", run.Status.Message)
-		}
-		if strings.Contains(run.Status.Message, "attempts") {
-			t.Errorf("Expected missing .evals/list to fail promptly without retries, got: %s", run.Status.Message)
-		}
+			if run.Status.DiscoveryDeadline == nil {
+				t.Errorf("Expected status.discoveryDeadline to be populated")
+			}
+			if !strings.Contains(run.Status.Message, ".evals/list not found or not executable; see docs/concept/functionality.md §2.3") {
+				t.Errorf("Expected failure message to report .evals/list not found or not executable, got: %s", run.Status.Message)
+			}
+			if strings.Contains(run.Status.Message, "attempts") {
+				t.Errorf("Expected missing .evals/list to fail promptly without retries, got: %s", run.Status.Message)
+			}
 
-		// Delete Run and assert cleanup
-		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
-		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
-	})
+			// Delete Run and assert cleanup
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+			harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+		})
 
-	t.Run("DeleteMidDiscovery", func(t *testing.T) {
-		runName := "support-agent-delete-mid-discovery"
-		manifest := fmt.Sprintf(`
+		t.Run("DeleteMidDiscovery", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			runName := "support-agent-delete-mid-discovery"
+			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -321,25 +337,28 @@ spec:
     commit: %s
 `, runName, commit)
 
-		harness.KubectlApplyContent(manifest)
+			harness.KubectlApplyContent(manifest)
 
-		// Assert sandbox was created in eval-runner-sandbox
-		sandboxName := discovery.SandboxNameForRun(runName)
-		harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
+			// Assert sandbox was created in eval-runner-sandbox
+			sandboxName := discovery.SandboxNameForRun(runName)
+			harness.WaitForSandboxExists("eval-runner-sandbox", sandboxName, 30*time.Second)
 
-		// Delete the Run while it is mid-discovery
-		harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
+			// Delete the Run while it is mid-discovery
+			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner")
 
-		// Assert Run is deleted (finalizer cleanup completes)
-		harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
+			// Assert Run is deleted (finalizer cleanup completes)
+			harness.WaitForRunDeleted("eval-runner", runName, 30*time.Second)
 
-		// Assert sandbox was deleted from eval-runner-sandbox
-		harness.WaitForSandboxDeleted("eval-runner-sandbox", sandboxName, 30*time.Second)
-	})
+			// Assert sandbox was deleted from eval-runner-sandbox
+			harness.WaitForSandboxDeleted("eval-runner-sandbox", sandboxName, 30*time.Second)
+		})
 
-	t.Run("UISmoke", func(t *testing.T) {
-		runName := "smoke-ui-run"
-		manifest := fmt.Sprintf(`
+		t.Run("UISmoke", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			runName := "smoke-ui-run"
+			manifest := fmt.Sprintf(`
 apiVersion: evalrunner.gke-labs.dev/v1alpha1
 kind: Run
 metadata:
@@ -351,14 +370,340 @@ spec:
     commit: a81d0c4
   model: test-model
 `, runName)
-		harness.KubectlApplyContent(manifest)
-		t.Cleanup(func() {
-			harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+			harness.KubectlApplyContent(manifest)
+			t.Cleanup(func() {
+				harness.runCmd("kubectl", "delete", "run", runName, "-n", "eval-runner", "--ignore-not-found")
+			})
+
+			runUISmoke(t, harness, runName, false)
 		})
 
-		runUISmoke(t, harness, runName, false)
+		t.Run("SupportAgentSandboxTaskCompleted", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			supportAgentCommit := harness.GetGitServerCommit("eval-runner-sandbox", "support-agent.git")
+			runName := "support-agent-sandbox-run"
+			manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/support-agent.git
+    commit: %s
+  model: mockllm/model
+  tasks:
+  - triage/sandbox_eval
+  - triage/sandbox_root_eval
+`, runName, supportAgentCommit)
+
+			harness.KubectlApplyContent(manifest)
+
+			// Wait for Run to complete
+			run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
+
+			if run.Status.Discovery == nil {
+				t.Fatalf("Expected status.discovery to be populated")
+			}
+			if run.Status.Discovery.TaskCount != 5 {
+				t.Fatalf("Expected 5 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+			}
+
+			if len(run.Status.Tasks) != 2 {
+				t.Fatalf("Expected 2 tasks in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
+			}
+
+			tasksByID := make(map[string]v1alpha1.TaskStatus)
+			for _, task := range run.Status.Tasks {
+				tasksByID[task.ID] = task
+			}
+			for _, expectedTaskID := range []string{"triage/sandbox_eval", "triage/sandbox_root_eval"} {
+				task, ok := tasksByID[expectedTaskID]
+				if !ok {
+					t.Fatalf("Expected task %s in status.tasks", expectedTaskID)
+				}
+				if task.Phase != v1alpha1.TaskPhaseCompleted {
+					t.Errorf("Expected task %s Completed, got %s (msg: %s)", expectedTaskID, task.Phase, task.Message)
+				}
+				if task.Samples != 1 {
+					t.Errorf("Expected 1 sample for %s, got %d", expectedTaskID, task.Samples)
+				}
+				if task.Successes != 1 {
+					t.Errorf("Expected 1 success for %s, got %d", expectedTaskID, task.Successes)
+				}
+				if task.SamplesDone != 1 {
+					t.Errorf("Expected samplesDone 1 for %s, got %d", expectedTaskID, task.SamplesDone)
+				}
+				if task.MeanScore == nil || *task.MeanScore != 1.0 {
+					t.Errorf("Expected meanScore 1.0 for %s, got %v", expectedTaskID, task.MeanScore)
+				}
+			}
+
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+		})
+
+		t.Run("TerminalBenchSandboxTaskCompleted", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			modelCredentialsSecret := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: model-credentials
+  namespace: eval-runner-sandbox
+type: Opaque
+stringData:
+  GEMINI_API_KEY: dummy-key
+`
+			harness.KubectlApplyContent(modelCredentialsSecret)
+			t.Cleanup(func() {
+				_ = exec.Command("kubectl", "delete", "secret", "model-credentials", "-n", "eval-runner-sandbox", "--ignore-not-found").Run()
+			})
+
+			terminalBenchCommit := harness.GetGitServerCommit("eval-runner-sandbox", "terminal-bench.git")
+			runName := "terminal-bench-sandbox-run"
+			manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/terminal-bench.git
+    commit: %s
+  model: mockllm/model
+  tasks:
+  - terminal-bench/regex-log/oracle
+`, runName, terminalBenchCommit)
+
+			harness.KubectlApplyContent(manifest)
+
+			// Assert that the regex-log sandbox pod's task container has limits cpu: 1, memory: 2G
+			sandboxName := discovery.TaskSandboxNameForRun(runName, "terminal-bench/regex-log/oracle")
+			var observedCPULimit, observedMemoryLimit string
+			var observedPod *corev1.Pod
+			podObservedDeadline := time.Now().Add(180 * time.Second)
+			for time.Now().Before(podObservedDeadline) {
+				out, err := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "-o", "json").CombinedOutput()
+				if err == nil {
+					var pod corev1.Pod
+					if json.Unmarshal(out, &pod) == nil && len(pod.Spec.Containers) > 0 {
+						podCopy := pod
+						observedPod = &podCopy
+						for _, container := range pod.Spec.Containers {
+							if container.Name == discovery.TaskContainerName {
+								observedCPULimit = container.Resources.Limits.Cpu().String()
+								observedMemoryLimit = container.Resources.Limits.Memory().String()
+								break
+							}
+						}
+						if observedCPULimit != "" && observedMemoryLimit != "" {
+							break
+						}
+					}
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if observedCPULimit != "1" || observedMemoryLimit != "2G" {
+				t.Errorf("Expected regex-log sandbox pod task container limits cpu: 1, memory: 2G; got cpu: %s, memory: %s", observedCPULimit, observedMemoryLimit)
+			}
+
+			if observedPod == nil {
+				t.Fatalf("Failed to observe sandbox pod %s", sandboxName)
+			}
+			harness.AssertPodHasNoModelSecret(*observedPod, "sandbox task")
+
+			// Wait for Run to complete
+			run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 600*time.Second)
+
+			if run.Status.Discovery == nil {
+				t.Fatalf("Expected status.discovery to be populated")
+			}
+			if run.Status.Discovery.TaskCount != 180 {
+				t.Fatalf("Expected 180 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
+			}
+
+			if len(run.Status.Tasks) != 1 {
+				t.Fatalf("Expected 1 task in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
+			}
+
+			task := run.Status.Tasks[0]
+			if task.ID != "terminal-bench/regex-log/oracle" {
+				t.Errorf("Expected task ID terminal-bench/regex-log/oracle, got %s", task.ID)
+			}
+			if task.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("Expected task %s Completed, got %s (msg: %s)", task.ID, task.Phase, task.Message)
+			}
+			if task.Samples != 1 {
+				t.Errorf("Expected 1 sample for %s, got %d", task.ID, task.Samples)
+			}
+			if task.Successes != 1 {
+				t.Errorf("Expected 1 success for %s, got %d", task.ID, task.Successes)
+			}
+			if task.SamplesDone != 1 {
+				t.Errorf("Expected samplesDone 1 for %s, got %d", task.ID, task.SamplesDone)
+			}
+			if task.MeanScore == nil || *task.MeanScore != 1.0 {
+				t.Errorf("Expected meanScore 1.0 for %s, got %v", task.ID, task.MeanScore)
+			}
+			if task.Resources == nil || task.Resources.Limits == nil {
+				t.Fatalf("Expected task.Resources.Limits for %s to be populated", task.ID)
+			}
+			cpuLimit := task.Resources.Limits[corev1.ResourceCPU]
+			if cpuLimit.String() != "1" {
+				t.Errorf("Expected task.Resources.Limits[cpu] 1 for %s, got %s", task.ID, cpuLimit.String())
+			}
+			memoryLimit := task.Resources.Limits[corev1.ResourceMemory]
+			if memoryLimit.String() != "2G" {
+				t.Errorf("Expected task.Resources.Limits[memory] 2G for %s, got %s", task.ID, memoryLimit.String())
+			}
+
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+		})
+
+		t.Run("TerminalBenchAgentTasksCompleted", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+
+			terminalBenchCommit := harness.GetGitServerCommit("eval-runner-sandbox", "terminal-bench.git")
+			runName := "terminal-bench-agent-run"
+			manifest := fmt.Sprintf(`
+apiVersion: evalrunner.gke-labs.dev/v1alpha1
+kind: Run
+metadata:
+  name: %s
+  namespace: eval-runner
+spec:
+  repo:
+    url: http://git-server.eval-runner-sandbox.svc/terminal-bench.git
+    commit: %s
+  model: mockllm/model
+  tasks:
+  - terminal-bench/regex-log-agent
+  - terminal-bench/regex-log-noop
+`, runName, terminalBenchCommit)
+
+			harness.KubectlApplyContent(manifest)
+
+			run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 600*time.Second)
+			if len(run.Status.Tasks) != 2 {
+				t.Fatalf("Expected 2 tasks in status.tasks, got %d", len(run.Status.Tasks))
+			}
+
+			taskByID := make(map[string]v1alpha1.TaskStatus)
+			for _, task := range run.Status.Tasks {
+				taskByID[task.ID] = task
+			}
+
+			solveTask, ok := taskByID["terminal-bench/regex-log-agent"]
+			if !ok {
+				t.Fatalf("task terminal-bench/regex-log-agent not found in status.tasks")
+			}
+			if solveTask.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("Expected solve task Completed, got %s (msg: %s)", solveTask.Phase, solveTask.Message)
+			}
+			if solveTask.Samples != 1 {
+				t.Errorf("Expected 1 sample for solve task, got %d", solveTask.Samples)
+			}
+			if solveTask.Successes != 1 {
+				t.Errorf("Expected 1 success for solve task, got %d", solveTask.Successes)
+			}
+			if solveTask.MeanScore == nil || *solveTask.MeanScore != 1.0 {
+				t.Errorf("Expected meanScore 1.0 for solve task, got %v", solveTask.MeanScore)
+			}
+
+			noopTask, ok := taskByID["terminal-bench/regex-log-noop"]
+			if !ok {
+				t.Fatalf("task terminal-bench/regex-log-noop not found in status.tasks")
+			}
+			if noopTask.Phase != v1alpha1.TaskPhaseCompleted {
+				t.Errorf("Expected noop task Completed, got %s", noopTask.Phase)
+			}
+			if noopTask.Message != "" {
+				t.Errorf("Expected empty message for noop task, got %q", noopTask.Message)
+			}
+			if noopTask.Successes != 0 {
+				t.Errorf("Expected 0 successes for failing verify with noop model, got %d", noopTask.Successes)
+			}
+			if noopTask.MeanScore == nil || *noopTask.MeanScore != 0.0 {
+				t.Errorf("Expected meanScore 0.0 for failing verify with noop model, got %v", noopTask.MeanScore)
+			}
+
+			nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
+			loadAgentRecord := func(task v1alpha1.TaskStatus) agent.Result {
+				if task.LogPath == "" {
+					t.Fatalf("task %s has empty logPath", task.ID)
+				}
+				agentPathSuffix := strings.TrimPrefix(strings.Replace(task.LogPath, "results.json", "agent.json", 1), "/tmp/")
+				findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", agentPathSuffix)
+				foundFile := strings.TrimSpace(harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd))
+				if foundFile == "" {
+					t.Fatalf("agent.json not found on node for task %s at %s", task.ID, agentPathSuffix)
+				}
+				firstFile := strings.Split(foundFile, "\n")[0]
+				content := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
+				var record agent.Result
+				if err := json.Unmarshal([]byte(content), &record); err != nil {
+					t.Fatalf("failed to unmarshal agent.json for task %s: %v", task.ID, err)
+				}
+				return record
+			}
+
+			solveRecord := loadAgentRecord(solveTask)
+			if solveRecord.StopReason != agent.StopReasonCompleted {
+				t.Errorf("Expected solve task stopReason Completed, got %s", solveRecord.StopReason)
+			}
+			if len(solveRecord.Steps) == 0 {
+				t.Errorf("Expected solve task steps > 0, got %d", len(solveRecord.Steps))
+			}
+			hasToolCall := false
+			for _, step := range solveRecord.Steps {
+				if len(step.ToolCalls) > 0 {
+					hasToolCall = true
+					if len(step.ToolResults) != len(step.ToolCalls) {
+						t.Errorf("Expected step tool results count %d to match tool calls count %d", len(step.ToolResults), len(step.ToolCalls))
+					}
+					for _, toolResult := range step.ToolResults {
+						if toolResult.ExitCode != 0 {
+							t.Errorf("Expected tool result exit code 0 for solve task, got %d", toolResult.ExitCode)
+						}
+					}
+				}
+			}
+			if !hasToolCall {
+				t.Errorf("Expected solve task to have at least one tool call in steps")
+			}
+
+			noopRecord := loadAgentRecord(noopTask)
+			if noopRecord.StopReason != agent.StopReasonCompleted {
+				t.Errorf("Expected noop task stopReason Completed, got %s", noopRecord.StopReason)
+			}
+			if len(noopRecord.Steps) == 0 {
+				t.Errorf("Expected noop task steps > 0, got %d", len(noopRecord.Steps))
+			}
+
+			harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
+		})
+
+		t.Run("WebhookSmoke", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+			runWebhookSmoke(t, harness)
+		})
+
+		t.Run("GitRemoteSmoke", func(t *testing.T) {
+			t.Parallel()
+			harness := harness.WithT(t)
+			runGitRemoteSmoke(t, harness, "eval-runner-sandbox")
+		})
 	})
 
+	// ConfigMapReload mutates cluster-wide eval-runner-config (artifactDir), so it runs serially.
 	t.Run("ConfigMapReload", func(t *testing.T) {
 		t.Cleanup(func() {
 			restoreJSON := fmt.Sprintf(`{"data":{"artifactDir":%q}}`, "/tmp/artifacts")
@@ -389,317 +734,6 @@ spec:
 		if restartsBefore != restartsAfter {
 			t.Fatalf("expected 0 pod restarts, restartCount changed from %s to %s", restartsBefore, restartsAfter)
 		}
-	})
-
-	t.Run("SupportAgentSandboxTaskCompleted", func(t *testing.T) {
-		supportAgentCommit := harness.GetGitServerCommit("eval-runner-sandbox", "support-agent.git")
-		runName := "support-agent-sandbox-run"
-		manifest := fmt.Sprintf(`
-apiVersion: evalrunner.gke-labs.dev/v1alpha1
-kind: Run
-metadata:
-  name: %s
-  namespace: eval-runner
-spec:
-  repo:
-    url: http://git-server.eval-runner-sandbox.svc/support-agent.git
-    commit: %s
-  model: mockllm/model
-  tasks:
-  - triage/sandbox_eval
-  - triage/sandbox_root_eval
-`, runName, supportAgentCommit)
-
-		harness.KubectlApplyContent(manifest)
-
-		// Wait for Run to complete
-		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 180*time.Second)
-
-		if run.Status.Discovery == nil {
-			t.Fatalf("Expected status.discovery to be populated")
-		}
-		if run.Status.Discovery.TaskCount != 5 {
-			t.Fatalf("Expected 5 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
-		}
-
-		if len(run.Status.Tasks) != 2 {
-			t.Fatalf("Expected 2 tasks in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
-		}
-
-		tasksByID := make(map[string]v1alpha1.TaskStatus)
-		for _, task := range run.Status.Tasks {
-			tasksByID[task.ID] = task
-		}
-		for _, expectedTaskID := range []string{"triage/sandbox_eval", "triage/sandbox_root_eval"} {
-			task, ok := tasksByID[expectedTaskID]
-			if !ok {
-				t.Fatalf("Expected task %s in status.tasks", expectedTaskID)
-			}
-			if task.Phase != v1alpha1.TaskPhaseCompleted {
-				t.Errorf("Expected task %s Completed, got %s (msg: %s)", expectedTaskID, task.Phase, task.Message)
-			}
-			if task.Samples != 1 {
-				t.Errorf("Expected 1 sample for %s, got %d", expectedTaskID, task.Samples)
-			}
-			if task.Successes != 1 {
-				t.Errorf("Expected 1 success for %s, got %d", expectedTaskID, task.Successes)
-			}
-			if task.SamplesDone != 1 {
-				t.Errorf("Expected samplesDone 1 for %s, got %d", expectedTaskID, task.SamplesDone)
-			}
-			if task.MeanScore == nil || *task.MeanScore != 1.0 {
-				t.Errorf("Expected meanScore 1.0 for %s, got %v", expectedTaskID, task.MeanScore)
-			}
-		}
-
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
-	})
-
-	t.Run("TerminalBenchSandboxTaskCompleted", func(t *testing.T) {
-		modelCredentialsSecret := `
-apiVersion: v1
-kind: Secret
-metadata:
-  name: model-credentials
-  namespace: eval-runner-sandbox
-type: Opaque
-stringData:
-  GEMINI_API_KEY: dummy-key
-`
-		harness.KubectlApplyContent(modelCredentialsSecret)
-		t.Cleanup(func() {
-			_ = exec.Command("kubectl", "delete", "secret", "model-credentials", "-n", "eval-runner-sandbox", "--ignore-not-found").Run()
-		})
-
-		terminalBenchCommit := harness.GetGitServerCommit("eval-runner-sandbox", "terminal-bench.git")
-		runName := "terminal-bench-sandbox-run"
-		manifest := fmt.Sprintf(`
-apiVersion: evalrunner.gke-labs.dev/v1alpha1
-kind: Run
-metadata:
-  name: %s
-  namespace: eval-runner
-spec:
-  repo:
-    url: http://git-server.eval-runner-sandbox.svc/terminal-bench.git
-    commit: %s
-  model: mockllm/model
-  tasks:
-  - terminal-bench/regex-log/oracle
-`, runName, terminalBenchCommit)
-
-		harness.KubectlApplyContent(manifest)
-
-		// Assert that the regex-log sandbox pod's task container has limits cpu: 1, memory: 2G
-		sandboxName := discovery.TaskSandboxNameForRun(runName, "terminal-bench/regex-log/oracle")
-		var observedCPULimit, observedMemoryLimit string
-		var observedPod *corev1.Pod
-		podObservedDeadline := time.Now().Add(180 * time.Second)
-		for time.Now().Before(podObservedDeadline) {
-			out, err := exec.Command("kubectl", "get", "pod", sandboxName, "-n", "eval-runner-sandbox", "-o", "json").CombinedOutput()
-			if err == nil {
-				var pod corev1.Pod
-				if json.Unmarshal(out, &pod) == nil && len(pod.Spec.Containers) > 0 {
-					podCopy := pod
-					observedPod = &podCopy
-					for _, container := range pod.Spec.Containers {
-						if container.Name == discovery.TaskContainerName {
-							observedCPULimit = container.Resources.Limits.Cpu().String()
-							observedMemoryLimit = container.Resources.Limits.Memory().String()
-							break
-						}
-					}
-					if observedCPULimit != "" && observedMemoryLimit != "" {
-						break
-					}
-				}
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		if observedCPULimit != "1" || observedMemoryLimit != "2G" {
-			t.Errorf("Expected regex-log sandbox pod task container limits cpu: 1, memory: 2G; got cpu: %s, memory: %s", observedCPULimit, observedMemoryLimit)
-		}
-
-		if observedPod == nil {
-			t.Fatalf("Failed to observe sandbox pod %s", sandboxName)
-		}
-		harness.AssertPodHasNoModelSecret(*observedPod, "sandbox task")
-
-		// Wait for Run to complete
-		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 600*time.Second)
-
-		if run.Status.Discovery == nil {
-			t.Fatalf("Expected status.discovery to be populated")
-		}
-		if run.Status.Discovery.TaskCount != 180 {
-			t.Fatalf("Expected 180 tasks in discovery, got %d", run.Status.Discovery.TaskCount)
-		}
-
-		if len(run.Status.Tasks) != 1 {
-			t.Fatalf("Expected 1 task in status.tasks, got %d: %+v", len(run.Status.Tasks), run.Status.Tasks)
-		}
-
-		task := run.Status.Tasks[0]
-		if task.ID != "terminal-bench/regex-log/oracle" {
-			t.Errorf("Expected task ID terminal-bench/regex-log/oracle, got %s", task.ID)
-		}
-		if task.Phase != v1alpha1.TaskPhaseCompleted {
-			t.Errorf("Expected task %s Completed, got %s (msg: %s)", task.ID, task.Phase, task.Message)
-		}
-		if task.Samples != 1 {
-			t.Errorf("Expected 1 sample for %s, got %d", task.ID, task.Samples)
-		}
-		if task.Successes != 1 {
-			t.Errorf("Expected 1 success for %s, got %d", task.ID, task.Successes)
-		}
-		if task.SamplesDone != 1 {
-			t.Errorf("Expected samplesDone 1 for %s, got %d", task.ID, task.SamplesDone)
-		}
-		if task.MeanScore == nil || *task.MeanScore != 1.0 {
-			t.Errorf("Expected meanScore 1.0 for %s, got %v", task.ID, task.MeanScore)
-		}
-		if task.Resources == nil || task.Resources.Limits == nil {
-			t.Fatalf("Expected task.Resources.Limits for %s to be populated", task.ID)
-		}
-		cpuLimit := task.Resources.Limits[corev1.ResourceCPU]
-		if cpuLimit.String() != "1" {
-			t.Errorf("Expected task.Resources.Limits[cpu] 1 for %s, got %s", task.ID, cpuLimit.String())
-		}
-		memoryLimit := task.Resources.Limits[corev1.ResourceMemory]
-		if memoryLimit.String() != "2G" {
-			t.Errorf("Expected task.Resources.Limits[memory] 2G for %s, got %s", task.ID, memoryLimit.String())
-		}
-
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
-	})
-
-	t.Run("TerminalBenchAgentTasksCompleted", func(t *testing.T) {
-		terminalBenchCommit := harness.GetGitServerCommit("eval-runner-sandbox", "terminal-bench.git")
-		runName := "terminal-bench-agent-run"
-		manifest := fmt.Sprintf(`
-apiVersion: evalrunner.gke-labs.dev/v1alpha1
-kind: Run
-metadata:
-  name: %s
-  namespace: eval-runner
-spec:
-  repo:
-    url: http://git-server.eval-runner-sandbox.svc/terminal-bench.git
-    commit: %s
-  model: mockllm/model
-  tasks:
-  - terminal-bench/regex-log-agent
-  - terminal-bench/regex-log-noop
-`, runName, terminalBenchCommit)
-
-		harness.KubectlApplyContent(manifest)
-
-		run := harness.WaitForRunPhase("eval-runner", runName, string(v1alpha1.RunPhaseCompleted), 600*time.Second)
-		if len(run.Status.Tasks) != 2 {
-			t.Fatalf("Expected 2 tasks in status.tasks, got %d", len(run.Status.Tasks))
-		}
-
-		taskByID := make(map[string]v1alpha1.TaskStatus)
-		for _, task := range run.Status.Tasks {
-			taskByID[task.ID] = task
-		}
-
-		solveTask, ok := taskByID["terminal-bench/regex-log-agent"]
-		if !ok {
-			t.Fatalf("task terminal-bench/regex-log-agent not found in status.tasks")
-		}
-		if solveTask.Phase != v1alpha1.TaskPhaseCompleted {
-			t.Errorf("Expected solve task Completed, got %s (msg: %s)", solveTask.Phase, solveTask.Message)
-		}
-		if solveTask.Samples != 1 {
-			t.Errorf("Expected 1 sample for solve task, got %d", solveTask.Samples)
-		}
-		if solveTask.Successes != 1 {
-			t.Errorf("Expected 1 success for solve task, got %d", solveTask.Successes)
-		}
-		if solveTask.MeanScore == nil || *solveTask.MeanScore != 1.0 {
-			t.Errorf("Expected meanScore 1.0 for solve task, got %v", solveTask.MeanScore)
-		}
-
-		noopTask, ok := taskByID["terminal-bench/regex-log-noop"]
-		if !ok {
-			t.Fatalf("task terminal-bench/regex-log-noop not found in status.tasks")
-		}
-		if noopTask.Phase != v1alpha1.TaskPhaseCompleted {
-			t.Errorf("Expected noop task Completed, got %s", noopTask.Phase)
-		}
-		if noopTask.Message != "" {
-			t.Errorf("Expected empty message for noop task, got %q", noopTask.Message)
-		}
-		if noopTask.Successes != 0 {
-			t.Errorf("Expected 0 successes for failing verify with noop model, got %d", noopTask.Successes)
-		}
-		if noopTask.MeanScore == nil || *noopTask.MeanScore != 0.0 {
-			t.Errorf("Expected meanScore 0.0 for failing verify with noop model, got %v", noopTask.MeanScore)
-		}
-
-		nodeContainer := fmt.Sprintf("%s-control-plane", harness.clusterName)
-		loadAgentRecord := func(task v1alpha1.TaskStatus) agent.Result {
-			if task.LogPath == "" {
-				t.Fatalf("task %s has empty logPath", task.ID)
-			}
-			agentPathSuffix := strings.TrimPrefix(strings.Replace(task.LogPath, "results.json", "agent.json", 1), "/tmp/")
-			findCmd := fmt.Sprintf("find /var/lib/kubelet/pods -ignore_readdir_race -path '*/%s' -type f", agentPathSuffix)
-			foundFile := strings.TrimSpace(harness.runCmd("docker", "exec", nodeContainer, "sh", "-c", findCmd))
-			if foundFile == "" {
-				t.Fatalf("agent.json not found on node for task %s at %s", task.ID, agentPathSuffix)
-			}
-			firstFile := strings.Split(foundFile, "\n")[0]
-			content := harness.runCmd("docker", "exec", nodeContainer, "cat", firstFile)
-			var record agent.Result
-			if err := json.Unmarshal([]byte(content), &record); err != nil {
-				t.Fatalf("failed to unmarshal agent.json for task %s: %v", task.ID, err)
-			}
-			return record
-		}
-
-		solveRecord := loadAgentRecord(solveTask)
-		if solveRecord.StopReason != agent.StopReasonCompleted {
-			t.Errorf("Expected solve task stopReason Completed, got %s", solveRecord.StopReason)
-		}
-		if len(solveRecord.Steps) == 0 {
-			t.Errorf("Expected solve task steps > 0, got %d", len(solveRecord.Steps))
-		}
-		hasToolCall := false
-		for _, step := range solveRecord.Steps {
-			if len(step.ToolCalls) > 0 {
-				hasToolCall = true
-				if len(step.ToolResults) != len(step.ToolCalls) {
-					t.Errorf("Expected step tool results count %d to match tool calls count %d", len(step.ToolResults), len(step.ToolCalls))
-				}
-				for _, toolResult := range step.ToolResults {
-					if toolResult.ExitCode != 0 {
-						t.Errorf("Expected tool result exit code 0 for solve task, got %d", toolResult.ExitCode)
-					}
-				}
-			}
-		}
-		if !hasToolCall {
-			t.Errorf("Expected solve task to have at least one tool call in steps")
-		}
-
-		noopRecord := loadAgentRecord(noopTask)
-		if noopRecord.StopReason != agent.StopReasonCompleted {
-			t.Errorf("Expected noop task stopReason Completed, got %s", noopRecord.StopReason)
-		}
-		if len(noopRecord.Steps) == 0 {
-			t.Errorf("Expected noop task steps > 0, got %d", len(noopRecord.Steps))
-		}
-
-		harness.WaitForAllSandboxesDeletedForRun("eval-runner-sandbox", runName, 30*time.Second)
-	})
-
-	t.Run("WebhookSmoke", func(t *testing.T) {
-		runWebhookSmoke(t, harness)
-	})
-
-	t.Run("GitRemoteSmoke", func(t *testing.T) {
-		runGitRemoteSmoke(t, harness, "eval-runner-sandbox")
 	})
 }
 

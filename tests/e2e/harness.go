@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -389,6 +390,32 @@ func (h *Harness) GetGitServerCommit(namespace, repoName string) string {
 	return strings.TrimSpace(out)
 }
 
+// CreateGitServerCommit creates a new commit on a temporary branch in git-server
+// based on the repository's current HEAD tree, returning the new commit SHA and a
+// cleanup function that deletes the branch ref.
+func (h *Harness) CreateGitServerCommit(namespace, repositoryName, branchName, commitMessage string) (string, func()) {
+	gitDirectory := fmt.Sprintf("/git/%s", repositoryName)
+	headCommit := h.GetGitServerCommit(namespace, repositoryName)
+	newCommit := strings.TrimSpace(h.runCmd(
+		"kubectl", "exec", "-n", namespace, "deployment/git-server", "--",
+		"git", "-c", "user.name=eval-runner-e2e", "-c", "user.email=e2e@example.com",
+		"--git-dir="+gitDirectory, "commit-tree", headCommit+"^{tree}", "-p", headCommit, "-m", commitMessage,
+	))
+	h.runCmd(
+		"kubectl", "exec", "-n", namespace, "deployment/git-server", "--",
+		"git", "--git-dir="+gitDirectory, "update-ref", "refs/heads/"+branchName, newCommit,
+	)
+	cleanup := func() {
+		if output, err := exec.Command(
+			"kubectl", "exec", "-n", namespace, "deployment/git-server", "--",
+			"git", "--git-dir="+gitDirectory, "update-ref", "-d", "refs/heads/"+branchName,
+		).CombinedOutput(); err != nil {
+			h.t.Logf("warning: failed to delete temporary branch %s in %s: %v (output: %s)", branchName, repositoryName, err, string(output))
+		}
+	}
+	return newCommit, cleanup
+}
+
 func (h *Harness) DeployFakeGCSServer(namespace, bucket string) {
 	h.t.Logf("Deploying fake-gcs-server in namespace %s with bucket %s", namespace, bucket)
 
@@ -469,9 +496,8 @@ func (h *Harness) ConfigureGCSSink(bucket string) {
 	h.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", patch)
 
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST=fake-gcs-server.eval-runner.svc:4443")
-	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
-
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-ui", "-n", "eval-runner", "STORAGE_EMULATOR_HOST=fake-gcs-server.eval-runner.svc:4443")
+	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
 	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-ui", "--timeout=90s")
 }
 
@@ -481,10 +507,21 @@ func (h *Harness) ConfigureLocalDirSink() {
 	h.runCmd("kubectl", "patch", "configmap", "eval-runner-config", "-n", "eval-runner", "--type=merge", "-p", patch)
 
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-controller", "-n", "eval-runner", "STORAGE_EMULATOR_HOST-")
-	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
-
 	h.runCmd("kubectl", "set", "env", "deployment/eval-runner-ui", "-n", "eval-runner", "STORAGE_EMULATOR_HOST-")
+	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-controller", "--timeout=90s")
 	h.runCmd("kubectl", "rollout", "status", "-n", "eval-runner", "deployment/eval-runner-ui", "--timeout=90s")
+}
+
+func (h *Harness) pickFreePort() int {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		h.t.Fatalf("failed to find available local port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		h.t.Fatalf("failed to close temporary port listener: %v", err)
+	}
+	return port
 }
 
 func (h *Harness) GetGCSObjects(namespace, bucket string) string {
@@ -499,6 +536,9 @@ func (h *Harness) GetGCSObject(namespace, bucket, objectPath string) []byte {
 }
 
 func (h *Harness) PortForwardUI(port int) (baseURL string, cleanup func()) {
+	if port <= 0 {
+		port = h.pickFreePort()
+	}
 	cmd := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-ui", fmt.Sprintf("%d:80", port))
 	if err := cmd.Start(); err != nil {
 		h.t.Fatalf("failed to start eval-runner-ui port-forward: %v", err)
@@ -541,6 +581,9 @@ func (h *Harness) PortForwardUI(port int) (baseURL string, cleanup func()) {
 }
 
 func (h *Harness) PortForwardWebhook(port int) (baseURL string, cleanup func()) {
+	if port <= 0 {
+		port = h.pickFreePort()
+	}
 	cmd := exec.Command("kubectl", "port-forward", "-n", "eval-runner", "svc/eval-runner-webhook", fmt.Sprintf("%d:80", port))
 	if err := cmd.Start(); err != nil {
 		h.t.Fatalf("failed to start eval-runner-webhook port-forward: %v", err)
