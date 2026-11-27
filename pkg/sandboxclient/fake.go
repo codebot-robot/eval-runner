@@ -52,6 +52,10 @@ type FakeClient struct {
 	ListStderr string
 	ListErr    error
 
+	FetchErr    error
+	FetchExit   int
+	FetchStderr string
+
 	CloneErr    error
 	CloneExit   int
 	CloneStderr string
@@ -199,30 +203,57 @@ func (f *FakeClient) Execute(ctx context.Context, cfg ProcessConfig) (*ExecuteRe
 		return &ExecuteResult{ExitCode: 0}, nil
 	}
 
-	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "clone" {
-		if f.CloneErr != nil {
-			if isResourceExhausted(f.CloneErr) {
-				return nil, &discovery.LimitError{
-					Stream: "stdout",
-					Limit:  stdoutLimit,
+	if cmd0 == "git" {
+		switch gitSubcommand(cfg.Command) {
+		case "fetch":
+			if f.FetchErr != nil {
+				if isResourceExhausted(f.FetchErr) {
+					return nil, &discovery.LimitError{
+						Stream: "stdout",
+						Limit:  stdoutLimit,
+					}
 				}
+				return nil, f.FetchErr
 			}
-			return nil, f.CloneErr
-		}
-		return &ExecuteResult{ExitCode: f.CloneExit, Stderr: f.CloneStderr}, nil
-	}
-
-	if cmd0 == "git" && len(cfg.Command) > 1 && cfg.Command[1] == "checkout" {
-		if f.CheckoutErr != nil {
-			if isResourceExhausted(f.CheckoutErr) {
-				return nil, &discovery.LimitError{
-					Stream: "stdout",
-					Limit:  stdoutLimit,
+			if f.FetchExit != 0 || f.FetchStderr != "" {
+				return &ExecuteResult{ExitCode: f.FetchExit, Stderr: f.FetchStderr}, nil
+			}
+			if f.CloneErr != nil {
+				if isResourceExhausted(f.CloneErr) {
+					return nil, &discovery.LimitError{
+						Stream: "stdout",
+						Limit:  stdoutLimit,
+					}
 				}
+				return nil, f.CloneErr
 			}
-			return nil, f.CheckoutErr
+			if f.CloneExit != 0 || f.CloneStderr != "" {
+				return &ExecuteResult{ExitCode: f.CloneExit, Stderr: f.CloneStderr}, nil
+			}
+			return &ExecuteResult{ExitCode: 0}, nil
+		case "clone":
+			if f.CloneErr != nil {
+				if isResourceExhausted(f.CloneErr) {
+					return nil, &discovery.LimitError{
+						Stream: "stdout",
+						Limit:  stdoutLimit,
+					}
+				}
+				return nil, f.CloneErr
+			}
+			return &ExecuteResult{ExitCode: f.CloneExit, Stderr: f.CloneStderr}, nil
+		case "checkout":
+			if f.CheckoutErr != nil {
+				if isResourceExhausted(f.CheckoutErr) {
+					return nil, &discovery.LimitError{
+						Stream: "stdout",
+						Limit:  stdoutLimit,
+					}
+				}
+				return nil, f.CheckoutErr
+			}
+			return &ExecuteResult{ExitCode: f.CheckoutExit, Stderr: f.CheckoutStderr}, nil
 		}
-		return &ExecuteResult{ExitCode: f.CheckoutExit, Stderr: f.CheckoutStderr}, nil
 	}
 
 	if cmd0 == "./.evals/list" || (len(cfg.Command) >= 3 && strings.Contains(cfg.Command[2], "./.evals/list")) {
@@ -334,4 +365,17 @@ func (f *FakeClient) SetAsyncTaskStatus(executionID string, taskStatus AsyncTask
 	}
 	statusCopy := taskStatus
 	f.asyncTasks[executionID] = &statusCopy
+}
+
+func gitSubcommand(command []string) string {
+	if len(command) < 2 || command[0] != "git" {
+		return ""
+	}
+	if command[1] == "-C" {
+		if len(command) >= 4 {
+			return command[3]
+		}
+		return ""
+	}
+	return command[1]
 }

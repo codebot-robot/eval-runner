@@ -703,6 +703,108 @@ func executeSandboxWithTimeout(ctx context.Context, client sandboxclient.Client,
 	}
 }
 
+func checkoutRepositoryProcessConfig(commit string, shallowFetched bool) sandboxclient.ProcessConfig {
+	if shallowFetched {
+		return sandboxclient.ProcessConfig{
+			Command: []string{"git", "-C", "repo", "checkout", "--detach", "FETCH_HEAD"},
+		}
+	}
+	return sandboxclient.ProcessConfig{
+		Command: []string{"git", "checkout", commit},
+		Cwd:     "repo",
+	}
+}
+
+// fetchOrCloneRepository populates the "repo" directory inside the sandbox.
+// When commit is non-empty, it prefers a shallow single-commit fetch
+// (git init repo + git -C repo fetch --depth 1 -- <url> <commit>). If the git
+// server rejects fetching by commit SHA (non-zero git exit), it cleans up
+// "repo" and falls back to a full git clone -- <url> repo.
+func (r *RunReconciler) fetchOrCloneRepository(
+	ctx context.Context,
+	sandboxClient sandboxclient.Client,
+	deadline *metav1.Time,
+	stepTimeout time.Duration,
+	repositoryURL string,
+	commit string,
+) (shallowFetched bool, result *sandboxclient.ExecuteResult, err error, lastStepCtx context.Context) {
+	logger := log.FromContext(ctx)
+
+	cleanRepositoryDirectory := func() (context.Context, error) {
+		cleanCtx, cleanCancel := r.stepContext(ctx, deadline, stepTimeout)
+		defer cleanCancel()
+		if _, cleanErr := executeSandboxWithTimeout(cleanCtx, sandboxClient, sandboxclient.ProcessConfig{
+			Command: []string{"rm", "-rf", "repo"},
+		}); cleanErr != nil {
+			logger.V(1).Info("Failed to clean repo directory before git operation", "error", cleanErr)
+			if isStepTimeout(cleanCtx, cleanErr) || isUnavailableOrDialTimeout(cleanErr) || status.Code(cleanErr) == codes.Unauthenticated {
+				return cleanCtx, cleanErr
+			}
+		}
+		return cleanCtx, nil
+	}
+
+	if commit != "" {
+		cleanCtx, cleanErr := cleanRepositoryDirectory()
+		lastStepCtx = cleanCtx
+		if cleanErr != nil {
+			return false, nil, cleanErr, lastStepCtx
+		}
+
+		gitInitCtx, gitInitCancel := r.stepContext(ctx, deadline, stepTimeout)
+		gitInitResult, gitInitErr := executeSandboxWithTimeout(gitInitCtx, sandboxClient, sandboxclient.ProcessConfig{
+			Command: []string{"git", "init", "repo"},
+		})
+		gitInitCancel()
+		lastStepCtx = gitInitCtx
+		if gitInitErr != nil {
+			return false, gitInitResult, gitInitErr, lastStepCtx
+		}
+
+		if gitInitResult != nil && gitInitResult.ExitCode == 0 {
+			fetchCtx, fetchCancel := r.stepContext(ctx, deadline, stepTimeout)
+			fetchResult, fetchErr := executeSandboxWithTimeout(fetchCtx, sandboxClient, sandboxclient.ProcessConfig{
+				Command: []string{"git", "-C", "repo", "fetch", "--depth", "1", "--", repositoryURL, commit},
+			})
+			fetchCancel()
+			lastStepCtx = fetchCtx
+			if fetchErr != nil {
+				return false, fetchResult, fetchErr, lastStepCtx
+			}
+			if fetchResult != nil && fetchResult.ExitCode == 0 {
+				return true, fetchResult, nil, lastStepCtx
+			}
+			if deadline != nil && !r.now().Before(deadline.Time) {
+				return false, fetchResult, nil, lastStepCtx
+			}
+			var fetchExitCode int
+			if fetchResult != nil {
+				fetchExitCode = fetchResult.ExitCode
+			}
+			logger.Info("Shallow git fetch failed; falling back to full git clone", "exitCode", fetchExitCode)
+		} else {
+			if deadline != nil && !r.now().Before(deadline.Time) {
+				return false, gitInitResult, nil, lastStepCtx
+			}
+			logger.Info("git init failed before shallow fetch; falling back to full git clone")
+		}
+	}
+
+	cleanCtx, cleanErr := cleanRepositoryDirectory()
+	lastStepCtx = cleanCtx
+	if cleanErr != nil {
+		return false, nil, cleanErr, lastStepCtx
+	}
+
+	cloneCtx, cloneCancel := r.stepContext(ctx, deadline, stepTimeout)
+	defer cloneCancel()
+	lastStepCtx = cloneCtx
+	cloneResult, cloneErr := executeSandboxWithTimeout(cloneCtx, sandboxClient, sandboxclient.ProcessConfig{
+		Command: []string{"git", "clone", "--", repositoryURL, "repo"},
+	})
+	return false, cloneResult, cloneErr, lastStepCtx
+}
+
 func readFileWithTimeout(ctx context.Context, client sandboxclient.Client, path string) ([]byte, error) {
 	type result struct {
 		data []byte
@@ -1424,28 +1526,21 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return true, false, ctrl.Result{}, nil
 	}
 
+	var shallowFetched bool
 	executeCleanAndClone := func() (*sandboxclient.ExecuteResult, error) {
-		cleanCtx, cleanCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
-		defer cleanCancel()
-		lastCloneStepCtx = cleanCtx
-		if _, cleanErr := executeSandboxWithTimeout(cleanCtx, sbClient, sandboxclient.ProcessConfig{
-			Command: []string{"rm", "-rf", "repo"},
-		}); cleanErr != nil {
-			logger.V(1).Info("Failed to clean repo directory before clone attempt", "error", cleanErr)
-			if isStepTimeout(cleanCtx, cleanErr) {
-				return nil, cleanErr
-			}
-			if isUnavailableOrDialTimeout(cleanErr) {
-				return nil, cleanErr
-			}
-		}
-
-		cloneCtx, cloneCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
-		defer cloneCancel()
-		lastCloneStepCtx = cloneCtx
-		return executeSandboxWithTimeout(cloneCtx, sbClient, sandboxclient.ProcessConfig{
-			Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
-		})
+		var fetched bool
+		var result *sandboxclient.ExecuteResult
+		var err error
+		fetched, result, err, lastCloneStepCtx = r.fetchOrCloneRepository(
+			ctx,
+			sbClient,
+			run.Status.DiscoveryDeadline,
+			r.discoveryStepTimeout(),
+			run.Spec.Repo.URL,
+			run.Spec.Repo.Commit,
+		)
+		shallowFetched = fetched
+		return result, err
 	}
 
 	for cloneAttempts = 1; cloneAttempts <= maxAttempts; cloneAttempts++ {
@@ -1588,14 +1683,11 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// -------------------------------------------------------------------------
-	// Step 2: git checkout <commit> (no retry: commit not found is permanent)
+	// Step 2: git checkout <commit> (or FETCH_HEAD after shallow fetch; no retry)
 	// -------------------------------------------------------------------------
-	logger.Info("Step 1 succeeded; starting step 2: git checkout", "commit", run.Spec.Repo.Commit)
+	logger.Info("Step 1 succeeded; starting step 2: git checkout", "commit", run.Spec.Repo.Commit, "shallowFetched", shallowFetched)
 	checkoutCtx, checkoutCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
-	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, sandboxclient.ProcessConfig{
-		Command: []string{"git", "checkout", run.Spec.Repo.Commit},
-		Cwd:     "repo",
-	})
+	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, checkoutRepositoryProcessConfig(run.Spec.Repo.Commit, shallowFetched))
 	checkoutCancel()
 	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
 		if isStepTimeout(checkoutCtx, checkoutErr) {
@@ -4200,24 +4292,24 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 	}
 	mkdirCancel()
 
-	// Step 1: Clone repo
+	// Step 1: Shallow fetch commit (falling back to full git clone)
 	logger.Info("Starting task step 1: git clone", "url", run.Spec.Repo.URL)
-	cloneCtx, cloneCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-	cloneRes, cloneErr := executeSandboxWithTimeout(cloneCtx, sbClient, sandboxclient.ProcessConfig{
-		Command: []string{"git", "clone", "--", run.Spec.Repo.URL, "repo"},
-	})
-	cloneCancel()
+	shallowFetched, cloneRes, cloneErr, cloneCtx := r.fetchOrCloneRepository(
+		ctx,
+		sbClient,
+		run.Status.ExecutionDeadline,
+		r.executionStepTimeout(),
+		run.Spec.Repo.URL,
+		run.Spec.Repo.Commit,
+	)
 	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git clone", cloneCtx, cloneRes, cloneErr, taskID, effRange); failed {
 		return failedResult
 	}
 
-	// Step 2: Checkout commit
-	logger.Info("Starting task step 2: git checkout", "commit", run.Spec.Repo.Commit)
+	// Step 2: Checkout commit (or FETCH_HEAD after shallow fetch)
+	logger.Info("Starting task step 2: git checkout", "commit", run.Spec.Repo.Commit, "shallowFetched", shallowFetched)
 	checkoutCtx, checkoutCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, sandboxclient.ProcessConfig{
-		Command: []string{"git", "checkout", run.Spec.Repo.Commit},
-		Cwd:     "repo",
-	})
+	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, checkoutRepositoryProcessConfig(run.Spec.Repo.Commit, shallowFetched))
 	checkoutCancel()
 	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git checkout", checkoutCtx, checkoutRes, checkoutErr, taskID, effRange); failed {
 		return failedResult
