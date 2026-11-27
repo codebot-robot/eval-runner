@@ -715,6 +715,12 @@ func checkoutRepositoryProcessConfig(commit string, shallowFetched bool) sandbox
 	}
 }
 
+type repositoryFetchResult struct {
+	shallowFetched bool
+	executeResult  *sandboxclient.ExecuteResult
+	timedOut       bool
+}
+
 // fetchOrCloneRepository populates the "repo" directory inside the sandbox.
 // When commit is non-empty, it prefers a shallow single-commit fetch
 // (git init repo + git -C repo fetch --depth 1 -- <url> <commit>). If the git
@@ -727,55 +733,55 @@ func (r *RunReconciler) fetchOrCloneRepository(
 	stepTimeout time.Duration,
 	repositoryURL string,
 	commit string,
-) (shallowFetched bool, result *sandboxclient.ExecuteResult, err error, lastStepCtx context.Context) {
+) (repositoryFetchResult, error) {
 	logger := log.FromContext(ctx)
 
-	cleanRepositoryDirectory := func() (context.Context, error) {
-		cleanCtx, cleanCancel := r.stepContext(ctx, deadline, stepTimeout)
-		defer cleanCancel()
-		if _, cleanErr := executeSandboxWithTimeout(cleanCtx, sandboxClient, sandboxclient.ProcessConfig{
+	runStep := func(processConfig sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, bool, error) {
+		stepContext, stepCancel := r.stepContext(ctx, deadline, stepTimeout)
+		stepResult, stepErr := executeSandboxWithTimeout(stepContext, sandboxClient, processConfig)
+		stepCancel()
+		return stepResult, isStepTimeout(stepContext, stepErr), stepErr
+	}
+
+	cleanRepositoryDirectory := func() (bool, error) {
+		if _, timedOut, cleanErr := runStep(sandboxclient.ProcessConfig{
 			Command: []string{"rm", "-rf", "repo"},
 		}); cleanErr != nil {
 			logger.V(1).Info("Failed to clean repo directory before git operation", "error", cleanErr)
-			if isStepTimeout(cleanCtx, cleanErr) || isUnavailableOrDialTimeout(cleanErr) || status.Code(cleanErr) == codes.Unauthenticated {
-				return cleanCtx, cleanErr
+			if timedOut || isUnavailableOrDialTimeout(cleanErr) || status.Code(cleanErr) == codes.Unauthenticated {
+				return timedOut, cleanErr
 			}
 		}
-		return cleanCtx, nil
+		return false, nil
 	}
 
 	if commit != "" {
-		cleanCtx, cleanErr := cleanRepositoryDirectory()
-		lastStepCtx = cleanCtx
-		if cleanErr != nil {
-			return false, nil, cleanErr, lastStepCtx
+		if timedOut, cleanErr := cleanRepositoryDirectory(); cleanErr != nil {
+			return repositoryFetchResult{timedOut: timedOut}, cleanErr
 		}
 
-		gitInitCtx, gitInitCancel := r.stepContext(ctx, deadline, stepTimeout)
-		gitInitResult, gitInitErr := executeSandboxWithTimeout(gitInitCtx, sandboxClient, sandboxclient.ProcessConfig{
+		gitInitResult, gitInitTimedOut, gitInitErr := runStep(sandboxclient.ProcessConfig{
 			Command: []string{"git", "init", "repo"},
 		})
-		gitInitCancel()
-		lastStepCtx = gitInitCtx
 		if gitInitErr != nil {
-			return false, gitInitResult, gitInitErr, lastStepCtx
+			return repositoryFetchResult{executeResult: gitInitResult, timedOut: gitInitTimedOut}, gitInitErr
 		}
 
 		if gitInitResult != nil && gitInitResult.ExitCode == 0 {
-			fetchCtx, fetchCancel := r.stepContext(ctx, deadline, stepTimeout)
-			fetchResult, fetchErr := executeSandboxWithTimeout(fetchCtx, sandboxClient, sandboxclient.ProcessConfig{
+			fetchResult, fetchTimedOut, fetchErr := runStep(sandboxclient.ProcessConfig{
 				Command: []string{"git", "-C", "repo", "fetch", "--depth", "1", "--", repositoryURL, commit},
 			})
-			fetchCancel()
-			lastStepCtx = fetchCtx
 			if fetchErr != nil {
-				return false, fetchResult, fetchErr, lastStepCtx
+				return repositoryFetchResult{executeResult: fetchResult, timedOut: fetchTimedOut}, fetchErr
 			}
 			if fetchResult != nil && fetchResult.ExitCode == 0 {
-				return true, fetchResult, nil, lastStepCtx
+				return repositoryFetchResult{shallowFetched: true, executeResult: fetchResult, timedOut: fetchTimedOut}, nil
+			}
+			if fetchTimedOut {
+				return repositoryFetchResult{executeResult: fetchResult, timedOut: true}, nil
 			}
 			if deadline != nil && !r.now().Before(deadline.Time) {
-				return false, fetchResult, nil, lastStepCtx
+				return repositoryFetchResult{executeResult: fetchResult}, nil
 			}
 			var fetchExitCode int
 			if fetchResult != nil {
@@ -783,26 +789,24 @@ func (r *RunReconciler) fetchOrCloneRepository(
 			}
 			logger.Info("Shallow git fetch failed; falling back to full git clone", "exitCode", fetchExitCode)
 		} else {
+			if gitInitTimedOut {
+				return repositoryFetchResult{executeResult: gitInitResult, timedOut: true}, nil
+			}
 			if deadline != nil && !r.now().Before(deadline.Time) {
-				return false, gitInitResult, nil, lastStepCtx
+				return repositoryFetchResult{executeResult: gitInitResult}, nil
 			}
 			logger.Info("git init failed before shallow fetch; falling back to full git clone")
 		}
 	}
 
-	cleanCtx, cleanErr := cleanRepositoryDirectory()
-	lastStepCtx = cleanCtx
-	if cleanErr != nil {
-		return false, nil, cleanErr, lastStepCtx
+	if timedOut, cleanErr := cleanRepositoryDirectory(); cleanErr != nil {
+		return repositoryFetchResult{timedOut: timedOut}, cleanErr
 	}
 
-	cloneCtx, cloneCancel := r.stepContext(ctx, deadline, stepTimeout)
-	defer cloneCancel()
-	lastStepCtx = cloneCtx
-	cloneResult, cloneErr := executeSandboxWithTimeout(cloneCtx, sandboxClient, sandboxclient.ProcessConfig{
+	cloneResult, cloneTimedOut, cloneErr := runStep(sandboxclient.ProcessConfig{
 		Command: []string{"git", "clone", "--", repositoryURL, "repo"},
 	})
-	return false, cloneResult, cloneErr, lastStepCtx
+	return repositoryFetchResult{executeResult: cloneResult, timedOut: cloneTimedOut}, cloneErr
 }
 
 func readFileWithTimeout(ctx context.Context, client sandboxclient.Client, path string) ([]byte, error) {
@@ -1440,11 +1444,10 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Step 1: git clone -- <url> repo (retry up to N times on failure)
 	// -------------------------------------------------------------------------
 	logger.Info("Sandbox pod is ready; starting step 1: git clone", "pod", podKey)
-	var cloneRes *sandboxclient.ExecuteResult
+	var fetchResult repositoryFetchResult
 	var cloneErr error
 	var cloneAttempts int
 	var uncountedRetried bool
-	var lastCloneStepCtx context.Context
 
 	handleUnavailable := func(dialErr error) (retried bool, handled bool, res ctrl.Result, err error) {
 		logger.Info("Discovery step failed with Unavailable; checking sandbox status", "error", dialErr, "run", run.Name, "endpoint", currentEndpoint)
@@ -1526,12 +1529,8 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return true, false, ctrl.Result{}, nil
 	}
 
-	var shallowFetched bool
-	executeCleanAndClone := func() (*sandboxclient.ExecuteResult, error) {
-		var fetched bool
-		var result *sandboxclient.ExecuteResult
-		var err error
-		fetched, result, err, lastCloneStepCtx = r.fetchOrCloneRepository(
+	executeCleanAndClone := func() (repositoryFetchResult, error) {
+		return r.fetchOrCloneRepository(
 			ctx,
 			sbClient,
 			run.Status.DiscoveryDeadline,
@@ -1539,8 +1538,6 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			run.Spec.Repo.URL,
 			run.Spec.Repo.Commit,
 		)
-		shallowFetched = fetched
-		return result, err
 	}
 
 	for cloneAttempts = 1; cloneAttempts <= maxAttempts; cloneAttempts++ {
@@ -1565,9 +1562,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 		}
 
-		cloneRes, cloneErr = executeCleanAndClone()
+		fetchResult, cloneErr = executeCleanAndClone()
 
-		if isStepTimeout(lastCloneStepCtx, cloneErr) {
+		if fetchResult.timedOut {
 			return r.failRun(ctx, &run, &sandbox, "step git clone failed: sandbox did not report completion")
 		}
 
@@ -1578,8 +1575,8 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				return res, err
 			}
 			if recovered {
-				cloneRes, cloneErr = executeCleanAndClone()
-				if isStepTimeout(lastCloneStepCtx, cloneErr) {
+				fetchResult, cloneErr = executeCleanAndClone()
+				if fetchResult.timedOut {
 					return r.failRun(ctx, &run, &sandbox, "step git clone failed: sandbox did not report completion")
 				}
 			}
@@ -1590,7 +1587,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 		}
 
-		if cloneErr == nil && cloneRes != nil && cloneRes.ExitCode == 0 {
+		if cloneErr == nil && fetchResult.executeResult != nil && fetchResult.executeResult.ExitCode == 0 {
 			break
 		}
 
@@ -1649,15 +1646,15 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Evaluate git clone outcome
-	if cloneErr != nil || cloneRes == nil || cloneRes.ExitCode != 0 {
-		if isStepTimeout(lastCloneStepCtx, cloneErr) {
+	if cloneErr != nil || fetchResult.executeResult == nil || fetchResult.executeResult.ExitCode != 0 {
+		if fetchResult.timedOut {
 			return r.failRun(ctx, &run, &sandbox, "step git clone failed: sandbox did not report completion")
 		}
 		var cloneStderr string
 		var exitCode int
-		if cloneRes != nil {
-			cloneStderr = cloneRes.Stderr
-			exitCode = cloneRes.ExitCode
+		if fetchResult.executeResult != nil {
+			cloneStderr = fetchResult.executeResult.Stderr
+			exitCode = fetchResult.executeResult.ExitCode
 		}
 		tail := extractStderrTail(cloneStderr, r.maxStderrLines(), discovery.MaxStderrTailBytes)
 		isDeadlineExceeded := (run.Status.DiscoveryDeadline != nil && !r.now().Before(run.Status.DiscoveryDeadline.Time))
@@ -1685,9 +1682,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// -------------------------------------------------------------------------
 	// Step 2: git checkout <commit> (or FETCH_HEAD after shallow fetch; no retry)
 	// -------------------------------------------------------------------------
-	logger.Info("Step 1 succeeded; starting step 2: git checkout", "commit", run.Spec.Repo.Commit, "shallowFetched", shallowFetched)
+	logger.Info("Step 1 succeeded; starting step 2: git checkout", "commit", run.Spec.Repo.Commit, "shallowFetched", fetchResult.shallowFetched)
 	checkoutCtx, checkoutCancel := r.stepContext(ctx, run.Status.DiscoveryDeadline, r.discoveryStepTimeout())
-	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, checkoutRepositoryProcessConfig(run.Spec.Repo.Commit, shallowFetched))
+	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, checkoutRepositoryProcessConfig(run.Spec.Repo.Commit, fetchResult.shallowFetched))
 	checkoutCancel()
 	if checkoutErr != nil || checkoutRes == nil || checkoutRes.ExitCode != 0 {
 		if isStepTimeout(checkoutCtx, checkoutErr) {
@@ -4115,7 +4112,7 @@ func (r *RunReconciler) handleStepExecutionFailure(
 	ctx context.Context,
 	runName string,
 	stepName string,
-	stepContext context.Context,
+	timedOut bool,
 	stepResult *sandboxclient.ExecuteResult,
 	stepError error,
 	taskID string,
@@ -4125,7 +4122,7 @@ func (r *RunReconciler) handleStepExecutionFailure(
 		return taskExecutionResult{}, false
 	}
 	logger := log.FromContext(ctx).WithValues("task", taskID, "run", runName)
-	if isStepTimeout(stepContext, stepError) {
+	if timedOut || isStepTimeout(nil, stepError) {
 		message := fmt.Sprintf("step %s failed: sandbox did not report completion", stepName)
 		logger.Error(errors.New(message), fmt.Sprintf("Task step %s timed out", stepName), "task", taskID)
 		return taskExecutionResult{
@@ -4294,7 +4291,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	// Step 1: Shallow fetch commit (falling back to full git clone)
 	logger.Info("Starting task step 1: git clone", "url", run.Spec.Repo.URL)
-	shallowFetched, cloneRes, cloneErr, cloneCtx := r.fetchOrCloneRepository(
+	fetchResult, cloneErr := r.fetchOrCloneRepository(
 		ctx,
 		sbClient,
 		run.Status.ExecutionDeadline,
@@ -4302,16 +4299,16 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 		run.Spec.Repo.URL,
 		run.Spec.Repo.Commit,
 	)
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git clone", cloneCtx, cloneRes, cloneErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git clone", fetchResult.timedOut, fetchResult.executeResult, cloneErr, taskID, effRange); failed {
 		return failedResult
 	}
 
 	// Step 2: Checkout commit (or FETCH_HEAD after shallow fetch)
-	logger.Info("Starting task step 2: git checkout", "commit", run.Spec.Repo.Commit, "shallowFetched", shallowFetched)
+	logger.Info("Starting task step 2: git checkout", "commit", run.Spec.Repo.Commit, "shallowFetched", fetchResult.shallowFetched)
 	checkoutCtx, checkoutCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, checkoutRepositoryProcessConfig(run.Spec.Repo.Commit, shallowFetched))
+	checkoutRes, checkoutErr := executeSandboxWithTimeout(checkoutCtx, sbClient, checkoutRepositoryProcessConfig(run.Spec.Repo.Commit, fetchResult.shallowFetched))
 	checkoutCancel()
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git checkout", checkoutCtx, checkoutRes, checkoutErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "git checkout", isStepTimeout(checkoutCtx, checkoutErr), checkoutRes, checkoutErr, taskID, effRange); failed {
 		return failedResult
 	}
 
@@ -4347,7 +4344,7 @@ func (r *RunReconciler) executeTask(ctx context.Context, run *v1alpha1.Run, task
 
 	close(stopPoller)
 	pollerWg.Wait()
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "inspect eval", inspectCtx, inspectRes, inspectErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "inspect eval", isStepTimeout(inspectCtx, inspectErr), inspectRes, inspectErr, taskID, effRange); failed {
 		return failedResult
 	}
 
@@ -4686,7 +4683,7 @@ func (r *RunReconciler) executeAgentPhase(
 			Env:     taskEnv,
 		})
 		prepareCancel()
-		if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "agent prepare command", prepareContext, prepareResult, prepareError, taskID, effRange); failed {
+		if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "agent prepare command", isStepTimeout(prepareContext, prepareError), prepareResult, prepareError, taskID, effRange); failed {
 			failedResult.timeoutSeconds = effectiveTimeoutSeconds
 			failedResult.resources = effectiveResources
 			return agentPhaseOutcome{}, &failedResult
@@ -4959,7 +4956,7 @@ func (r *RunReconciler) executeSandboxTask(
 		Env:     gcpProjectTaskEnv(taskGCPProject(run, taskID)),
 	})
 	commandCancel()
-	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "task command", commandContext, commandResult, commandErr, taskID, effRange); failed {
+	if failedResult, failed := r.handleStepExecutionFailure(ctx, run.Name, "task command", isStepTimeout(commandContext, commandErr), commandResult, commandErr, taskID, effRange); failed {
 		failedResult.timeoutSeconds = effectiveTimeoutSeconds
 		failedResult.resources = effectiveResources
 		applyTokensAndCost(&failedResult, tokensAndCost)
@@ -5271,7 +5268,7 @@ func (r *RunReconciler) reconcileAsyncSandboxTask(ctx context.Context, run *v1al
 	case sandboxclient.AsyncTaskCompleted:
 		if pollStatus.ExitCode != 0 {
 			execResult := &sandboxclient.ExecuteResult{ExitCode: pollStatus.ExitCode, Stdout: pollStatus.Stdout, Stderr: pollStatus.Stderr}
-			failedResult, _ := r.handleStepExecutionFailure(ctx, run.Name, "task command", nil, execResult, nil, task.ID, effectiveRange)
+			failedResult, _ := r.handleStepExecutionFailure(ctx, run.Name, "task command", false, execResult, nil, task.ID, effectiveRange)
 			return finishResult(failedResult)
 		}
 		startTime := r.now()
