@@ -201,7 +201,7 @@ func sampleRunDetailView() RunDetailView {
 		Name:            "docs-eval-cand-05ce4d8",
 		Namespace:       "eval-runner",
 		Phase:           v1alpha1.RunPhaseCompleted,
-		PhaseChip:       "good",
+		PhaseChip:       "neutral",
 		RepoURL:         "https://github.com/gke-labs/eval-runner.git",
 		Commit:          "05ce4d8222222222222222222222222222222222",
 		CommitShort:     "05ce4d8",
@@ -219,8 +219,11 @@ func sampleRunDetailView() RunDetailView {
 			{
 				ID:          "triage/runbook_lookup",
 				Phase:       v1alpha1.TaskPhaseCompleted,
-				PhaseChip:   "good",
-				RateStr:     "0.84",
+				PhaseChip:   "neutral",
+				RateStr:     "84%",
+				TrendText:   "▲ +23%",
+				TrendClass:  "good",
+				TrendTitle:  "Previous run docs-eval-base-05ce4d8: 61%",
 				HasCI:       true,
 				CILeftPx:    170.4,
 				CIWidthPx:   50.4,
@@ -281,7 +284,7 @@ func sampleRunsListView() RunsListView {
 				Name:      "docs-eval-cand-05ce4d8",
 				Namespace: "eval-runner",
 				Phase:     v1alpha1.RunPhaseCompleted,
-				PhaseChip: "good",
+				PhaseChip: "neutral",
 				Tasks:     "1/1",
 				Samples:   48,
 				Rates:     "triage/runbook_lookup=0.84[0.71,0.92]",
@@ -293,7 +296,7 @@ func sampleRunsListView() RunsListView {
 				Name:      "docs-eval-base-05ce4d8",
 				Namespace: "eval-runner",
 				Phase:     v1alpha1.RunPhaseCompleted,
-				PhaseChip: "good",
+				PhaseChip: "neutral",
 				Tasks:     "1/1",
 				Samples:   48,
 				Rates:     "triage/runbook_lookup=0.61[0.46,0.74]",
@@ -3571,5 +3574,287 @@ func TestHeaderWordmarkMarkup(t *testing.T) {
 				t.Errorf("title should keep eval-runner, not wordmark in %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestPhaseChipClasses(t *testing.T) {
+	runCases := []struct {
+		phase    v1alpha1.RunPhase
+		expected string
+	}{
+		{v1alpha1.RunPhaseCompleted, "neutral"},
+		{v1alpha1.RunPhaseFailed, "bad"},
+		{v1alpha1.RunPhaseRunning, "pending"},
+		{v1alpha1.RunPhasePending, "neutral"},
+		{v1alpha1.RunPhaseDiscovering, "warn"},
+		{v1alpha1.RunPhaseDiscovered, "warn"},
+		{v1alpha1.RunPhase("Unknown"), "neutral"},
+	}
+	for _, testCase := range runCases {
+		if got := phaseChipClass(testCase.phase); got != testCase.expected {
+			t.Errorf("phaseChipClass(%q) = %q, want %q", testCase.phase, got, testCase.expected)
+		}
+	}
+
+	taskCases := []struct {
+		phase    v1alpha1.TaskPhase
+		expected string
+	}{
+		{v1alpha1.TaskPhaseCompleted, "neutral"},
+		{v1alpha1.TaskPhaseFailed, "bad"},
+		{v1alpha1.TaskPhaseRunning, "pending"},
+		{v1alpha1.TaskPhasePending, "neutral"},
+		{v1alpha1.TaskPhaseSkipped, "neutral"},
+		{v1alpha1.TaskPhase("Unknown"), "neutral"},
+	}
+	for _, testCase := range taskCases {
+		if got := taskPhaseChipClass(testCase.phase); got != testCase.expected {
+			t.Errorf("taskPhaseChipClass(%q) = %q, want %q", testCase.phase, got, testCase.expected)
+		}
+	}
+}
+
+func TestFormatPassRatePercentAndTaskTrend(t *testing.T) {
+	percentCases := []struct {
+		rate     float64
+		expected string
+	}{
+		{0.0, "0%"},
+		{0.2, "20%"},
+		{0.84, "84%"},
+		{0.846, "85%"},
+		{1.0, "100%"},
+	}
+	for _, testCase := range percentCases {
+		if got := formatPassRatePercent(testCase.rate); got != testCase.expected {
+			t.Errorf("formatPassRatePercent(%v) = %q, want %q", testCase.rate, got, testCase.expected)
+		}
+	}
+
+	trendCases := []struct {
+		name          string
+		currentRate   float64
+		previous      previousTaskResult
+		expectedText  string
+		expectedClass string
+		expectedTitle string
+	}{
+		{
+			name:          "improved",
+			currentRate:   0.20,
+			previous:      previousTaskResult{runName: "run-1", rate: 0.10},
+			expectedText:  "▲ +10%",
+			expectedClass: "good",
+			expectedTitle: "Previous run run-1: 10%",
+		},
+		{
+			name:          "regressed",
+			currentRate:   0.00,
+			previous:      previousTaskResult{runName: "run-1", rate: 0.25},
+			expectedText:  "▼ -25%",
+			expectedClass: "bad",
+			expectedTitle: "Previous run run-1: 25%",
+		},
+		{
+			name:          "unchanged",
+			currentRate:   0.20,
+			previous:      previousTaskResult{runName: "run-1", rate: 0.20},
+			expectedText:  "",
+			expectedClass: "",
+			expectedTitle: "",
+		},
+		{
+			name:          "tiny_difference_rounds_to_zero",
+			currentRate:   0.2004,
+			previous:      previousTaskResult{runName: "run-1", rate: 0.2000},
+			expectedText:  "",
+			expectedClass: "",
+			expectedTitle: "",
+		},
+	}
+	for _, testCase := range trendCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			text, class, title := taskTrend(testCase.currentRate, testCase.previous)
+			if text != testCase.expectedText || class != testCase.expectedClass || title != testCase.expectedTitle {
+				t.Errorf("taskTrend(%v, %+v) = (%q, %q, %q), want (%q, %q, %q)",
+					testCase.currentRate, testCase.previous, text, class, title,
+					testCase.expectedText, testCase.expectedClass, testCase.expectedTitle)
+			}
+		})
+	}
+}
+
+func TestPreviousTaskResults(t *testing.T) {
+	baseTime := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	rate10 := 0.10
+	rate20 := 0.20
+	rate50 := 0.50
+	rate70 := 0.70
+	rate90 := 0.90
+
+	repoURL := "https://github.com/gke-labs/eval-runner.git"
+	otherRepoURL := "https://github.com/other-org/other-repo.git"
+	repoRef := RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"}
+
+	olderCompleted := v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-older",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(baseTime.Add(-30 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: repoURL}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-a", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate10},
+				{ID: "task-b", Phase: v1alpha1.TaskPhaseCompleted, MeanScore: &rate70},
+			},
+		},
+	}
+
+	recentCompleted := v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-recent",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(baseTime.Add(-20 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: repoURL}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-a", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate20},
+				{ID: "task-b", Phase: v1alpha1.TaskPhaseFailed, SuccessRate: &rate10},
+			},
+		},
+	}
+
+	failedPrior := v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-failed",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(baseTime.Add(-15 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: repoURL}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseFailed,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-a", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate90},
+			},
+		},
+	}
+
+	otherRepoPrior := v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-other-repo",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(baseTime.Add(-12 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: otherRepoURL}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-a", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate90},
+			},
+		},
+	}
+
+	currentRun := v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-current",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(baseTime.Add(-10 * time.Minute)),
+		},
+		Spec: v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: repoURL}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-a", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate50},
+				{ID: "task-b", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate50},
+				{ID: "task-new", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate50},
+			},
+		},
+	}
+
+	newerCompleted := v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "run-newer",
+			Namespace:         "eval-runner",
+			CreationTimestamp: metav1.NewTime(baseTime),
+		},
+		Spec: v1alpha1.RunSpec{Repo: v1alpha1.RepoSpec{URL: repoURL}},
+		Status: v1alpha1.RunStatus{
+			Phase: v1alpha1.RunPhaseCompleted,
+			Tasks: []v1alpha1.TaskStatus{
+				{ID: "task-a", Phase: v1alpha1.TaskPhaseCompleted, SuccessRate: &rate90},
+			},
+		},
+	}
+
+	allRuns := []v1alpha1.Run{newerCompleted, currentRun, otherRepoPrior, failedPrior, olderCompleted, recentCompleted}
+	got := previousTaskResults(&currentRun, allRuns, repoRef)
+
+	if result, ok := got["task-a"]; !ok || result.runName != "run-recent" || result.rate != rate20 {
+		t.Errorf("task-a prior = (%+v, %v), want (run-recent, 0.20)", result, ok)
+	}
+	if result, ok := got["task-b"]; !ok || result.runName != "run-older" || result.rate != rate70 {
+		t.Errorf("task-b prior = (%+v, %v), want (run-older, 0.70)", result, ok)
+	}
+	if _, ok := got["task-new"]; ok {
+		t.Errorf("expected no prior result for task-new, got %+v", got["task-new"])
+	}
+}
+
+func TestTemplateRenderingRunDetail_PassPercentAndTrends(t *testing.T) {
+	view := sampleRunDetailView()
+	view.Tasks = []RunTaskRow{
+		{
+			ID:         "task/improved",
+			Phase:      v1alpha1.TaskPhaseCompleted,
+			PhaseChip:  taskPhaseChipClass(v1alpha1.TaskPhaseCompleted),
+			RateStr:    "20%",
+			TrendText:  "▲ +10%",
+			TrendClass: "good",
+			TrendTitle: "Previous run run-prev: 10%",
+			Samples:    10,
+			Successes:  2,
+		},
+		{
+			ID:         "task/regressed",
+			Phase:      v1alpha1.TaskPhaseCompleted,
+			PhaseChip:  taskPhaseChipClass(v1alpha1.TaskPhaseCompleted),
+			RateStr:    "0%",
+			TrendText:  "▼ -20%",
+			TrendClass: "bad",
+			TrendTitle: "Previous run run-prev: 20%",
+			Samples:    1,
+			Successes:  0,
+		},
+		{
+			ID:        "task/unchanged",
+			Phase:     v1alpha1.TaskPhaseCompleted,
+			PhaseChip: taskPhaseChipClass(v1alpha1.TaskPhaseCompleted),
+			RateStr:   "100%",
+			Samples:   5,
+			Successes: 5,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmplRunDetail.Execute(&buf, view); err != nil {
+		t.Fatalf("failed to execute run detail template: %v", err)
+	}
+	rendered := html.UnescapeString(buf.String())
+
+	if strings.Contains(rendered, "chip good") {
+		t.Errorf("expected no 'chip good' for Completed phase chips, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `20% <span class="trend good" title="Previous run run-prev: 10%">▲ +10%</span>`) {
+		t.Errorf("expected improved pass rate and up arrow, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `0% <span class="trend bad" title="Previous run run-prev: 20%">▼ -20%</span>`) {
+		t.Errorf("expected regressed pass rate and down arrow, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `<td class="num" style="white-space:nowrap">100%</td>`) {
+		t.Errorf("expected unchanged pass rate without trend span, got:\n%s", rendered)
 	}
 }
