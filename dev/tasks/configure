@@ -51,6 +51,7 @@ RESTART_ONLY_KEYS: Dict[str, Tuple[str, ...]] = {
     "gcpProjectBillingAccountID": (CONTROLLER_DEPLOYMENT,),
     "gcpProjectParentFolderID": (CONTROLLER_DEPLOYMENT,),
     "gcpProjectPool": (CONTROLLER_DEPLOYMENT,),
+    "gcpProjectTaskRoles": (CONTROLLER_DEPLOYMENT,),
     "servicePortalControllerAddress": (CONTROLLER_DEPLOYMENT,),
     "servicePortalControllerCAFile": (CONTROLLER_DEPLOYMENT,),
     "servicePortalTokenFile": (CONTROLLER_DEPLOYMENT,),

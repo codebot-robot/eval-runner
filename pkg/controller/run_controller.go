@@ -274,7 +274,12 @@ type RunReconciler struct {
 	// If nil, defaults to RESTGCPProjectProvisioner using GCPTokenSource or controller ADC/WIF credentials.
 	GCPProjectProvisioner GCPProjectProvisioner
 
-	// GCPTokenSource supplies OAuth2 tokens for GCP project provisioning and service portal injection.
+	// GCPAccessTokenMinter mints short-lived project-scoped OAuth2 access tokens by impersonating
+	// each project's eval-task service account. If nil, defaults to RESTGCPProjectProvisioner
+	// using GCPTokenSource or controller ADC/WIF credentials.
+	GCPAccessTokenMinter GCPAccessTokenMinter
+
+	// GCPTokenSource supplies OAuth2 tokens for GCP project provisioning and service account impersonation.
 	// If nil, defaults to NewGCPTokenSource using Config.GCPWorkloadIdentityProvider or ADC.
 	GCPTokenSource oauth2.TokenSource
 
@@ -2069,6 +2074,7 @@ type gcpProjectConfig struct {
 	pool             []string
 	parentFolderID   string
 	billingAccountID string
+	taskRoles        []string
 }
 
 func (r *RunReconciler) validateGCPProjectConfig() (gcpProjectConfig, error) {
@@ -2079,6 +2085,7 @@ func (r *RunReconciler) validateGCPProjectConfig() (gcpProjectConfig, error) {
 	pool := append([]string(nil), r.Config.GCPProjectPool...)
 	parentFolderID := strings.TrimSpace(r.Config.GCPProjectParentFolderID)
 	billingAccountID := strings.TrimSpace(r.Config.GCPProjectBillingAccountID)
+	taskRoles := append([]string(nil), r.Config.GCPProjectTaskRoles...)
 	r.cfgMu.RUnlock()
 	if len(pool) > 0 {
 		return gcpProjectConfig{pool: pool}, nil
@@ -2089,6 +2096,7 @@ func (r *RunReconciler) validateGCPProjectConfig() (gcpProjectConfig, error) {
 	return gcpProjectConfig{
 		parentFolderID:   parentFolderID,
 		billingAccountID: billingAccountID,
+		taskRoles:        taskRoles,
 	}, nil
 }
 
@@ -2200,6 +2208,17 @@ func (r *RunReconciler) gcpProjectProvisioner(ctx context.Context) (GCPProjectPr
 	return &RESTGCPProjectProvisioner{TokenSource: tokenSource}, nil
 }
 
+func (r *RunReconciler) gcpAccessTokenMinter(ctx context.Context) (GCPAccessTokenMinter, error) {
+	if r.GCPAccessTokenMinter != nil {
+		return r.GCPAccessTokenMinter, nil
+	}
+	tokenSource, err := r.gcpTokenSource(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &RESTGCPProjectProvisioner{TokenSource: tokenSource}, nil
+}
+
 func (r *RunReconciler) cleanupTaskGCPProject(ctx context.Context, runName, taskID, projectID string) {
 	if err := r.deleteTaskGCPProject(ctx, runName, taskID, projectID); err != nil {
 		log.FromContext(ctx).V(1).Info("best-effort gcp project cleanup failed", "run", runName, "task", taskID, "gcpProject", projectID, "error", err)
@@ -2250,6 +2269,9 @@ func collectTaskGCPProjects(tasks []v1alpha1.TaskStatus) map[string]string {
 }
 
 func taskGCPProject(run *v1alpha1.Run, taskID string) string {
+	if run == nil {
+		return ""
+	}
 	for _, task := range run.Status.Tasks {
 		if task.ID == taskID {
 			return task.GCPProject
@@ -2937,7 +2959,7 @@ func (r *RunReconciler) startPendingTask(
 				return pendingTaskStartOutcome{failureMessage: fmt.Sprintf("failed to generate gcp project id: %v", err)}
 			}
 			createContext, createCancel := r.stepContext(ctx, run.Status.ExecutionDeadline, r.executionStepTimeout())
-			err = provisioner.CreateProject(createContext, gcpConfig.parentFolderID, gcpConfig.billingAccountID, projectID)
+			err = provisioner.CreateProject(createContext, gcpConfig.parentFolderID, gcpConfig.billingAccountID, projectID, gcpConfig.taskRoles)
 			createCancel()
 			if err != nil {
 				logger.Error(err, "Failed to provision ephemeral gcp project", "task", taskID, "gcpProject", projectID)

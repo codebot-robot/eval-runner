@@ -45,6 +45,8 @@ const (
 	ConfigMapKeyGCPProjectBillingAccountID = "gcpProjectBillingAccountID"
 	// ConfigMapKeyGCPProjectPool is the ConfigMap key for comma-separated pre-created GCP project IDs leased to gcp-project tasks.
 	ConfigMapKeyGCPProjectPool = "gcpProjectPool"
+	// ConfigMapKeyGCPProjectTaskRoles is the ConfigMap key for comma-separated project-level IAM roles granted to per-project task service accounts.
+	ConfigMapKeyGCPProjectTaskRoles = "gcpProjectTaskRoles"
 	// DefaultWorkloadIdentityTokenFile is the contract path for the projected Kubernetes ServiceAccount token.
 	DefaultWorkloadIdentityTokenFile = "/var/run/secrets/eval-runner/gcp/token"
 	// ConfigMapKeyDiscoveryDeadline is the ConfigMap key for discovery deadline.

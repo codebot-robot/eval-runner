@@ -538,17 +538,18 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	gcpProjectParentFolderID := fs.String("gcp-project-parent-folder-id", "", "gcp project parent folder id")
 	gcpProjectBillingAccountID := fs.String("gcp-project-billing-account-id", "", "gcp project billing account id")
 	gcpProjectPool := fs.String("gcp-project-pool", "", "gcp project pool")
+	gcpProjectTaskRoles := fs.String("gcp-project-task-roles", strings.Join(DefaultGCPProjectTaskRoles, ","), "gcp project task roles")
 	servicePortalAddress := fs.String("service-portal-controller-address", "", "service portal controller address")
 	servicePortalCA := fs.String("service-portal-controller-ca-file", "", "service portal controller ca file")
 	servicePortalToken := fs.String("service-portal-token-file", "", "service portal token file")
 
 	// Parse with only artifact-bucket, max-parallel-tasks, ui-base-url, strict-config, artifact-max-upload-bytes, inconclusive-policy, comparison-ttl set
-	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--gcp-project-parent-folder-id=123456789012", "--gcp-project-billing-account-id=012345-6789AB-CDEF01", "--gcp-project-pool=proj-a,proj-b", "--service-portal-controller-address=127.0.0.1:8443"})
+	err := fs.Parse([]string{"--artifact-bucket=gs://custom", "--max-parallel-tasks=10", "--sandboxd-image=my-sandboxd:tag", "--github-token-secret=my-gh-secret", "--ui-base-url=https://eval.example.com", "--strict-config", "--artifact-max-upload-bytes=5242880", "--inconclusive-policy=failure", "--comparison-ttl=24h", "--poll-progress-interval=2s", "--sandbox-egress-hosts=github.com,*.googleapis.com", "--gcp-project-parent-folder-id=123456789012", "--gcp-project-billing-account-id=012345-6789AB-CDEF01", "--gcp-project-pool=proj-a,proj-b", "--gcp-project-task-roles=roles/viewer,roles/storage.admin", "--service-portal-controller-address=127.0.0.1:8443"})
 	if err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *cacheDirectory, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *gcpProjectParentFolderID, *gcpProjectBillingAccountID, *gcpProjectPool, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
+	rawFlags := FlagsFromFlagSet(fs, *bucket, *dir, *cacheDirectory, *sandboxd, *githubToken, *githubApp, *uiURL, *discovery, *execution, *grace, *parallel, *strictConfig, *uploadBytes, *inconclusivePolicy, *compTTL, *commandUsers, *pollInterval, *affinityMode, *sandboxEgressHosts, *gcpProjectParentFolderID, *gcpProjectBillingAccountID, *gcpProjectPool, *gcpProjectTaskRoles, *servicePortalAddress, *servicePortalCA, *servicePortalToken)
 	if !rawFlags.IsExplicit("artifact-bucket") {
 		t.Errorf("expected artifact-bucket to be explicit")
 	}
@@ -572,6 +573,12 @@ func TestFlagsFromFlagSet(t *testing.T) {
 	}
 	if rawFlags.GCPProjectPool != "proj-a,proj-b" {
 		t.Errorf("expected GCPProjectPool %q, got %q", "proj-a,proj-b", rawFlags.GCPProjectPool)
+	}
+	if !rawFlags.IsExplicit("gcp-project-task-roles") {
+		t.Errorf("expected gcp-project-task-roles to be explicit")
+	}
+	if rawFlags.GCPProjectTaskRoles != "roles/viewer,roles/storage.admin" {
+		t.Errorf("expected GCPProjectTaskRoles %q, got %q", "roles/viewer,roles/storage.admin", rawFlags.GCPProjectTaskRoles)
 	}
 	if !rawFlags.IsExplicit("service-portal-controller-address") {
 		t.Errorf("expected service-portal-controller-address to be explicit")
@@ -3570,6 +3577,87 @@ func TestResolveConfig_GCPProjectPool(t *testing.T) {
 			}
 			if len(clearedCfg.GCPProjectPool) != 0 {
 				t.Errorf("expected empty pool for flag value %q, got %v", clearValue, clearedCfg.GCPProjectPool)
+			}
+		}
+	})
+}
+
+func TestResolveConfig_GCPProjectTaskRoles(t *testing.T) {
+	t.Run("default is roles/editor", func(t *testing.T) {
+		cfg, err := ResolveConfig(nil, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"roles/editor"}
+		if !reflect.DeepEqual(cfg.GCPProjectTaskRoles, want) {
+			t.Errorf("GCPProjectTaskRoles = %v, want %v", cfg.GCPProjectTaskRoles, want)
+		}
+	})
+
+	t.Run("configmap parses comma-separated roles and passes strict config", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectTaskRoles: " roles/viewer , roles/storage.admin,roles/viewer, , roles/compute.admin ",
+			},
+		}
+		cfg, err := ResolveConfig(configMap, RawFlags{StrictConfig: true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"roles/viewer", "roles/storage.admin", "roles/compute.admin"}
+		if !reflect.DeepEqual(cfg.GCPProjectTaskRoles, want) {
+			t.Errorf("GCPProjectTaskRoles = %v, want %v", cfg.GCPProjectTaskRoles, want)
+		}
+	})
+
+	t.Run("configmap disabled sentinel clears roles", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectTaskRoles: ConfigSentinelDisabled,
+			},
+		}
+		cfg, err := ResolveConfig(configMap, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(cfg.GCPProjectTaskRoles) != 0 {
+			t.Errorf("expected empty roles for sentinel, got %v", cfg.GCPProjectTaskRoles)
+		}
+	})
+
+	t.Run("explicit flag overrides and clears configmap", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: DefaultConfigMapName},
+			Data: map[string]string{
+				ConfigMapKeyGCPProjectTaskRoles: "roles/viewer",
+			},
+		}
+		flags := RawFlags{
+			GCPProjectTaskRoles: " roles/container.admin , roles/iam.serviceAccountUser , roles/container.admin ",
+			Explicit:            map[string]bool{"gcp-project-task-roles": true},
+		}
+		cfg, err := ResolveConfig(configMap, flags)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"roles/container.admin", "roles/iam.serviceAccountUser"}
+		if !reflect.DeepEqual(cfg.GCPProjectTaskRoles, want) {
+			t.Errorf("GCPProjectTaskRoles = %v, want %v", cfg.GCPProjectTaskRoles, want)
+		}
+
+		for _, clearValue := range []string{"", "   ", ConfigSentinelDisabled} {
+			clearFlags := RawFlags{
+				GCPProjectTaskRoles: clearValue,
+				Explicit:            map[string]bool{"gcp-project-task-roles": true},
+			}
+			clearedCfg, err := ResolveConfig(configMap, clearFlags)
+			if err != nil {
+				t.Fatalf("unexpected error for flag value %q: %v", clearValue, err)
+			}
+			if len(clearedCfg.GCPProjectTaskRoles) != 0 {
+				t.Errorf("expected empty roles for flag value %q, got %v", clearValue, clearedCfg.GCPProjectTaskRoles)
 			}
 		}
 	})
