@@ -533,7 +533,7 @@ fi
 					corev1.ResourceMemory: resource.MustParse("128Mi"),
 				},
 				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceCPU:    resource.MustParse("2"),
 					corev1.ResourceMemory: resource.MustParse("512Mi"),
 				},
 			},
@@ -961,7 +961,7 @@ func BuildSandbox(run *v1alpha1.Run, sandboxNamespace string, authTokenDigest st
 										corev1.ResourceMemory: resource.MustParse("128Mi"),
 									},
 									Limits: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("500m"),
+										corev1.ResourceCPU:    resource.MustParse("2"),
 										corev1.ResourceMemory: resource.MustParse("512Mi"),
 									},
 								},
