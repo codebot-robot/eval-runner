@@ -202,11 +202,35 @@ func TestBuildSandbox(t *testing.T) {
 	}
 
 	// Resources checks
-	if c.Resources.Requests.Cpu().IsZero() || c.Resources.Requests.Memory().IsZero() {
-		t.Errorf("Resource requests must be set, got: %+v", c.Resources.Requests)
+	expectedCPURequest := resource.MustParse("100m")
+	expectedMemoryRequest := resource.MustParse("128Mi")
+	expectedDiscoveryCPULimit := resource.MustParse("2")
+	expectedMemoryLimit := resource.MustParse("512Mi")
+	expectedSandboxdInitCPULimit := resource.MustParse("500m")
+
+	if c.Resources.Requests.Cpu().Cmp(expectedCPURequest) != 0 {
+		t.Errorf("Expected discovery container CPU request %v, got %v", expectedCPURequest, c.Resources.Requests.Cpu())
 	}
-	if c.Resources.Limits.Cpu().IsZero() || c.Resources.Limits.Memory().IsZero() {
-		t.Errorf("Resource limits must be set, got: %+v", c.Resources.Limits)
+	if c.Resources.Requests.Memory().Cmp(expectedMemoryRequest) != 0 {
+		t.Errorf("Expected discovery container Memory request %v, got %v", expectedMemoryRequest, c.Resources.Requests.Memory())
+	}
+	if c.Resources.Limits.Cpu().Cmp(expectedDiscoveryCPULimit) != 0 {
+		t.Errorf("Expected discovery container CPU limit %v, got %v", expectedDiscoveryCPULimit, c.Resources.Limits.Cpu())
+	}
+	if c.Resources.Limits.Memory().Cmp(expectedMemoryLimit) != 0 {
+		t.Errorf("Expected discovery container Memory limit %v, got %v", expectedMemoryLimit, c.Resources.Limits.Memory())
+	}
+	if initC.Resources.Requests.Cpu().Cmp(expectedCPURequest) != 0 {
+		t.Errorf("Expected %s init container CPU request %v, got %v", SandboxdInitContainerName, expectedCPURequest, initC.Resources.Requests.Cpu())
+	}
+	if initC.Resources.Requests.Memory().Cmp(expectedMemoryRequest) != 0 {
+		t.Errorf("Expected %s init container Memory request %v, got %v", SandboxdInitContainerName, expectedMemoryRequest, initC.Resources.Requests.Memory())
+	}
+	if initC.Resources.Limits.Cpu().Cmp(expectedSandboxdInitCPULimit) != 0 {
+		t.Errorf("Expected %s init container CPU limit %v, got %v", SandboxdInitContainerName, expectedSandboxdInitCPULimit, initC.Resources.Limits.Cpu())
+	}
+	if initC.Resources.Limits.Memory().Cmp(expectedMemoryLimit) != 0 {
+		t.Errorf("Expected %s init container Memory limit %v, got %v", SandboxdInitContainerName, expectedMemoryLimit, initC.Resources.Limits.Memory())
 	}
 
 	// Volumes
@@ -661,6 +685,24 @@ func TestBuildTaskSandbox_RepoCheckoutInitContainer(t *testing.T) {
 	}
 	if securityContext.Capabilities == nil || len(securityContext.Capabilities.Drop) != 1 || securityContext.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("Expected drop ALL capabilities")
+	}
+
+	// Assert resources: low requests for scheduling density and 2 CPU limit to avoid git index-pack throttling
+	expectedCPURequest := resource.MustParse("100m")
+	expectedMemoryRequest := resource.MustParse("128Mi")
+	expectedCheckoutCPULimit := resource.MustParse("2")
+	expectedMemoryLimit := resource.MustParse("512Mi")
+	if checkoutInitContainer.Resources.Requests.Cpu().Cmp(expectedCPURequest) != 0 {
+		t.Errorf("Expected %s CPU request %v, got %v", RepoCheckoutInitContainerName, expectedCPURequest, checkoutInitContainer.Resources.Requests.Cpu())
+	}
+	if checkoutInitContainer.Resources.Requests.Memory().Cmp(expectedMemoryRequest) != 0 {
+		t.Errorf("Expected %s Memory request %v, got %v", RepoCheckoutInitContainerName, expectedMemoryRequest, checkoutInitContainer.Resources.Requests.Memory())
+	}
+	if checkoutInitContainer.Resources.Limits.Cpu().Cmp(expectedCheckoutCPULimit) != 0 {
+		t.Errorf("Expected %s CPU limit %v, got %v", RepoCheckoutInitContainerName, expectedCheckoutCPULimit, checkoutInitContainer.Resources.Limits.Cpu())
+	}
+	if checkoutInitContainer.Resources.Limits.Memory().Cmp(expectedMemoryLimit) != 0 {
+		t.Errorf("Expected %s Memory limit %v, got %v", RepoCheckoutInitContainerName, expectedMemoryLimit, checkoutInitContainer.Resources.Limits.Memory())
 	}
 
 	// Case 2: CloneRepo is false, checkout init container is not present
