@@ -2046,14 +2046,15 @@ func (r *RunReconciler) deleteAllSandboxesForRun(ctx context.Context, runNamespa
 	return nil
 }
 
-// isSandboxTask returns true if the task declares sandbox and optionally gcp-project (and no other resource types).
+// isSandboxTask returns true if the task declares sandbox and optionally gcp-project
+// and/or kind-cluster (and no other resource types).
 func isSandboxTask(task v1alpha1.ManifestTask) bool {
 	hasSandbox := false
 	for _, resource := range task.Resources {
 		switch resource.Type {
 		case v1alpha1.ResourceTypeSandbox:
 			hasSandbox = true
-		case v1alpha1.ResourceTypeGCPProject:
+		case v1alpha1.ResourceTypeGCPProject, v1alpha1.ResourceTypeKindCluster:
 		default:
 			return false
 		}
@@ -2064,6 +2065,15 @@ func isSandboxTask(task v1alpha1.ManifestTask) bool {
 func taskRequiresGCPProject(task v1alpha1.ManifestTask) bool {
 	for _, resource := range task.Resources {
 		if resource.Type == v1alpha1.ResourceTypeGCPProject {
+			return true
+		}
+	}
+	return false
+}
+
+func taskRequiresKindCluster(task v1alpha1.ManifestTask) bool {
+	for _, manifestResource := range task.Resources {
+		if manifestResource.Type == v1alpha1.ResourceTypeKindCluster {
 			return true
 		}
 	}
@@ -3028,12 +3038,14 @@ func (r *RunReconciler) buildPendingTaskSandbox(
 ) *sandboxv1beta1.Sandbox {
 	taskImage := ""
 	sandboxTask := false
+	kindCluster := false
 	var taskLimits corev1.ResourceList
 	if manifestTask != nil {
 		taskImage = manifestTask.Image
 		sandboxTask = isSandboxTask(*manifestTask)
 		if sandboxTask {
 			taskLimits = discovery.TaskResourceLimits(*manifestTask)
+			kindCluster = taskRequiresKindCluster(*manifestTask)
 		}
 	}
 	return discovery.BuildTaskSandbox(run, task.ID, discovery.TaskSandboxConfig{
@@ -3049,6 +3061,7 @@ func (r *RunReconciler) buildPendingTaskSandbox(
 		CloneRepo:              sandboxTask && run.Spec.Repo.URL != "",
 		StepTimeoutSeconds:     int(r.executionStepTimeout().Seconds()),
 		SandboxTask:            sandboxTask,
+		KindCluster:            kindCluster,
 		Limits:                 taskLimits,
 		ServicePortalIntercept: r.ServicePortalClient != nil,
 	})

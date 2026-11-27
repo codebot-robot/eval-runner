@@ -31,9 +31,9 @@ metadata:
   name: eval-runner-sandbox
   labels:
     kubernetes.io/metadata.name: eval-runner-sandbox
-    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/enforce-version: latest
-    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/warn: privileged
     pod-security.kubernetes.io/warn-version: latest
-    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/audit-version: latest
