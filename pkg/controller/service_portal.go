@@ -29,12 +29,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
 	// DefaultModelCredentialsSecretName is the Secret in the controller's namespace
 	// holding model API keys for agent tasks and service portal credential injection.
 	DefaultModelCredentialsSecretName = "model-credentials"
+
+	// DefaultServicePortalsNamespace is the default Kubernetes namespace where
+	// ecosystem caching service portals run.
+	DefaultServicePortalsNamespace = "eval-runner-service-portals"
 
 	servicePortalCredentialURIScheme = "secret://"
 
@@ -108,6 +113,39 @@ type ServicePortalOptions struct {
 	// ModelBaseURL optionally overrides the model API base URL for sample-runner tasks
 	// and targets the service portal credential replacement rule at that endpoint.
 	ModelBaseURL string
+
+	// GoProxyServicePortalEnabled forwards proxy.golang.org HTTPS traffic to the in-cluster Go proxy service portal.
+	GoProxyServicePortalEnabled bool
+
+	// ServicePortalsNamespace is the Kubernetes namespace where ecosystem caching service portals run.
+	// Defaults to DefaultServicePortalsNamespace when empty.
+	ServicePortalsNamespace string
+}
+
+type cachingServicePortal struct {
+	enabled     func(options ServicePortalOptions) bool
+	hostnames   []string
+	serviceName string
+	servicePort int32
+}
+
+var builtInCachingServicePortals = []cachingServicePortal{
+	{
+		enabled: func(options ServicePortalOptions) bool {
+			return options.GoProxyServicePortalEnabled
+		},
+		hostnames:   []string{"proxy.golang.org"},
+		serviceName: "goproxy-service-portal",
+		servicePort: 8080,
+	},
+}
+
+func (servicePortal cachingServicePortal) backendURL(namespace string) string {
+	trimmedNamespace := strings.TrimSpace(namespace)
+	if trimmedNamespace == "" {
+		trimmedNamespace = DefaultServicePortalsNamespace
+	}
+	return fmt.Sprintf("http://%s.%s.svc:%d", servicePortal.serviceName, trimmedNamespace, servicePortal.servicePort)
 }
 
 // ServicePortalModelCredential describes how a model provider's API credential is
@@ -243,6 +281,11 @@ func (options ServicePortalOptions) Validate() error {
 			return err
 		}
 	}
+	if trimmedNamespace := strings.TrimSpace(options.ServicePortalsNamespace); trimmedNamespace != "" {
+		if errs := validation.IsDNS1123Label(trimmedNamespace); len(errs) > 0 {
+			return fmt.Errorf("invalid service portals namespace %q: %s", options.ServicePortalsNamespace, strings.Join(errs, ", "))
+		}
+	}
 	return nil
 }
 
@@ -270,6 +313,25 @@ func BuildServicePortalEgressPolicyWithCredentials(
 ) *portalsv1.EgressPolicy {
 	httpHosts := append([]string(nil), options.AllowedHTTPHosts...)
 	httpsHosts := append([]string(nil), options.AllowedHosts...)
+
+	var cachingServicePortalRules []*portalsv1.EgressRule
+	for _, cachingServicePortal := range builtInCachingServicePortals {
+		if !cachingServicePortal.enabled(options) {
+			continue
+		}
+		for _, hostname := range cachingServicePortal.hostnames {
+			normalizedHostname := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(hostname)), ".")
+			httpsHosts = filterOutHostname(httpsHosts, normalizedHostname)
+		}
+		cachingServicePortalRules = append(cachingServicePortalRules, &portalsv1.EgressRule{
+			Https: &portalsv1.HttpsRule{
+				Hostnames: append([]string(nil), cachingServicePortal.hostnames...),
+				Effects: &portalsv1.HttpRuleEffects{
+					BackendUrl: cachingServicePortal.backendURL(options.ServicePortalsNamespace),
+				},
+			},
+		})
+	}
 
 	var gcpCredentialRule *portalsv1.EgressRule
 	if includeGCPAccessToken {
@@ -342,7 +404,7 @@ func BuildServicePortalEgressPolicyWithCredentials(
 		}
 	}
 
-	if len(httpHosts) == 0 && len(httpsHosts) == 0 && gcpCredentialRule == nil && credentialRule == nil {
+	if len(httpHosts) == 0 && len(httpsHosts) == 0 && len(cachingServicePortalRules) == 0 && gcpCredentialRule == nil && credentialRule == nil {
 		return &portalsv1.EgressPolicy{}
 	}
 	var rules []*portalsv1.EgressRule
@@ -360,6 +422,7 @@ func BuildServicePortalEgressPolicyWithCredentials(
 			},
 		})
 	}
+	rules = append(rules, cachingServicePortalRules...)
 	if gcpCredentialRule != nil {
 		rules = append(rules, gcpCredentialRule)
 	}

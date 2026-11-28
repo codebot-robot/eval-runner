@@ -1100,6 +1100,8 @@ func TestUnknownConfigMapKeys(t *testing.T) {
 			configkeys.ConfigMapKeyHeadTopUpInterval:        "6h",
 			configkeys.ConfigMapKeyHeadTargetCIHalfWidth:    "0.05",
 			configkeys.ConfigMapKeyHeadMaxSamplesPerTask:    "64",
+			ConfigMapKeyGoProxyServicePortalEnabled:         "true",
+			ConfigMapKeyServicePortalsNamespace:             "eval-runner-service-portals",
 		},
 	}
 	if unknown := UnknownConfigMapKeys(cmRecognized); unknown != nil {
@@ -3281,6 +3283,111 @@ func TestResolveConfig_ServicePortal(t *testing.T) {
 		}
 		if cfg.ServicePortal.ModelBaseURL != "" {
 			t.Errorf("expected empty ServicePortal.ModelBaseURL, got %q", cfg.ServicePortal.ModelBaseURL)
+		}
+	})
+
+	t.Run("goproxy service portal defaults to disabled and default namespace", func(t *testing.T) {
+		cfg, err := ResolveConfig(nil, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ServicePortal.GoProxyServicePortalEnabled {
+			t.Errorf("ServicePortal.GoProxyServicePortalEnabled = true, want false")
+		}
+		if cfg.ServicePortal.ServicePortalsNamespace != DefaultServicePortalsNamespace {
+			t.Errorf("ServicePortal.ServicePortalsNamespace = %q, want %q", cfg.ServicePortal.ServicePortalsNamespace, DefaultServicePortalsNamespace)
+		}
+	})
+
+	t.Run("goproxyServicePortalEnabled true and false parsed from configmap", func(t *testing.T) {
+		testCases := []struct {
+			name  string
+			value string
+			want  bool
+		}{
+			{name: "true", value: "true", want: true},
+			{name: "true with whitespace", value: " true ", want: true},
+			{name: "false", value: "false", want: false},
+			{name: "whitespace retains default false", value: "   ", want: false},
+		}
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				configMap := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+					Data: map[string]string{
+						configkeys.ConfigMapKeyGoProxyServicePortalEnabled: testCase.value,
+					},
+				}
+				cfg, err := ResolveConfig(configMap, RawFlags{})
+				if err != nil {
+					t.Fatalf("unexpected error for %q: %v", testCase.value, err)
+				}
+				if cfg.ServicePortal.GoProxyServicePortalEnabled != testCase.want {
+					t.Errorf("ServicePortal.GoProxyServicePortalEnabled = %v, want %v", cfg.ServicePortal.GoProxyServicePortalEnabled, testCase.want)
+				}
+			})
+		}
+	})
+
+	t.Run("invalid goproxyServicePortalEnabled returns error", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyGoProxyServicePortalEnabled: "not-a-bool",
+			},
+		}
+		_, err := ResolveConfig(configMap, RawFlags{})
+		if err == nil {
+			t.Fatal("expected error for invalid goproxyServicePortalEnabled, got nil")
+		}
+		if !strings.Contains(err.Error(), configkeys.ConfigMapKeyGoProxyServicePortalEnabled) {
+			t.Errorf("expected error mentioning %s, got %q", configkeys.ConfigMapKeyGoProxyServicePortalEnabled, err.Error())
+		}
+	})
+
+	t.Run("servicePortalsNamespace custom override and whitespace default", func(t *testing.T) {
+		customConfigMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalsNamespace: "  custom-service-portals  ",
+			},
+		}
+		cfg, err := ResolveConfig(customConfigMap, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.ServicePortal.ServicePortalsNamespace != "custom-service-portals" {
+			t.Errorf("ServicePortal.ServicePortalsNamespace = %q, want %q", cfg.ServicePortal.ServicePortalsNamespace, "custom-service-portals")
+		}
+
+		whitespaceConfigMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalsNamespace: "   ",
+			},
+		}
+		cfgDefault, err := ResolveConfig(whitespaceConfigMap, RawFlags{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfgDefault.ServicePortal.ServicePortalsNamespace != DefaultServicePortalsNamespace {
+			t.Errorf("ServicePortal.ServicePortalsNamespace = %q, want %q", cfgDefault.ServicePortal.ServicePortalsNamespace, DefaultServicePortalsNamespace)
+		}
+	})
+
+	t.Run("invalid servicePortalsNamespace returns error", func(t *testing.T) {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "eval-runner", Name: "eval-runner-config"},
+			Data: map[string]string{
+				configkeys.ConfigMapKeyServicePortalsNamespace: "INVALID_NAMESPACE!",
+			},
+		}
+		_, err := ResolveConfig(configMap, RawFlags{})
+		if err == nil {
+			t.Fatal("expected error for invalid servicePortalsNamespace, got nil")
+		}
+		if !strings.Contains(err.Error(), configkeys.ConfigMapKeyServicePortalsNamespace) {
+			t.Errorf("expected error mentioning %s, got %q", configkeys.ConfigMapKeyServicePortalsNamespace, err.Error())
 		}
 	})
 }

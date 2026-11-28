@@ -115,6 +115,10 @@ const (
 	ConfigMapKeyServicePortalAllowedHTTPHosts = configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts
 	// ConfigMapKeyServicePortalModelBaseURL is the ConfigMap key for an optional custom model API base URL routed through the service portal.
 	ConfigMapKeyServicePortalModelBaseURL = configkeys.ConfigMapKeyServicePortalModelBaseURL
+	// ConfigMapKeyGoProxyServicePortalEnabled is the ConfigMap key enabling forwarding proxy.golang.org HTTPS traffic to the in-cluster Go proxy service portal.
+	ConfigMapKeyGoProxyServicePortalEnabled = configkeys.ConfigMapKeyGoProxyServicePortalEnabled
+	// ConfigMapKeyServicePortalsNamespace is the ConfigMap key for the namespace where ecosystem caching service portals run.
+	ConfigMapKeyServicePortalsNamespace = configkeys.ConfigMapKeyServicePortalsNamespace
 )
 
 const (
@@ -182,6 +186,8 @@ var KnownConfigMapKeys = map[string]struct{}{
 	configkeys.ConfigMapKeyServicePortalAllowedHosts:      {},
 	configkeys.ConfigMapKeyServicePortalAllowedHTTPHosts:  {},
 	configkeys.ConfigMapKeyServicePortalModelBaseURL:      {},
+	configkeys.ConfigMapKeyGoProxyServicePortalEnabled:    {},
+	configkeys.ConfigMapKeyServicePortalsNamespace:        {},
 
 	// Workload Identity Federation and ephemeral GCP project creation
 	configkeys.ConfigMapKeyGCPWorkloadIdentityProvider: {},
@@ -427,11 +433,12 @@ func DefaultClusterConfig() ClusterConfig {
 		GCPWorkloadIdentityProvider: "",
 		GCPProjectTaskRoles:         append([]string(nil), DefaultGCPProjectTaskRoles...),
 		ServicePortal: ServicePortalOptions{
-			ControllerAddress: "",
-			CAFile:            "",
-			TokenFile:         "",
-			AllowedHosts:      append([]string(nil), DefaultServicePortalAllowedHosts...),
-			AllowedHTTPHosts:  append([]string(nil), DefaultServicePortalAllowedHTTPHosts...),
+			ControllerAddress:       "",
+			CAFile:                  "",
+			TokenFile:               "",
+			AllowedHosts:            append([]string(nil), DefaultServicePortalAllowedHosts...),
+			AllowedHTTPHosts:        append([]string(nil), DefaultServicePortalAllowedHTTPHosts...),
+			ServicePortalsNamespace: DefaultServicePortalsNamespace,
 		},
 	}
 }
@@ -988,6 +995,25 @@ func ResolveConfig(cm *corev1.ConfigMap, flags RawFlags) (ClusterConfig, error) 
 				cfg.ServicePortal.ModelBaseURL = trimmed
 			}
 		}
+		if value, ok := cm.Data[ConfigMapKeyGoProxyServicePortalEnabled]; ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				enabled, err := strconv.ParseBool(trimmed)
+				if err != nil {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %w", ConfigMapKeyGoProxyServicePortalEnabled, value, ns, name, err)
+				}
+				cfg.ServicePortal.GoProxyServicePortalEnabled = enabled
+			}
+		}
+		if value, ok := cm.Data[ConfigMapKeyServicePortalsNamespace]; ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				if errs := validation.IsDNS1123Label(trimmed); len(errs) > 0 {
+					return cfg, fmt.Errorf("invalid %s %q in ConfigMap %s/%s: %s", ConfigMapKeyServicePortalsNamespace, value, ns, name, strings.Join(errs, ", "))
+				}
+				cfg.ServicePortal.ServicePortalsNamespace = trimmed
+			}
+		}
 	}
 
 	// Apply explicit flag overrides
@@ -1262,6 +1288,8 @@ func LogEffectiveClusterSettings(logger logr.Logger, resolved ClusterConfig) {
 		"gcpProjectPool", strings.Join(resolved.GCPProjectPool, ","),
 		"gcpProjectTaskRoles", strings.Join(resolved.GCPProjectTaskRoles, ","),
 		"servicePortalModelBaseURL", resolved.ServicePortal.ModelBaseURL,
+		"goproxyServicePortalEnabled", resolved.ServicePortal.GoProxyServicePortalEnabled,
+		"servicePortalsNamespace", resolved.ServicePortal.ServicePortalsNamespace,
 		"headTopUpInterval", resolved.HeadTopUpInterval,
 		"headTargetCIHalfWidth", resolved.HeadTargetCIHalfWidth,
 		"headMaxSamplesPerTask", resolved.HeadMaxSamplesPerTask,
