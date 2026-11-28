@@ -14968,3 +14968,185 @@ func TestReconcile_ControllerRestartInFlightTaskRunsInFreshSandbox(t *testing.T)
 	_ = fakeKubeClient.Get(t.Context(), request.NamespacedName, &finalRun)
 	t.Fatalf("expected Run to reach Completed in fresh sandbox, got phase=%s task=%+v", finalRun.Status.Phase, finalRun.Status.Tasks)
 }
+
+func TestFetchOrCloneRepository(t *testing.T) {
+	reconciler := &RunReconciler{}
+	repositoryURL := "git://git-server/repo.git"
+	commit := "abc1234"
+
+	t.Run("CleanTimeoutReportsTimedOutWithoutContinuing", func(t *testing.T) {
+		hungChannel := make(chan struct{})
+		defer close(hungChannel)
+
+		var callsMutex sync.Mutex
+		var gitCalled bool
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "rm" {
+					<-hungChannel
+					return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+				}
+				callsMutex.Lock()
+				gitCalled = true
+				callsMutex.Unlock()
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}
+
+		result, err := reconciler.fetchOrCloneRepository(t.Context(), fakeClient, nil, 50*time.Millisecond, repositoryURL, commit)
+		if !result.timedOut {
+			t.Fatalf("expected timedOut=true, got false (err=%v)", err)
+		}
+		if result.shallowFetched {
+			t.Errorf("expected shallowFetched=false on clean timeout")
+		}
+		if err == nil {
+			t.Errorf("expected non-nil error on clean timeout")
+		}
+		callsMutex.Lock()
+		calledAfterClean := gitCalled
+		callsMutex.Unlock()
+		if calledAfterClean {
+			t.Errorf("expected no git commands to run after clean timeout")
+		}
+	})
+
+	t.Run("CleanUnavailableAndUnauthenticatedPropagateWithoutTimedOut", func(t *testing.T) {
+		for _, testCase := range []struct {
+			name string
+			code codes.Code
+		}{
+			{name: "Unavailable", code: codes.Unavailable},
+			{name: "Unauthenticated", code: codes.Unauthenticated},
+		} {
+			t.Run(testCase.name, func(t *testing.T) {
+				fakeClient := &sandboxclient.FakeClient{
+					ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+						return nil, status.Error(testCase.code, "rpc failure")
+					},
+				}
+
+				result, err := reconciler.fetchOrCloneRepository(t.Context(), fakeClient, nil, time.Second, repositoryURL, commit)
+				if result.timedOut {
+					t.Errorf("expected timedOut=false for %s error", testCase.name)
+				}
+				if status.Code(err) != testCase.code {
+					t.Errorf("status.Code(err) = %v, want %v", status.Code(err), testCase.code)
+				}
+				if len(fakeClient.Calls) != 1 {
+					t.Errorf("expected only rm call, got %d calls", len(fakeClient.Calls))
+				}
+			})
+		}
+	})
+
+	t.Run("CleanNonFatalErrorIgnoredAndShallowFetchSucceeds", func(t *testing.T) {
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				if len(cfg.Command) > 0 && cfg.Command[0] == "rm" {
+					return nil, errors.New("non-fatal clean error")
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}
+
+		result, err := reconciler.fetchOrCloneRepository(t.Context(), fakeClient, nil, time.Second, repositoryURL, commit)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.shallowFetched || result.timedOut {
+			t.Errorf("got shallowFetched=%v timedOut=%v, want shallowFetched=true timedOut=false", result.shallowFetched, result.timedOut)
+		}
+		if result.executeResult == nil || result.executeResult.ExitCode != 0 {
+			t.Errorf("expected exit code 0 executeResult, got %+v", result.executeResult)
+		}
+	})
+
+	t.Run("GitInitTimeoutReportsTimedOutWithoutFallback", func(t *testing.T) {
+		hungChannel := make(chan struct{})
+		defer close(hungChannel)
+
+		var callsMutex sync.Mutex
+		var cloneCalled bool
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				switch gitCommandSubcommand(cfg.Command) {
+				case "init":
+					<-hungChannel
+				case "clone":
+					callsMutex.Lock()
+					cloneCalled = true
+					callsMutex.Unlock()
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}
+
+		result, err := reconciler.fetchOrCloneRepository(t.Context(), fakeClient, nil, 50*time.Millisecond, repositoryURL, commit)
+		if !result.timedOut {
+			t.Fatalf("expected timedOut=true, got false (err=%v)", err)
+		}
+		if err == nil {
+			t.Errorf("expected non-nil error on git init timeout")
+		}
+		callsMutex.Lock()
+		fallbackCloneCalled := cloneCalled
+		callsMutex.Unlock()
+		if fallbackCloneCalled {
+			t.Errorf("did not expect fallback git clone after git init timeout")
+		}
+	})
+
+	t.Run("FallbackCloneTimeoutReportsTimedOut", func(t *testing.T) {
+		hungChannel := make(chan struct{})
+		defer close(hungChannel)
+
+		fakeClient := &sandboxclient.FakeClient{
+			ExecFn: func(call int, ctx context.Context, cfg sandboxclient.ProcessConfig) (*sandboxclient.ExecuteResult, error) {
+				switch gitCommandSubcommand(cfg.Command) {
+				case "fetch":
+					return &sandboxclient.ExecuteResult{ExitCode: 128, Stderr: "unadvertised object"}, nil
+				case "clone":
+					<-hungChannel
+				}
+				return &sandboxclient.ExecuteResult{ExitCode: 0}, nil
+			},
+		}
+
+		result, err := reconciler.fetchOrCloneRepository(t.Context(), fakeClient, nil, 50*time.Millisecond, repositoryURL, commit)
+		if !result.timedOut {
+			t.Fatalf("expected timedOut=true, got false (err=%v)", err)
+		}
+		if result.shallowFetched {
+			t.Errorf("expected shallowFetched=false on fallback clone timeout")
+		}
+		if err == nil {
+			t.Errorf("expected non-nil error on fallback clone timeout")
+		}
+	})
+
+	t.Run("EmptyCommitSkipsShallowFetchAndClonesDirectly", func(t *testing.T) {
+		fakeClient := &sandboxclient.FakeClient{}
+
+		result, err := reconciler.fetchOrCloneRepository(t.Context(), fakeClient, nil, time.Second, repositoryURL, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.shallowFetched || result.timedOut {
+			t.Errorf("got shallowFetched=%v timedOut=%v, want both false", result.shallowFetched, result.timedOut)
+		}
+		expectedCommands := []string{
+			"rm -rf repo",
+			"git clone -- git://git-server/repo.git repo",
+		}
+		if len(fakeClient.Calls) != len(expectedCommands) {
+			t.Fatalf("expected %d calls, got %d: %+v", len(expectedCommands), len(fakeClient.Calls), fakeClient.Calls)
+		}
+		for i, expectedCommand := range expectedCommands {
+			gotCommand := strings.Join(fakeClient.Calls[i].Command, " ")
+			if gotCommand != expectedCommand {
+				t.Errorf("call %d = %q, want %q", i, gotCommand, expectedCommand)
+			}
+		}
+	})
+}
