@@ -2561,11 +2561,88 @@ type TaskSamplesListView struct {
 	Version          string
 }
 
+const (
+	// transcriptCollapseLineThreshold is the maximum number of lines rendered inline
+	// before a transcript row or note section is collapsed into a <details> block.
+	transcriptCollapseLineThreshold = 12
+	// transcriptCollapseRuneThreshold is the maximum number of runes rendered inline
+	// before a transcript row or note section is collapsed into a <details> block.
+	transcriptCollapseRuneThreshold = 800
+	// transcriptPreviewMaxRunes caps the single-line preview shown in a collapsed summary.
+	transcriptPreviewMaxRunes = 120
+)
+
 // TranscriptRowView represents a single rendered transcript entry row.
 type TranscriptRowView struct {
-	Kind    string // "user", "assistant", "tool_call", "tool", "system"
-	Class   string // "", "tool", "bad"
-	Content string
+	Kind        string // "user", "assistant", "tool_call", "tool", "system"
+	Class       string // "", "tool", "bad", "note"
+	Content     string
+	Collapsible bool
+	Preview     string
+	SizeSummary string
+}
+
+// NewTranscriptRowView builds a TranscriptRowView, marking large entries as
+// collapsible with a concise first-line preview and line/byte size summary.
+func NewTranscriptRowView(kind, class, content string) TranscriptRowView {
+	row := TranscriptRowView{
+		Kind:    kind,
+		Class:   class,
+		Content: content,
+	}
+	lineCount := countTranscriptLines(content)
+	runeCount := utf8.RuneCountInString(content)
+	if lineCount > transcriptCollapseLineThreshold || runeCount > transcriptCollapseRuneThreshold {
+		row.Collapsible = true
+		row.Preview = transcriptFirstLinePreview(content, transcriptPreviewMaxRunes)
+		row.SizeSummary = formatTranscriptSizeSummary(lineCount, len(content))
+	}
+	return row
+}
+
+func countTranscriptLines(content string) int {
+	if content == "" {
+		return 0
+	}
+	trimmed := strings.TrimSuffix(content, "\n")
+	return strings.Count(trimmed, "\n") + 1
+}
+
+func transcriptFirstLinePreview(content string, maxRunes int) string {
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			return TruncateRunes(trimmed, maxRunes)
+		}
+	}
+	return ""
+}
+
+func formatTranscriptSizeSummary(lineCount, byteCount int) string {
+	lineLabel := fmt.Sprintf("%d lines", lineCount)
+	if lineCount == 1 {
+		lineLabel = "1 line"
+	}
+	return fmt.Sprintf("%s · %s", lineLabel, FormatByteSize(byteCount))
+}
+
+// FormatByteSize formats a byte count in human-readable B, KB, or MB units.
+func FormatByteSize(byteCount int) string {
+	if byteCount < 0 {
+		byteCount = 0
+	}
+	const (
+		kilobyte = 1024
+		megabyte = 1024 * 1024
+	)
+	switch {
+	case byteCount >= megabyte:
+		return fmt.Sprintf("%.1f MB", float64(byteCount)/float64(megabyte))
+	case byteCount >= kilobyte:
+		return fmt.Sprintf("%.1f KB", float64(byteCount)/float64(kilobyte))
+	default:
+		return fmt.Sprintf("%d B", byteCount)
+	}
 }
 
 // SampleTranscriptView is the view model for GET /runs/{ns}/{name}/tasks/{task}/samples/{sample}.
@@ -2589,6 +2666,9 @@ type SampleTranscriptView struct {
 	Target                 string // sample target, shown in full as "Pass rule"
 	Explanation            string // scorer explanation, shown in full as "Grader reason"
 	Rows                   []TranscriptRowView
+	ExpandAll              bool
+	ExpandAllLink          string
+	CollapseAllLink        string
 	TotalEvents            int
 	IsEventsTruncated      bool
 	EventsTruncatedMessage string
@@ -2597,6 +2677,42 @@ type SampleTranscriptView struct {
 	StorageMessage         string
 	ArtifactFooter         string
 	Version                string
+}
+
+// NoteRows returns the eval note sections (pass rule and grader reason) as
+// transcript rows so large notes collapse consistently with transcript entries.
+func (v SampleTranscriptView) NoteRows() []TranscriptRowView {
+	var notes []TranscriptRowView
+	if v.Target != "" {
+		notes = append(notes, NewTranscriptRowView("pass rule", "note", v.Target))
+	}
+	if v.Explanation != "" {
+		notes = append(notes, NewTranscriptRowView("grader reason", "note", v.Explanation))
+	}
+	return notes
+}
+
+// CollapsibleCount returns the total number of collapsible note sections and
+// transcript rows on the sample detail page.
+func (v SampleTranscriptView) CollapsibleCount() int {
+	count := 0
+	for _, note := range v.NoteRows() {
+		if note.Collapsible {
+			count++
+		}
+	}
+	for _, row := range v.Rows {
+		if row.Collapsible {
+			count++
+		}
+	}
+	return count
+}
+
+// HasCollapsibleRows reports whether any note section or transcript row on the
+// sample detail page is rendered inside a collapsible disclosure block.
+func (v SampleTranscriptView) HasCollapsibleRows() bool {
+	return v.CollapsibleCount() > 0
 }
 
 // TruncateRunes truncates string s to maxRunes, appending "..." if truncated.

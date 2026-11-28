@@ -4432,6 +4432,19 @@ func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	var collapseAllLink, expandAllLink string
+	if ref.Host != "" {
+		sampleSuffix := fmt.Sprintf("/runs/%s/tasks/%s/samples/%s", name, url.PathEscape(taskID), url.PathEscape(sampleID))
+		collapseAllLink = repoLink(ref, sampleSuffix, linkNS)
+		expandAllLink = repoLink(ref, sampleSuffix+"?expand=all", linkNS)
+	} else {
+		collapseAllLink = BuildTaskSampleLink(ns, name, taskID, sampleID)
+		expandAllLink = collapseAllLink + "?expand=all"
+	}
+	view.ExpandAll = strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("expand")), "all")
+	view.ExpandAllLink = expandAllLink
+	view.CollapseAllLink = collapseAllLink
+
 	var rowViews []TranscriptRowView
 	for i, r := range rows {
 		class := ""
@@ -4443,11 +4456,7 @@ func (s *Server) renderSampleTranscript(w http.ResponseWriter, r *http.Request, 
 				class = "bad"
 			}
 		}
-		rowViews = append(rowViews, TranscriptRowView{
-			Kind:    r.Kind,
-			Class:   class,
-			Content: TruncateMessageBytes(r.Content, maxMessageBytes),
-		})
+		rowViews = append(rowViews, NewTranscriptRowView(r.Kind, class, TruncateMessageBytes(r.Content, maxMessageBytes)))
 	}
 	view.Rows = rowViews
 

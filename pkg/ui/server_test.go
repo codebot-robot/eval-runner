@@ -2574,6 +2574,111 @@ func TestServerTaskSamplesAndTranscript(t *testing.T) {
 		}
 	})
 
+	t.Run("SampleTranscript_CollapsibleLargeRowAndExpandAll", func(t *testing.T) {
+		longLogLines := make([]string, 25)
+		longLogLines[0] = "kubectl describe pod checkout-0"
+		for i := 1; i < len(longLogLines); i++ {
+			longLogLines[i] = fmt.Sprintf("Events: line %02d pod restart backoff observed", i)
+		}
+		longLog := strings.Join(longLogLines, "\n")
+
+		resultsJSON, err := json.Marshal(artifacts.ResultsFile{
+			SchemaVersion: 1,
+			Samples: []artifacts.SampleResult{
+				{
+					ID:     "sample-long-1",
+					Passed: new(false),
+					Transcript: []artifacts.SampleTranscriptRow{
+						{Kind: "user", Content: "Investigate checkout CrashLoopBackOff."},
+						{Kind: "tool", Content: longLog},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal results JSON: %v", err)
+		}
+		longMeta := artifacts.RunMetadata{
+			TaskID:      "devops/crashloop",
+			Commit:      commit,
+			Model:       "gemini-2.5-pro",
+			SampleCount: 1,
+			Successes:   0,
+			StartedAt:   &now,
+			FinishedAt:  &now,
+		}
+		longStored, err := sink.StoreArtifact(t.Context(), longMeta, "results.json", resultsJSON)
+		if err != nil {
+			t.Fatalf("failed to store results.json: %v", err)
+		}
+
+		longRun := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "long-transcript-run",
+				Namespace: "custom-ns",
+			},
+			Spec: v1alpha1.RunSpec{
+				Repo: v1alpha1.RepoSpec{
+					URL:    "https://github.com/gke-labs/eval-runner.git",
+					Commit: commit,
+				},
+				Model: "gemini-2.5-pro",
+			},
+			Status: v1alpha1.RunStatus{
+				Phase: v1alpha1.RunPhaseCompleted,
+				Tasks: []v1alpha1.TaskStatus{
+					{
+						ID:      "devops/crashloop",
+						Phase:   v1alpha1.TaskPhaseCompleted,
+						Samples: 1,
+						LogPath: longStored.Location,
+					},
+				},
+			},
+		}
+		longClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(longRun).Build()
+		longServer := NewServer(Config{Client: longClient, ArtifactSink: sink, DefaultNamespace: "eval-runner"})
+
+		defaultReq := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/long-transcript-run/tasks/devops%2Fcrashloop/samples/sample-long-1?namespace=custom-ns", nil)
+		defaultRecorder := httptest.NewRecorder()
+		longServer.ServeHTTP(defaultRecorder, defaultReq)
+		if defaultRecorder.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", defaultRecorder.Code, defaultRecorder.Body.String())
+		}
+		defaultBody := defaultRecorder.Body.String()
+		for _, expected := range []string{
+			`<div class="ev ">`,
+			`Investigate checkout CrashLoopBackOff.`,
+			`<details class="ev tool">`,
+			`<span class="ev-preview">kubectl describe pod checkout-0</span>`,
+			`25 lines · `,
+			`href="/github.com/gke-labs/eval-runner/runs/long-transcript-run/tasks/devops%2Fcrashloop/samples/sample-long-1?expand=all&amp;namespace=custom-ns">Expand all</a>`,
+		} {
+			if !strings.Contains(defaultBody, expected) {
+				t.Errorf("expected default transcript HTML to contain %q", expected)
+			}
+		}
+		if strings.Contains(defaultBody, `<details class="ev tool" open>`) {
+			t.Errorf("expected large tool row to be collapsed by default")
+		}
+
+		expandReq := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/long-transcript-run/tasks/devops%2Fcrashloop/samples/sample-long-1?expand=all&namespace=custom-ns", nil)
+		expandRecorder := httptest.NewRecorder()
+		longServer.ServeHTTP(expandRecorder, expandReq)
+		if expandRecorder.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for expand=all, got %d: %s", expandRecorder.Code, expandRecorder.Body.String())
+		}
+		expandBody := expandRecorder.Body.String()
+		for _, expected := range []string{
+			`<details class="ev tool" open>`,
+			`href="/github.com/gke-labs/eval-runner/runs/long-transcript-run/tasks/devops%2Fcrashloop/samples/sample-long-1?namespace=custom-ns">Collapse all</a>`,
+		} {
+			if !strings.Contains(expandBody, expected) {
+				t.Errorf("expected expanded transcript HTML to contain %q", expected)
+			}
+		}
+	})
+
 	t.Run("Negative_MissingLogPath_404", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/task%2Fno-log/samples", nil)
 		w := httptest.NewRecorder()

@@ -1439,6 +1439,20 @@ const trajectoryCSS = `
 .note-cell { max-width: 240px; }
 .ev.note { background: var(--surface); }
 .ev.note .k { width: 120px; color: var(--ink-2); }
+.transcript-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.transcript-toolbar-meta { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+details.ev { display: block; padding: 0; overflow: hidden; }
+.ev-summary { display: flex; align-items: baseline; gap: 12px; padding: 12px 16px; cursor: pointer; list-style: none; }
+.ev-summary:hover { background: rgba(17,24,39,.03); }
+.ev-summary::-webkit-details-marker { display: none; }
+.ev-summary::before { content: "▸"; font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; width: 12px; }
+details.ev[open] > .ev-summary::before { content: "▾"; }
+.ev-summary .k { padding-top: 0; }
+.ev-preview { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-meta { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.ev-body { padding: 12px 16px; border-top: 1px solid var(--line); }
+details.ev.tool > .ev-body { border-top-color: #C7D2FE; }
+details.ev.bad > .ev-body { border-top-color: #FECACA; }
 `
 
 const taskSamplesListTemplate = `
@@ -1591,29 +1605,61 @@ const sampleTranscriptTemplate = `
       </div>
       {{ else }}
 
-      {{- if or .Target .Explanation }}
+      {{- if .HasCollapsibleRows }}
+      <div class="transcript-toolbar">
+        <span class="transcript-toolbar-meta">{{ .CollapsibleCount }} large {{ if eq .CollapsibleCount 1 }}section{{ else }}sections{{ end }}</span>
+        {{- if .ExpandAll }}
+        <a class="btn-page" href="{{ if .CollapseAllLink }}{{ .CollapseAllLink }}{{ else }}?{{ end }}">Collapse all</a>
+        {{- else }}
+        <a class="btn-page" href="{{ if .ExpandAllLink }}{{ .ExpandAllLink }}{{ else }}?expand=all{{ end }}">Expand all</a>
+        {{- end }}
+      </div>
+      {{- end }}
+
+      {{- $notes := .NoteRows }}
+      {{- if $notes }}
       <div class="eval-notes" style="margin-top:20px">
-        {{- if .Target }}
-        <div class="ev note">
-          <span class="k">pass rule</span>
-          <pre class="b">{{ .Target }}</pre>
+        {{- range $notes }}
+        {{- if .Collapsible }}
+        <details class="ev {{ .Class }}"{{ if $.ExpandAll }} open{{ end }}>
+          <summary class="ev-summary">
+            <span class="k">{{ .Kind }}</span>
+            <span class="ev-preview">{{ .Preview }}</span>
+            <span class="ev-meta">{{ .SizeSummary }}</span>
+          </summary>
+          <div class="ev-body">
+            <pre class="b">{{ .Content }}</pre>
+          </div>
+        </details>
+        {{- else }}
+        <div class="ev {{ .Class }}">
+          <span class="k">{{ .Kind }}</span>
+          <pre class="b">{{ .Content }}</pre>
         </div>
         {{- end }}
-        {{- if .Explanation }}
-        <div class="ev note">
-          <span class="k">grader reason</span>
-          <pre class="b">{{ .Explanation }}</pre>
-        </div>
         {{- end }}
       </div>
       {{- end }}
 
       <div class="transcript" style="margin-top:20px">
         {{ range .Rows }}
+        {{- if .Collapsible }}
+        <details class="ev{{ if .Class }} {{ .Class }}{{ end }}"{{ if $.ExpandAll }} open{{ end }}>
+          <summary class="ev-summary">
+            <span class="k">{{ .Kind }}</span>
+            <span class="ev-preview">{{ .Preview }}</span>
+            <span class="ev-meta">{{ .SizeSummary }}</span>
+          </summary>
+          <div class="ev-body">
+            <pre class="b">{{ .Content }}</pre>
+          </div>
+        </details>
+        {{- else }}
         <div class="ev {{ .Class }}">
           <span class="k">{{ .Kind }}</span>
           <pre class="b">{{ .Content }}</pre>
         </div>
+        {{- end }}
         {{ else }}
         <div class="empty-state">No transcript events recorded for this sample.</div>
         {{ end }}
