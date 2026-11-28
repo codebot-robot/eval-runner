@@ -3132,12 +3132,16 @@ func (r *RunReconciler) buildPendingTaskSandbox(
 	sandboxTask := false
 	kindCluster := false
 	var taskLimits corev1.ResourceList
+	var kindClusterLimits corev1.ResourceList
 	if manifestTask != nil {
 		taskImage = manifestTask.Image
 		sandboxTask = isSandboxTask(*manifestTask)
 		if sandboxTask {
 			taskLimits = discovery.TaskResourceLimits(*manifestTask)
 			kindCluster = taskRequiresKindCluster(*manifestTask)
+			if kindCluster {
+				kindClusterLimits = discovery.KindClusterResourceLimits(*manifestTask)
+			}
 		}
 	}
 	return discovery.BuildTaskSandbox(run, task.ID, discovery.TaskSandboxConfig{
@@ -3154,6 +3158,7 @@ func (r *RunReconciler) buildPendingTaskSandbox(
 		StepTimeoutSeconds:     int(r.executionStepTimeout().Seconds()),
 		SandboxTask:            sandboxTask,
 		KindCluster:            kindCluster,
+		KindClusterLimits:      kindClusterLimits,
 		Limits:                 taskLimits,
 		ServicePortalIntercept: r.ServicePortalClient != nil,
 	})

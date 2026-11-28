@@ -1630,10 +1630,10 @@ func TestBuildTaskSandbox_KindCluster(t *testing.T) {
 			t.Errorf("expected sidecar TCP readiness probe on port %d, got %+v", DockerInDockerPort, sidecarContainer.ReadinessProbe)
 		}
 
-		expectedCPURequest := resource.MustParse(DefaultDockerInDockerCPURequest)
-		expectedMemoryRequest := resource.MustParse(DefaultDockerInDockerMemoryRequest)
-		expectedCPULimit := resource.MustParse(DefaultDockerInDockerCPULimit)
-		expectedMemoryLimit := resource.MustParse(DefaultDockerInDockerMemoryLimit)
+		expectedCPURequest := resource.MustParse("500m")
+		expectedMemoryRequest := resource.MustParse("1Gi")
+		expectedCPULimit := resource.MustParse("4")
+		expectedMemoryLimit := resource.MustParse("8Gi")
 
 		if sidecarContainer.Resources.Requests.Cpu().Cmp(expectedCPURequest) != 0 {
 			t.Errorf("sidecar CPU request = %v, want %v", sidecarContainer.Resources.Requests.Cpu(), expectedCPURequest)
@@ -1646,6 +1646,89 @@ func TestBuildTaskSandbox_KindCluster(t *testing.T) {
 		}
 		if sidecarContainer.Resources.Limits.Memory().Cmp(expectedMemoryLimit) != 0 {
 			t.Errorf("sidecar Memory limit = %v, want %v", sidecarContainer.Resources.Limits.Memory(), expectedMemoryLimit)
+		}
+	})
+
+	t.Run("kind-cluster honors custom limits and falls back to defaults for omitted keys", func(t *testing.T) {
+		testCases := []struct {
+			name                string
+			kindClusterLimits   corev1.ResourceList
+			expectedCPULimit    string
+			expectedMemoryLimit string
+		}{
+			{
+				name: "custom cpu and memory",
+				kindClusterLimits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("8"),
+					corev1.ResourceMemory: resource.MustParse("16Gi"),
+				},
+				expectedCPULimit:    "8",
+				expectedMemoryLimit: "16Gi",
+			},
+			{
+				name: "custom cpu only falls back to default memory",
+				kindClusterLimits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("6"),
+				},
+				expectedCPULimit:    "6",
+				expectedMemoryLimit: DefaultDockerInDockerMemoryLimit,
+			},
+			{
+				name: "custom memory only falls back to default cpu",
+				kindClusterLimits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("12Gi"),
+				},
+				expectedCPULimit:    DefaultDockerInDockerCPULimit,
+				expectedMemoryLimit: "12Gi",
+			},
+		}
+
+		expectedCPURequest := resource.MustParse(DefaultDockerInDockerCPURequest)
+		expectedMemoryRequest := resource.MustParse(DefaultDockerInDockerMemoryRequest)
+		taskLimits := corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}
+
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				sandbox := BuildTaskSandbox(run, "kind-custom-limits-task", TaskSandboxConfig{
+					Namespace:         "eval-runner-sandbox",
+					Image:             "kube-agents-eval:v1",
+					AuthTokenDigest:   digest,
+					SandboxTask:       true,
+					KindCluster:       true,
+					KindClusterLimits: testCase.kindClusterLimits,
+					Limits:            taskLimits,
+				})
+
+				containers := sandbox.Spec.PodTemplate.Spec.Containers
+				if len(containers) != 2 {
+					t.Fatalf("len(Containers) = %d, want 2", len(containers))
+				}
+
+				taskContainer := containers[0]
+				if taskContainer.Resources.Limits.Cpu().Cmp(resource.MustParse("2")) != 0 {
+					t.Errorf("task CPU limit = %v, want 2", taskContainer.Resources.Limits.Cpu())
+				}
+				if taskContainer.Resources.Limits.Memory().Cmp(resource.MustParse("4Gi")) != 0 {
+					t.Errorf("task Memory limit = %v, want 4Gi", taskContainer.Resources.Limits.Memory())
+				}
+
+				sidecarContainer := containers[1]
+				if sidecarContainer.Resources.Requests.Cpu().Cmp(expectedCPURequest) != 0 {
+					t.Errorf("sidecar CPU request = %v, want %v", sidecarContainer.Resources.Requests.Cpu(), expectedCPURequest)
+				}
+				if sidecarContainer.Resources.Requests.Memory().Cmp(expectedMemoryRequest) != 0 {
+					t.Errorf("sidecar Memory request = %v, want %v", sidecarContainer.Resources.Requests.Memory(), expectedMemoryRequest)
+				}
+				if sidecarContainer.Resources.Limits.Cpu().Cmp(resource.MustParse(testCase.expectedCPULimit)) != 0 {
+					t.Errorf("sidecar CPU limit = %v, want %s", sidecarContainer.Resources.Limits.Cpu(), testCase.expectedCPULimit)
+				}
+				if sidecarContainer.Resources.Limits.Memory().Cmp(resource.MustParse(testCase.expectedMemoryLimit)) != 0 {
+					t.Errorf("sidecar Memory limit = %v, want %s", sidecarContainer.Resources.Limits.Memory(), testCase.expectedMemoryLimit)
+				}
+			})
 		}
 	})
 

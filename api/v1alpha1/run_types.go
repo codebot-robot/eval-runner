@@ -338,8 +338,8 @@ type ManifestResource struct {
 	// Type is the resource type (e.g., docker, kind-cluster, kubernetes-namespace, sandbox, gcp-project).
 	Type string `json:"type"`
 
-	// Limits specifies the maximum resource limits for the task sandbox container.
-	// Only valid when Type is "sandbox". Supported keys are "cpu" and "memory".
+	// Limits specifies the maximum resource limits for the task sandbox container or kind-cluster DinD sidecar.
+	// Only valid when Type is "sandbox" or "kind-cluster". Supported keys are "cpu" and "memory".
 	// +optional
 	Limits corev1.ResourceList `json:"limits,omitempty"`
 }
