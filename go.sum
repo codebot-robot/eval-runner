@@ -83,8 +83,8 @@ github.com/fsnotify/fsnotify v1.10.1 h1:b0/UzAf9yR5rhf3RPm9gf3ehBPpf0oZKIjtpKrx5
 github.com/fsnotify/fsnotify v1.10.1/go.mod h1:TLheqan6HD6GBK6PrDWyDPBaEV8LspOxvPSjC+bVfgo=
 github.com/fxamacker/cbor/v2 v2.9.1 h1:2rWm8B193Ll4VdjsJY28jxs70IdDsHRWgQYAI80+rMQ=
 github.com/fxamacker/cbor/v2 v2.9.1/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
-github.com/gke-labs/service-portals v0.0.0-20261123161426-4e016d063b8e h1:DoYguE+7Lu5eTH+KVtg/UJou2PkiYe0uskTmiqbgrt4=
-github.com/gke-labs/service-portals v0.0.0-20261123161426-4e016d063b8e/go.mod h1:7ZQSf9i98AZtI+ByDJFH/7aRMmgXSDNesP2yK6xtrlA=
+github.com/gke-labs/service-portals v0.0.0-20261128110508-657cd2a471f5 h1:WM+HDlg/v4fyd5K71mVfq5fBaEn0Ez8ZA8bklPCsyIQ=
+github.com/gke-labs/service-portals v0.0.0-20261128110508-657cd2a471f5/go.mod h1:7ZQSf9i98AZtI+ByDJFH/7aRMmgXSDNesP2yK6xtrlA=
 github.com/gliderlabs/ssh v0.3.8 h1:a4YXD1V7xMF9g5nTkdfnja3Sxy1PVDCj1Zg4Wb8vY6c=
 github.com/gliderlabs/ssh v0.3.8/go.mod h1:xYoytBv1sV0aL3CavoDuJIQNURXkkfPA/wxQ1pL1fAU=
 github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 h1:+zs/tPmkDkHx3U66DAb0lQFJrpS6731Oaa12ikc+DiI=

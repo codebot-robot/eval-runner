@@ -105,6 +105,162 @@ func TestBuildServicePortalEgressPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildServicePortalEgressPolicy_GoProxyServicePortal(t *testing.T) {
+	const defaultGoProxyBackendURL = "http://goproxy-service-portal.eval-runner-service-portals.svc:8080"
+
+	t.Run("enabled with default namespace forwards proxy.golang.org when not in AllowedHosts", func(t *testing.T) {
+		options := ServicePortalOptions{
+			AllowedHosts:                []string{"github.com", "*.googleapis.com"},
+			GoProxyServicePortalEnabled: true,
+		}
+		policy := BuildServicePortalEgressPolicyWithCredentials(options, nil, false)
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("policy failed validation: %v", err)
+		}
+
+		goProxyRule := policy.Match(portalsv1.ProtocolHTTPS, "proxy.golang.org", 443)
+		if goProxyRule == nil || goProxyRule.GetHttps() == nil {
+			t.Fatalf("expected HTTPS rule matching proxy.golang.org, got %v", goProxyRule)
+		}
+		if got := goProxyRule.GetHttps().GetEffects().GetBackendUrl(); got != defaultGoProxyBackendURL {
+			t.Fatalf("got BackendUrl=%q, want %q", got, defaultGoProxyBackendURL)
+		}
+
+		githubRule := policy.Match(portalsv1.ProtocolHTTPS, "github.com", 443)
+		if githubRule == nil || githubRule.GetHttps() == nil {
+			t.Fatalf("expected HTTPS rule matching github.com, got %v", githubRule)
+		}
+		if got := githubRule.GetHttps().GetEffects().GetBackendUrl(); got != "" {
+			t.Fatalf("expected github.com rule without BackendUrl, got %q", got)
+		}
+	})
+
+	t.Run("enabled deduplicates proxy.golang.org from AllowedHosts without validation ties", func(t *testing.T) {
+		testCases := []struct {
+			name         string
+			allowedHosts []string
+		}{
+			{
+				name:         "mixed with other allowed hosts",
+				allowedHosts: []string{"github.com", "proxy.golang.org", "*.googleapis.com"},
+			},
+			{
+				name:         "uppercase with trailing dot",
+				allowedHosts: []string{"github.com", "PROXY.GOLANG.ORG."},
+			},
+			{
+				name:         "only host in AllowedHosts",
+				allowedHosts: []string{"proxy.golang.org"},
+			},
+			{
+				name:         "empty AllowedHosts",
+				allowedHosts: nil,
+			},
+		}
+
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				options := ServicePortalOptions{
+					AllowedHosts:                testCase.allowedHosts,
+					GoProxyServicePortalEnabled: true,
+				}
+				policy := BuildServicePortalEgressPolicyWithCredentials(options, nil, false)
+				if err := policy.Validate(); err != nil {
+					t.Fatalf("policy failed validation: %v", err)
+				}
+				goProxyRule := policy.Match(portalsv1.ProtocolHTTPS, "proxy.golang.org", 443)
+				if goProxyRule == nil || goProxyRule.GetHttps() == nil {
+					t.Fatalf("expected HTTPS rule matching proxy.golang.org, got %v", goProxyRule)
+				}
+				if got := goProxyRule.GetHttps().GetEffects().GetBackendUrl(); got != defaultGoProxyBackendURL {
+					t.Fatalf("got BackendUrl=%q, want %q", got, defaultGoProxyBackendURL)
+				}
+			})
+		}
+	})
+
+	t.Run("enabled respects custom ServicePortalsNamespace", func(t *testing.T) {
+		options := ServicePortalOptions{
+			AllowedHosts:                []string{"github.com", "proxy.golang.org"},
+			GoProxyServicePortalEnabled: true,
+			ServicePortalsNamespace:     "custom-service-portals",
+		}
+		policy := BuildServicePortalEgressPolicyWithCredentials(options, nil, false)
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("policy failed validation: %v", err)
+		}
+
+		wantBackendURL := "http://goproxy-service-portal.custom-service-portals.svc:8080"
+		goProxyRule := policy.Match(portalsv1.ProtocolHTTPS, "proxy.golang.org", 443)
+		if goProxyRule == nil || goProxyRule.GetHttps() == nil {
+			t.Fatalf("expected HTTPS rule matching proxy.golang.org, got %v", goProxyRule)
+		}
+		if got := goProxyRule.GetHttps().GetEffects().GetBackendUrl(); got != wantBackendURL {
+			t.Fatalf("got BackendUrl=%q, want %q", got, wantBackendURL)
+		}
+	})
+
+	t.Run("disabled leaves behavior unchanged", func(t *testing.T) {
+		optionsWithHost := ServicePortalOptions{
+			AllowedHosts:                []string{"github.com", "proxy.golang.org"},
+			GoProxyServicePortalEnabled: false,
+		}
+		policyWithHost := BuildServicePortalEgressPolicyWithCredentials(optionsWithHost, nil, false)
+		if err := policyWithHost.Validate(); err != nil {
+			t.Fatalf("policy failed validation: %v", err)
+		}
+		goProxyRule := policyWithHost.Match(portalsv1.ProtocolHTTPS, "proxy.golang.org", 443)
+		if goProxyRule == nil || goProxyRule.GetHttps() == nil {
+			t.Fatalf("expected plain HTTPS rule matching proxy.golang.org, got %v", goProxyRule)
+		}
+		if goProxyRule.GetHttps().GetEffects() != nil {
+			t.Fatalf("expected no effects when GoProxyServicePortalEnabled is false, got %+v", goProxyRule.GetHttps().GetEffects())
+		}
+
+		optionsWithoutHost := ServicePortalOptions{
+			AllowedHosts:                []string{"github.com"},
+			GoProxyServicePortalEnabled: false,
+		}
+		policyWithoutHost := BuildServicePortalEgressPolicyWithCredentials(optionsWithoutHost, nil, false)
+		if err := policyWithoutHost.Validate(); err != nil {
+			t.Fatalf("policy failed validation: %v", err)
+		}
+		if matched := policyWithoutHost.Match(portalsv1.ProtocolHTTPS, "proxy.golang.org", 443); matched != nil {
+			t.Fatalf("expected proxy.golang.org not to match when absent from AllowedHosts and disabled, got %v", matched)
+		}
+	})
+
+	t.Run("coexists with model credential and GCP access token rules", func(t *testing.T) {
+		credential, ok, err := ModelCredentialForModel("google/gemini-2.5-flash", "")
+		if err != nil || !ok {
+			t.Fatalf("ModelCredentialForModel failed: ok=%v err=%v", ok, err)
+		}
+		options := ServicePortalOptions{
+			AllowedHosts:                append([]string{"proxy.golang.org"}, DefaultServicePortalAllowedHosts...),
+			AllowedHTTPHosts:            DefaultServicePortalAllowedHTTPHosts,
+			GoProxyServicePortalEnabled: true,
+			ServicePortalsNamespace:     "eval-runner-service-portals",
+		}
+		policy := BuildServicePortalEgressPolicyWithCredentials(options, &credential, true)
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("policy failed validation: %v", err)
+		}
+
+		goProxyRule := policy.Match(portalsv1.ProtocolHTTPS, "proxy.golang.org", 443)
+		if got := goProxyRule.GetHttps().GetEffects().GetBackendUrl(); got != defaultGoProxyBackendURL {
+			t.Fatalf("got BackendUrl=%q, want %q", got, defaultGoProxyBackendURL)
+		}
+		modelRule := policy.Match(portalsv1.ProtocolHTTPS, "generativelanguage.googleapis.com", 443)
+		if modelRule == nil || len(modelRule.GetHttps().GetEffects().GetReplaceHeaders()) != 1 {
+			t.Fatalf("expected model credential rule, got %v", modelRule)
+		}
+		gcpRule := policy.Match(portalsv1.ProtocolHTTPS, "storage.googleapis.com", 443)
+		if gcpRule == nil || len(gcpRule.GetHttps().GetEffects().GetReplaceHeaders()) != 1 {
+			t.Fatalf("expected GCP credential rule, got %v", gcpRule)
+		}
+	})
+}
+
 func TestModelCredentialForModel(t *testing.T) {
 	testCases := []struct {
 		name         string

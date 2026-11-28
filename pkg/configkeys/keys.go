@@ -91,6 +91,10 @@ const (
 	ConfigMapKeyServicePortalAllowedHTTPHosts = "servicePortalAllowedHTTPHosts"
 	// ConfigMapKeyServicePortalModelBaseURL is the ConfigMap key for an optional custom model API base URL routed through the service portal.
 	ConfigMapKeyServicePortalModelBaseURL = "servicePortalModelBaseURL"
+	// ConfigMapKeyGoProxyServicePortalEnabled is the ConfigMap key enabling forwarding proxy.golang.org HTTPS traffic to the in-cluster Go proxy service portal.
+	ConfigMapKeyGoProxyServicePortalEnabled = "goproxyServicePortalEnabled"
+	// ConfigMapKeyServicePortalsNamespace is the ConfigMap key for the namespace where ecosystem caching service portals run.
+	ConfigMapKeyServicePortalsNamespace = "servicePortalsNamespace"
 
 	// Webhook keys
 
