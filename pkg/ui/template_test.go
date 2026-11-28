@@ -1763,6 +1763,7 @@ func TestEscapingHostileFixtures(t *testing.T) {
 				{Kind: "tool_call", Class: "tool", Content: "call " + hostileImg},
 				{Kind: "tool", Class: "tool", Content: "tool " + hostileIframe},
 				{Kind: "assistant", Class: "bad", Content: "assistant " + hostileScript},
+				NewTranscriptRowView("tool"+hostileScript, "tool", "first "+hostileImg+"\n"+strings.Repeat("line "+hostileIframe+"\n", 15)),
 			},
 		}
 
@@ -3857,4 +3858,273 @@ func TestTemplateRenderingRunDetail_PassPercentAndTrends(t *testing.T) {
 	if !strings.Contains(rendered, `<td class="num" style="white-space:nowrap">100%</td>`) {
 		t.Errorf("expected unchanged pass rate without trend span, got:\n%s", rendered)
 	}
+}
+
+func TestFormatByteSize(t *testing.T) {
+	tests := []struct {
+		name      string
+		byteCount int
+		want      string
+	}{
+		{name: "negative clamps to zero", byteCount: -5, want: "0 B"},
+		{name: "zero", byteCount: 0, want: "0 B"},
+		{name: "bytes", byteCount: 850, want: "850 B"},
+		{name: "one kilobyte", byteCount: 1024, want: "1.0 KB"},
+		{name: "fractional kilobytes", byteCount: 2150, want: "2.1 KB"},
+		{name: "sixteen kilobytes", byteCount: 16 * 1024, want: "16.0 KB"},
+		{name: "one megabyte", byteCount: 1024 * 1024, want: "1.0 MB"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := FormatByteSize(testCase.byteCount); got != testCase.want {
+				t.Errorf("FormatByteSize(%d) = %q, want %q", testCase.byteCount, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestNewTranscriptRowView(t *testing.T) {
+	shortTwelveLines := strings.TrimSuffix(strings.Repeat("short line\n", 12), "\n")
+	thirteenLines := strings.TrimSuffix(strings.Repeat("short line\n", 13), "\n")
+	exactEightHundredRunes := strings.Repeat("a", 800)
+	eightHundredOneRunes := strings.Repeat("a", 801)
+
+	longOutputLines := make([]string, 42)
+	longOutputLines[0] = "   kubectl get pods -A --output=wide"
+	for i := 1; i < len(longOutputLines); i++ {
+		longOutputLines[i] = fmt.Sprintf("default   pod-%02d   1/1   Running   0   12m   10.244.0.%02d", i, i)
+	}
+	longOutput := strings.Join(longOutputLines, "\n")
+
+	leadingBlankLines := "\n\n   first non-empty line\n" + strings.Repeat("detail\n", 15)
+
+	tests := []struct {
+		name            string
+		kind            string
+		class           string
+		content         string
+		wantCollapsible bool
+		wantPreview     string
+		wantSizeSummary string
+	}{
+		{
+			name:            "short single line stays inline",
+			kind:            "user",
+			content:         "Check why checkout returns HTTP 502.",
+			wantCollapsible: false,
+		},
+		{
+			name:            "twelve lines stays inline",
+			kind:            "tool",
+			class:           "tool",
+			content:         shortTwelveLines,
+			wantCollapsible: false,
+		},
+		{
+			name:            "twelve lines with trailing newline stays inline",
+			kind:            "tool",
+			class:           "tool",
+			content:         shortTwelveLines + "\n",
+			wantCollapsible: false,
+		},
+		{
+			name:            "thirteen lines collapses",
+			kind:            "tool",
+			class:           "tool",
+			content:         thirteenLines,
+			wantCollapsible: true,
+			wantPreview:     "short line",
+			wantSizeSummary: fmt.Sprintf("13 lines · %d B", len(thirteenLines)),
+		},
+		{
+			name:            "exact 800 runes stays inline",
+			kind:            "assistant",
+			content:         exactEightHundredRunes,
+			wantCollapsible: false,
+		},
+		{
+			name:            "801 runes single line collapses with singular line label",
+			kind:            "assistant",
+			content:         eightHundredOneRunes,
+			wantCollapsible: true,
+			wantPreview:     strings.Repeat("a", transcriptPreviewMaxRunes) + "...",
+			wantSizeSummary: "1 line · 801 B",
+		},
+		{
+			name:            "multi-kilobyte log shows KB size summary",
+			kind:            "tool",
+			class:           "tool",
+			content:         longOutput,
+			wantCollapsible: true,
+			wantPreview:     "kubectl get pods -A --output=wide",
+			wantSizeSummary: fmt.Sprintf("42 lines · %s", FormatByteSize(len(longOutput))),
+		},
+		{
+			name:            "skips leading blank lines for preview",
+			kind:            "tool",
+			class:           "tool",
+			content:         leadingBlankLines,
+			wantCollapsible: true,
+			wantPreview:     "first non-empty line",
+			wantSizeSummary: fmt.Sprintf("18 lines · %d B", len(leadingBlankLines)),
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := NewTranscriptRowView(testCase.kind, testCase.class, testCase.content)
+			if got.Collapsible != testCase.wantCollapsible {
+				t.Errorf("Collapsible = %v, want %v", got.Collapsible, testCase.wantCollapsible)
+			}
+			if got.Preview != testCase.wantPreview {
+				t.Errorf("Preview = %q, want %q", got.Preview, testCase.wantPreview)
+			}
+			if got.SizeSummary != testCase.wantSizeSummary {
+				t.Errorf("SizeSummary = %q, want %q", got.SizeSummary, testCase.wantSizeSummary)
+			}
+			if got.Content != testCase.content {
+				t.Errorf("Content mismatch")
+			}
+		})
+	}
+}
+
+func TestTemplateRenderingSampleTranscript_CollapsibleRowsAndSections(t *testing.T) {
+	longToolLines := make([]string, 42)
+	longToolLines[0] = "kubectl get pods -A"
+	for i := 1; i < len(longToolLines); i++ {
+		longToolLines[i] = fmt.Sprintf("kube-system  component-%02d  1/1  Running  0  4m  10.244.0.%02d", i, i)
+	}
+	longToolOutput := strings.Join(longToolLines, "\n")
+
+	longGraderLines := make([]string, 16)
+	longGraderLines[0] = "Verification failed on 2 assertions:"
+	for i := 1; i < len(longGraderLines); i++ {
+		longGraderLines[i] = fmt.Sprintf("  check %02d: expected deployment ready", i)
+	}
+	longGraderReason := strings.Join(longGraderLines, "\n")
+
+	baseView := SampleTranscriptView{
+		ActiveTab:       NavTabRuns,
+		Repo:            RepoRef{Host: "github.com", Owner: "gke-labs", Name: "eval-runner"},
+		Namespace:       "eval-runner",
+		RunName:         "sample-run",
+		TaskID:          "devops-bench/crashloop",
+		EscapedTaskID:   "devops-bench%2Fcrashloop",
+		SampleID:        "sample-001",
+		EscapedSampleID: "sample-001",
+		Score:           "0.00",
+		Status:          "fail",
+		StatusUpper:     "FAIL",
+		StatusClass:     "bad",
+		LatencyStr:      "24.5s",
+		TokensStr:       "18,400",
+		LogPath:         "/tmp/eval-runner-sink/runs/abcdef1234567890/devops-bench%2Fcrashloop/results.json",
+		Target:          "Deployment becomes Ready within 60s",
+		Explanation:     longGraderReason,
+		ExpandAllLink:   "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/devops-bench%2Fcrashloop/samples/sample-001?expand=all",
+		CollapseAllLink: "/github.com/gke-labs/eval-runner/runs/sample-run/tasks/devops-bench%2Fcrashloop/samples/sample-001",
+		Rows: []TranscriptRowView{
+			NewTranscriptRowView("user", "", "Fix the CrashLoopBackOff in namespace payments."),
+			NewTranscriptRowView("tool_call", "tool", "kubectl get pods -A"),
+			NewTranscriptRowView("tool", "tool", longToolOutput),
+			NewTranscriptRowView("assistant", "bad", "I checked the pods and could not resolve the crash."),
+		},
+		ArtifactFooter: "artifacts: dir /tmp/eval-runner-sink",
+	}
+
+	t.Run("CollapsedByDefault_Golden", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := RenderSampleTranscript(&buf, baseView); err != nil {
+			t.Fatalf("RenderSampleTranscript error: %v", err)
+		}
+		rendered := buf.String()
+
+		if strings.Contains(rendered, "<script") {
+			t.Errorf("expected pure HTML without <script> tags")
+		}
+		// Short target note and short transcript rows stay inline.
+		for _, inlineSnippet := range []string{
+			`<div class="ev note">`,
+			`<span class="k">pass rule</span>`,
+			`<div class="ev ">`,
+			`<span class="k">user</span>`,
+			`<div class="ev tool">`,
+			`<span class="k">tool_call</span>`,
+			`<div class="ev bad">`,
+			`<span class="k">assistant</span>`,
+		} {
+			if !strings.Contains(rendered, inlineSnippet) {
+				t.Errorf("expected inline markup %q in rendered HTML", inlineSnippet)
+			}
+		}
+		// Large grader reason section and large tool row render inside collapsed <details>.
+		for _, collapsedSnippet := range []string{
+			`<span class="transcript-toolbar-meta">2 large sections</span>`,
+			`href="/github.com/gke-labs/eval-runner/runs/sample-run/tasks/devops-bench%2Fcrashloop/samples/sample-001?expand=all">Expand all</a>`,
+			`<details class="ev note">`,
+			`<span class="k">grader reason</span>`,
+			`<span class="ev-preview">Verification failed on 2 assertions:</span>`,
+			`<details class="ev tool">`,
+			`<span class="k">tool</span>`,
+			`<span class="ev-preview">kubectl get pods -A</span>`,
+			fmt.Sprintf(`<span class="ev-meta">42 lines · %s</span>`, FormatByteSize(len(longToolOutput))),
+			`kube-system  component-41  1/1  Running  0  4m  10.244.0.41`,
+		} {
+			if !strings.Contains(rendered, collapsedSnippet) {
+				t.Errorf("expected collapsed markup %q in rendered HTML", collapsedSnippet)
+			}
+		}
+		if strings.Contains(rendered, "<details class=\"ev note\" open>") || strings.Contains(rendered, "<details class=\"ev tool\" open>") {
+			t.Errorf("expected collapsed <details> blocks to omit open attribute by default")
+		}
+
+		assertGolden(t, "sample_transcript_collapsible.golden.html", rendered)
+	})
+
+	t.Run("ExpandAll_OpensDetailsAndShowsCollapseAll", func(t *testing.T) {
+		expandedView := baseView
+		expandedView.ExpandAll = true
+
+		var buf bytes.Buffer
+		if err := RenderSampleTranscript(&buf, expandedView); err != nil {
+			t.Fatalf("RenderSampleTranscript error: %v", err)
+		}
+		rendered := buf.String()
+
+		for _, snippet := range []string{
+			`href="/github.com/gke-labs/eval-runner/runs/sample-run/tasks/devops-bench%2Fcrashloop/samples/sample-001">Collapse all</a>`,
+			`<details class="ev note" open>`,
+			`<details class="ev tool" open>`,
+		} {
+			if !strings.Contains(rendered, snippet) {
+				t.Errorf("expected expanded markup %q in rendered HTML", snippet)
+			}
+		}
+		if strings.Contains(rendered, ">Expand all</a>") {
+			t.Errorf("expected Expand all link to be replaced by Collapse all when ExpandAll is true")
+		}
+	})
+
+	t.Run("AllShortRows_OmitsToolbarAndDetails", func(t *testing.T) {
+		shortView := baseView
+		shortView.Explanation = "short reason"
+		shortView.Rows = []TranscriptRowView{
+			NewTranscriptRowView("user", "", "Short prompt"),
+			NewTranscriptRowView("assistant", "bad", "Short reply"),
+		}
+
+		var buf bytes.Buffer
+		if err := RenderSampleTranscript(&buf, shortView); err != nil {
+			t.Fatalf("RenderSampleTranscript error: %v", err)
+		}
+		rendered := buf.String()
+
+		if strings.Contains(rendered, "<details") {
+			t.Errorf("expected no <details> elements when all rows and sections are short")
+		}
+		if strings.Contains(rendered, `class="transcript-toolbar"`) {
+			t.Errorf("expected no transcript toolbar when there are no collapsible rows or sections")
+		}
+	})
 }
