@@ -572,22 +572,22 @@ func TestValidateManifest(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name: "standalone kind-cluster resource with limits fails validation",
+			name: "standalone kind-cluster resource with limits passes validation",
 			manifest: &v1alpha1.Manifest{
 				Tasks: []v1alpha1.ManifestTask{
 					{
 						ID:   "task-kind-cluster-with-limits",
 						Spec: "test.py@eval",
 						Resources: []v1alpha1.ManifestResource{
-							{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+							{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6")}},
 						},
 					},
 				},
 			},
-			expectError: true,
+			expectError: false,
 		},
 		{
-			name: "sandbox and kind-cluster with limits on kind-cluster fails validation",
+			name: "sandbox and kind-cluster with limits on kind-cluster passes validation",
 			manifest: &v1alpha1.Manifest{
 				Tasks: []v1alpha1.ManifestTask{
 					{
@@ -596,12 +596,12 @@ func TestValidateManifest(t *testing.T) {
 						Image: "eval-image:v1",
 						Resources: []v1alpha1.ManifestResource{
 							{Type: v1alpha1.ResourceTypeSandbox},
-							{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")}},
+							{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6"), corev1.ResourceMemory: resource.MustParse("12Gi")}},
 						},
 					},
 				},
 			},
-			expectError: true,
+			expectError: false,
 		},
 	}
 
@@ -896,30 +896,61 @@ func TestValidateTaskResources_RejectionPaths(t *testing.T) {
 			expectedValue: "1Gi",
 		},
 		{
-			name: "kind-cluster resource with limits",
+			name: "kind-cluster resource with unsupported key",
 			task: v1alpha1.ManifestTask{
-				ID:        "task-kind-limits",
+				ID:        "task-kind-bad-key",
 				Spec:      "eval.py@task",
-				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}},
+				Image:     "image:v1",
+				Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}},
 			},
-			expectedTask:  "task-kind-limits",
-			expectedField: "limits",
+			expectedTask:  "task-kind-bad-key",
+			expectedField: "nvidia.com/gpu",
 			expectedValue: "1",
 		},
 		{
-			name: "sandbox and kind-cluster with limits on kind-cluster",
+			name: "kind-cluster resource with cpu over cap 16",
 			task: v1alpha1.ManifestTask{
-				ID:    "task-sandbox-kind-limits",
+				ID:    "task-kind-over-cpu",
 				Spec:  "eval.py@task",
 				Image: "image:v1",
 				Resources: []v1alpha1.ManifestResource{
-					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
-					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")}},
+					{Type: v1alpha1.ResourceTypeSandbox},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("17")}},
 				},
 			},
-			expectedTask:  "task-sandbox-kind-limits",
-			expectedField: "limits",
-			expectedValue: "2Gi",
+			expectedTask:  "task-kind-over-cpu",
+			expectedField: "cpu",
+			expectedValue: "17",
+		},
+		{
+			name: "kind-cluster resource with memory over cap 64Gi",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-kind-over-memory",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("65Gi")}},
+				},
+			},
+			expectedTask:  "task-kind-over-memory",
+			expectedField: "memory",
+			expectedValue: "65Gi",
+		},
+		{
+			name: "kind-cluster resource with zero cpu",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-kind-zero-cpu",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0")}},
+				},
+			},
+			expectedTask:  "task-kind-zero-cpu",
+			expectedField: "cpu",
+			expectedValue: "0",
 		},
 		{
 			name: "zero cpu",
@@ -1116,6 +1147,18 @@ func TestValidateTaskResources_Valid(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "sandbox with limits combined with kind-cluster with limits",
+			task: v1alpha1.ManifestTask{
+				ID:    "task-sandbox-and-kind-limits",
+				Spec:  "eval.py@task",
+				Image: "image:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6"), corev1.ResourceMemory: resource.MustParse("12Gi")}},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1125,6 +1168,133 @@ func TestValidateTaskResources_Valid(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestKindClusterResourceLimits(t *testing.T) {
+	t.Run("parsed from manifest JSON", func(t *testing.T) {
+		manifestJSON := []byte(`{
+			"tasks": [
+				{
+					"id": "kube-agents/kind-task",
+					"spec": "eval.py@kind",
+					"image": "kube-agents-eval:v1",
+					"command": ["./run.sh"],
+					"resources": [
+						{ "type": "sandbox", "limits": { "cpu": "2", "memory": "4Gi" } },
+						{ "type": "kind-cluster", "limits": { "cpu": "6", "memory": "12Gi" } }
+					]
+				}
+			]
+		}`)
+
+		manifest, err := ParseManifest(manifestJSON)
+		if err != nil {
+			t.Fatalf("ParseManifest failed: %v", err)
+		}
+		if err := ValidateManifest(manifest); err != nil {
+			t.Fatalf("ValidateManifest failed: %v", err)
+		}
+		if err := ValidateTaskResources(manifest.Tasks[0]); err != nil {
+			t.Fatalf("ValidateTaskResources failed: %v", err)
+		}
+
+		limits := KindClusterResourceLimits(manifest.Tasks[0])
+		cpuLimit := limits[corev1.ResourceCPU]
+		memoryLimit := limits[corev1.ResourceMemory]
+		if cpuLimit.Cmp(resource.MustParse("6")) != 0 {
+			t.Errorf("got cpuLimit=%v, want 6", cpuLimit)
+		}
+		if memoryLimit.Cmp(resource.MustParse("12Gi")) != 0 {
+			t.Errorf("got memoryLimit=%v, want 12Gi", memoryLimit)
+		}
+	})
+
+	t.Run("explicit limits", func(t *testing.T) {
+		task := v1alpha1.ManifestTask{
+			ID: "task-kind-explicit",
+			Resources: []v1alpha1.ManifestResource{
+				{
+					Type: v1alpha1.ResourceTypeSandbox,
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("2"),
+						corev1.ResourceMemory: resource.MustParse("4Gi"),
+					},
+				},
+				{
+					Type: v1alpha1.ResourceTypeKindCluster,
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("8"),
+						corev1.ResourceMemory: resource.MustParse("16Gi"),
+					},
+				},
+			},
+		}
+		limits := KindClusterResourceLimits(task)
+		cpuLimit := limits[corev1.ResourceCPU]
+		memoryLimit := limits[corev1.ResourceMemory]
+		if cpuLimit.Cmp(resource.MustParse("8")) != 0 {
+			t.Errorf("got cpuLimit=%v, want 8", cpuLimit)
+		}
+		if memoryLimit.Cmp(resource.MustParse("16Gi")) != 0 {
+			t.Errorf("got memoryLimit=%v, want 16Gi", memoryLimit)
+		}
+	})
+
+	t.Run("defaults when absent", func(t *testing.T) {
+		task := v1alpha1.ManifestTask{
+			ID:        "task-kind-defaults",
+			Resources: []v1alpha1.ManifestResource{{Type: v1alpha1.ResourceTypeKindCluster}},
+		}
+		limits := KindClusterResourceLimits(task)
+		cpuLimit := limits[corev1.ResourceCPU]
+		memoryLimit := limits[corev1.ResourceMemory]
+		if cpuLimit.Cmp(resource.MustParse("4")) != 0 {
+			t.Errorf("got cpuLimit=%v, want 4", cpuLimit)
+		}
+		if memoryLimit.Cmp(resource.MustParse("8Gi")) != 0 {
+			t.Errorf("got memoryLimit=%v, want 8Gi", memoryLimit)
+		}
+	})
+
+	t.Run("omitted keys filled with defaults", func(t *testing.T) {
+		taskCPUOnly := v1alpha1.ManifestTask{
+			ID: "task-kind-cpu-only",
+			Resources: []v1alpha1.ManifestResource{{
+				Type: v1alpha1.ResourceTypeKindCluster,
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("6"),
+				},
+			}},
+		}
+		limitsCPUOnly := KindClusterResourceLimits(taskCPUOnly)
+		cpuLimitFromCPUOnly := limitsCPUOnly[corev1.ResourceCPU]
+		memoryLimitFromCPUOnly := limitsCPUOnly[corev1.ResourceMemory]
+		if cpuLimitFromCPUOnly.Cmp(resource.MustParse("6")) != 0 {
+			t.Errorf("got cpuLimit=%v, want 6", cpuLimitFromCPUOnly)
+		}
+		if memoryLimitFromCPUOnly.Cmp(resource.MustParse(DefaultDockerInDockerMemoryLimit)) != 0 {
+			t.Errorf("got memoryLimit=%v, want %s", memoryLimitFromCPUOnly, DefaultDockerInDockerMemoryLimit)
+		}
+
+		taskMemoryOnly := v1alpha1.ManifestTask{
+			ID: "task-kind-memory-only",
+			Resources: []v1alpha1.ManifestResource{{
+				Type: v1alpha1.ResourceTypeKindCluster,
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("16Gi"),
+				},
+			}},
+		}
+		limitsMemoryOnly := KindClusterResourceLimits(taskMemoryOnly)
+		cpuLimitFromMemoryOnly := limitsMemoryOnly[corev1.ResourceCPU]
+		memoryLimitFromMemoryOnly := limitsMemoryOnly[corev1.ResourceMemory]
+		if cpuLimitFromMemoryOnly.Cmp(resource.MustParse(DefaultDockerInDockerCPULimit)) != 0 {
+			t.Errorf("got cpuLimit=%v, want %s", cpuLimitFromMemoryOnly, DefaultDockerInDockerCPULimit)
+		}
+		if memoryLimitFromMemoryOnly.Cmp(resource.MustParse("16Gi")) != 0 {
+			t.Errorf("got memoryLimit=%v, want 16Gi", memoryLimitFromMemoryOnly)
+		}
+	})
 }
 
 func TestTaskResourceLimits(t *testing.T) {

@@ -80,7 +80,7 @@ func ParseManifest(data []byte) (*v1alpha1.Manifest, error) {
 // - Each task's Workdir (if set) must be relative and not contain '..'
 // - Each task specifying command requires a non-blank image
 // - Each task specifying sandbox resource requires a non-blank image
-// - Each task specifying gcp-project or kind-cluster resource must not set limits (limits are only valid on sandbox)
+// - Each task specifying gcp-project resource must not set limits (limits are only valid on sandbox or kind-cluster)
 func ValidateManifest(m *v1alpha1.Manifest) error {
 	if m == nil {
 		return fmt.Errorf("manifest cannot be nil")
@@ -121,8 +121,8 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 			if manifestResource.Type == v1alpha1.ResourceTypeSandbox && strings.TrimSpace(task.Image) == "" {
 				return fmt.Errorf("task %q specifies sandbox resource without image: sandbox resource requires a non-blank image", id)
 			}
-			if (manifestResource.Type == v1alpha1.ResourceTypeGCPProject || manifestResource.Type == v1alpha1.ResourceTypeKindCluster) && len(manifestResource.Limits) > 0 {
-				return fmt.Errorf("task %q has invalid limits %v on %s resource: limits are only valid on sandbox resources", id, manifestResource.Limits, manifestResource.Type)
+			if manifestResource.Type == v1alpha1.ResourceTypeGCPProject && len(manifestResource.Limits) > 0 {
+				return fmt.Errorf("task %q has invalid limits %v on %s resource: limits are only valid on sandbox or kind-cluster resources", id, manifestResource.Limits, manifestResource.Type)
 			}
 		}
 
@@ -164,16 +164,16 @@ func ValidateManifest(m *v1alpha1.Manifest) error {
 }
 
 // ValidateTaskResources validates declarative resource requirements for a task:
-// - cpu and memory limits are only valid on resources of type sandbox.
+// - cpu and memory limits are only valid on resources of type sandbox or kind-cluster.
 // - cpu and memory limits must be positive (> 0).
 // - cpu limit must not exceed MaxTaskCPULimit (16).
 // - memory limit must not exceed MaxTaskMemoryLimit (64Gi).
 func ValidateTaskResources(task v1alpha1.ManifestTask) error {
 	taskID := task.ID
 	for _, manifestResource := range task.Resources {
-		if manifestResource.Type != v1alpha1.ResourceTypeSandbox {
+		if manifestResource.Type != v1alpha1.ResourceTypeSandbox && manifestResource.Type != v1alpha1.ResourceTypeKindCluster {
 			if len(manifestResource.Limits) > 0 {
-				return fmt.Errorf("task %q has invalid limits %v: limits are only valid on sandbox resources", taskID, manifestResource.Limits)
+				return fmt.Errorf("task %q has invalid limits %v: limits are only valid on sandbox or kind-cluster resources", taskID, manifestResource.Limits)
 			}
 			continue
 		}
@@ -206,6 +206,34 @@ func TaskResourceLimits(task v1alpha1.ManifestTask) corev1.ResourceList {
 
 	for _, manifestResource := range task.Resources {
 		if manifestResource.Type == v1alpha1.ResourceTypeSandbox {
+			if manifestResource.Limits != nil {
+				if quantity, ok := manifestResource.Limits[corev1.ResourceCPU]; ok && !quantity.IsZero() {
+					limits[corev1.ResourceCPU] = quantity
+				}
+				if quantity, ok := manifestResource.Limits[corev1.ResourceMemory]; ok && !quantity.IsZero() {
+					limits[corev1.ResourceMemory] = quantity
+				}
+			}
+			break
+		}
+	}
+
+	return limits
+}
+
+// KindClusterResourceLimits returns the effective Docker-in-Docker sidecar limits
+// for a task declaring a kind-cluster resource as a corev1.ResourceList.
+// If limits are specified on the kind-cluster resource, those values are used,
+// with the defaults (DefaultDockerInDockerCPULimit / DefaultDockerInDockerMemoryLimit)
+// filled in for keys the manifest omits.
+func KindClusterResourceLimits(task v1alpha1.ManifestTask) corev1.ResourceList {
+	limits := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse(DefaultDockerInDockerCPULimit),
+		corev1.ResourceMemory: resource.MustParse(DefaultDockerInDockerMemoryLimit),
+	}
+
+	for _, manifestResource := range task.Resources {
+		if manifestResource.Type == v1alpha1.ResourceTypeKindCluster {
 			if manifestResource.Limits != nil {
 				if quantity, ok := manifestResource.Limits[corev1.ResourceCPU]; ok && !quantity.IsZero() {
 					limits[corev1.ResourceCPU] = quantity

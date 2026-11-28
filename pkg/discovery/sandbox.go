@@ -131,10 +131,10 @@ const (
 	DefaultDockerInDockerMemoryRequest = "1Gi"
 
 	// DefaultDockerInDockerCPULimit is the default CPU limit for the dind sidecar container.
-	DefaultDockerInDockerCPULimit = "2"
+	DefaultDockerInDockerCPULimit = "4"
 
 	// DefaultDockerInDockerMemoryLimit is the default memory limit for the dind sidecar container.
-	DefaultDockerInDockerMemoryLimit = "4Gi"
+	DefaultDockerInDockerMemoryLimit = "8Gi"
 )
 
 // PlaceholderModelCredentialEnvironmentVariables is the table of model credential environment
@@ -273,6 +273,7 @@ type TaskSandboxConfig struct {
 	StepTimeoutSeconds     int
 	SandboxTask            bool
 	KindCluster            bool
+	KindClusterLimits      corev1.ResourceList
 	Limits                 corev1.ResourceList
 	ServicePortalIntercept bool
 }
@@ -726,7 +727,7 @@ fi
 		}
 		sandbox.Spec.PodTemplate.Spec.Containers = append(
 			sandbox.Spec.PodTemplate.Spec.Containers,
-			buildDockerInDockerSidecarContainer(),
+			buildDockerInDockerSidecarContainer(cfg.KindClusterLimits),
 		)
 	}
 
@@ -735,7 +736,18 @@ fi
 
 // buildDockerInDockerSidecarContainer returns the privileged Docker-in-Docker sidecar
 // container attached to task sandboxes declaring the kind-cluster resource.
-func buildDockerInDockerSidecarContainer() corev1.Container {
+func buildDockerInDockerSidecarContainer(customLimits corev1.ResourceList) corev1.Container {
+	limits := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse(DefaultDockerInDockerCPULimit),
+		corev1.ResourceMemory: resource.MustParse(DefaultDockerInDockerMemoryLimit),
+	}
+	if quantity, ok := customLimits[corev1.ResourceCPU]; ok && !quantity.IsZero() {
+		limits[corev1.ResourceCPU] = quantity.DeepCopy()
+	}
+	if quantity, ok := customLimits[corev1.ResourceMemory]; ok && !quantity.IsZero() {
+		limits[corev1.ResourceMemory] = quantity.DeepCopy()
+	}
+
 	return corev1.Container{
 		Name:  DockerInDockerContainerName,
 		Image: DockerInDockerImage,
@@ -772,10 +784,7 @@ func buildDockerInDockerSidecarContainer() corev1.Container {
 				corev1.ResourceCPU:    resource.MustParse(DefaultDockerInDockerCPURequest),
 				corev1.ResourceMemory: resource.MustParse(DefaultDockerInDockerMemoryRequest),
 			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse(DefaultDockerInDockerCPULimit),
-				corev1.ResourceMemory: resource.MustParse(DefaultDockerInDockerMemoryLimit),
-			},
+			Limits: limits,
 		},
 	}
 }

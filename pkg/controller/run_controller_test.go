@@ -14178,17 +14178,35 @@ func TestKindClusterTaskEligibilityAndSandboxConstruction(t *testing.T) {
 				},
 			},
 			{
-				ID:    "task-sandbox-kind-invalid-limits",
+				ID:    "task-sandbox-kind-custom-limits",
 				Spec:  "eval.py@6",
 				Image: "kube-agents-eval:v1",
 				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8"), corev1.ResourceMemory: resource.MustParse("16Gi")}},
+				},
+			},
+			{
+				ID:    "task-sandbox-kind-partial-limits",
+				Spec:  "eval.py@7",
+				Image: "kube-agents-eval:v1",
+				Resources: []v1alpha1.ManifestResource{
 					{Type: v1alpha1.ResourceTypeSandbox},
-					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("12Gi")}},
+				},
+			},
+			{
+				ID:    "task-sandbox-kind-invalid-limits",
+				Spec:  "eval.py@8",
+				Image: "kube-agents-eval:v1",
+				Resources: []v1alpha1.ManifestResource{
+					{Type: v1alpha1.ResourceTypeSandbox},
+					{Type: v1alpha1.ResourceTypeKindCluster, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("32")}},
 				},
 			},
 			{
 				ID:      "task-sandbox-only",
-				Spec:    "eval.py@7",
+				Spec:    "eval.py@9",
 				Image:   "regular-eval:v1",
 				Command: []string{"./run.sh"},
 				Resources: []v1alpha1.ManifestResource{
@@ -14232,12 +14250,23 @@ func TestKindClusterTaskEligibilityAndSandboxConstruction(t *testing.T) {
 			t.Errorf("task-sandbox-kind-docker = (%q, %q), want (Failed, \"resources not supported yet\")", tasks[4].Phase, tasks[4].Message)
 		}
 
-		if tasks[5].Phase != v1alpha1.TaskPhaseFailed || !strings.Contains(tasks[5].Message, "limits are only valid on sandbox resources") {
-			t.Errorf("task-sandbox-kind-invalid-limits = (%q, %q), want Failed with limits error", tasks[5].Phase, tasks[5].Message)
+		if tasks[5].Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("task-sandbox-kind-custom-limits phase = %q (%q), want Pending", tasks[5].Phase, tasks[5].Message)
+		}
+		if tasks[5].Resources == nil || tasks[5].Resources.Limits.Cpu().Cmp(resource.MustParse("2")) != 0 || tasks[5].Resources.Limits.Memory().Cmp(resource.MustParse("4Gi")) != 0 {
+			t.Errorf("task-sandbox-kind-custom-limits task resources = %+v, want 2 CPU / 4Gi memory", tasks[5].Resources)
 		}
 
 		if tasks[6].Phase != v1alpha1.TaskPhasePending {
-			t.Errorf("task-sandbox-only phase = %q (%q), want Pending", tasks[6].Phase, tasks[6].Message)
+			t.Errorf("task-sandbox-kind-partial-limits phase = %q (%q), want Pending", tasks[6].Phase, tasks[6].Message)
+		}
+
+		if tasks[7].Phase != v1alpha1.TaskPhaseFailed || !strings.Contains(tasks[7].Message, "exceeds maximum allowed") {
+			t.Errorf("task-sandbox-kind-invalid-limits = (%q, %q), want Failed with exceeds maximum allowed error", tasks[7].Phase, tasks[7].Message)
+		}
+
+		if tasks[8].Phase != v1alpha1.TaskPhasePending {
+			t.Errorf("task-sandbox-only phase = %q (%q), want Pending", tasks[8].Phase, tasks[8].Message)
 		}
 	})
 
@@ -14306,6 +14335,19 @@ func TestKindClusterTaskEligibilityAndSandboxConstruction(t *testing.T) {
 		if len(kindPodSpec.Containers) != 2 || kindPodSpec.Containers[1].Name != discovery.DockerInDockerContainerName {
 			t.Fatalf("expected 2 containers with %q sidecar, got %d containers", discovery.DockerInDockerContainerName, len(kindPodSpec.Containers))
 		}
+		defaultSidecar := kindPodSpec.Containers[1]
+		if defaultSidecar.Resources.Requests.Cpu().Cmp(resource.MustParse("500m")) != 0 {
+			t.Errorf("default dind CPU request = %v, want 500m", defaultSidecar.Resources.Requests.Cpu())
+		}
+		if defaultSidecar.Resources.Requests.Memory().Cmp(resource.MustParse("1Gi")) != 0 {
+			t.Errorf("default dind Memory request = %v, want 1Gi", defaultSidecar.Resources.Requests.Memory())
+		}
+		if defaultSidecar.Resources.Limits.Cpu().Cmp(resource.MustParse("4")) != 0 {
+			t.Errorf("default dind CPU limit = %v, want 4", defaultSidecar.Resources.Limits.Cpu())
+		}
+		if defaultSidecar.Resources.Limits.Memory().Cmp(resource.MustParse("8Gi")) != 0 {
+			t.Errorf("default dind Memory limit = %v, want 8Gi", defaultSidecar.Resources.Limits.Memory())
+		}
 		dockerHostFound := false
 		for _, environmentVariable := range kindPodSpec.Containers[0].Env {
 			if environmentVariable.Name == "DOCKER_HOST" && environmentVariable.Value == discovery.DockerInDockerHost {
@@ -14316,10 +14358,45 @@ func TestKindClusterTaskEligibilityAndSandboxConstruction(t *testing.T) {
 			t.Errorf("expected DOCKER_HOST=%q in kind task container env", discovery.DockerInDockerHost)
 		}
 
-		regularSandbox := reconciler.buildPendingTaskSandbox(
+		customKindSandbox := reconciler.buildPendingTaskSandbox(
+			run,
+			v1alpha1.TaskStatus{ID: manifest.Tasks[5].ID},
+			&manifest.Tasks[5],
+			"task-run-kind-custom-sandbox",
+			"token-custom",
+		)
+		customKindPodSpec := customKindSandbox.Spec.PodTemplate.Spec
+		if len(customKindPodSpec.Containers) != 2 {
+			t.Fatalf("expected 2 containers for custom kind limits task, got %d", len(customKindPodSpec.Containers))
+		}
+		customTaskContainer := customKindPodSpec.Containers[0]
+		if customTaskContainer.Resources.Limits.Cpu().Cmp(resource.MustParse("2")) != 0 || customTaskContainer.Resources.Limits.Memory().Cmp(resource.MustParse("4Gi")) != 0 {
+			t.Errorf("custom kind task container limits = %v, want 2 CPU / 4Gi memory", customTaskContainer.Resources.Limits)
+		}
+		customSidecar := customKindPodSpec.Containers[1]
+		if customSidecar.Resources.Requests.Cpu().Cmp(resource.MustParse("500m")) != 0 || customSidecar.Resources.Requests.Memory().Cmp(resource.MustParse("1Gi")) != 0 {
+			t.Errorf("custom dind requests = %v, want 500m CPU / 1Gi memory", customSidecar.Resources.Requests)
+		}
+		if customSidecar.Resources.Limits.Cpu().Cmp(resource.MustParse("8")) != 0 || customSidecar.Resources.Limits.Memory().Cmp(resource.MustParse("16Gi")) != 0 {
+			t.Errorf("custom dind limits = %v, want 8 CPU / 16Gi memory", customSidecar.Resources.Limits)
+		}
+
+		partialKindSandbox := reconciler.buildPendingTaskSandbox(
 			run,
 			v1alpha1.TaskStatus{ID: manifest.Tasks[6].ID},
 			&manifest.Tasks[6],
+			"task-run-kind-partial-sandbox",
+			"token-partial",
+		)
+		partialSidecar := partialKindSandbox.Spec.PodTemplate.Spec.Containers[1]
+		if partialSidecar.Resources.Limits.Cpu().Cmp(resource.MustParse("4")) != 0 || partialSidecar.Resources.Limits.Memory().Cmp(resource.MustParse("12Gi")) != 0 {
+			t.Errorf("partial dind limits = %v, want 4 CPU / 12Gi memory", partialSidecar.Resources.Limits)
+		}
+
+		regularSandbox := reconciler.buildPendingTaskSandbox(
+			run,
+			v1alpha1.TaskStatus{ID: manifest.Tasks[8].ID},
+			&manifest.Tasks[8],
 			"task-run-regular-sandbox",
 			"token-456",
 		)
